@@ -1,5 +1,5 @@
 ---
-description: Pull data from Oracle Fusion ERP / HCM / SCM REST APIs into a Spark DataFrame from an AIDP notebook. Use when the user mentions Fusion ERP, Fusion REST API, FA REST, Cloud ERP, or wants live data from a Fusion pod. Covers HTTP Basic (default) and OAuth (v0.2). For volumes >499 rows/page or bulk extracts, route to aidp-fusion-bicc.
+description: Pull data from Oracle Fusion ERP / HCM / SCM REST APIs into a Spark DataFrame from an AIDP notebook. Use when the user mentions Fusion ERP, Fusion REST API, FA REST, Cloud ERP, or wants live data from a Fusion pod. HTTP Basic auth only. For volumes >499 rows/page or bulk extracts, route to aidp-fusion-bicc.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -18,11 +18,9 @@ allowed-tools: Read, Write, Edit, Bash
 ## Prerequisites in the AIDP notebook
 1. `pip install requests pandas` (usually already on the cluster).
 2. Helpers on `sys.path`.
-3. Fusion pod URL + Basic credentials, OR OAuth client + private key.
+3. Fusion pod URL + HTTP Basic credentials.
 
-## Auth: pick one
-
-### Option A — HTTP Basic (recommended default, v0.1)
+## Auth: HTTP Basic
 
 ```python
 import os
@@ -50,32 +48,11 @@ df.show(5)
 print("rows:", df.count())
 ```
 
-### Option B — OAuth (v0.2, deferred)
-
-```python
-import os
-from oracle_ai_data_platform_connectors.auth import oauth_token
-
-token = oauth_token(
-    token_url=os.environ["FUSION_OAUTH_TOKEN_URL"],
-    client_id=os.environ["FUSION_OAUTH_CLIENT_ID"],
-    private_key_pem=open(os.environ["FUSION_OAUTH_PRIVATE_KEY_PATH"]).read(),
-)
-
-import requests
-session = requests.Session()
-session.headers.update({
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json",
-})
-# Then fetch_paged(session, ...) as Option A
-```
-
 ## Gotchas
 - **499 row/page hard cap** — Fusion silently truncates `limit=500+` to 499. Helper enforces this automatically.
 - **`onlyData=true`** — helper sets this so only the actual fields come back, not Fusion's HATEOAS link envelope. Saves bandwidth.
 - **`q=` filter syntax** is Fusion-specific (`q=InvoiceDate >= '2026-01-01' AND Status = 'PAID'`). Quote string values in single quotes.
-- **OAuth tokens expire** in ~60 min. v0.2 will add auto-refresh; for now, mint a fresh token at the start of each notebook.
+- **Nested struct columns** — Fusion responses contain nested objects (links, addresses). `rows_to_spark_dataframe()` defaults to `mode="json_string"` which packs each row into a single `row_json` column. Use `from_json` downstream to project specific fields.
 - **Network** — Fusion pods are public (`*.fa.<region>.oraclecloud.com`); no AIDP VCN routing needed.
 
 ## References

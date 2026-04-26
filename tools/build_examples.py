@@ -180,7 +180,7 @@ def exacs_wallet_query() -> List[dict]:
     return [
         md(
             "# `aidp-exacs` live test — wallet (TCPS)\n",
-            "**Live-test row 7.**\n",
+            "**Live-test row 4.**\n",
         ),
         sys_path_setup(),
         code(
@@ -208,7 +208,7 @@ def exacs_dbtoken_query() -> List[dict]:
     return [
         md(
             "# `aidp-exacs` live test — IAM DB-Token (only IAM-enabled clusters)\n",
-            "**Live-test row 8.** Skip if the cluster is on classic auth.\n",
+            "**Live-test row 5.** Skip if the cluster is on classic auth.\n",
         ),
         sys_path_setup(),
         code(
@@ -231,7 +231,7 @@ def exacs_user_password() -> List[dict]:
     return [
         md(
             "# `aidp-exacs` live test — legacy DB user/password\n",
-            "**Live-test row 9.** For non-IAM ExaCS clusters.\n",
+            "**Live-test row 6.** For non-IAM ExaCS clusters.\n",
         ),
         sys_path_setup(),
         code(
@@ -257,7 +257,7 @@ def bds_hive_kerberos() -> List[dict]:
     return [
         md(
             "# `aidp-bds-hive` live test — Kerberos\n",
-            "**Live-test row 10.** Requires `kinit` on the cluster image (TBD; this notebook will fail fast with a clear error if not).\n",
+            "**Live-test row 7.** Requires `kinit` on the cluster image (TBD; this notebook will fail fast with a clear error if not).\n",
         ),
         sys_path_setup(),
         code(
@@ -288,7 +288,7 @@ def bds_hive_ldap() -> List[dict]:
     return [
         md(
             "# `aidp-bds-hive` live test — LDAP\n",
-            "**Live-test row 11.** Recommended default for v0.1.\n",
+            "**Live-test row 8.** Recommended default for v0.1.\n",
         ),
         sys_path_setup(),
         code(
@@ -314,7 +314,7 @@ def fusion_rest_basic() -> List[dict]:
     return [
         md(
             "# `aidp-fusion-rest` live test — HTTP Basic\n",
-            "**Live-test row 12.**\n",
+            "**Live-test row 9.**\n",
         ),
         sys_path_setup(),
         code(
@@ -341,40 +341,11 @@ def fusion_rest_basic() -> List[dict]:
     ]
 
 
-def fusion_rest_oauth() -> List[dict]:
-    return [
-        md(
-            "# `aidp-fusion-rest` live test — OAuth (v0.2)\n",
-            "**Live-test row 13.** Deferred to v0.2; placeholder structure.\n",
-        ),
-        sys_path_setup(),
-        code(
-            "from oracle_ai_data_platform_connectors.auth import oauth_token\n",
-            "import requests\n",
-            "\n",
-            "token = oauth_token(\n",
-            "    token_url=os.environ['FUSION_OAUTH_TOKEN_URL'],\n",
-            "    client_id=os.environ['FUSION_OAUTH_CLIENT_ID'],\n",
-            "    private_key_pem=open(os.environ['FUSION_OAUTH_PRIVATE_KEY_PATH']).read(),\n",
-            ")\n",
-            "session = requests.Session()\n",
-            "session.headers.update({'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})\n",
-        ),
-        code(
-            "from oracle_ai_data_platform_connectors.rest.fusion import fetch_paged, rows_to_spark_dataframe\n",
-            "rows = fetch_paged(session, os.environ['FUSION_BASE_URL'], os.environ['FUSION_TEST_PATH'])\n",
-            "df = rows_to_spark_dataframe(spark, rows)\n",
-            "df.show(5)\n",
-        ),
-        emit_summary("aidp-fusion-rest", "oauth"),
-    ]
-
-
 def fusion_bicc_to_dataframe() -> List[dict]:
     return [
         md(
             "# `aidp-fusion-bicc` live test — BICC extract → Object Storage → Spark CSV\n",
-            "**Live-test row 14.** End-to-end: trigger BICC, wait, read CSV from OCI Object Storage.\n",
+            "**Live-test row 10.** End-to-end: trigger BICC, wait, read CSV from OCI Object Storage.\n",
         ),
         sys_path_setup(),
         code(
@@ -409,46 +380,11 @@ def fusion_bicc_to_dataframe() -> List[dict]:
     ]
 
 
-def epm_planning_oauth() -> List[dict]:
-    return [
-        md(
-            "# `aidp-epm-cloud` live test — Identity-domain OAuth (v0.2)\n",
-            "**Live-test row 15.** Deferred to v0.2.\n",
-        ),
-        sys_path_setup(),
-        code(
-            "from oracle_ai_data_platform_connectors.auth import oauth_token\n",
-            "import requests\n",
-            "\n",
-            "token = oauth_token(\n",
-            "    token_url=os.environ['EPM_OAUTH_TOKEN_URL'],\n",
-            "    client_id=os.environ['EPM_OAUTH_CLIENT_ID'],\n",
-            "    private_key_pem=open(os.environ['EPM_OAUTH_PRIVATE_KEY_PATH']).read(),\n",
-            ")\n",
-            "session = requests.Session()\n",
-            "session.headers.update({'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})\n",
-        ),
-        code(
-            "from oracle_ai_data_platform_connectors.rest.epm import (\n",
-            "    list_applications, export_data_slice, slice_to_long_dataframe,\n",
-            ")\n",
-            "apps = list_applications(session, os.environ['EPM_BASE_URL'])\n",
-            "print('apps:', [a['name'] for a in apps])\n",
-            "import json\n",
-            "grid = json.loads(os.environ['EPM_GRID_DEFINITION_JSON'])\n",
-            "resp = export_data_slice(session, os.environ['EPM_BASE_URL'], os.environ['EPM_APPLICATION'], os.environ['EPM_PLAN_TYPE'], grid)\n",
-            "df = slice_to_long_dataframe(spark, resp)\n",
-            "df.show(10)\n",
-        ),
-        emit_summary("aidp-epm-cloud", "oauth"),
-    ]
-
-
 def epm_planning_basic() -> List[dict]:
     return [
         md(
             "# `aidp-epm-cloud` live test — HTTP Basic (default for v0.1)\n",
-            "**Live-test row 16.** Username MUST be in `tenancy.user@domain` form (e.g. `epmloaner622.first.last@oracle.com`).\n",
+            "**Live-test row 11.** Username MUST be in `tenancy.user@domain` form (e.g. `epmloaner622.first.last@oracle.com`).\n",
         ),
         sys_path_setup(),
         code(
@@ -480,7 +416,7 @@ def essbase_mdx_basic() -> List[dict]:
     return [
         md(
             "# `aidp-essbase` live test — HTTP Basic + MDX\n",
-            "**Live-test row 17.**\n",
+            "**Live-test row 12.**\n",
         ),
         sys_path_setup(),
         code(
@@ -509,7 +445,7 @@ def kafka_streaming_oauth() -> List[dict]:
     return [
         md(
             "# `aidp-streaming-kafka` live test — SASL_SSL OAuthBearer\n",
-            "**Live-test row 18.** Requires custom OAuthBearer callback handler JAR pre-attached to the cluster.\n",
+            "**Live-test row 13.** Requires custom OAuthBearer callback handler JAR pre-attached to the cluster.\n",
         ),
         sys_path_setup(),
         code(
@@ -541,7 +477,7 @@ def kafka_streaming_apikey() -> List[dict]:
     return [
         md(
             "# `aidp-streaming-kafka` live test — SASL/PLAIN with OCI auth token\n",
-            "**Live-test row 19.** Recommended default. 1-hour token TTL.\n",
+            "**Live-test row 14.** Recommended default. 1-hour token TTL.\n",
         ),
         sys_path_setup(),
         code(
@@ -666,9 +602,7 @@ NOTEBOOKS = [
     ("bds_hive_kerberos", bds_hive_kerberos),
     ("bds_hive_ldap", bds_hive_ldap),
     ("fusion_rest_basic", fusion_rest_basic),
-    ("fusion_rest_oauth", fusion_rest_oauth),
     ("fusion_bicc_to_dataframe", fusion_bicc_to_dataframe),
-    ("epm_planning_oauth", epm_planning_oauth),
     ("epm_planning_basic", epm_planning_basic),
     ("essbase_mdx_basic", essbase_mdx_basic),
     ("kafka_streaming_oauth", kafka_streaming_oauth),

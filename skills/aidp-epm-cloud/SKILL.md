@@ -1,5 +1,5 @@
 ---
-description: Run a Planning data-slice export against Oracle EPM Cloud (Planning / EPBCS) and materialize as a Spark DataFrame in an AIDP notebook. Use when the user mentions EPM Cloud, EPBCS, Hyperion Planning, planning app, MDX export, or wants Planning data in Spark. Covers HTTP Basic (default, v0.1) and OAuth (v0.2).
+description: Run a Planning data-slice export against Oracle EPM Cloud (Planning / EPBCS) and materialize as a Spark DataFrame in an AIDP notebook. Use when the user mentions EPM Cloud, EPBCS, Hyperion Planning, planning app, MDX export, or wants Planning data in Spark. HTTP Basic auth with identity-domain-prefixed username.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -18,9 +18,7 @@ allowed-tools: Read, Write, Edit, Bash
 2. Helpers on `sys.path`.
 3. EPM pod URL + credentials in the form ``tenancy.user@domain``.
 
-## Auth: pick one
-
-### Option A — HTTP Basic (recommended default for v0.1)
+## Auth: HTTP Basic
 
 ```python
 import os
@@ -64,30 +62,11 @@ df.show(10)
 print("cells:", df.count())
 ```
 
-### Option B — OAuth (v0.2, deferred)
-
-JWT client-credentials. IDCS tenants post to `https://<idcs-instance>.identity.oraclecloud.com/oauth2/v1/token`; IAM Domains tenants post to `https://<iam-domain>.identity.oraclecloud.com/oauth2/v1/token`. There's no programmatic auto-detect; ask the customer which tenant type their EPM pod uses.
-
-```python
-import os, requests
-from oracle_ai_data_platform_connectors.auth import oauth_token
-
-token = oauth_token(
-    token_url="https://<your-domain>.identity.oraclecloud.com/oauth2/v1/token",
-    client_id=os.environ["EPM_OAUTH_CLIENT_ID"],
-    private_key_pem=open(os.environ["EPM_OAUTH_PRIVATE_KEY_PATH"]).read(),
-)
-session = requests.Session()
-session.headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-# then export_data_slice(session, ...) as in Option A
-```
-
 ## Gotchas
 - **Username MUST include the identity-domain prefix.** `tenancy.user@domain` (e.g. `epmloaner622.first.last@oracle.com`). The bare `first.last@oracle.com` returns 401.
 - **POV members must be leaf-level.** EPM returns 400 / empty if you pass a parent member without `IChildren()` / `ILvl0Descendants()`.
 - **`#Missing` cells** — empty Planning blocks come back as the literal string `"#Missing"`. Helper preserves this in the `value` column; cast to numeric and filter as needed.
-- **401 vs 403** — 401 = auth fail (refresh OAuth token, or re-check Basic creds). 403 = permission denied (different code path; don't retry).
-- **Token TTL** — OAuth tokens are typically 60 min. v0.2 will add auto-refresh; for v0.1 Basic, this isn't an issue.
+- **401 vs 403** — 401 = auth fail (re-check Basic creds). 403 = permission denied (different code path; don't retry).
 
 ## References
 - Helpers: [scripts/oracle_ai_data_platform_connectors/rest/epm.py](../../scripts/oracle_ai_data_platform_connectors/rest/epm.py)

@@ -11,7 +11,9 @@ All notable changes to this plugin are documented here. The format follows [Keep
 - Phase 0 auth-strategy research findings folded into skill defaults.
 
 ### Changed
-- **Removed `aidp-atp` as a separate skill.** ATP, ADW, and ALH are all Oracle 26ai under the hood; the same JDBC driver, URL pattern, wallet flow, and IAM DB-Token flow apply to all three. `aidp-alh` now covers the entire Autonomous DB family. Routing skill and README updated. Live-test matrix shrunk from 19 to 16 connector rows (plus row 0 bootstrap).
+- **Removed `aidp-atp` as a separate skill.** ATP, ADW, and ALH are all Oracle 26ai under the hood; the same JDBC driver, URL pattern, wallet flow, and IAM DB-Token flow apply to all three. `aidp-alh` now covers the entire Autonomous DB family.
+- **Dropped OAuth from `aidp-fusion-rest` and `aidp-epm-cloud` skills.** Both are HTTP Basic only. Removed Option B (OAuth/JWT client-credentials) sections, related env vars (`FUSION_OAUTH_*`, `EPM_OAUTH_*`), and the corresponding live-test rows + notebooks. `aidp-fusion-bicc` was always Basic + API key (verified).
+- Live-test matrix shrunk to 15 rows (was 17 after ATP drop, now 15 after 2 OAuth rows removed).
 
 ## [0.1.0] — TBD
 

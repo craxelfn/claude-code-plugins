@@ -1,7 +1,7 @@
 # Live-test results
 
 
-**Summary:** 6 PASS, 0 FAIL, 1 DEFERRED, 10 NOT RUN out of 17 rows.
+**Summary:** 6 PASS, 0 FAIL, 1 DEFERRED, 8 NOT RUN out of 15 rows.
 
 | # | Skill | Auth | Notebook | Status | Rows | Last run (UTC) |
 |---|---|---|---|---|---|---|
@@ -15,10 +15,8 @@
 | 7 | `aidp-bds-hive` | Kerberos keytab | [`bds_hive_kerberos.ipynb`](../../examples/bds_hive_kerberos.ipynb) | NOT RUN | - | - |
 | 8 | `aidp-bds-hive` | LDAP | [`bds_hive_ldap.ipynb`](../../examples/bds_hive_ldap.ipynb) | NOT RUN | - | - |
 | 9 | `aidp-fusion-rest` | HTTP Basic | [`fusion_rest_basic.ipynb`](../../examples/fusion_rest_basic.ipynb) | PASS | 229 | 1777213835 |
-| 10 | `aidp-fusion-rest` | OAuth (Fusion OAuth profile) | [`fusion_rest_oauth.ipynb`](../../examples/fusion_rest_oauth.ipynb) | NOT RUN | - | - |
-| 11 | `aidp-fusion-bicc` | HTTP Basic + API Key | [`fusion_bicc_to_dataframe.ipynb`](../../examples/fusion_bicc_to_dataframe.ipynb) | NOT RUN | - | - |
-| 12 | `aidp-epm-cloud` | Identity-domain OAuth | [`epm_planning_oauth.ipynb`](../../examples/epm_planning_oauth.ipynb) | NOT RUN | - | - |
-| 13 | `aidp-epm-cloud` | Basic (legacy tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |
-| 14 | `aidp-essbase` | HTTP Basic | [`essbase_mdx_basic.ipynb`](../../examples/essbase_mdx_basic.ipynb) | PASS | 2 | None |
-| 15 | `aidp-streaming-kafka` | SASL_SSL OAuth | [`kafka_streaming_oauth.ipynb`](../../examples/kafka_streaming_oauth.ipynb) | NOT RUN | - | - |
-| 16 | `aidp-streaming-kafka` | SASL/PLAIN with API Key | [`kafka_streaming_apikey.ipynb`](../../examples/kafka_streaming_apikey.ipynb) | PASS | 3 | 1777217508 |
+| 10 | `aidp-fusion-bicc` | HTTP Basic + API Key | [`fusion_bicc_to_dataframe.ipynb`](../../examples/fusion_bicc_to_dataframe.ipynb) | NOT RUN | - | - |
+| 11 | `aidp-epm-cloud` | Basic (tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |
+| 12 | `aidp-essbase` | HTTP Basic | [`essbase_mdx_basic.ipynb`](../../examples/essbase_mdx_basic.ipynb) | PASS | 2 | None |
+| 13 | `aidp-streaming-kafka` | SASL_SSL OAuth | [`kafka_streaming_oauth.ipynb`](../../examples/kafka_streaming_oauth.ipynb) | NOT RUN | - | - |
+| 14 | `aidp-streaming-kafka` | SASL/PLAIN with API Key | [`kafka_streaming_apikey.ipynb`](../../examples/kafka_streaming_apikey.ipynb) | PASS | 3 | 1777217508 |

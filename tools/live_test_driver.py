@@ -56,13 +56,11 @@ LIVE_TEST_ROWS = [
     LiveTestRow(7,  "aidp-bds-hive",       "Kerberos keytab",                    "bds_hive_kerberos.ipynb",        "kinit succeeds, Hive JDBC SHOW TABLES returns rows",               False),
     LiveTestRow(8,  "aidp-bds-hive",       "LDAP",                               "bds_hive_ldap.ipynb",            "Same query via LDAP bind",                                         False),
     LiveTestRow(9,  "aidp-fusion-rest",    "HTTP Basic",                         "fusion_rest_basic.ipynb",        "<=499-row paged fetch lands as Spark DataFrame",                   True),
-    LiveTestRow(10, "aidp-fusion-rest",    "OAuth (Fusion OAuth profile)",       "fusion_rest_oauth.ipynb",        "Same fetch via bearer token; auto-refresh on 401",                 False),
-    LiveTestRow(11, "aidp-fusion-bicc",    "HTTP Basic + API Key",               "fusion_bicc_to_dataframe.ipynb", "Extract kicks off -> CSV in OS bucket -> Spark reads it",          True),
-    LiveTestRow(12, "aidp-epm-cloud",      "Identity-domain OAuth",              "epm_planning_oauth.ipynb",       "Planning REST applications=200; MDX export -> DataFrame",          False),
-    LiveTestRow(13, "aidp-epm-cloud",      "Basic (legacy tenancy.user@domain)", "epm_planning_basic.ipynb",       "Same MDX export via Basic",                                        False),
-    LiveTestRow(14, "aidp-essbase",        "HTTP Basic",                         "essbase_mdx_basic.ipynb",        "MDX SELECT returns DataFrame with expected dim count",             False),
-    LiveTestRow(15, "aidp-streaming-kafka", "SASL_SSL OAuth",                    "kafka_streaming_oauth.ipynb",    "query.lastProgress shows non-zero numInputRows",                   False),
-    LiveTestRow(16, "aidp-streaming-kafka", "SASL/PLAIN with API Key",           "kafka_streaming_apikey.ipynb",   "Same stream via API-key SASL",                                     False),
+    LiveTestRow(10, "aidp-fusion-bicc",    "HTTP Basic + API Key",               "fusion_bicc_to_dataframe.ipynb", "Extract kicks off -> CSV in OS bucket -> Spark reads it",          True),
+    LiveTestRow(11, "aidp-epm-cloud",      "Basic (tenancy.user@domain)",        "epm_planning_basic.ipynb",       "Planning REST applications=200; MDX export -> DataFrame",          False),
+    LiveTestRow(12, "aidp-essbase",        "HTTP Basic",                         "essbase_mdx_basic.ipynb",        "MDX SELECT returns DataFrame with expected dim count",             False),
+    LiveTestRow(13, "aidp-streaming-kafka", "SASL_SSL OAuth",                    "kafka_streaming_oauth.ipynb",    "query.lastProgress shows non-zero numInputRows",                   False),
+    LiveTestRow(14, "aidp-streaming-kafka", "SASL/PLAIN with API Key",           "kafka_streaming_apikey.ipynb",   "Same stream via API-key SASL",                                     False),
 ]
 
 
