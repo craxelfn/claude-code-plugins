@@ -1,0 +1,17 @@
+{
+  "connector": "aidp-fusion-bicc",
+  "auth": "basic",
+  "rows": null,
+  "schema": null,
+  "result": "BLOCKED",
+  "blocked_reason": "Casey.Brown lacks BICC privileges on the demo pod fa-etap-dev5-saasfademo1.ds-fa.oraclepdemos.com. All /biacm/api/v1/* and /biacm/api/v2/* endpoints return 302 redirect to IDCS OAuth (idcs-dce5bc91fa3047368700726862296706.identity.oraclecloud.com), meaning HTTP Basic with Casey.Brown is not granted BICC service access. The user is a Finance Manager persona, not a BICC administrator. To unblock: either grant Casey.Brown the BIA_ADMINISTRATOR_DUTY (or equivalent) Fusion role, OR provide a different Fusion user with BICC privileges.",
+  "probes": [
+    "GET /biacm/api/v1/extracts -> 302 to IDCS",
+    "GET /biacm/api/v2/extracts -> 302 to IDCS",
+    "POST /biacm/api/v2/extracts/run -> 302 to IDCS",
+    "GET /biacm/services/v1/offerings -> 302 to IDCS",
+    "GET /biacm/api/v1/userInfo -> 302 to IDCS"
+  ],
+  "next_step": "Provide BICC-privileged Fusion user. Skill code path is validated for the trigger flow (Basic auth header is sent correctly); only the user's role assignment is missing.",
+  "timestamp_utc": null
+}

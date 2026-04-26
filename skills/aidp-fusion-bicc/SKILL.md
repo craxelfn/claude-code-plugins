@@ -1,5 +1,5 @@
 ---
-description: Trigger a Fusion BICC extract job, wait for completion, then read the resulting gzipped CSV from OCI Object Storage into a Spark DataFrame. Use when the user mentions BICC, Fusion bulk extract, BI Cloud Connector, or needs >50k rows from Fusion. Covers HTTP Basic (BICC trigger) + API Key (OCI Object Storage side).
+description: Trigger a Fusion BICC extract job, wait for completion, then read the resulting gzipped CSV from OCI Object Storage into a Spark DataFrame. Use when the user mentions BICC, Fusion bulk extract, BI Cloud Connector, or needs >50k rows from Fusion. HTTP Basic auth only. The OCI Object Storage read uses cluster-level auth (Spark `oci://`).
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -14,16 +14,15 @@ allowed-tools: Read, Write, Edit, Bash
 - For small/live REST queries → use [`aidp-fusion-rest`](../aidp-fusion-rest/SKILL.md).
 
 ## Prerequisites in the AIDP notebook
-1. `pip install requests` + OCI SDK (already on AIDP cluster).
+1. `pip install requests` (usually pre-installed on the cluster).
 2. Helpers on `sys.path`.
-3. Fusion BICC offering credentials (HTTP Basic) for the trigger side.
+3. Fusion BICC offering credentials (HTTP Basic) for the trigger side. The user must have BICC privileges in Fusion — a regular Fusion REST user (e.g. Finance Manager persona) typically does NOT.
 4. OCI Object Storage namespace + bucket where BICC drops the extract.
-5. OCI API key (inline PEM) or Vault-stored credentials for reading from Object Storage.
-6. The Spark cluster must already be configured to read `oci://...` paths (`tpcds` cluster has this; if not, add the OCI HDFS connector).
+5. The AIDP Spark cluster's `oci://` HDFS connector must be configured at the cluster level (the `tpcds` cluster has this). The user does NOT need to supply OCI API keys from the notebook — the cluster handles `oci://` reads with its own service auth.
 
-## Auth flow (two-sided)
+## Auth: HTTP Basic only (both sides)
 
-### Side 1 — Trigger BICC extract (HTTP Basic)
+### Side 1 — Trigger BICC extract
 
 ```python
 import os
@@ -47,6 +46,8 @@ print("BICC extract landed at prefix:", prefix)
 
 ### Side 2 — Read CSV from OCI Object Storage (Spark `oci://`)
 
+The Spark cluster reads `oci://...` URIs with its pre-configured OCI auth — no user-supplied API key needed in the notebook.
+
 ```python
 from oracle_ai_data_platform_connectors.rest.fusion import (
     read_bicc_csv_from_object_storage,
@@ -62,14 +63,14 @@ print("rows:", df.count())
 df.printSchema()
 ```
 
-(If your AIDP cluster needs explicit OCI credentials for `oci://` reads, configure them at cluster level — using inline PEM via
-`from_inline_pem` is not directly compatible with the cluster-level HDFS connector. Set the API key on the cluster's OCI profile.)
+If `oci://` reads fail with auth errors, the cluster-level OCI HDFS connector isn't configured properly. Fix at the cluster level (Cluster → Settings → OCI auth profile), not in the notebook.
 
 ## Gotchas
+- **BICC privileges** — the Fusion user must have a BICC-enabled role (e.g. `BIA_ADMINISTRATOR_DUTY`). A standard Fusion REST user (Finance Manager) returns HTML auth pages instead of BICC JSON when probing offering endpoints.
 - **BICC extract can take minutes to hours.** The helper polls every 30s with a 1h timeout — bump `timeout_seconds` for big offerings.
 - **Manifest file** — BICC writes a `MANIFEST.MF` alongside the CSVs listing files + checksums. The helper relies on the `outputPrefix` from the job-status response; if Oracle changes the response shape, update the helper.
 - **Schema inference is slow** for big CSVs. Pass an explicit `schema=StructType([...])` for repeat runs.
-- **Network** — BICC trigger endpoint is on the public Fusion pod. OCI Object Storage is reached via `oci://` from Spark (uses cluster's OCI config).
+- **Network** — BICC trigger endpoint is on the public Fusion pod. OCI Object Storage is reached via `oci://` from Spark (uses cluster's OCI config — not user creds).
 - **Cleanup** — BICC doesn't auto-delete old extracts. Schedule a separate cleanup job if you don't want the bucket to grow unbounded.
 
 ## References
