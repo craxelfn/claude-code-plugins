@@ -1,5 +1,5 @@
 ---
-description: Connect from an AIDP notebook to Oracle Exadata Cloud Service (ExaCS) via Spark JDBC over TCPS. Use when the user mentions ExaCS, Exadata, Exadata Cloud, or has a private-subnet Oracle DB on port 1522. Covers wallet (mTLS), IAM DB-Token (IAM-enabled clusters), and legacy DB user/password.
+description: Connect from an AIDP notebook to Oracle Exadata Cloud Service (ExaCS) via Spark JDBC. Use when the user mentions ExaCS, Exadata, Exadata Cloud, RAC SCAN listener, or has a private-subnet Oracle DB. Default path is plain TCP on port 1521 with server-enforced AES256 Native Network Encryption (live-validated). Wallet TCPS and IAM DB-Token paths are also covered.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -7,20 +7,92 @@ allowed-tools: Read, Write, Edit, Bash
 
 ## When to use
 - User wants to read or write an ExaCS PDB from an AIDP notebook.
-- User mentions: "ExaCS", "Exadata Cloud", "private-subnet Oracle DB", "TCPS port 1522".
+- User mentions: "ExaCS", "Exadata Cloud", "RAC SCAN listener", "private-subnet Oracle DB".
 
 ## When NOT to use
-- For Autonomous DB → use [`aidp-atp`](../aidp-atp/SKILL.md).
-- For Oracle AI Lakehouse → use [`aidp-alh`](../aidp-alh/SKILL.md).
+- For Oracle AI Lakehouse / ADW / ATP (Autonomous DB family) → use [`aidp-alh`](../aidp-alh/SKILL.md).
 
-## Prerequisites in the AIDP notebook
-1. Oracle JDBC driver on classpath.
-2. Helpers on `sys.path`.
-3. Network reachability AIDP→ExaCS (private subnet — usually requires VCN peering / DRG / RCE; confirm with `nc -zv <host> 1522`).
+## Critical infrastructure prerequisites
+
+ExaCS sits in a customer private subnet; AIDP runs in its own VCN. Two pieces must be in place before any JDBC will work — neither is configurable from a notebook:
+
+1. **VCN routing AIDP→ExaCS** (PE/RCE through PAGW). Workspaces created without private connectivity can't reach customer DBs.
+2. **Workspace `scanDetails`** — required for RAC clusters. Without it, the SCAN listener's redirect to a node-local IP (`10.x.x.x`) is unreachable from the executor → `ORA-17820`. Configure once via the AIDP workspace REST API or console:
+
+   ```json
+   networkConfigurationDetails: {
+     "subnetId": "ocid1.subnet.oc1.iad.aaaa...",
+     "scanDetails": [
+       {"fqdn": "<scan-host>.clientsubnet.dns.oraclevcn.com", "port": "1521"}
+     ]
+   }
+   ```
+
+   This activates **PE-ARCH 3c (RCE with SCAN Proxy)** — the PAGW translates RAC node-redirect IPs to Class-E NAT addresses so the JDBC redirect lands on the right tunnel.
+
+Smoke-test connectivity from a notebook before chasing JDBC errors:
+
+```python
+import socket, ipaddress
+ip = socket.gethostbyname(SCAN_HOST)            # should be Class-E (255.x) or RFC-1918 — never public
+with socket.create_connection((SCAN_HOST, 1521), timeout=15): pass
+```
 
 ## Auth: pick one
 
-### Option A — Wallet (TCPS, recommended default)
+### Option A — Plain user/password on TCP 1521 + server-enforced NNE (recommended; live-validated)
+
+ExaCS deployments commonly enforce **Oracle Native Network Encryption (NNE)** server-side:
+`SQLNET.ENCRYPTION_SERVER=REQUIRED` + `SQLNET.ENCRYPTION_TYPES_SERVER=AES256`. The Oracle thin
+driver complies automatically — no client-side `oracle.net.encryption_*` options needed. The
+encrypted session can be verified after connect via `v$session_connect_info.network_service_banner`
+(see snippet below).
+
+```python
+import os
+from oracle_ai_data_platform_connectors.jdbc import (
+    build_oracle_jdbc_url, spark_jdbc_options_password,
+)
+
+url = build_oracle_jdbc_url(
+    host=os.environ["EXACS_HOST"],            # SCAN FQDN or host
+    port=int(os.environ.get("EXACS_PORT", "1521")),
+    service_name=os.environ["EXACS_SERVICE_NAME"],
+    use_tcps=False,                           # plain TCP — encryption is via NNE, not TLS
+)
+opts = spark_jdbc_options_password(
+    url=url,
+    user=os.environ["EXACS_USER"],
+    password=os.environ["EXACS_PASSWORD"],
+)
+df = (spark.read.format("jdbc").options(**opts)
+        .option("dbtable", os.environ["EXACS_TABLE_FOR_TEST"]).load())
+df.show(5)
+```
+
+**SYS / SYSDBA logon** (admin scripts only; not for app workloads):
+
+```python
+opts["oracle.jdbc.internal_logon"] = "sysdba"
+```
+
+**Verify in-transit encryption is active** (run once per environment):
+
+```python
+enc_q = ("SELECT network_service_banner FROM v$session_connect_info "
+         "WHERE sid = SYS_CONTEXT('USERENV','SID')")
+banners = (spark.read.format("jdbc").options(**opts)
+             .option("query", enc_q).load().collect())
+for r in banners:
+    print(r[0])
+# Expect lines including:
+#   AES256 Encryption service adapter for Linux: Version ...
+#   Crypto-checksumming service for Linux: Version ...
+```
+
+### Option B — Wallet (TCPS port 1522)
+
+Use only when the customer ExaCS cluster is configured for TCPS endpoints (not the default; admin must enable TCPS listeners and issue a wallet). For most deployments Option A is simpler and the encryption guarantee is the same (AES256 on the wire).
 
 ```python
 import os
@@ -30,14 +102,12 @@ from oracle_ai_data_platform_connectors.jdbc import (
 )
 
 tns_admin = write_wallet_to_tmp(
-    wallet="/path/to/exacs-wallet.zip",
+    wallet=os.environ["EXACS_WALLET_ZIP_PATH"],
     target_dir="/tmp/wallet/exacs",
 )
-
-# Direct host/port/service form (ExaCS typically doesn't expose _high/_medium aliases)
 url = build_oracle_jdbc_url(
     host=os.environ["EXACS_HOST"],
-    port=int(os.environ.get("EXACS_PORT", "1522")),
+    port=int(os.environ.get("EXACS_PORT_TCPS", "1522")),
     service_name=os.environ["EXACS_SERVICE_NAME"],
     use_tcps=True,
 )
@@ -46,13 +116,13 @@ opts = spark_jdbc_options_wallet(
     user=os.environ["EXACS_USER"],
     password=os.environ["EXACS_PASSWORD"],
 )
-df = spark.read.format("jdbc").options(**opts).option("dbtable", "MY_TABLE").load()
-df.show(5)
+df = (spark.read.format("jdbc").options(**opts)
+        .option("dbtable", "MY_TABLE").load())
 ```
 
-### Option B — IAM DB-Token (only for IAM-enabled ExaCS clusters)
+### Option C — IAM DB-Token (only for IAM-enabled ExaCS clusters)
 
-ExaCS supports IAM DB-Token only when explicitly IAM-enabled (`ALTER SYSTEM SET IDENTITY_PROVIDER_TYPE='OCI_IAM'`). Skip this option if your cluster is on classic (non-IAM) auth.
+Requires `ALTER SYSTEM SET IDENTITY_PROVIDER_TYPE='OCI_IAM'` on the cluster. Skip if the cluster is on classic auth.
 
 ```python
 import os
@@ -65,48 +135,25 @@ token_dir = generate_db_token(
     compartment_ocid=os.environ["EXACS_COMPARTMENT_OCID"],
     target_dir="/tmp/dbcred_exacs",
 )
-
 url = build_oracle_jdbc_url(
     host=os.environ["EXACS_HOST"],
     port=1522,
     service_name=os.environ["EXACS_SERVICE_NAME"],
 )
 opts = spark_jdbc_options_dbtoken(url=url, token_dir=token_dir)
-df = spark.read.format("jdbc").options(**opts).option("dbtable", "MY_TABLE").load()
-```
-
-### Option C — Legacy DB user/password
-
-For non-IAM ExaCS clusters where the wallet flow is overkill (e.g., on-prem-style migrations):
-
-```python
-import os
-from oracle_ai_data_platform_connectors.jdbc import (
-    build_oracle_jdbc_url, spark_jdbc_options_password,
-)
-
-# Use plain TCP only if the cluster is on a private subnet and you accept no encryption.
-# Otherwise keep use_tcps=True and provide the wallet's cwallet.sso under TNS_ADMIN.
-url = build_oracle_jdbc_url(
-    host=os.environ["EXACS_HOST"],
-    port=1521,
-    service_name=os.environ["EXACS_SERVICE_NAME"],
-    use_tcps=False,
-)
-opts = spark_jdbc_options_password(
-    url=url,
-    user=os.environ["EXACS_USER"],
-    password=os.environ["EXACS_PASSWORD"],
-)
-df = spark.read.format("jdbc").options(**opts).option("dbtable", "MY_TABLE").load()
+df = (spark.read.format("jdbc").options(**opts)
+        .option("dbtable", "MY_TABLE").load())
 ```
 
 ## Gotchas
-- **Network path matters most.** ExaCS sits in a private subnet; AIDP runs in its own VCN. Confirm a route exists (`nc -zv <host> 1522`) before chasing JDBC errors.
-- **TCPS wallet must include `cwallet.sso`** for SSO-style auto-login — that's the file the JDBC driver reads, not `ewallet.p12`.
-- **No IMDS access from AIDP** — Instance Principal flows that work elsewhere on OCI compute will fail here. Use API Key + inline PEM.
-- **Port 1522 vs 1521** — TCPS is 1522; plain TCP is 1521. Clusters often expose only 1522 by policy.
+
+- **`scanDetails` is the #1 cause of ORA-17820.** If the JDBC URL points at the SCAN listener on a RAC cluster but the workspace doesn't have the SCAN FQDN registered, the redirect fails silently. See "Critical infrastructure prerequisites" above.
+- **Port 1521 is NOT plain unencrypted.** With NNE configured server-side, port-1521 TCP is AES256 encrypted on the wire. Confirm via `v$session_connect_info` after the first connect — don't assume.
+- **No IMDS access from AIDP notebooks** — Instance Principal / Resource Principal flows that work elsewhere on OCI compute fail here. Use API Key + inline PEM if you need OCI SDK calls.
+- **TCPS wallets must include `cwallet.sso`** for SSO-style auto-login — that's the file the JDBC driver reads, not `ewallet.p12`.
+- **Driver class name** — `oracle.jdbc.OracleDriver` is canonical. The legacy alias `oracle.jdbc.driver.OracleDriver` also works but is deprecated.
 
 ## References
 - Helpers: [scripts/oracle_ai_data_platform_connectors/jdbc/oracle.py](../../scripts/oracle_ai_data_platform_connectors/jdbc/oracle.py)
-- AIDP private endpoint design: `Claude context/AIDP/AIDP Context/AIDP/aidp_internal_pe_architecture.md` (peer notes via memory `oci_private_endpoint_design.md`).
+- Live-validated reference notebook (the source of the Option A pattern): [`exacs_intransit_encryption_demo.ipynb`](https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors) on workspace `exacs-private-test` — proves AES256 NNE end-to-end on a customer ExaCS cluster running Oracle 23ai.
+- AIDP private endpoint design (PE-ARCH 1a–3c, SCAN Proxy): see workspace memory `oci_private_endpoint_design.md`.

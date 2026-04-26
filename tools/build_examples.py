@@ -230,26 +230,82 @@ def exacs_dbtoken_query() -> List[dict]:
 def exacs_user_password() -> List[dict]:
     return [
         md(
-            "# `aidp-exacs` live test — legacy DB user/password\n",
-            "**Live-test row 6.** For non-IAM ExaCS clusters.\n",
+            "# `aidp-exacs` live test — plain user/password on TCP 1521 + server-enforced NNE\n",
+            "**Live-test row 6.** Mirrors the working pattern from `exacs_intransit_encryption_demo.ipynb` "
+            "in the `exacs-private-test` workspace, which proved AES256 NNE end-to-end against a customer "
+            "ExaCS cluster running Oracle 23ai.\n",
+            "\n",
+            "**Workspace prereq:** `networkConfigurationDetails.scanDetails` must include the SCAN FQDN+port "
+            "(PE-ARCH 3c, RCE with SCAN Proxy). Without it the RAC redirect dies with ORA-17820.\n",
         ),
         sys_path_setup(),
+        md("## Step 1 — Configuration\n"),
         code(
-            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_password\n",
-            "\n",
-            "url = build_oracle_jdbc_url(\n",
-            "    host=os.environ['EXACS_HOST'],\n",
-            "    port=int(os.environ.get('EXACS_PORT_LEGACY', '1521')),\n",
-            "    service_name=os.environ['EXACS_SERVICE_NAME'],\n",
-            "    use_tcps=False,\n",
-            ")\n",
-            "opts = spark_jdbc_options_password(url=url, user=os.environ['EXACS_USER'], password=os.environ['EXACS_PASSWORD'])\n",
+            "SCAN_HOST = os.environ['EXACS_HOST']\n",
+            "SCAN_PORT = int(os.environ.get('EXACS_PORT_LEGACY', '1521'))\n",
+            "SERVICE   = os.environ['EXACS_SERVICE_NAME']\n",
+            "DB_USER   = os.environ['EXACS_USER']\n",
+            "DB_PASS   = os.environ['EXACS_PASSWORD']\n",
+            "TABLE     = os.environ['EXACS_TABLE_FOR_TEST']\n",
+            "print(f'  SCAN  : {SCAN_HOST}:{SCAN_PORT}')\n",
+            "print(f'  SVC   : {SERVICE}')\n",
+            "print(f'  USER  : {DB_USER}')\n",
+            "print(f'  TABLE : {TABLE}')\n",
+        ),
+        md(
+            "## Step 2 — DNS resolution check\n",
+            "SCAN host must resolve to a Class-E (240.0.0.0/4 / 255.x) or RFC-1918 (10.x/172.16-31.x/192.168.x) IP. "
+            "A public IP would mean traffic isn't going through the PE.\n",
         ),
         code(
-            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['EXACS_TABLE_FOR_TEST']).load()\n",
+            "import socket, ipaddress\n",
+            "ips = sorted({r[4][0] for r in socket.getaddrinfo(SCAN_HOST, SCAN_PORT, socket.AF_INET)})\n",
+            "for ip in ips:\n",
+            "    is_class_e = int(ip.split('.')[0]) >= 240\n",
+            "    is_priv    = ipaddress.ip_address(ip).is_private\n",
+            "    kind = 'Class-E NAT' if is_class_e else 'RFC-1918 private' if is_priv else 'PUBLIC (FAIL)'\n",
+            "    print(f'  {SCAN_HOST} -> {ip}  [{kind}]')\n",
+            "assert any(int(ip.split('.')[0]) >= 240 or ipaddress.ip_address(ip).is_private for ip in ips), 'PE routing not active'\n",
+        ),
+        md("## Step 3 — TCP connectivity\n"),
+        code(
+            "import socket, time\n",
+            "t0 = time.time()\n",
+            "with socket.create_connection((SCAN_HOST, SCAN_PORT), timeout=15) as s:\n",
+            "    print(f'  Connected in {(time.time()-t0)*1000:.0f} ms  (local={s.getsockname()}  remote={s.getpeername()})')\n",
+        ),
+        md("## Step 4 — Spark JDBC connect (plain user/password)\n"),
+        code(
+            "from oracle_ai_data_platform_connectors.jdbc import (\n",
+            "    build_oracle_jdbc_url, spark_jdbc_options_password,\n",
+            ")\n",
+            "url = build_oracle_jdbc_url(host=SCAN_HOST, port=SCAN_PORT, service_name=SERVICE, use_tcps=False)\n",
+            "opts = spark_jdbc_options_password(url=url, user=DB_USER, password=DB_PASS)\n",
+            "# Optional: enable for the SYS user only.\n",
+            "# opts['oracle.jdbc.internal_logon'] = 'sysdba'\n",
+            "print('JDBC URL:', url)\n",
+        ),
+        code(
+            "df = (spark.read.format('jdbc').options(**opts).option('dbtable', TABLE).load())\n",
             "df.show(5)\n",
         ),
-        emit_summary("aidp-exacs", "password-legacy"),
+        md(
+            "## Step 5 — In-transit encryption verification\n",
+            "Read `v$session_connect_info.network_service_banner` for the active session — proves AES256 NNE.\n",
+        ),
+        code(
+            "enc_q = (\n",
+            "    \"SELECT network_service_banner FROM v$session_connect_info \"\n",
+            "    \"WHERE sid = SYS_CONTEXT('USERENV','SID')\"\n",
+            ")\n",
+            "banners = (spark.read.format('jdbc').options(**opts)\n",
+            "             .option('query', enc_q).load().collect())\n",
+            "for r in banners:\n",
+            "    print(' ', r[0])\n",
+            "encryption = next((b[0] for b in (b.split(' Encryption service adapter') for b in (r[0] for r in banners)) if len(b) > 1), None)\n",
+            "print('Negotiated algorithm:', encryption)\n",
+        ),
+        emit_summary("aidp-exacs", "password-tcp-nne"),
     ]
 
 
