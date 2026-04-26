@@ -1,7 +1,7 @@
 # Live-test results
 
 
-**Summary:** 13 PASS, 1 DEFERRED, 9 NOT RUN out of 23 rows.
+**Summary:** 13 PASS, 3 DEFERRED, 7 NOT RUN out of 23 rows.
 
 Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neither is supported by AIDP notebooks for ExaCS clusters.
 
@@ -16,8 +16,8 @@ Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neithe
 | 2 | `aidp-alh` | IAM DB-Token (>25 min refresh) | [`alh_dbtoken_query.ipynb`](../../examples/alh_dbtoken_query.ipynb) | DEFERRED | - | None |
 | 3 | `aidp-alh` | API Key + inline OCI config | [`alh_catalog_sync_apikey.ipynb`](../../examples/alh_catalog_sync_apikey.ipynb) | NOT RUN | - | - |
 | 6 | `aidp-exacs` | Plain user/pwd on TCP 1521 + NNE AES256 | [`exacs_user_password.ipynb`](../../examples/exacs_user_password.ipynb) | PASS | - | None |
-| 7 | `aidp-bds-hive` | Kerberos keytab | [`bds_hive_kerberos.ipynb`](../../examples/bds_hive_kerberos.ipynb) | NOT RUN | - | - |
-| 8 | `aidp-bds-hive` | LDAP | [`bds_hive_ldap.ipynb`](../../examples/bds_hive_ldap.ipynb) | NOT RUN | - | - |
+| 7 | `aidp-bds-hive` | Kerberos keytab | [`bds_hive_kerberos.ipynb`](../../examples/bds_hive_kerberos.ipynb) | DEFERRED | - | - |
+| 8 | `aidp-bds-hive` | LDAP | [`bds_hive_ldap.ipynb`](../../examples/bds_hive_ldap.ipynb) | DEFERRED | - | - |
 | 9 | `aidp-fusion-rest` | HTTP Basic | [`fusion_rest_basic.ipynb`](../../examples/fusion_rest_basic.ipynb) | PASS | 229 | 1777213835 |
 | 10 | `aidp-fusion-bicc` | HTTP Basic | [`fusion_bicc_to_dataframe.ipynb`](../../examples/fusion_bicc_to_dataframe.ipynb) | PASS | - | None |
 | 11 | `aidp-epm-cloud` | Basic (tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |
@@ -35,6 +35,11 @@ Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neithe
 | 23 | `aidp-rest-generic` | HTTP Basic + manifest | [`rest_generic_read.ipynb`](../../examples/rest_generic_read.ipynb) | NOT RUN | - | - |
 | 24 | `aidp-jdbc-custom` | SQLite memory + runtime-load helper | [`jdbc_custom_sqlite.ipynb`](../../examples/jdbc_custom_sqlite.ipynb) | PASS | 1 | 1777229921 |
 | 25 | `aidp-excel` | stdlib zipfile + XML parser | [`excel_read.ipynb`](../../examples/excel_read.ipynb) | PASS | 5 | 1777230349 |
+
+### Notes on DEFERRED rows
+
+- **Row 2 (`aidp-alh` IAM DB-Token)** — DEFERRED because the AIDP cluster's Python doesn't have the `oci` SDK installed and the cluster's PyPI mirror is unreachable. The same IAM-DB-Token JDBC code path is exercised by row 1's wallet flow (both use `spark_jdbc_options_dbtoken` in the same skill). Skill correct; live test contingent on cluster having `oci` SDK or PyPI access.
+- **Rows 7 + 8 (`aidp-bds-hive` Kerberos / LDAP)** — DEFERRED after a discovery sweep found 0 BDS clusters in the `oaseceal` tenancy across 102 compartments × 15 regions. Provisioning a fresh BDS cluster (~30–60 min provision time, ~$0.50–2/hr running cost, plus Kerberos/LDAP requires either a Secure-cluster build or external LDAP/AD infra) was authorized but ultimately skipped per user decision. The skill `aidp-bds-hive` documents both auth modes correctly; live test contingent on a customer-provided BDS cluster. See `row07.json` and `row08.json` for the full discovery summary + un-block instructions.
 
 ### Notes on PASS-without-rows entries
 

@@ -1,0 +1,19 @@
+{
+  "connector": "aidp-bds-hive",
+  "auth": "kerberos",
+  "result": "DEFERRED",
+  "rows": null,
+  "schema": null,
+  "deferred_reason": "No existing BDS cluster found in the oase tenancy after scanning all 102 compartments × 15 regions. Provisioning a fresh BDS Secure cluster (Kerberos pre-baked) was authorized but ultimately deferred by the user. The skill `aidp-bds-hive` Option B (Kerberos) documents the canonical pattern (`auth=kerberos`, `principal=hive/<host>@<REALM>`, `kerberos_kinit()` helper); live validation is contingent on a customer-provided BDS cluster with Kerberos pre-configured.",
+  "discovery_summary": {
+    "compartments_scanned": 102,
+    "regions_scanned": 15,
+    "bds_instances_found": 0,
+    "scan_command": "oci bds instance list --compartment-id <each>",
+    "candidate_vcn_for_provisioning": "tpcds (10.2.0.0/24) ClientSubnet (10.2.0.0/26) in compartment AIDP_TPC-DS_Ahmed",
+    "reason_for_deferral": "BDS Secure cluster provisioning is ~60 min wait and ~$0.50-2/hr running cost. User chose to skip provisioning and leave the row as DEFERRED rather than spend the time + money on a one-shot test."
+  },
+  "skill_correctness": "The aidp-bds-hive SKILL.md Kerberos snippet is sourced from documented Oracle BDS patterns. The Hive JDBC URL form `jdbc:hive2://<host>:10000/<db>;principal=hive/<host>@<REALM>;auth=kerberos` is the standard. The kerberos_kinit() helper invokes the system `kinit` binary with a keytab. None of this requires special handling in the plugin runtime; it's a straight Spark JDBC pass-through.",
+  "to_unblock": "Provide an existing customer BDS cluster: HS2 hostname, port (usually 10000), realm, principal, keytab path. Then run `examples/bds_hive_kerberos.ipynb` against it.",
+  "timestamp_utc": null
+}

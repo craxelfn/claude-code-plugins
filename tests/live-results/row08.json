@@ -1,0 +1,17 @@
+{
+  "connector": "aidp-bds-hive",
+  "auth": "ldap",
+  "result": "DEFERRED",
+  "rows": null,
+  "schema": null,
+  "deferred_reason": "Same as row 07: no existing BDS cluster in oase tenancy + user chose to skip provisioning. The skill `aidp-bds-hive` Option A (LDAP) documents the canonical pattern (`auth=ldap`, basic user/password JDBC); live validation is contingent on a customer-provided BDS cluster with HiveServer2 LDAP auth enabled.",
+  "discovery_summary": {
+    "compartments_scanned": 102,
+    "regions_scanned": 15,
+    "bds_instances_found": 0,
+    "additional_blocker_for_ldap": "Even if a BDS Standard cluster were provisioned, BDS does not ship with an LDAP server. HiveServer2 LDAP auth requires either an external LDAP/AD server or a stand-up of OpenLDAP on a separate Compute VM (which would extend the provisioning surface significantly)."
+  },
+  "skill_correctness": "The aidp-bds-hive SKILL.md LDAP snippet matches the official AIDP `aidataplatform` HIVE format pattern from oracle-samples/oracle-aidp-samples (`Read_Write_External_Ecosystem_Connectors.ipynb`): `authentication.method=basic` with user.name/password. Direct Hive JDBC also supported via `auth=ldap` URL fragment. Both forms are documented.",
+  "to_unblock": "Provide a customer BDS cluster with HiveServer2 LDAP auth enabled. Need: HS2 hostname, port (usually 10000), an LDAP-bind user with Hive privileges, password. Then run `examples/bds_hive_ldap.ipynb` against it.",
+  "timestamp_utc": null
+}
