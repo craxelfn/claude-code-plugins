@@ -1,7 +1,7 @@
 # Live-test results
 
 
-**Summary:** 12 PASS, 1 DEFERRED, 10 NOT RUN out of 23 rows.
+**Summary:** 13 PASS, 1 DEFERRED, 9 NOT RUN out of 23 rows.
 
 Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neither is supported by AIDP notebooks for ExaCS clusters.
 
@@ -29,7 +29,7 @@ Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neithe
 | 17 | `aidp-sqlserver` | Plain user/password | [`sqlserver_read.ipynb`](../../examples/sqlserver_read.ipynb) | NOT RUN | - | - |
 | 18 | `aidp-oracle-db` | Plain user/password (TCP 1521) | [`oracle_db_read.ipynb`](../../examples/oracle_db_read.ipynb) | NOT RUN | - | - |
 | 19 | `aidp-iceberg` | Implicit IAM (Hadoop catalog on `oci://`) | [`iceberg_smoke.ipynb`](../../examples/iceberg_smoke.ipynb) | PASS | 4 | 1777229629 |
-| 20 | `aidp-snowflake` | sfUser/sfPassword | [`snowflake_read.ipynb`](../../examples/snowflake_read.ipynb) | NOT RUN | - | - |
+| 20 | `aidp-snowflake` | sfUser/sfPassword | [`snowflake_read.ipynb`](../../examples/snowflake_read.ipynb) | PASS | 10 | 1777231136 |
 | 21 | `aidp-azure-adls` | OAuth client-credentials | [`adls_read.ipynb`](../../examples/adls_read.ipynb) | NOT RUN | - | - |
 | 22 | `aidp-aws-s3` | AWS access key | [`s3_read.ipynb`](../../examples/s3_read.ipynb) | NOT RUN | - | - |
 | 23 | `aidp-rest-generic` | HTTP Basic + manifest | [`rest_generic_read.ipynb`](../../examples/rest_generic_read.ipynb) | NOT RUN | - | - |

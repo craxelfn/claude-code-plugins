@@ -16,14 +16,45 @@ Bridge AIDP Spark to Snowflake using the official Snowflake Spark connector. Use
 
 ## Cluster prerequisite — install the connector JARs
 
-The Snowflake Spark connector is **not** in the AIDP cluster image by default. Upload these two JARs to a Volume and attach via the cluster's Library tab (or pass via `spark.jars` for ad-hoc runs):
+The Snowflake Spark connector is **not** in the AIDP cluster image by default. Two ways to get it in.
 
-| JAR | Where |
-|---|---|
-| `spark-snowflake_2.12-3.1.1.jar` | <https://repo1.maven.org/maven2/net/snowflake/spark-snowflake_2.12/> |
-| `snowflake-jdbc-3.19.0.jar` | <https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/> |
+### Option A — Runtime-load (recommended; no cluster restart) ★ live-validated
 
-Pin the versions — newer Snowflake connector / JDBC may not be compatible with the cluster's Spark version.
+The plugin's `add_spark_connector_at_runtime` helper downloads + registers both JARs in the running Spark session. Live-validated on the AIDP `tpcds` cluster (Spark 3.5.0) — see `tests/live-results/row20.json`.
+
+```python
+from oracle_ai_data_platform_connectors.jdbc import (
+    add_spark_connector_at_runtime, download_jdbc_jar,
+)
+
+jars = [
+    download_jdbc_jar(
+        maven_url="https://repo1.maven.org/maven2/net/snowflake/"
+                  "spark-snowflake_2.12/3.1.1/spark-snowflake_2.12-3.1.1.jar",
+        target_path="/tmp/spark-snowflake_2.12-3.1.1.jar"),
+    download_jdbc_jar(
+        maven_url="https://repo1.maven.org/maven2/net/snowflake/"
+                  "snowflake-jdbc/3.19.0/snowflake-jdbc-3.19.0.jar",
+        target_path="/tmp/snowflake-jdbc-3.19.0.jar"),
+]
+add_spark_connector_at_runtime(
+    spark,
+    jar_paths=jars,
+    verify_classes=[
+        "net.snowflake.spark.snowflake.DefaultSource",
+        "net.snowflake.client.jdbc.SnowflakeDriver",
+    ],
+    register_jdbc_driver_class="net.snowflake.client.jdbc.SnowflakeDriver",
+)
+```
+
+The helper does three things in one call: builds a `URLClassLoader` covering both JARs and sets it as the thread context CL (so Spark's `ServiceLoader` finds the `snowflake` format), registers the JDBC driver with `DriverManager` (for any code path that goes through `getConnection`), and calls `SparkContext.addJar` on each JAR (so executors fetch them — required because Snowflake reads partition across executors). All without a kernel restart.
+
+### Option B — Cluster Library tab (durable, requires admin)
+
+Upload both JARs to a Volume and attach via the cluster Library tab. Persists across cluster restarts. Requires admin access. After restart, skip the runtime-load helper.
+
+Pin the versions — newer Snowflake connector / JDBC may not be compatible with the cluster's Spark version. The pair tested on Spark 3.5.0 / Scala 2.12 is `spark-snowflake_2.12-3.1.1` + `snowflake-jdbc-3.19.0`.
 
 ## Read
 

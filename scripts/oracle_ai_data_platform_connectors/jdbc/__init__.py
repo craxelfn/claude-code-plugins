@@ -12,6 +12,7 @@ from .hive import (
 )
 from .runtime_load import (
     add_jdbc_jar_at_runtime,
+    add_spark_connector_at_runtime,
     download_jdbc_jar,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "build_hive_jdbc_url",
     "spark_hive_jdbc_options",
     "add_jdbc_jar_at_runtime",
+    "add_spark_connector_at_runtime",
     "download_jdbc_jar",
 ]
