@@ -1,0 +1,18 @@
+{
+  "connector": "aidp-essbase",
+  "auth": "basic",
+  "rows": null,
+  "schema": null,
+  "result": "BLOCKED",
+  "blocked_reason": "Essbase 21c REST API at https://ess21c.cealinfra.com/essbase/rest/v1/ requires HTTP Basic auth (WWW-Authenticate: Basic realm=\"Oracle Analytics Cloud - Essbase\"). The JET UI redirects to IDCS OAuth at idcs-f5e26b80ce5d4d20a66ba648b5e00403.identity.oraclecloud.com — a DIFFERENT identity provider from the one that issues AIDP_SESSION tokens (authService.oracle.com / aud=oci). So an OCI session token cannot be passed as Bearer to Essbase REST. Need either: (a) Essbase username + password (Ahmed's IAM Domain credentials in the cealinfra IDCS), OR (b) an IDCS OAuth Confidential App registered in idcs-f5e26b80ce5d4d20a66ba648b5e00403 with client_credentials grant.",
+  "essbase_idcs": "idcs-f5e26b80ce5d4d20a66ba648b5e00403.identity.oraclecloud.com",
+  "aidp_session_issuer": "authService.oracle.com",
+  "aidp_session_audience": "oci",
+  "probes_performed": [
+    "GET /essbase/jet/ -> 302 to IDCS OAuth",
+    "GET /essbase/rest/v1/about (no auth) -> 401 Basic",
+    "GET /essbase/rest/v1/about (Bearer AIDP_SESSION) -> 401 Basic",
+    "GET /essbase/rest/v1/applications (no auth) -> 401 Basic"
+  ],
+  "next_step": "Tell me ESSBASE_USER and ESSBASE_PASSWORD (likely the IAM Domain credentials Ahmed uses to login to OCI Console / IDCS)."
+}
