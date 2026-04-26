@@ -342,41 +342,40 @@ def fusion_rest_basic() -> List[dict]:
 
 
 def fusion_bicc_to_dataframe() -> List[dict]:
+    """Live test for aidp-fusion-bicc.
+
+    Uses the AIDP `aidataplatform` format handler (Option A in the skill,
+    matches the official Oracle AIDP sample). The custom REST trigger flow
+    is documented in SKILL.md as Option B but not exercised here.
+    """
     return [
         md(
-            "# `aidp-fusion-bicc` live test — BICC extract → Object Storage → Spark CSV\n",
-            "**Live-test row 10.** End-to-end: trigger BICC, wait, read CSV from OCI Object Storage.\n",
+            "# `aidp-fusion-bicc` live test — AIDP `aidataplatform` format (BICC PVO → Spark)\n",
+            "**Live-test row 10.** Uses AIDP's built-in `spark.read.format('aidataplatform')` connector — matches the official Oracle AIDP sample at `oracle-samples/oracle-aidp-samples` (`Read_Only_Ingestion_Connectors.ipynb`). The connector triggers the BICC extract, polls for completion, and reads the resulting CSVs from OCI Object Storage internally.\n",
         ),
         sys_path_setup(),
         code(
-            "from oracle_ai_data_platform_connectors.auth import http_basic_session\n",
-            "from oracle_ai_data_platform_connectors.rest.fusion import (\n",
-            "    trigger_bicc_extract, read_bicc_csv_from_object_storage,\n",
-            ")\n",
+            "from oracle_ai_data_platform_connectors.rest.fusion import read_bicc_via_aidp_format\n",
             "\n",
-            "session = http_basic_session(\n",
+            "# Prereqs: Fusion user has a BICC-admin role; an AIDP `EXTERNAL STORAGE`\n",
+            "# profile is registered in the catalog pointing at the OCI Object Storage\n",
+            "# bucket BICC writes to (configured once by an admin).\n",
+            "df = read_bicc_via_aidp_format(\n",
+            "    spark=spark,\n",
+            "    fusion_service_url=os.environ['FUSION_BICC_BASE_URL'],\n",
             "    username=os.environ['FUSION_BICC_USER'],\n",
             "    password=os.environ['FUSION_BICC_PASSWORD'],\n",
-            "    base_url=os.environ['FUSION_BICC_BASE_URL'],\n",
+            "    schema=os.environ['FUSION_BICC_SCHEMA'],            # e.g. 'ERP'\n",
+            "    datastore=os.environ['FUSION_BICC_PVO'],            # PVO name\n",
+            "    fusion_external_storage=os.environ['FUSION_BICC_EXTERNAL_STORAGE'],\n",
             ")\n",
-            "prefix = trigger_bicc_extract(\n",
-            "    session=session,\n",
-            "    base_url=os.environ['FUSION_BICC_BASE_URL'],\n",
-            "    offering=os.environ['FUSION_BICC_OFFERING'],\n",
-            "    poll_interval_seconds=30, timeout_seconds=3600,\n",
-            ")\n",
-            "print('extract prefix:', prefix)\n",
         ),
         code(
-            "df = read_bicc_csv_from_object_storage(\n",
-            "    spark=spark,\n",
-            "    namespace=os.environ['OCI_NAMESPACE'],\n",
-            "    bucket=os.environ['OCI_BUCKET_BICC'],\n",
-            "    prefix=prefix,\n",
-            ")\n",
+            "df.show(5)\n",
+            "print('rows:', df.count())\n",
             "df.printSchema()\n",
         ),
-        emit_summary("aidp-fusion-bicc", "basic-plus-apikey"),
+        emit_summary("aidp-fusion-bicc", "basic-aidp-format"),
     ]
 
 

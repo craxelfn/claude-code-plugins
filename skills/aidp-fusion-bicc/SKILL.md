@@ -1,9 +1,11 @@
 ---
-description: Trigger a Fusion BICC extract job, wait for completion, then read the resulting gzipped CSV from OCI Object Storage into a Spark DataFrame. Use when the user mentions BICC, Fusion bulk extract, BI Cloud Connector, or needs >50k rows from Fusion. HTTP Basic auth only. The OCI Object Storage read uses cluster-level auth (Spark `oci://`).
+description: Pull a Fusion BICC bulk extract into a Spark DataFrame from an AIDP notebook. Use when the user mentions BICC, Fusion bulk extract, BI Cloud Connector, PVO, or needs >50k rows from Fusion. The recommended path uses AIDP's built-in `spark.read.format("aidataplatform")` connector (matches the official Oracle AIDP sample). HTTP Basic auth.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
 # `aidp-fusion-bicc` — Fusion BICC bulk extract → Spark
+
+Mirrors the official Oracle AIDP sample at [oracle-samples/oracle-aidp-samples → `data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb`](https://github.com/oracle-samples/oracle-aidp-samples/blob/main/data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb), which routes BICC through AIDP's built-in `aidataplatform` format handler.
 
 ## When to use
 - User wants a **bulk** extract from Fusion (millions of rows, daily snapshots, full-table loads).
@@ -14,20 +16,60 @@ allowed-tools: Read, Write, Edit, Bash
 - For small/live REST queries → use [`aidp-fusion-rest`](../aidp-fusion-rest/SKILL.md).
 
 ## Prerequisites in the AIDP notebook
-1. `pip install requests` (usually pre-installed on the cluster).
-2. Helpers on `sys.path`.
-3. Fusion BICC offering credentials (HTTP Basic) for the trigger side. The user must have BICC privileges in Fusion — a regular Fusion REST user (e.g. Finance Manager persona) typically does NOT.
-4. OCI Object Storage namespace + bucket where BICC drops the extract.
-5. The AIDP Spark cluster's `oci://` HDFS connector must be configured at the cluster level (the `tpcds` cluster has this). The user does NOT need to supply OCI API keys from the notebook — the cluster handles `oci://` reads with its own service auth.
+1. **AIDP-side prep (one-time, by an administrator):** an `EXTERNAL STORAGE` profile registered in the AIDP catalog pointing at the OCI Object Storage bucket BICC writes to. The user references it by name via `fusion.external.storage` — they don't supply OCI credentials in the notebook.
+2. **Fusion-side requirement:** the Fusion user must have a BICC-administrator role (e.g. `BIA_ADMINISTRATOR_DUTY`). A regular Fusion REST user (Finance Manager persona) gets a 302 to IDCS instead of BICC JSON — confirmed live.
+3. The PVO (Public View Object) name and its source schema (e.g. `ERP`).
+4. Helpers on `sys.path`.
 
-## Auth: HTTP Basic only (both sides)
+## Auth: HTTP Basic (Recommended path = AIDP `aidataplatform` format)
 
-### Side 1 — Trigger BICC extract
+### Option A — AIDP built-in connector (recommended; matches official sample)
+
+```python
+import os
+from oracle_ai_data_platform_connectors.rest.fusion import read_bicc_via_aidp_format
+
+df = read_bicc_via_aidp_format(
+    spark=spark,
+    fusion_service_url=os.environ["FUSION_BICC_BASE_URL"],
+    username=os.environ["FUSION_BICC_USER"],            # MUST have BICC privileges
+    password=os.environ["FUSION_BICC_PASSWORD"],
+    schema=os.environ["FUSION_BICC_SCHEMA"],            # e.g. "ERP"
+    datastore=os.environ["FUSION_BICC_PVO"],            # the PVO name
+    fusion_external_storage=os.environ["FUSION_BICC_EXTERNAL_STORAGE"],
+)
+df.show(5)
+print("rows:", df.count())
+```
+
+The AIDP format handler does the BICC trigger, polling, manifest read, and OCI Object Storage CSV materialization internally — the user just gets a Spark DataFrame.
+
+Equivalent verbatim invocation (same as the official Oracle sample):
+
+```python
+df = (
+    spark.read.format("aidataplatform")
+        .option("type", "FUSION_BICC")
+        .option("fusion.service.url", os.environ["FUSION_BICC_BASE_URL"])
+        .option("user.name", os.environ["FUSION_BICC_USER"])
+        .option("password", os.environ["FUSION_BICC_PASSWORD"])
+        .option("schema", os.environ["FUSION_BICC_SCHEMA"])
+        .option("fusion.external.storage", os.environ["FUSION_BICC_EXTERNAL_STORAGE"])
+        .option("datastore", os.environ["FUSION_BICC_PVO"])
+        .load()
+)
+```
+
+### Option B — Custom REST trigger + manual Object Storage read (fallback)
+
+Only use this when the AIDP `aidataplatform` connector isn't available on the cluster, when you need a custom polling cadence, or when you want to inspect the `MANIFEST.MF` directly. NOT validated against the official sample — endpoint paths and response schema are best-effort and may need adjustment per Fusion version.
 
 ```python
 import os
 from oracle_ai_data_platform_connectors.auth import http_basic_session
-from oracle_ai_data_platform_connectors.rest.fusion import trigger_bicc_extract
+from oracle_ai_data_platform_connectors.rest.fusion import (
+    trigger_bicc_extract, read_bicc_csv_from_object_storage,
+)
 
 session = http_basic_session(
     username=os.environ["FUSION_BICC_USER"],
@@ -41,18 +83,6 @@ prefix = trigger_bicc_extract(
     poll_interval_seconds=30,
     timeout_seconds=3600,
 )
-print("BICC extract landed at prefix:", prefix)
-```
-
-### Side 2 — Read CSV from OCI Object Storage (Spark `oci://`)
-
-The Spark cluster reads `oci://...` URIs with its pre-configured OCI auth — no user-supplied API key needed in the notebook.
-
-```python
-from oracle_ai_data_platform_connectors.rest.fusion import (
-    read_bicc_csv_from_object_storage,
-)
-
 df = read_bicc_csv_from_object_storage(
     spark=spark,
     namespace=os.environ["OCI_NAMESPACE"],
@@ -60,19 +90,16 @@ df = read_bicc_csv_from_object_storage(
     prefix=prefix,
 )
 print("rows:", df.count())
-df.printSchema()
 ```
 
-If `oci://` reads fail with auth errors, the cluster-level OCI HDFS connector isn't configured properly. Fix at the cluster level (Cluster → Settings → OCI auth profile), not in the notebook.
-
 ## Gotchas
-- **BICC privileges** — the Fusion user must have a BICC-enabled role (e.g. `BIA_ADMINISTRATOR_DUTY`). A standard Fusion REST user (Finance Manager) returns HTML auth pages instead of BICC JSON when probing offering endpoints.
-- **BICC extract can take minutes to hours.** The helper polls every 30s with a 1h timeout — bump `timeout_seconds` for big offerings.
-- **Manifest file** — BICC writes a `MANIFEST.MF` alongside the CSVs listing files + checksums. The helper relies on the `outputPrefix` from the job-status response; if Oracle changes the response shape, update the helper.
-- **Schema inference is slow** for big CSVs. Pass an explicit `schema=StructType([...])` for repeat runs.
-- **Network** — BICC trigger endpoint is on the public Fusion pod. OCI Object Storage is reached via `oci://` from Spark (uses cluster's OCI config — not user creds).
-- **Cleanup** — BICC doesn't auto-delete old extracts. Schedule a separate cleanup job if you don't want the bucket to grow unbounded.
+- **BICC privileges** — Fusion user must hold a BICC-admin role. Without it, `/biacm/api/v[12]/*` endpoints 302-redirect to IDCS OAuth (HTTP Basic isn't honored). This is the #1 reason live tests fail. (Live-confirmed against the demo pod with `Casey.Brown` finance-mgr persona — every BICC endpoint redirected.)
+- **`fusion.external.storage` is a catalog-managed name**, not a URL. Set it up once via AIDP Catalog UI (or `oci aidataplatform` CLI), then reference by name. The user never types OCI namespace/bucket in the notebook for Option A.
+- **`schema` and `datastore`** — these are BICC concepts: `schema` = offering schema (`ERP`, `HCM`, etc.); `datastore` = PVO name (e.g. `FscmTopModelAM.AnalyticsServiceAM`). Get them from the BICC console under "Configure Cloud Extract".
+- **First extract is slow** — BICC builds a full snapshot. Subsequent runs are incremental. Plan for >5 min on the first call.
+- **Schema inference is slow on big CSVs** (Option B path). Option A's connector knows the schema in advance from the BICC metadata.
 
 ## References
 - Helpers: [scripts/oracle_ai_data_platform_connectors/rest/fusion.py](../../scripts/oracle_ai_data_platform_connectors/rest/fusion.py)
+- Official Oracle AIDP sample: [Read_Only_Ingestion_Connectors.ipynb](https://github.com/oracle-samples/oracle-aidp-samples/blob/main/data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb)
 - BICC docs: https://docs.oracle.com/en/cloud/saas/applications-common/24a/oafsm/

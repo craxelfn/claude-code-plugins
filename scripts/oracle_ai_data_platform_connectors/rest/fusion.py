@@ -160,6 +160,69 @@ def read_bicc_csv_from_object_storage(
     return reader.load(path)
 
 
+def read_bicc_via_aidp_format(
+    spark: Any,
+    fusion_service_url: str,
+    username: str,
+    password: str,
+    schema: str,
+    datastore: str,
+    fusion_external_storage: str,
+):
+    """Read a Fusion BICC PVO via AIDP's built-in `aidataplatform` Spark format.
+
+    This mirrors the official Oracle AIDP sample
+    (oracle-samples/oracle-aidp-samples →
+    ``data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb``):
+
+        spark.read.format("aidataplatform")
+            .option("type", "FUSION_BICC")
+            .option("fusion.service.url", "<URL>")
+            .option("user.name", "<user>")
+            .option("password", "<pwd>")
+            .option("schema", "<SCHEMA>")
+            .option("fusion.external.storage", "<storage-name>")
+            .option("datastore", "<PVO name>")
+            .load()
+
+    The format handler internally:
+    1. Triggers the BICC extract via Fusion REST.
+    2. Waits for completion.
+    3. Reads the extracted CSVs from the OCI Object Storage location
+       backing ``fusion.external.storage`` (which is a pre-configured
+       AIDP external-storage profile).
+    4. Returns the result as a Spark DataFrame with the requested schema.
+
+    Args:
+        spark: Active SparkSession.
+        fusion_service_url: Fusion pod base URL
+            (e.g. ``https://my-pod.fa.us-phoenix-1.oraclecloud.com``).
+        username: Fusion user with BICC privileges
+            (e.g. ``BIA_ADMINISTRATOR_DUTY`` or equivalent role).
+        password: Fusion user password.
+        schema: Target schema (BICC offering schema name, e.g. ``ERP``).
+        datastore: PVO (Public View Object) name to extract.
+        fusion_external_storage: Name of a pre-configured AIDP external
+            storage profile pointing at the OCI Object Storage bucket
+            BICC writes to. This is set up once in the AIDP catalog by
+            an administrator; users just reference it by name.
+
+    Returns:
+        Spark DataFrame.
+    """
+    return (
+        spark.read.format("aidataplatform")
+            .option("type", "FUSION_BICC")
+            .option("fusion.service.url", fusion_service_url)
+            .option("user.name", username)
+            .option("password", password)
+            .option("schema", schema)
+            .option("fusion.external.storage", fusion_external_storage)
+            .option("datastore", datastore)
+            .load()
+    )
+
+
 def rows_to_spark_dataframe(spark: Any, rows: Iterator[dict], *, mode: str = "json_string"):
     """Materialize an iterator of dicts as a Spark DataFrame.
 
