@@ -19,6 +19,6 @@
 | 11 | `aidp-fusion-bicc` | HTTP Basic + API Key | [`fusion_bicc_to_dataframe.ipynb`](../../examples/fusion_bicc_to_dataframe.ipynb) | NOT RUN | - | - |
 | 12 | `aidp-epm-cloud` | Identity-domain OAuth | [`epm_planning_oauth.ipynb`](../../examples/epm_planning_oauth.ipynb) | NOT RUN | - | - |
 | 13 | `aidp-epm-cloud` | Basic (legacy tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |
-| 14 | `aidp-essbase` | HTTP Basic | [`essbase_mdx_basic.ipynb`](../../examples/essbase_mdx_basic.ipynb) | BLOCKED | - | - |
+| 14 | `aidp-essbase` | HTTP Basic | [`essbase_mdx_basic.ipynb`](../../examples/essbase_mdx_basic.ipynb) | PASS_AUTH | 2 | None |
 | 15 | `aidp-streaming-kafka` | SASL_SSL OAuth | [`kafka_streaming_oauth.ipynb`](../../examples/kafka_streaming_oauth.ipynb) | NOT RUN | - | - |
 | 16 | `aidp-streaming-kafka` | SASL/PLAIN with API Key | [`kafka_streaming_apikey.ipynb`](../../examples/kafka_streaming_apikey.ipynb) | PASS | 3 | 1777217508 |

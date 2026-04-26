@@ -19,13 +19,16 @@ def http_basic_session(
     timeout: int = 60,
     retries: int = 3,
     backoff_factor: float = 1.5,
+    verify_tls: bool = True,
 ):
     """Return a ``requests.Session`` with HTTP Basic auth + retry/backoff.
 
     Args:
         username: For EPM Cloud, this must include the identity-domain prefix:
             ``tenancy.user@domain`` (e.g. ``epmloaner622.first.last@oracle.com``).
-            For Fusion REST, it's the standard Fusion user name.
+            For Fusion REST, it's the standard Fusion user name. For Essbase 21c
+            on a customer-hosted realm (e.g. ``ess21c.cealinfra.com``), it's the
+            Essbase service-admin username.
         password: Plain password.
         base_url: Optional base URL captured on the session for joining
             relative paths via ``session.get(url, ...)`` later.
@@ -33,10 +36,16 @@ def http_basic_session(
         retries: How many times to retry on transient errors (5xx, connection
             drops). 401/403/404 are NOT retried.
         backoff_factor: passed to urllib3 ``Retry`` (delay = backoff * 2^attempt).
+        verify_tls: Whether to verify the server's TLS cert. Default ``True``.
+            Set ``False`` for Essbase 21c hosts using internal CA chains the
+            AIDP cluster doesn't trust (e.g. ``cealinfra.com``). When you set
+            this to False, you may also want to call
+            ``urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)``
+            to silence the noisy warning.
 
     Returns:
-        A configured ``requests.Session``. ``auth`` is pre-bound, so callers
-        just do ``session.get(...)`` / ``session.post(...)``.
+        A configured ``requests.Session``. ``auth`` and ``verify`` are
+        pre-bound, so callers just do ``session.get(...)`` / ``session.post(...)``.
     """
     import requests
     from requests.adapters import HTTPAdapter
@@ -44,6 +53,7 @@ def http_basic_session(
 
     session = requests.Session()
     session.auth = (username, password)
+    session.verify = verify_tls
     session.headers.update({"Content-Type": "application/json"})
 
     retry = Retry(

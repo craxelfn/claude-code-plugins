@@ -20,8 +20,13 @@ allowed-tools: Read, Write, Edit, Bash
 
 ## Auth: HTTP Basic
 
+Essbase 21c REST API expects `Authorization: Basic base64(user:pass)`. **The JET UI redirects to IDCS OAuth, but the REST surface is Basic-only** — passing an OCI session JWT as Bearer fails (different identity provider). Username is the Essbase service-admin (e.g. `Oacadmin1`).
+
+If your Essbase host uses an internal CA chain not trusted by the AIDP cluster (e.g. `cealinfra.com`), pass `verify_tls=False` to the session helper. Live-validated against `https://ess21c.cealinfra.com/`.
+
 ```python
-import os
+import os, urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # internal CA
 from oracle_ai_data_platform_connectors.auth import http_basic_session
 from oracle_ai_data_platform_connectors.rest.essbase import (
     execute_mdx, mdx_result_to_spark_dataframe,
@@ -31,6 +36,7 @@ session = http_basic_session(
     username=os.environ["ESSBASE_USER"],
     password=os.environ["ESSBASE_PASSWORD"],
     base_url=os.environ["ESSBASE_BASE_URL"],
+    verify_tls=False,   # set True for trusted public CAs
 )
 
 mdx_query = """
