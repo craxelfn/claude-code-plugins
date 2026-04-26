@@ -38,15 +38,27 @@ claude --plugin-dir ./oracle-ai-data-platform-workbench-spark-connectors
 
 ## How to use
 
-In a Claude Code session against an AIDP workspace, just describe what you want:
+### First-time setup (once per AIDP workspace)
+
+Tell Claude:
+
+> "Set up the AIDP connectors plugin in this workspace."
+
+The `aidp-connectors-bootstrap` skill activates and uses the AIDP MCP tools to upload the helper package to `/Workspace/Shared/oracle_ai_data_platform_connectors/`, then runs [`examples/00_bootstrap_helpers.ipynb`](examples/00_bootstrap_helpers.ipynb) which prints `BOOTSTRAP OK` when the package is importable from a notebook cell.
+
+(If you're not using Claude or prefer manual setup: upload `scripts/oracle_ai_data_platform_connectors/` to `/Workspace/Shared/oracle_ai_data_platform_connectors/scripts/oracle_ai_data_platform_connectors/` via the AIDP UI, then run the bootstrap notebook to confirm.)
+
+### Day-to-day
+
+In a Claude Code session against your AIDP workspace, just describe what you want:
 
 > "I need to load ATP data into Spark in my AIDP notebook"
 
-The relevant skill activates automatically and walks you through:
-1. Prerequisites (pip, JDBC jar via `spark.jars`, env vars / OCI Vault secrets)
-2. Auth options — pick one (wallet, DB-token, API key, Basic, OAuth, Kerberos, LDAP)
-3. The Spark JDBC / REST / streaming snippet ready to paste into a notebook cell
-4. Known gotchas
+The relevant connector skill activates automatically and walks you through:
+1. Prerequisites (env vars / OCI Vault secrets, JDBC jar via `spark.jars` if needed).
+2. Auth options — pick one (wallet, DB-token, API key, Basic, OAuth, Kerberos, LDAP).
+3. The Spark JDBC / REST / streaming snippet ready to paste into a notebook cell.
+4. Known gotchas.
 
 ## Auth methods that are NOT supported in AIDP notebooks today
 

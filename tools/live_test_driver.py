@@ -45,6 +45,7 @@ class LiveTestRow:
 
 
 LIVE_TEST_ROWS = [
+    LiveTestRow(0,  "aidp-connectors-bootstrap", "n/a",                          "00_bootstrap_helpers.ipynb",     "BOOTSTRAP OK printed; package importable",                         True),
     LiveTestRow(1,  "aidp-alh",            "Wallet (mTLS)",                     "alh_wallet_query.ipynb",         "Spark DataFrame with non-zero rows from a known ALH table",        True),
     LiveTestRow(2,  "aidp-alh",            "IAM DB-Token",                       "alh_dbtoken_query.ipynb",        "Same query as #1 succeeds via DB-token, no wallet on disk",        True),
     LiveTestRow(3,  "aidp-alh",            "API Key + inline OCI config",        "alh_catalog_sync_apikey.ipynb",  "External-catalog metadata refresh succeeds; downstream Spark read", False),

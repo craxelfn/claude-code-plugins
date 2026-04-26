@@ -661,10 +661,92 @@ def kafka_streaming_apikey() -> List[dict]:
     ]
 
 
+def bootstrap_helpers() -> List[dict]:
+    """Self-test notebook — run once after the helpers have been uploaded.
+
+    Verifies the package is importable and prints a summary so the user (and
+    Claude, when driving via MCP) can confirm the setup worked.
+    """
+    return [
+        md(
+            "# `00_bootstrap_helpers` — confirm the AIDP connectors helper package is set up\n",
+            "\n",
+            "Run this notebook **once per AIDP workspace** after the plugin's helpers have been uploaded to `/Workspace/Shared/oracle_ai_data_platform_connectors/scripts/`.\n",
+            "\n",
+            "If you haven't uploaded the helpers yet, ask Claude: *\"set up the AIDP connectors plugin in this workspace\"* — the `aidp-connectors-bootstrap` skill drives the upload via MCP. Or upload `scripts/oracle_ai_data_platform_connectors/` manually via the AIDP UI to that path.\n",
+            "\n",
+            "**Pass criteria:** the final cell prints `BOOTSTRAP OK` plus the package version and a list of submodules.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "# Confirm the directory layout the helpers expect.\n",
+            "import os, pathlib\n",
+            "expected = pathlib.Path('/Workspace/Shared/oracle_ai_data_platform_connectors/scripts/oracle_ai_data_platform_connectors')\n",
+            "if not expected.exists():\n",
+            "    raise RuntimeError(\n",
+            "        f'Helpers not found at {expected}. Run the aidp-connectors-bootstrap skill (ask Claude: \"set up the AIDP connectors plugin\") '\n",
+            "        f'or upload the plugin scripts/ directory to /Workspace/Shared/ manually.'\n",
+            "    )\n",
+            "files = sorted(p.name for p in expected.rglob('*.py'))\n",
+            "print(f'found {len(files)} Python files under {expected}')\n",
+            "for f in files: print(' ', f)\n",
+        ),
+        code(
+            "# Sanity-import every public submodule.\n",
+            "import importlib\n",
+            "import oracle_ai_data_platform_connectors as pkg\n",
+            "from oracle_ai_data_platform_connectors import auth, jdbc, rest, streaming\n",
+            "from oracle_ai_data_platform_connectors.auth import (\n",
+            "    write_wallet_to_tmp, generate_db_token, from_inline_pem,\n",
+            "    http_basic_session, oauth_token, get_secret,\n",
+            ")\n",
+            "from oracle_ai_data_platform_connectors.jdbc import (\n",
+            "    build_oracle_jdbc_url, build_hive_jdbc_url,\n",
+            "    spark_jdbc_options_wallet, spark_jdbc_options_dbtoken, spark_jdbc_options_password,\n",
+            "    spark_hive_jdbc_options,\n",
+            ")\n",
+            "from oracle_ai_data_platform_connectors.rest import fusion, epm, essbase  # noqa: F401\n",
+            "from oracle_ai_data_platform_connectors.streaming import (\n",
+            "    bootstrap_for_region, build_kafka_options_sasl_plain, validate_checkpoint_path,\n",
+            ")\n",
+            "print('all imports OK; package version:', pkg.__version__)\n",
+        ),
+        code(
+            "# Quick logic smoke test: run the URL builder and the checkpoint validator.\n",
+            "url = build_oracle_jdbc_url(tns_alias='atp_high', tns_admin='/tmp/wallet/atp')\n",
+            "assert url == 'jdbc:oracle:thin:@atp_high?TNS_ADMIN=/tmp/wallet/atp', f'unexpected URL: {url}'\n",
+            "import pytest as _pytest\n",
+            "try:\n",
+            "    validate_checkpoint_path('/Workspace/cp')\n",
+            "    raise AssertionError('checkpoint validator should have raised')\n",
+            "except ValueError:\n",
+            "    pass\n",
+            "print('smoke test OK')\n",
+        ),
+        code(
+            "# Final result marker — the live-test driver picks this up if you run it as part of a batch.\n",
+            "import json, time\n",
+            "summary = {\n",
+            "    'connector': 'bootstrap',\n",
+            "    'auth': 'n/a',\n",
+            "    'rows': 1,                  # 1 = bootstrap success\n",
+            "    'schema': ['BOOTSTRAP_OK'],\n",
+            "    'package_version': pkg.__version__,\n",
+            "    'timestamp_utc': int(time.time()),\n",
+            "}\n",
+            "print('BOOTSTRAP OK')\n",
+            "print('AIDP_LIVE_TEST_RESULT_BEGIN')\n",
+            "print(json.dumps(summary, indent=2))\n",
+            "print('AIDP_LIVE_TEST_RESULT_END')\n",
+        ),
+    ]
+
+
 # === Build everything =======================================================
 
 
 NOTEBOOKS = [
+    ("00_bootstrap_helpers", bootstrap_helpers),
     ("alh_wallet_query", alh_wallet_query),
     ("alh_dbtoken_query", alh_dbtoken_query),
     ("alh_catalog_sync_apikey", alh_catalog_sync_apikey),

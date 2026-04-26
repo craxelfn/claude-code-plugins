@@ -3,6 +3,7 @@
 
 | # | Skill | Auth | Notebook | Status | Rows | Last run (UTC) |
 |---|---|---|---|---|---|---|
+| 0 | `aidp-connectors-bootstrap` | n/a | [`00_bootstrap_helpers.ipynb`](../../examples/00_bootstrap_helpers.ipynb) | NOT RUN | - | - |
 | 1 | `aidp-alh` | Wallet (mTLS) | [`alh_wallet_query.ipynb`](../../examples/alh_wallet_query.ipynb) | NOT RUN | - | - |
 | 2 | `aidp-alh` | IAM DB-Token | [`alh_dbtoken_query.ipynb`](../../examples/alh_dbtoken_query.ipynb) | NOT RUN | - | - |
 | 3 | `aidp-alh` | API Key + inline OCI config | [`alh_catalog_sync_apikey.ipynb`](../../examples/alh_catalog_sync_apikey.ipynb) | NOT RUN | - | - |

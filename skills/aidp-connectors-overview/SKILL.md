@@ -15,7 +15,9 @@ allowed-tools: Read
 
 ## How to route
 
-Pick the right skill from this table and **invoke that skill**. Don't re-write its content here.
+**Before any connector skill works**, the helper package must be uploaded to the user's AIDP workspace. If the user hasn't done this yet (or you see `ModuleNotFoundError: oracle_ai_data_platform_connectors` in any prior cell), invoke [`aidp-connectors-bootstrap`](../aidp-connectors-bootstrap/SKILL.md) first. It uses the AIDP MCP tools to push the package into `/Workspace/Shared/` and runs a sanity-import notebook.
+
+Otherwise, pick the right skill from this table and **invoke that skill**. Don't re-write its content here.
 
 | User says... | Use skill |
 |---|---|
