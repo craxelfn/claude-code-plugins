@@ -1,0 +1,27 @@
+{
+  "name": "oracle-ai-data-platform-workbench-spark-connectors",
+  "version": "0.1.0",
+  "description": "Oracle AI Data Platform (AIDP) Spark connectors for Claude Code: ALH, ATP, ExaCS, BDS Hive, Fusion ERP REST, Fusion BICC, EPM Cloud Planning, Essbase 21c, OCI Streaming Kafka. Each skill covers every supported auth method (wallet, IAM DB-Token, API key, Basic, OAuth, Kerberos, LDAP) for use from an AIDP notebook.",
+  "author": {
+    "name": "Ahmed Awan"
+  },
+  "homepage": "https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors",
+  "repository": "https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors",
+  "license": "MIT",
+  "keywords": [
+    "oracle",
+    "aidp",
+    "spark",
+    "jdbc",
+    "lakehouse",
+    "atp",
+    "exacs",
+    "bds",
+    "fusion",
+    "epm",
+    "essbase",
+    "kafka",
+    "streaming",
+    "connector"
+  ]
+}
