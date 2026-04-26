@@ -1,0 +1,693 @@
+"""Build all 19 example AIDP notebooks from a single spec.
+
+Each notebook has a consistent structure:
+    1. Markdown cell — title, auth method, prerequisites, expected output
+    2. Code cell — sys.path setup + imports
+    3. Code cell — auth setup (option-specific)
+    4. Code cell — query / extract / stream
+    5. Code cell — assert + emit JSON summary (the live-test driver parses this)
+
+Run:
+    python tools/build_examples.py
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import List
+
+REPO = Path(__file__).resolve().parent.parent
+EXAMPLES = REPO / "examples"
+EXAMPLES.mkdir(exist_ok=True)
+
+
+def code(*lines: str) -> dict:
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": list(lines),
+    }
+
+
+def md(*lines: str) -> dict:
+    return {"cell_type": "markdown", "metadata": {}, "source": list(lines)}
+
+
+# Reused as the last cell of every notebook — the live-test driver parses this.
+def emit_summary(connector: str, auth: str, df_var: str = "df") -> dict:
+    return code(
+        f"# Live-test driver parses this final cell's stdout for the JSON summary.\n",
+        "import json, time\n",
+        "summary = {\n",
+        f"    'connector': {connector!r},\n",
+        f"    'auth': {auth!r},\n",
+        f"    'rows': int({df_var}.count()),\n",
+        f"    'schema': sorted([f.name for f in {df_var}.schema.fields]),\n",
+        "    'timestamp_utc': int(time.time()),\n",
+        "}\n",
+        "print('AIDP_LIVE_TEST_RESULT_BEGIN')\n",
+        "print(json.dumps(summary, indent=2))\n",
+        "print('AIDP_LIVE_TEST_RESULT_END')\n",
+    )
+
+
+def sys_path_setup() -> dict:
+    return code(
+        "import sys, os\n",
+        "# Adjust this if you've uploaded the plugin scripts/ dir elsewhere.\n",
+        "sys.path.insert(0, '/Workspace/Shared/oracle_ai_data_platform_connectors/scripts')\n",
+    )
+
+
+def write(name: str, cells: list, kernel: str = "python3") -> None:
+    nb = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": kernel,
+            },
+            "language_info": {"name": "python", "version": "3.10"},
+            "aidp_connector": name,
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = EXAMPLES / f"{name}.ipynb"
+    out.write_text(json.dumps(nb, indent=2), encoding="utf-8")
+    print(f"wrote {out}")
+
+
+# === Definitions ============================================================
+
+
+def alh_wallet_query() -> List[dict]:
+    return [
+        md(
+            "# `aidp-alh` live test — wallet (mTLS)\n",
+            "\n",
+            "**Live-test row 1.** Reads a known ALH table via Spark JDBC using a wallet.\n",
+            "\n",
+            "**Prerequisites:** `ALH_*` env vars set or OCI Vault configured. ALH wallet ZIP available.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import write_wallet_to_tmp\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_wallet\n",
+            "\n",
+            "tns_admin = write_wallet_to_tmp(\n",
+            "    wallet=os.environ.get('ALH_WALLET_ZIP_PATH', '/tmp/alh-wallet.zip'),\n",
+            "    target_dir='/tmp/wallet/alh',\n",
+            ")\n",
+            "url = build_oracle_jdbc_url(tns_alias=os.environ['ALH_TNS_SERVICE'], tns_admin=tns_admin)\n",
+            "opts = spark_jdbc_options_wallet(url=url, user=os.environ['ALH_USER'], password=os.environ['ALH_PASSWORD'])\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['ALH_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-alh", "wallet"),
+    ]
+
+
+def alh_dbtoken_query() -> List[dict]:
+    return [
+        md(
+            "# `aidp-alh` live test — IAM DB-Token\n",
+            "\n",
+            "**Live-test row 2.** Same query as row 1, but auth is via DB-token instead of password.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import generate_db_token\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_dbtoken\n",
+            "\n",
+            "token_dir = generate_db_token(\n",
+            "    compartment_ocid=os.environ['ALH_COMPARTMENT_OCID'],\n",
+            "    target_dir='/tmp/dbcred_alh',\n",
+            ")\n",
+            "url = build_oracle_jdbc_url(\n",
+            "    tns_alias=os.environ['ALH_TNS_SERVICE'],\n",
+            "    tns_admin=os.environ.get('ALH_WALLET_PATH', '/tmp/wallet/alh'),\n",
+            ")\n",
+            "opts = spark_jdbc_options_dbtoken(url=url, token_dir=token_dir)\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['ALH_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-alh", "dbtoken"),
+    ]
+
+
+def alh_catalog_sync_apikey() -> List[dict]:
+    return [
+        md(
+            "# `aidp-alh` live test — API Key + inline OCI config (catalog-sync side)\n",
+            "\n",
+            "**Live-test row 3.** Refreshes the AIDP external catalog metadata from ALH using inline-PEM OCI auth, then reads the synced table via Spark.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import from_inline_pem\n",
+            "import oci\n",
+            "\n",
+            "config = from_inline_pem(\n",
+            "    user_ocid=os.environ['OCI_USER_OCID'],\n",
+            "    tenancy_ocid=os.environ['OCI_TENANCY_OCID'],\n",
+            "    fingerprint=os.environ['OCI_FINGERPRINT'],\n",
+            "    private_key_pem=os.environ['OCI_PRIVATE_KEY_PEM'],\n",
+            "    region=os.environ['OCI_REGION'],\n",
+            ")\n",
+            "# A control-plane sanity check — proves the config works without writing a PEM file.\n",
+            "identity = oci.identity.IdentityClient(config=config)\n",
+            "print('user:', identity.get_user(config['user']).data.name)\n",
+        ),
+        code(
+            "# Downstream Spark read against the externally-cataloged ALH table.\n",
+            "df = spark.read.table(os.environ['ALH_EXTERNAL_CATALOG_TABLE'])\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-alh", "apikey-catalog-sync"),
+    ]
+
+
+def atp_wallet_query() -> List[dict]:
+    return [
+        md(
+            "# `aidp-atp` live test — wallet (mTLS)\n",
+            "\n",
+            "**Live-test row 4.** Already-validated pattern from prior IMFA work.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import write_wallet_to_tmp\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_wallet\n",
+            "\n",
+            "tns_admin = write_wallet_to_tmp(os.environ['ATP_WALLET_ZIP_PATH'], target_dir='/tmp/wallet/atp')\n",
+            "url = build_oracle_jdbc_url(tns_alias=os.environ['ATP_TNS_SERVICE'], tns_admin=tns_admin)\n",
+            "opts = spark_jdbc_options_wallet(url=url, user=os.environ['ATP_USER'], password=os.environ['ATP_PASSWORD'])\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['ATP_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-atp", "wallet"),
+    ]
+
+
+def atp_dbtoken_refresh() -> List[dict]:
+    return [
+        md(
+            "# `aidp-atp` live test — IAM DB-Token + on-executor refresh\n",
+            "\n",
+            "**Live-test row 5.** Long-running pattern. Pass criteria: zero auth failures over a >25-minute job (token refresh kicks in on each executor).\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import generate_db_token\n",
+            "from oracle_ai_data_platform_connectors.auth.dbtoken import refresh_on_executors\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_dbtoken\n",
+            "\n",
+            "token_dir = generate_db_token(os.environ['ATP_COMPARTMENT_OCID'], target_dir='/tmp/dbcred_atp')\n",
+            "url = build_oracle_jdbc_url(\n",
+            "    tns_alias=os.environ['ATP_TNS_SERVICE'],\n",
+            "    tns_admin=os.environ.get('ATP_WALLET_PATH', '/tmp/wallet/atp'),\n",
+            ")\n",
+            "opts = spark_jdbc_options_dbtoken(url=url, token_dir=token_dir)\n",
+        ),
+        code(
+            "# Driver-side query first (sanity check)\n",
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['ATP_TABLE_FOR_TEST']).load()\n",
+            "\n",
+            "# Then long-running mapPartitions with token refresh — for live tests, count rows\n",
+            "# per partition (cheap proxy for 'we held a JDBC connection long enough')\n",
+            "refresh = refresh_on_executors(spark, os.environ['ATP_COMPARTMENT_OCID'], '/tmp/dbcred_atp')\n",
+            "result = df.rdd.mapPartitions(lambda part: refresh(part)).toDF(df.schema)\n",
+            "print('result rows:', result.count())\n",
+        ),
+        emit_summary("aidp-atp", "dbtoken", df_var="result"),
+    ]
+
+
+def atp_admin_apikey() -> List[dict]:
+    return [
+        md(
+            "# `aidp-atp` live test — API Key + inline OCI config (admin)\n",
+            "\n",
+            "**Live-test row 6.** Confirms the inline-PEM OCI config path works for admin-only Database service calls (e.g. listing autonomous databases in a compartment).\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import from_inline_pem\n",
+            "import oci\n",
+            "\n",
+            "config = from_inline_pem(\n",
+            "    user_ocid=os.environ['OCI_USER_OCID'],\n",
+            "    tenancy_ocid=os.environ['OCI_TENANCY_OCID'],\n",
+            "    fingerprint=os.environ['OCI_FINGERPRINT'],\n",
+            "    private_key_pem=os.environ['OCI_PRIVATE_KEY_PEM'],\n",
+            "    region=os.environ['OCI_REGION'],\n",
+            ")\n",
+            "db_client = oci.database.DatabaseClient(config=config)\n",
+            "adbs = db_client.list_autonomous_databases(os.environ['ATP_COMPARTMENT_OCID']).data\n",
+            "print('autonomous DBs visible:', len(adbs))\n",
+        ),
+        code(
+            "import pandas as pd\n",
+            "df = spark.createDataFrame(pd.DataFrame([{'name': adb.display_name, 'state': adb.lifecycle_state} for adb in adbs]))\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-atp", "apikey-admin"),
+    ]
+
+
+def exacs_wallet_query() -> List[dict]:
+    return [
+        md(
+            "# `aidp-exacs` live test — wallet (TCPS)\n",
+            "**Live-test row 7.**\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import write_wallet_to_tmp\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_wallet\n",
+            "\n",
+            "write_wallet_to_tmp(os.environ['EXACS_WALLET_ZIP_PATH'], target_dir='/tmp/wallet/exacs')\n",
+            "url = build_oracle_jdbc_url(\n",
+            "    host=os.environ['EXACS_HOST'],\n",
+            "    port=int(os.environ.get('EXACS_PORT', '1522')),\n",
+            "    service_name=os.environ['EXACS_SERVICE_NAME'],\n",
+            "    use_tcps=True,\n",
+            ")\n",
+            "opts = spark_jdbc_options_wallet(url=url, user=os.environ['EXACS_USER'], password=os.environ['EXACS_PASSWORD'])\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['EXACS_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-exacs", "wallet"),
+    ]
+
+
+def exacs_dbtoken_query() -> List[dict]:
+    return [
+        md(
+            "# `aidp-exacs` live test — IAM DB-Token (only IAM-enabled clusters)\n",
+            "**Live-test row 8.** Skip if the cluster is on classic auth.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import generate_db_token\n",
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_dbtoken\n",
+            "\n",
+            "token_dir = generate_db_token(os.environ['EXACS_COMPARTMENT_OCID'], target_dir='/tmp/dbcred_exacs')\n",
+            "url = build_oracle_jdbc_url(host=os.environ['EXACS_HOST'], port=1522, service_name=os.environ['EXACS_SERVICE_NAME'])\n",
+            "opts = spark_jdbc_options_dbtoken(url=url, token_dir=token_dir)\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['EXACS_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-exacs", "dbtoken"),
+    ]
+
+
+def exacs_user_password() -> List[dict]:
+    return [
+        md(
+            "# `aidp-exacs` live test — legacy DB user/password\n",
+            "**Live-test row 9.** For non-IAM ExaCS clusters.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.jdbc import build_oracle_jdbc_url, spark_jdbc_options_password\n",
+            "\n",
+            "url = build_oracle_jdbc_url(\n",
+            "    host=os.environ['EXACS_HOST'],\n",
+            "    port=int(os.environ.get('EXACS_PORT_LEGACY', '1521')),\n",
+            "    service_name=os.environ['EXACS_SERVICE_NAME'],\n",
+            "    use_tcps=False,\n",
+            ")\n",
+            "opts = spark_jdbc_options_password(url=url, user=os.environ['EXACS_USER'], password=os.environ['EXACS_PASSWORD'])\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['EXACS_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-exacs", "password-legacy"),
+    ]
+
+
+def bds_hive_kerberos() -> List[dict]:
+    return [
+        md(
+            "# `aidp-bds-hive` live test — Kerberos\n",
+            "**Live-test row 10.** Requires `kinit` on the cluster image (TBD; this notebook will fail fast with a clear error if not).\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.jdbc import build_hive_jdbc_url, spark_hive_jdbc_options\n",
+            "from oracle_ai_data_platform_connectors.jdbc.hive import kerberos_kinit\n",
+            "\n",
+            "kerberos_kinit(\n",
+            "    principal=os.environ['BDS_KRB_PRINCIPAL'],\n",
+            "    keytab_path=os.environ['BDS_KRB_KEYTAB_PATH'],  # MUST be /tmp/...\n",
+            ")\n",
+            "url = build_hive_jdbc_url(\n",
+            "    host=os.environ['BDS_HS2_HOST'], port=10000,\n",
+            "    database=os.environ.get('BDS_HS2_DATABASE', 'default'),\n",
+            "    auth='kerberos',\n",
+            "    principal=f\"hive/{os.environ['BDS_HS2_HOST']}@{os.environ['BDS_HIVE_REALM']}\",\n",
+            ")\n",
+            "opts = spark_hive_jdbc_options(url=url)\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['BDS_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-bds-hive", "kerberos"),
+    ]
+
+
+def bds_hive_ldap() -> List[dict]:
+    return [
+        md(
+            "# `aidp-bds-hive` live test — LDAP\n",
+            "**Live-test row 11.** Recommended default for v0.1.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.jdbc import build_hive_jdbc_url, spark_hive_jdbc_options\n",
+            "\n",
+            "url = build_hive_jdbc_url(\n",
+            "    host=os.environ['BDS_HS2_HOST'],\n",
+            "    port=int(os.environ.get('BDS_HS2_PORT', '10000')),\n",
+            "    database=os.environ.get('BDS_HS2_DATABASE', 'default'),\n",
+            "    auth='ldap',\n",
+            ")\n",
+            "opts = spark_hive_jdbc_options(url=url, user=os.environ['BDS_LDAP_USER'], password=os.environ['BDS_LDAP_PASSWORD'])\n",
+        ),
+        code(
+            "df = spark.read.format('jdbc').options(**opts).option('dbtable', os.environ['BDS_TABLE_FOR_TEST']).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-bds-hive", "ldap"),
+    ]
+
+
+def fusion_rest_basic() -> List[dict]:
+    return [
+        md(
+            "# `aidp-fusion-rest` live test — HTTP Basic\n",
+            "**Live-test row 12.**\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import http_basic_session\n",
+            "from oracle_ai_data_platform_connectors.rest.fusion import fetch_paged, rows_to_spark_dataframe\n",
+            "\n",
+            "session = http_basic_session(\n",
+            "    username=os.environ['FUSION_USER'],\n",
+            "    password=os.environ['FUSION_PASSWORD'],\n",
+            "    base_url=os.environ['FUSION_BASE_URL'],\n",
+            ")\n",
+        ),
+        code(
+            "rows = fetch_paged(\n",
+            "    session=session,\n",
+            "    base_url=os.environ['FUSION_BASE_URL'],\n",
+            "    path=os.environ['FUSION_TEST_PATH'],   # e.g. '/fscmRestApi/resources/11.13.18.05/invoices'\n",
+            "    fields=os.environ.get('FUSION_TEST_FIELDS'),\n",
+            ")\n",
+            "df = rows_to_spark_dataframe(spark, rows)\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-fusion-rest", "basic"),
+    ]
+
+
+def fusion_rest_oauth() -> List[dict]:
+    return [
+        md(
+            "# `aidp-fusion-rest` live test — OAuth (v0.2)\n",
+            "**Live-test row 13.** Deferred to v0.2; placeholder structure.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import oauth_token\n",
+            "import requests\n",
+            "\n",
+            "token = oauth_token(\n",
+            "    token_url=os.environ['FUSION_OAUTH_TOKEN_URL'],\n",
+            "    client_id=os.environ['FUSION_OAUTH_CLIENT_ID'],\n",
+            "    private_key_pem=open(os.environ['FUSION_OAUTH_PRIVATE_KEY_PATH']).read(),\n",
+            ")\n",
+            "session = requests.Session()\n",
+            "session.headers.update({'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})\n",
+        ),
+        code(
+            "from oracle_ai_data_platform_connectors.rest.fusion import fetch_paged, rows_to_spark_dataframe\n",
+            "rows = fetch_paged(session, os.environ['FUSION_BASE_URL'], os.environ['FUSION_TEST_PATH'])\n",
+            "df = rows_to_spark_dataframe(spark, rows)\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-fusion-rest", "oauth"),
+    ]
+
+
+def fusion_bicc_to_dataframe() -> List[dict]:
+    return [
+        md(
+            "# `aidp-fusion-bicc` live test — BICC extract → Object Storage → Spark CSV\n",
+            "**Live-test row 14.** End-to-end: trigger BICC, wait, read CSV from OCI Object Storage.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import http_basic_session\n",
+            "from oracle_ai_data_platform_connectors.rest.fusion import (\n",
+            "    trigger_bicc_extract, read_bicc_csv_from_object_storage,\n",
+            ")\n",
+            "\n",
+            "session = http_basic_session(\n",
+            "    username=os.environ['FUSION_BICC_USER'],\n",
+            "    password=os.environ['FUSION_BICC_PASSWORD'],\n",
+            "    base_url=os.environ['FUSION_BICC_BASE_URL'],\n",
+            ")\n",
+            "prefix = trigger_bicc_extract(\n",
+            "    session=session,\n",
+            "    base_url=os.environ['FUSION_BICC_BASE_URL'],\n",
+            "    offering=os.environ['FUSION_BICC_OFFERING'],\n",
+            "    poll_interval_seconds=30, timeout_seconds=3600,\n",
+            ")\n",
+            "print('extract prefix:', prefix)\n",
+        ),
+        code(
+            "df = read_bicc_csv_from_object_storage(\n",
+            "    spark=spark,\n",
+            "    namespace=os.environ['OCI_NAMESPACE'],\n",
+            "    bucket=os.environ['OCI_BUCKET_BICC'],\n",
+            "    prefix=prefix,\n",
+            ")\n",
+            "df.printSchema()\n",
+        ),
+        emit_summary("aidp-fusion-bicc", "basic-plus-apikey"),
+    ]
+
+
+def epm_planning_oauth() -> List[dict]:
+    return [
+        md(
+            "# `aidp-epm-cloud` live test — Identity-domain OAuth (v0.2)\n",
+            "**Live-test row 15.** Deferred to v0.2.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import oauth_token\n",
+            "import requests\n",
+            "\n",
+            "token = oauth_token(\n",
+            "    token_url=os.environ['EPM_OAUTH_TOKEN_URL'],\n",
+            "    client_id=os.environ['EPM_OAUTH_CLIENT_ID'],\n",
+            "    private_key_pem=open(os.environ['EPM_OAUTH_PRIVATE_KEY_PATH']).read(),\n",
+            ")\n",
+            "session = requests.Session()\n",
+            "session.headers.update({'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})\n",
+        ),
+        code(
+            "from oracle_ai_data_platform_connectors.rest.epm import (\n",
+            "    list_applications, export_data_slice, slice_to_long_dataframe,\n",
+            ")\n",
+            "apps = list_applications(session, os.environ['EPM_BASE_URL'])\n",
+            "print('apps:', [a['name'] for a in apps])\n",
+            "import json\n",
+            "grid = json.loads(os.environ['EPM_GRID_DEFINITION_JSON'])\n",
+            "resp = export_data_slice(session, os.environ['EPM_BASE_URL'], os.environ['EPM_APPLICATION'], os.environ['EPM_PLAN_TYPE'], grid)\n",
+            "df = slice_to_long_dataframe(spark, resp)\n",
+            "df.show(10)\n",
+        ),
+        emit_summary("aidp-epm-cloud", "oauth"),
+    ]
+
+
+def epm_planning_basic() -> List[dict]:
+    return [
+        md(
+            "# `aidp-epm-cloud` live test — HTTP Basic (default for v0.1)\n",
+            "**Live-test row 16.** Username MUST be in `tenancy.user@domain` form (e.g. `epmloaner622.first.last@oracle.com`).\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import http_basic_session\n",
+            "from oracle_ai_data_platform_connectors.rest.epm import (\n",
+            "    list_applications, export_data_slice, slice_to_long_dataframe,\n",
+            ")\n",
+            "\n",
+            "session = http_basic_session(\n",
+            "    username=os.environ['EPM_USERNAME'],\n",
+            "    password=os.environ['EPM_PASSWORD'],\n",
+            "    base_url=os.environ['EPM_BASE_URL'],\n",
+            ")\n",
+            "apps = list_applications(session, os.environ['EPM_BASE_URL'])\n",
+            "print('apps:', [a['name'] for a in apps])\n",
+        ),
+        code(
+            "import json\n",
+            "grid = json.loads(os.environ['EPM_GRID_DEFINITION_JSON'])\n",
+            "resp = export_data_slice(session, os.environ['EPM_BASE_URL'], os.environ['EPM_APPLICATION'], os.environ['EPM_PLAN_TYPE'], grid)\n",
+            "df = slice_to_long_dataframe(spark, resp)\n",
+            "df.show(10)\n",
+        ),
+        emit_summary("aidp-epm-cloud", "basic"),
+    ]
+
+
+def essbase_mdx_basic() -> List[dict]:
+    return [
+        md(
+            "# `aidp-essbase` live test — HTTP Basic + MDX\n",
+            "**Live-test row 17.**\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.auth import http_basic_session\n",
+            "from oracle_ai_data_platform_connectors.rest.essbase import (\n",
+            "    execute_mdx, mdx_result_to_spark_dataframe,\n",
+            ")\n",
+            "\n",
+            "session = http_basic_session(\n",
+            "    username=os.environ['ESSBASE_USER'],\n",
+            "    password=os.environ['ESSBASE_PASSWORD'],\n",
+            "    base_url=os.environ['ESSBASE_BASE_URL'],\n",
+            ")\n",
+        ),
+        code(
+            "mdx = os.environ['ESSBASE_MDX_QUERY']\n",
+            "resp = execute_mdx(session, os.environ['ESSBASE_BASE_URL'], os.environ['ESSBASE_APPLICATION'], os.environ['ESSBASE_CUBE'], mdx)\n",
+            "df = mdx_result_to_spark_dataframe(spark, resp)\n",
+            "df.show(10)\n",
+        ),
+        emit_summary("aidp-essbase", "basic"),
+    ]
+
+
+def kafka_streaming_oauth() -> List[dict]:
+    return [
+        md(
+            "# `aidp-streaming-kafka` live test — SASL_SSL OAuthBearer\n",
+            "**Live-test row 18.** Requires custom OAuthBearer callback handler JAR pre-attached to the cluster.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.streaming import (\n",
+            "    bootstrap_for_region, build_kafka_options_oauthbearer, validate_checkpoint_path,\n",
+            ")\n",
+            "\n",
+            "bootstrap = bootstrap_for_region(os.environ['OCI_REGION'])\n",
+            "opts = build_kafka_options_oauthbearer(\n",
+            "    bootstrap_servers=bootstrap,\n",
+            "    token_endpoint_url=os.environ['OCI_OAUTH_TOKEN_URL'],\n",
+            "    callback_handler_class=os.environ['KAFKA_OAUTH_CALLBACK_CLASS'],\n",
+            "    topic=os.environ['KAFKA_TOPIC'],\n",
+            ")\n",
+        ),
+        code(
+            "checkpoint = validate_checkpoint_path(os.environ['KAFKA_CHECKPOINT_VOLUME'])\n",
+            "raw = spark.readStream.format('kafka').options(**opts).load()\n",
+            "query = raw.writeStream.format('memory').queryName('kafka_oauth_test').option('checkpointLocation', checkpoint).start()\n",
+            "query.awaitTermination(timeout=60)\n",
+            "df = spark.sql('SELECT * FROM kafka_oauth_test')\n",
+            "print('input rows in last batch:', query.lastProgress.get('numInputRows'))\n",
+        ),
+        emit_summary("aidp-streaming-kafka", "oauthbearer"),
+    ]
+
+
+def kafka_streaming_apikey() -> List[dict]:
+    return [
+        md(
+            "# `aidp-streaming-kafka` live test — SASL/PLAIN with OCI auth token\n",
+            "**Live-test row 19.** Recommended default. 1-hour token TTL.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.streaming import (\n",
+            "    bootstrap_for_region, build_kafka_options_sasl_plain, validate_checkpoint_path,\n",
+            ")\n",
+            "\n",
+            "bootstrap = bootstrap_for_region(os.environ['OCI_REGION'])\n",
+            "opts = build_kafka_options_sasl_plain(\n",
+            "    bootstrap_servers=bootstrap,\n",
+            "    tenancy_name=os.environ['OCI_TENANCY_NAME'],\n",
+            "    username=os.environ['OCI_USERNAME'],\n",
+            "    stream_pool_ocid=os.environ['OCI_STREAM_POOL_OCID'],\n",
+            "    auth_token=os.environ['OCI_AUTH_TOKEN'],\n",
+            "    topic=os.environ['KAFKA_TOPIC'],\n",
+            ")\n",
+        ),
+        code(
+            "checkpoint = validate_checkpoint_path(os.environ['KAFKA_CHECKPOINT_VOLUME'])\n",
+            "raw = spark.readStream.format('kafka').options(**opts).load()\n",
+            "query = raw.writeStream.format('memory').queryName('kafka_apikey_test').option('checkpointLocation', checkpoint).start()\n",
+            "query.awaitTermination(timeout=60)\n",
+            "df = spark.sql('SELECT * FROM kafka_apikey_test')\n",
+            "print('input rows in last batch:', query.lastProgress.get('numInputRows'))\n",
+        ),
+        emit_summary("aidp-streaming-kafka", "apikey-sasl-plain"),
+    ]
+
+
+# === Build everything =======================================================
+
+
+NOTEBOOKS = [
+    ("alh_wallet_query", alh_wallet_query),
+    ("alh_dbtoken_query", alh_dbtoken_query),
+    ("alh_catalog_sync_apikey", alh_catalog_sync_apikey),
+    ("atp_wallet_query", atp_wallet_query),
+    ("atp_dbtoken_refresh", atp_dbtoken_refresh),
+    ("atp_admin_apikey", atp_admin_apikey),
+    ("exacs_wallet_query", exacs_wallet_query),
+    ("exacs_dbtoken_query", exacs_dbtoken_query),
+    ("exacs_user_password", exacs_user_password),
+    ("bds_hive_kerberos", bds_hive_kerberos),
+    ("bds_hive_ldap", bds_hive_ldap),
+    ("fusion_rest_basic", fusion_rest_basic),
+    ("fusion_rest_oauth", fusion_rest_oauth),
+    ("fusion_bicc_to_dataframe", fusion_bicc_to_dataframe),
+    ("epm_planning_oauth", epm_planning_oauth),
+    ("epm_planning_basic", epm_planning_basic),
+    ("essbase_mdx_basic", essbase_mdx_basic),
+    ("kafka_streaming_oauth", kafka_streaming_oauth),
+    ("kafka_streaming_apikey", kafka_streaming_apikey),
+]
+
+
+if __name__ == "__main__":
+    for name, builder in NOTEBOOKS:
+        write(name, builder())
+    print(f"\nbuilt {len(NOTEBOOKS)} notebooks under {EXAMPLES}")
