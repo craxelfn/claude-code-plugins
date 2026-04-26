@@ -6,9 +6,10 @@ All notable changes to this plugin are documented here. The format follows [Keep
 
 ### Added
 - Initial plugin scaffold per Claude Code plugin standard.
-- Eight connector skills + bootstrap skill + routing skill: `aidp-alh` (covers Autonomous DB family — ALH/ADW/ATP), `aidp-exacs`, `aidp-bds-hive`, `aidp-fusion-rest`, `aidp-fusion-bicc`, `aidp-epm-cloud`, `aidp-essbase`, `aidp-streaming-kafka`.
-- Python helper package `oracle_ai_data_platform_connectors` with `auth/`, `jdbc/`, `rest/`, `streaming/` submodules.
+- **20 connector skills** + bootstrap skill + routing skill (after the v0.2.0 audit-driven additions). Oracle/OCI: `aidp-alh` (covers Autonomous DB family — ALH/ADW/ATP), `aidp-exacs`, `aidp-oracle-db`, `aidp-bds-hive`, `aidp-fusion-rest`, `aidp-fusion-bicc`, `aidp-epm-cloud`, `aidp-essbase`, `aidp-streaming-kafka`, `aidp-object-storage`, `aidp-iceberg`. External RDBMS: `aidp-postgresql`, `aidp-mysql`, `aidp-sqlserver`. Multi-cloud + escape hatches: `aidp-snowflake`, `aidp-azure-adls`, `aidp-aws-s3`, `aidp-rest-generic`, `aidp-jdbc-custom`, `aidp-excel`.
+- Python helper package `oracle_ai_data_platform_connectors` with `auth/`, `jdbc/`, `rest/`, `streaming/` submodules + new top-level `aidataplatform` module exposing `aidataplatform_options()` for the AIDP `aidataplatform` Spark format handler (covers ORACLE_DB, ORACLE_EXADATA, ORACLE_ALH, ORACLE_ATP, POSTGRESQL, MYSQL, MYSQL_HEATWAVE, SQLSERVER, HIVE, KAFKA, FUSION_BICC, GENERIC_REST).
 - Phase 0 auth-strategy research findings folded into skill defaults.
+- **v0.2.0 — official Oracle AIDP samples audit.** Added 12 new skills covering every distinct connector / data source documented in `oracle-samples/oracle-aidp-samples`: PostgreSQL, MySQL/HeatWave, SQL Server, generic Oracle DB (Compute/on-prem/Base DB), OCI Object Storage native, Apache Iceberg, Snowflake, Azure ADLS Gen2, AWS S3, Generic REST, custom JDBC escape hatch, Excel. Each skill has a SKILL.md with verbatim option shapes from the official sample notebooks. 12 new example notebooks added to `examples/`. Routing skill `aidp-connectors-overview` updated with new triggers. New unit-test suite `test_aidataplatform.py` (15 tests) covers the helper.
 
 ### Changed
 - **Removed `aidp-atp` as a separate skill.** ATP, ADW, and ALH are all Oracle 26ai under the hood; the same JDBC driver, URL pattern, wallet flow, and IAM DB-Token flow apply to all three. `aidp-alh` now covers the entire Autonomous DB family.

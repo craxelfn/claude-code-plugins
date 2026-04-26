@@ -566,6 +566,285 @@ def bootstrap_helpers() -> List[dict]:
     ]
 
 
+# === New skills added in v0.2.0 — generic patterns ==========================
+
+
+def _aidp_format_read(connector: str, type_const: str, env_prefix: str,
+                      *, has_database_name: bool = False) -> List[dict]:
+    """Generic read-only example for an `aidataplatform` connector type.
+
+    Used for postgresql / mysql / sqlserver / oracle_db / mysql_heatwave style
+    connectors that share the same option shape.
+    """
+    extras = ""
+    if has_database_name:
+        extras = (
+            f"    database_name=os.environ['{env_prefix}_NAME'],\n"
+        )
+    return [
+        md(
+            f"# `{connector}` live test — `aidataplatform` `type={type_const}`\n"
+            "Mirrors the official Oracle AIDP sample. Set the env vars listed below "
+            "(see `.env.example`) and run end-to-end.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.aidataplatform import (\n",
+            "    AIDP_FORMAT, aidataplatform_options,\n",
+            ")\n",
+            "\n",
+            "opts = aidataplatform_options(\n",
+            f"    type='{type_const}',\n",
+            f"    host=os.environ['{env_prefix}_HOST'],\n",
+            f"    port=int(os.environ['{env_prefix}_PORT']),\n",
+            extras,
+            f"    user=os.environ['{env_prefix}_USER'],\n",
+            f"    password=os.environ['{env_prefix}_PASSWORD'],\n",
+            f"    schema=os.environ['{env_prefix}_SCHEMA'],\n",
+            f"    table=os.environ['{env_prefix}_TABLE'],\n",
+            ")\n",
+        ),
+        code(
+            "df = spark.read.format(AIDP_FORMAT).options(**opts).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary(connector, f"aidataplatform-{type_const.lower()}"),
+    ]
+
+
+def postgresql_read() -> List[dict]:
+    return _aidp_format_read("aidp-postgresql", "POSTGRESQL", "PG")
+
+
+def mysql_read() -> List[dict]:
+    return _aidp_format_read("aidp-mysql", "MYSQL", "MYSQL")
+
+
+def sqlserver_read() -> List[dict]:
+    return _aidp_format_read("aidp-sqlserver", "SQLSERVER", "MSSQL")
+
+
+def oracle_db_read() -> List[dict]:
+    return _aidp_format_read(
+        "aidp-oracle-db", "ORACLE_DB", "ORADB", has_database_name=True,
+    )
+
+
+def object_storage_csv_roundtrip() -> List[dict]:
+    return [
+        md(
+            "# `aidp-object-storage` live test — direct read/write `oci://`\n"
+            "Writes a small CSV to OCI Object Storage and reads it back. Auth is implicit "
+            "via the cluster's IAM identity — no keys.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "oci_path = os.environ['OCI_OS_TEST_PATH']  # e.g. oci://my-bucket@my-ns/aidp-test/roundtrip.csv\n",
+            "data = [('Alice', 30), ('Bob', 35), ('Charlie', 25)]\n",
+            "df = spark.createDataFrame(data, ['name','age'])\n",
+            "(df.write.mode('overwrite').option('header', True).format('csv').save(oci_path))\n",
+            "print('wrote:', oci_path)\n",
+        ),
+        code(
+            "df = spark.read.option('header', True).format('csv').load(os.environ['OCI_OS_TEST_PATH'])\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-object-storage", "oci-implicit-iam"),
+    ]
+
+
+def iceberg_smoke() -> List[dict]:
+    return [
+        md(
+            "# `aidp-iceberg` live test — Hadoop catalog on `oci://`\n"
+            "Registers an Iceberg catalog backed by an OCI bucket, creates a database + "
+            "partitioned table, inserts rows, queries snapshots, time-travels.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "OCI_NAMESPACE = os.environ['OCI_NAMESPACE']\n",
+            "BUCKET_NAME   = os.environ['ICEBERG_BUCKET']\n",
+            "WAREHOUSE     = f'oci://{BUCKET_NAME}@{OCI_NAMESPACE}/iceberg-warehouse'\n",
+            "CATALOG       = os.environ.get('ICEBERG_CATALOG', 'oci_catalog')\n",
+            "DB            = os.environ.get('ICEBERG_DB', 'demo_db')\n",
+            "TABLE         = os.environ.get('ICEBERG_TABLE', 'employees')\n",
+            "FQN           = f'{CATALOG}.{DB}.{TABLE}'\n",
+            "spark.conf.set(f'spark.sql.catalog.{CATALOG}',           'org.apache.iceberg.spark.SparkCatalog')\n",
+            "spark.conf.set(f'spark.sql.catalog.{CATALOG}.type',      'hadoop')\n",
+            "spark.conf.set(f'spark.sql.catalog.{CATALOG}.warehouse', WAREHOUSE)\n",
+            "print('warehouse:', WAREHOUSE)\n",
+        ),
+        code(
+            "spark.sql(f'CREATE DATABASE IF NOT EXISTS {CATALOG}.{DB}')\n",
+            "spark.sql(f'DROP TABLE IF EXISTS {FQN}')\n",
+            "spark.sql(f'''CREATE TABLE {FQN} (id INT, name STRING, dept STRING) USING iceberg PARTITIONED BY (dept)''')\n",
+            "data = [(1,'Alice','eng'), (2,'Bob','eng'), (3,'Carol','sales')]\n",
+            "spark.createDataFrame(data, ['id','name','dept']).writeTo(FQN).append()\n",
+        ),
+        code(
+            "df = spark.sql(f'SELECT * FROM {FQN} ORDER BY id')\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-iceberg", "hadoop-catalog-oci"),
+    ]
+
+
+def snowflake_read() -> List[dict]:
+    return [
+        md(
+            "# `aidp-snowflake` live test — Snowflake Spark connector\n"
+            "Requires `spark-snowflake_2.12-3.1.1.jar` + `snowflake-jdbc-3.19.0.jar` on "
+            "the cluster classpath.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "snow = {\n",
+            "    'sfUrl':       os.environ['SNOW_URL'],\n",
+            "    'sfUser':      os.environ['SNOW_USER'],\n",
+            "    'sfPassword':  os.environ['SNOW_PASSWORD'],\n",
+            "    'sfDatabase':  os.environ['SNOW_DATABASE'],\n",
+            "    'sfSchema':    os.environ['SNOW_SCHEMA'],\n",
+            "    'sfWarehouse': os.environ['SNOW_WAREHOUSE'],\n",
+            "}\n",
+            "df = (spark.read.format('snowflake').options(**snow)\n",
+            "          .option('dbtable', os.environ['SNOW_TABLE']).load())\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-snowflake", "user-password"),
+    ]
+
+
+def adls_read() -> List[dict]:
+    return [
+        md(
+            "# `aidp-azure-adls` live test — `abfss://` via OAuth client-creds\n"
+            "Sets the Hadoop ABFS OAuth provider and reads a CSV from an ADLS Gen2 container.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "sa     = os.environ['ADLS_STORAGE_ACCOUNT']\n",
+            "cid    = os.environ['ADLS_CLIENT_ID']\n",
+            "secret = os.environ['ADLS_CLIENT_SECRET']\n",
+            "tenant = os.environ['ADLS_TENANT']\n",
+            "host   = f'{sa}.dfs.core.windows.net'\n",
+            "spark.conf.set(f'fs.azure.account.auth.type.{host}',           'OAuth')\n",
+            "spark.conf.set(f'fs.azure.account.oauth.provider.type.{host}', 'org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider')\n",
+            "spark.conf.set(f'fs.azure.account.oauth2.client.id.{host}',     cid)\n",
+            "spark.conf.set(f'fs.azure.account.oauth2.client.secret.{host}', secret)\n",
+            "spark.conf.set(f'fs.azure.account.oauth2.client.endpoint.{host}', f'https://login.microsoftonline.com/{tenant}/oauth2/token')\n",
+        ),
+        code(
+            "container = os.environ['ADLS_CONTAINER']\n",
+            "data_file = os.environ['ADLS_DATA_FILE']\n",
+            "df = (spark.read.format('csv').option('header', True)\n",
+            "        .load(f'abfss://{container}@{sa}.dfs.core.windows.net/{data_file}'))\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-azure-adls", "oauth-clientcreds"),
+    ]
+
+
+def s3_read() -> List[dict]:
+    return [
+        md(
+            "# `aidp-aws-s3` live test — `s3a://` via access key\n"
+            "Requires `aws-java-sdk-bundle-<ver>.jar` matching the cluster's `hadoop-aws`.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "spark.conf.set('fs.s3a.aws.credentials.provider', 'org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider')\n",
+            "os.environ['AWS_ACCESS_KEY_ID']     = os.environ['S3_ACCESS_KEY']\n",
+            "os.environ['AWS_SECRET_ACCESS_KEY'] = os.environ['S3_SECRET_KEY']\n",
+            "bucket = os.environ['S3_BUCKET']\n",
+            "key    = os.environ['S3_FILE']\n",
+            "df = spark.read.json(f's3a://{bucket}/{key}')\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-aws-s3", "access-key"),
+    ]
+
+
+def rest_generic_read() -> List[dict]:
+    return [
+        md(
+            "# `aidp-rest-generic` live test — `aidataplatform` `type=GENERIC_REST`\n"
+            "Reads from any REST endpoint that publishes a `manifest.url`.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "from oracle_ai_data_platform_connectors.aidataplatform import (\n",
+            "    AIDP_FORMAT, aidataplatform_options,\n",
+            ")\n",
+            "extra = {\n",
+            "    'base.url':     os.environ['REST_BASE_URL'],\n",
+            "    'manifest.url': os.environ['REST_MANIFEST_URL'],\n",
+            "    'auth.type':    'basic',\n",
+            "    'api':          os.environ['REST_API'],\n",
+            "}\n",
+            "# Each REST_PROP_* env var becomes a derived.property.* option.\n",
+            "for k, v in os.environ.items():\n",
+            "    if k.startswith('REST_PROP_'):\n",
+            "        extra[f'derived.property.{k[len(\"REST_PROP_\"):]}'] = v\n",
+            "opts = aidataplatform_options(\n",
+            "    type='GENERIC_REST',\n",
+            "    user=os.environ['REST_USER'],\n",
+            "    password=os.environ['REST_PASSWORD'],\n",
+            "    schema=os.environ.get('REST_SCHEMA', 'default'),\n",
+            "    extra=extra,\n",
+            ")\n",
+        ),
+        code(
+            "df = spark.read.format(AIDP_FORMAT).options(**opts).load()\n",
+            "df.show(5)\n",
+        ),
+        emit_summary("aidp-rest-generic", "basic"),
+    ]
+
+
+def jdbc_custom_sqlite() -> List[dict]:
+    return [
+        md(
+            "# `aidp-jdbc-custom` live test — generic `format('jdbc')` (SQLite memory DB)\n"
+            "Smoke test using SQLite (no external infra needed; in-memory DB). Validates the\n"
+            "Spark JDBC plumbing on the cluster — useful before swapping in a customer DB.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "JDBC_URL  = 'jdbc:sqlite::memory:'\n",
+            "DRIVER    = 'org.sqlite.JDBC'\n",
+            "props = {'driver': DRIVER, 'user': '', 'password': '', 'fetchsize': '1000'}\n",
+            "df = (spark.read.format('jdbc').options(**props)\n",
+            "      .option('url', JDBC_URL)\n",
+            "      .option('dbtable', '(SELECT 1 c1, 2 c2)').load())\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-jdbc-custom", "sqlite-memory"),
+    ]
+
+
+def excel_read() -> List[dict]:
+    return [
+        md(
+            "# `aidp-excel` live test — `pandas → CSV → Spark` (no jars)\n"
+            "Reads an .xlsx via pandas (driver-side), converts to CSV in the same path, then\n"
+            "re-reads as Spark. The `com.crealytics.spark.excel` path is also documented in\n"
+            "the SKILL but requires a cluster JAR install.\n",
+        ),
+        sys_path_setup(),
+        code(
+            "import pandas as pd\n",
+            "excel_path = os.environ['EXCEL_PATH']\n",
+            "csv_path   = excel_path.replace('.xlsx', '.csv')\n",
+            "pdf = pd.read_excel(excel_path)\n",
+            "pdf.to_csv(csv_path, index=False)\n",
+            "print('rows in pandas:', len(pdf))\n",
+            "df = spark.read.csv(csv_path, header=True, inferSchema=True)\n",
+            "df.show()\n",
+        ),
+        emit_summary("aidp-excel", "pandas-csv-fallback"),
+    ]
+
+
 # === Build everything =======================================================
 
 
@@ -582,6 +861,19 @@ NOTEBOOKS = [
     ("epm_planning_basic", epm_planning_basic),
     ("essbase_mdx_basic", essbase_mdx_basic),
     ("kafka_streaming_apikey", kafka_streaming_apikey),
+    # v0.2.0 — official-sample-driven additions
+    ("object_storage_csv_roundtrip", object_storage_csv_roundtrip),
+    ("postgresql_read", postgresql_read),
+    ("mysql_read", mysql_read),
+    ("sqlserver_read", sqlserver_read),
+    ("oracle_db_read", oracle_db_read),
+    ("iceberg_smoke", iceberg_smoke),
+    ("snowflake_read", snowflake_read),
+    ("adls_read", adls_read),
+    ("s3_read", s3_read),
+    ("rest_generic_read", rest_generic_read),
+    ("jdbc_custom_sqlite", jdbc_custom_sqlite),
+    ("excel_read", excel_read),
 ]
 
 

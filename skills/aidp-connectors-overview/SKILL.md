@@ -1,9 +1,9 @@
 ---
-description: Help the user pick the right connector skill for their Oracle source from an AIDP notebook. Use as a router when the user mentions multiple sources, isn't sure which connector applies, or asks "how do I connect to X from AIDP". Points at the specific skill that should run next.
+description: Help the user pick the right connector skill for their data source from an AIDP notebook. Use as a router when the user mentions multiple sources, isn't sure which connector applies, or asks "how do I connect to X from AIDP". Covers Oracle and non-Oracle sources — Postgres, MySQL, SQL Server, Snowflake, S3, ADLS, Iceberg, Object Storage, generic JDBC, Excel.
 allowed-tools: Read
 ---
 
-# `aidp-connectors-overview` — pick the right Oracle connector skill
+# `aidp-connectors-overview` — pick the right connector skill
 
 ## When to use
 - The user is exploring options ("how do I connect to Oracle from AIDP?", "which connector should I use?").
@@ -19,16 +19,40 @@ allowed-tools: Read
 
 Otherwise, pick the right skill from this table and **invoke that skill**. Don't re-write its content here.
 
+### Oracle / OCI sources
+
 | User says... | Use skill |
 |---|---|
-| "ALH", "AI Lakehouse", "ADW", "ATP", "Autonomous Database", "Autonomous Data Warehouse", "Autonomous Transaction Processing", "26ai", "external catalog from lakehouse" | [`aidp-alh`](../aidp-alh/SKILL.md) — covers the entire Autonomous DB family |
+| "ALH", "AI Lakehouse", "ADW", "ATP", "Autonomous Database", "26ai", "external catalog from lakehouse" | [`aidp-alh`](../aidp-alh/SKILL.md) — covers the entire Autonomous DB family |
 | "ExaCS", "Exadata", "Exadata Cloud", "private-subnet Oracle DB" | [`aidp-exacs`](../aidp-exacs/SKILL.md) |
+| "Oracle on Compute", "Base DB", "on-prem Oracle", "Oracle 19c / 21c" | [`aidp-oracle-db`](../aidp-oracle-db/SKILL.md) |
 | "BDS", "Big Data Service", "Hive", "HiveServer2", "Hadoop on OCI" | [`aidp-bds-hive`](../aidp-bds-hive/SKILL.md) |
 | "Fusion ERP", "Fusion HCM", "Fusion REST", "FA REST", "Cloud ERP API" | [`aidp-fusion-rest`](../aidp-fusion-rest/SKILL.md) |
 | "BICC", "BI Cloud Connector", "Fusion bulk extract", >50k rows from Fusion | [`aidp-fusion-bicc`](../aidp-fusion-bicc/SKILL.md) |
 | "EPM Cloud", "EPBCS", "Hyperion Planning", "Planning app", "exportdataslice" | [`aidp-epm-cloud`](../aidp-epm-cloud/SKILL.md) |
 | "Essbase", "Essbase 21c", "MDX", "OLAP cube", "cube REST" | [`aidp-essbase`](../aidp-essbase/SKILL.md) |
 | "OCI Streaming", "Kafka on OCI", "stream pool", "structured streaming Kafka" | [`aidp-streaming-kafka`](../aidp-streaming-kafka/SKILL.md) |
+| "OCI Object Storage", "oci://", "external volume", "external table on bucket" | [`aidp-object-storage`](../aidp-object-storage/SKILL.md) |
+| "Iceberg", "Apache Iceberg", "time travel", "snapshots", "schema evolution" | [`aidp-iceberg`](../aidp-iceberg/SKILL.md) |
+
+### External RDBMS (non-Oracle)
+
+| User says... | Use skill |
+|---|---|
+| "PostgreSQL", "Postgres", "psql" | [`aidp-postgresql`](../aidp-postgresql/SKILL.md) |
+| "MySQL", "HeatWave", "MDS", "MySQL Database Service" | [`aidp-mysql`](../aidp-mysql/SKILL.md) |
+| "SQL Server", "MSSQL", "Azure SQL", "TDS" | [`aidp-sqlserver`](../aidp-sqlserver/SKILL.md) |
+
+### Multi-cloud + escape hatches
+
+| User says... | Use skill |
+|---|---|
+| "Snowflake", "sfUrl", "sfWarehouse" | [`aidp-snowflake`](../aidp-snowflake/SKILL.md) |
+| "ADLS", "Azure Data Lake", "abfss" | [`aidp-azure-adls`](../aidp-azure-adls/SKILL.md) |
+| "S3", "AWS S3", "s3a" | [`aidp-aws-s3`](../aidp-aws-s3/SKILL.md) |
+| "Generic REST", "manifest URL", REST endpoint with manifest schema | [`aidp-rest-generic`](../aidp-rest-generic/SKILL.md) |
+| "Custom JDBC", "ClickHouse", "DuckDB", "DB2", "SAP HANA", any DB without a dedicated skill | [`aidp-jdbc-custom`](../aidp-jdbc-custom/SKILL.md) |
+| ".xlsx", "Excel", "spreadsheet ingestion" | [`aidp-excel`](../aidp-excel/SKILL.md) |
 
 ## What's blocked at the AIDP platform level (so you don't try)
 - **Instance Principal** — IMDS (`169.254.169.254`) is unreachable from AIDP notebooks; signer either fails or runs in AIDP's service tenancy, not the customer's.

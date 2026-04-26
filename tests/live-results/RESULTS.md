@@ -1,9 +1,11 @@
 # Live-test results
 
 
-**Summary:** 8 PASS, 1 DEFERRED, 3 NOT RUN out of 12 rows.
+**Summary:** 8 PASS, 1 DEFERRED, 14 NOT RUN out of 23 rows.
 
-Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neither is supported by AIDP notebooks for ExaCS clusters. ExaCS is now single-auth: row 6 (plain user/pwd on TCP 1521 + NNE).
+Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neither is supported by AIDP notebooks for ExaCS clusters.
+
+**v0.2.0** added rows 14–25 covering Object Storage, Iceberg, Postgres, MySQL/HeatWave, SQL Server, generic Oracle DB, Snowflake, ADLS Gen2, AWS S3, generic REST, custom JDBC, Excel — all sourced from the official `oracle-samples/oracle-aidp-samples` repo. These are NOT RUN until the corresponding env vars / external infra are provisioned.
 
 | # | Skill | Auth | Notebook | Status | Rows | Last run (UTC) |
 |---|---|---|---|---|---|---|
@@ -19,6 +21,18 @@ Row IDs 4 (ExaCS Wallet TCPS) and 5 (ExaCS IAM DB-Token) were removed — neithe
 | 11 | `aidp-epm-cloud` | Basic (tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |
 | 12 | `aidp-essbase` | HTTP Basic | [`essbase_mdx_basic.ipynb`](../../examples/essbase_mdx_basic.ipynb) | PASS | 2 | None |
 | 13 | `aidp-streaming-kafka` | SASL/PLAIN with OCI auth token | [`kafka_streaming_apikey.ipynb`](../../examples/kafka_streaming_apikey.ipynb) | PASS | 3 | 1777223131 |
+| 14 | `aidp-object-storage` | Implicit IAM (`oci://`) | [`object_storage_csv_roundtrip.ipynb`](../../examples/object_storage_csv_roundtrip.ipynb) | NOT RUN | - | - |
+| 15 | `aidp-postgresql` | Plain user/password | [`postgresql_read.ipynb`](../../examples/postgresql_read.ipynb) | NOT RUN | - | - |
+| 16 | `aidp-mysql` | Plain user/password (MYSQL / MYSQL_HEATWAVE) | [`mysql_read.ipynb`](../../examples/mysql_read.ipynb) | NOT RUN | - | - |
+| 17 | `aidp-sqlserver` | Plain user/password | [`sqlserver_read.ipynb`](../../examples/sqlserver_read.ipynb) | NOT RUN | - | - |
+| 18 | `aidp-oracle-db` | Plain user/password (TCP 1521) | [`oracle_db_read.ipynb`](../../examples/oracle_db_read.ipynb) | NOT RUN | - | - |
+| 19 | `aidp-iceberg` | Implicit IAM (Hadoop catalog on `oci://`) | [`iceberg_smoke.ipynb`](../../examples/iceberg_smoke.ipynb) | NOT RUN | - | - |
+| 20 | `aidp-snowflake` | sfUser/sfPassword | [`snowflake_read.ipynb`](../../examples/snowflake_read.ipynb) | NOT RUN | - | - |
+| 21 | `aidp-azure-adls` | OAuth client-credentials | [`adls_read.ipynb`](../../examples/adls_read.ipynb) | NOT RUN | - | - |
+| 22 | `aidp-aws-s3` | AWS access key | [`s3_read.ipynb`](../../examples/s3_read.ipynb) | NOT RUN | - | - |
+| 23 | `aidp-rest-generic` | HTTP Basic + manifest | [`rest_generic_read.ipynb`](../../examples/rest_generic_read.ipynb) | NOT RUN | - | - |
+| 24 | `aidp-jdbc-custom` | Driver-specific (SQLite memory) | [`jdbc_custom_sqlite.ipynb`](../../examples/jdbc_custom_sqlite.ipynb) | NOT RUN | - | - |
+| 25 | `aidp-excel` | None (file-based) | [`excel_read.ipynb`](../../examples/excel_read.ipynb) | NOT RUN | - | - |
 
 ### Notes on PASS-without-rows entries
 

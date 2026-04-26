@@ -4,20 +4,41 @@ A Claude Code plugin that ships model-invokable skills for connecting to every m
 
 ## What's in here
 
-Eight connector skills, one bootstrap skill, one routing skill:
+20 connector skills, one bootstrap skill, one routing skill:
 
+### Oracle / OCI sources
 | Skill | Target | Transport | Recommended auth |
 |---|---|---|---|
 | `aidp-connectors-overview` | (router) | — | — |
 | `aidp-connectors-bootstrap` | one-time setup | — | — |
 | `aidp-alh` | Oracle Autonomous DB family (ALH, ADW, ATP) | Spark JDBC | Wallet (mTLS) |
 | `aidp-exacs` | Exadata Cloud Service | Spark JDBC (TCP 1521 + NNE AES256) | Plain user/password |
+| `aidp-oracle-db` | Generic Oracle DB (Compute, Base DB, on-prem) | `aidataplatform` (`type=ORACLE_DB`) | Plain user/password |
 | `aidp-bds-hive` | Big Data Service HiveServer2 | Spark JDBC (Hive) | LDAP |
 | `aidp-fusion-rest` | Fusion ERP/HCM/SCM | REST → DataFrame | HTTP Basic only |
-| `aidp-fusion-bicc` | Fusion BICC extracts | OCI Object Storage CSV → Spark | HTTP Basic + API key |
+| `aidp-fusion-bicc` | Fusion BICC extracts | `aidataplatform` (`type=FUSION_BICC`) | HTTP Basic |
 | `aidp-epm-cloud` | EPM Cloud Planning | REST → DataFrame | HTTP Basic (`tenancy.user@domain`) |
 | `aidp-essbase` | Essbase 21c | REST + MDX → DataFrame | HTTP Basic |
 | `aidp-streaming-kafka` | OCI Streaming | Spark structured streaming | SASL/PLAIN with OCI auth token |
+| `aidp-object-storage` | OCI Object Storage native | Spark `oci://` | Implicit IAM (workspace identity) |
+| `aidp-iceberg` | Apache Iceberg on OCI Object Storage | Iceberg Hadoop catalog on `oci://` | Implicit IAM |
+
+### External RDBMS (`aidataplatform` format)
+| Skill | Target | Transport | Recommended auth |
+|---|---|---|---|
+| `aidp-postgresql` | PostgreSQL | `aidataplatform` (`type=POSTGRESQL`) | Plain user/password |
+| `aidp-mysql` | MySQL / OCI MySQL HeatWave | `aidataplatform` (`type=MYSQL` or `MYSQL_HEATWAVE`) | Plain user/password |
+| `aidp-sqlserver` | Microsoft SQL Server / Azure SQL DB | `aidataplatform` (`type=SQLSERVER`) | Plain user/password |
+
+### Multi-cloud + escape hatches
+| Skill | Target | Transport | Recommended auth |
+|---|---|---|---|
+| `aidp-snowflake` | Snowflake | `format("snowflake")` (Snowflake Spark connector) | sfUser/sfPassword |
+| `aidp-azure-adls` | Azure ADLS Gen2 | Spark `abfss://` | OAuth client-credentials (Service Principal) |
+| `aidp-aws-s3` | AWS S3 | Spark `s3a://` | AWS access keys |
+| `aidp-rest-generic` | Any REST API with a manifest | `aidataplatform` (`type=GENERIC_REST`) | HTTP Basic |
+| `aidp-jdbc-custom` | Any DB with a JDBC driver | Spark `format("jdbc")` | Driver-specific |
+| `aidp-excel` | `.xlsx` files in Volumes / Object Storage | `com.crealytics.spark.excel` or `pandas → CSV → Spark` | None (file-based) |
 
 Full per-connector × per-auth matrix is in [docs/AUTH_MATRIX.md](docs/AUTH_MATRIX.md) (will be generated as live tests pass).
 

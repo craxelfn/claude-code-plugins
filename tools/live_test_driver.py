@@ -59,6 +59,19 @@ LIVE_TEST_ROWS = [
     LiveTestRow(11, "aidp-epm-cloud",      "Basic (tenancy.user@domain)",        "epm_planning_basic.ipynb",       "Planning REST applications=200; MDX export -> DataFrame",          False),
     LiveTestRow(12, "aidp-essbase",        "HTTP Basic",                         "essbase_mdx_basic.ipynb",        "MDX SELECT returns DataFrame with expected dim count",             False),
     LiveTestRow(13, "aidp-streaming-kafka", "SASL/PLAIN with OCI auth token",    "kafka_streaming_apikey.ipynb",   "query.lastProgress shows non-zero numInputRows; messages parsed from topic", True),
+    # v0.2.0 — official-AIDP-samples-driven additions
+    LiveTestRow(14, "aidp-object-storage", "Implicit IAM (oci://)",              "object_storage_csv_roundtrip.ipynb", "Round-trip CSV write+read against an OCI bucket; no keys",   False),
+    LiveTestRow(15, "aidp-postgresql",     "Plain user/password",                "postgresql_read.ipynb",          "Spark DataFrame from a known PostgreSQL table",                    False),
+    LiveTestRow(16, "aidp-mysql",          "Plain user/password (MYSQL or MYSQL_HEATWAVE)", "mysql_read.ipynb",      "Spark DataFrame from a known MySQL or HeatWave table",             False),
+    LiveTestRow(17, "aidp-sqlserver",      "Plain user/password",                "sqlserver_read.ipynb",           "Spark DataFrame from a known SQL Server table",                    False),
+    LiveTestRow(18, "aidp-oracle-db",      "Plain user/password (TCP 1521)",     "oracle_db_read.ipynb",           "Spark DataFrame from an Oracle DB on Compute/on-prem",             False),
+    LiveTestRow(19, "aidp-iceberg",        "Implicit IAM (oci:// Hadoop catalog)", "iceberg_smoke.ipynb",          "Iceberg table created + rows written + read; snapshots visible",   False),
+    LiveTestRow(20, "aidp-snowflake",      "sfUser/sfPassword",                  "snowflake_read.ipynb",           "Spark DataFrame from a Snowflake table via Snowflake connector",   False),
+    LiveTestRow(21, "aidp-azure-adls",     "OAuth client-credentials",           "adls_read.ipynb",                "Spark CSV read from an ADLS Gen2 container",                       False),
+    LiveTestRow(22, "aidp-aws-s3",         "AWS access key",                     "s3_read.ipynb",                  "Spark JSON read from an S3 bucket via s3a://",                     False),
+    LiveTestRow(23, "aidp-rest-generic",   "HTTP Basic + manifest",              "rest_generic_read.ipynb",        "Spark DataFrame from a REST API with manifest schema",             False),
+    LiveTestRow(24, "aidp-jdbc-custom",    "Driver-specific (SQLite memory)",    "jdbc_custom_sqlite.ipynb",       "Spark JDBC plumbing smoke test against in-memory SQLite",          False),
+    LiveTestRow(25, "aidp-excel",          "None (file-based)",                  "excel_read.ipynb",               "Spark DataFrame from a .xlsx via pandas->CSV fallback",            False),
 ]
 
 
