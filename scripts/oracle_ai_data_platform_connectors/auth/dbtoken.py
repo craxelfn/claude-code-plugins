@@ -86,6 +86,11 @@ def generate_db_token(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode("ascii")
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
 
     client_kwargs: dict = {}
     if config is not None:
@@ -103,7 +108,12 @@ def generate_db_token(
     )
     token = response.data.token
 
+    # Oracle JDBC's OCI_TOKEN auth requires BOTH files in the same directory:
+    #   <target_dir>/token              — the scoped JWT
+    #   <target_dir>/oci_db_key.pem    — the matching private key (proof of possession)
+    # Driver looks for these names by convention; do not rename.
     _write_world_readable(Path(target_dir) / "token", token.encode("utf-8"))
+    _write_world_readable(Path(target_dir) / "oci_db_key.pem", private_pem)
     return target_dir
 
 

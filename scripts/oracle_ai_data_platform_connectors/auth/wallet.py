@@ -60,8 +60,9 @@ def write_wallet_to_tmp(
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(wallet, bytes):
-        _extract_zip_bytes_to(wallet, target)
+    if isinstance(wallet, (bytes, bytearray, memoryview)):
+        # Spark's binaryFile reader hands back bytearray, not bytes. Accept either.
+        _extract_zip_bytes_to(bytes(wallet), target)
     else:
         src = Path(wallet)
         if src.is_file() and src.suffix.lower() == ".zip":

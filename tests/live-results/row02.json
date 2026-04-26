@@ -1,0 +1,11 @@
+{
+  "connector": "aidp-alh",
+  "auth": "dbtoken",
+  "rows": null,
+  "schema": null,
+  "result": "DEFERRED",
+  "deferred_reason": "OCI auth endpoint connection failures during local DB-token generation (3/3 ConnectionResetError on POST /v1/actions/generateScopedAccessToken from 2026-04-26 14:58 UTC). Same skill code path validated by row 1 (ALH wallet PASS). DB-token-specific helper bug discovered and FIXED: generate_db_token() now writes both /tmp/dbcred/token AND /tmp/dbcred/oci_db_key.pem (Oracle JDBC OCI_TOKEN auth requires both files together). Re-run row 2 once OCI API connectivity is stable.",
+  "helper_bug_fixed": "scripts/oracle_ai_data_platform_connectors/auth/dbtoken.py: was missing the oci_db_key.pem private-key write that Oracle JDBC's OCI_TOKEN auth requires alongside the JWT.",
+  "blocking_caveat": "Even with stable OCI auth, the cluster's Python env lacks the `oci` package (cluster pypi mirror unreachable). For production use, the helper requires `oci` installed via cluster libraries OR pre-generation of token+key locally and shipping via OCI Object Storage.",
+  "timestamp_utc": null
+}

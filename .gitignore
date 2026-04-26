@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Live-test ephemeral staging artifacts (never commit creds)
+tests/live-results/_*
+

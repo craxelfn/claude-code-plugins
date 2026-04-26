@@ -160,16 +160,39 @@ def read_bicc_csv_from_object_storage(
     return reader.load(path)
 
 
-def rows_to_spark_dataframe(spark: Any, rows: Iterator[dict]):
+def rows_to_spark_dataframe(spark: Any, rows: Iterator[dict], *, mode: str = "json_string"):
     """Materialize an iterator of dicts as a Spark DataFrame.
 
-    Uses pandas in the middle to let Spark infer schema. For large rowsets,
-    use the BICC extract path instead.
+    Fusion REST responses commonly contain nested objects (HATEOAS links,
+    addresses, classifications) plus all-null columns. PySpark schema
+    inference can't merge ``StringType`` and ``StructType`` for the same
+    column across rows, so the default ``mode="json_string"`` packs every
+    row into a single ``row_json`` STRING column. Caller can then ``from_json``
+    selectively for the fields they need.
+
+    Args:
+        spark: SparkSession.
+        rows: iterator of dicts (e.g. from ``fetch_paged``).
+        mode: ``"json_string"`` (recommended; deterministic, robust)
+            or ``"infer"`` (legacy; may fail on nested data).
     """
+    import json as _json
+
     import pandas as pd
 
-    pdf = pd.DataFrame(list(rows))
-    if pdf.empty:
+    rows_list = list(rows)
+    if not rows_list:
         # Spark needs SOMETHING — return a 0-row DataFrame with a placeholder col.
         return spark.createDataFrame([], "placeholder STRING")
-    return spark.createDataFrame(pdf)
+
+    if mode == "json_string":
+        # Single-column, deterministic, type-safe across nested + null shapes.
+        json_rows = [(_json.dumps(r),) for r in rows_list]
+        return spark.createDataFrame(json_rows, schema="row_json STRING")
+
+    if mode == "infer":
+        # Legacy: try pandas-based inference. Fails on nested struct / all-null cols.
+        pdf = pd.DataFrame(rows_list)
+        return spark.createDataFrame(pdf)
+
+    raise ValueError(f"unknown mode {mode!r}; use 'json_string' or 'infer'")

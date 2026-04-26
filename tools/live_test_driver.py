@@ -96,8 +96,37 @@ def regenerate_results_md() -> str:
 
     Returns the markdown body (also writes it to disk).
     """
+    # Compute summary
+    pass_count = 0
+    fail_count = 0
+    deferred_count = 0
+    not_run_count = 0
+    statuses = {}
+    for row in LIVE_TEST_ROWS:
+        result_path = LIVE_RESULTS / f"row{row.row_number:02d}.json"
+        if result_path.exists():
+            data = json.loads(result_path.read_text())
+            explicit = data.get("result")
+            row_count = data.get("rows")
+            if explicit == "PASS" or (explicit is None and row_count and row_count > 0):
+                pass_count += 1
+                statuses[row.row_number] = "PASS"
+            elif explicit == "FAIL":
+                fail_count += 1
+                statuses[row.row_number] = "FAIL"
+            elif explicit == "DEFERRED":
+                deferred_count += 1
+                statuses[row.row_number] = "DEFERRED"
+            else:
+                statuses[row.row_number] = "UNKNOWN"
+        else:
+            not_run_count += 1
+            statuses[row.row_number] = "NOT RUN"
+
     lines = [
         "# Live-test results\n",
+        "",
+        f"**Summary:** {pass_count} PASS, {fail_count} FAIL, {deferred_count} DEFERRED, {not_run_count} NOT RUN out of {len(LIVE_TEST_ROWS)} rows.",
         "",
         "| # | Skill | Auth | Notebook | Status | Rows | Last run (UTC) |",
         "|---|---|---|---|---|---|---|",
@@ -106,8 +135,17 @@ def regenerate_results_md() -> str:
         result_path = LIVE_RESULTS / f"row{row.row_number:02d}.json"
         if result_path.exists():
             data = json.loads(result_path.read_text())
-            status = "PASS" if data.get("rows", 0) > 0 else "EMPTY"
-            rows = data.get("rows", "-")
+            explicit = data.get("result")
+            row_count = data.get("rows")
+            if explicit:
+                status = explicit
+            elif row_count is None:
+                status = "UNKNOWN"
+            elif row_count > 0:
+                status = "PASS"
+            else:
+                status = "EMPTY"
+            rows = row_count if row_count is not None else "-"
             ts = data.get("timestamp_utc", "-")
         else:
             status = "NOT RUN"
