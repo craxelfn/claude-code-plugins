@@ -1,8 +1,8 @@
-# Oracle AI Data Platform — Spark Connectors
+# Oracle AI Data Platform Workbench — Spark Connectors
 
-A Claude Code plugin that ships **18 model-invokable skills** for connecting Oracle AI Data Platform (AIDP) Spark notebooks to every data source AIDP customers commonly need. Each skill produces plain Python (Spark JDBC, Spark structured streaming, Spark `oci://`/`s3a://`/`abfss://`, or REST → Spark DataFrame) that runs in the notebook without any additional runtime.
+A Claude Code plugin that ships **18 model-invokable skills** for connecting Oracle AI Data Platform Workbench Spark notebooks to every data source these notebooks commonly need. Each skill produces plain Python (Spark JDBC, Spark structured streaming, Spark `oci://`/`s3a://`/`abfss://`, or REST → Spark DataFrame) that runs in the notebook without any additional runtime.
 
-**Live-validated** on AIDP `tpcds` cluster (Spark 3.5.0): **17 PASS / 4 ship-as-is** out of 21 test rows. See [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
+**Live-validated** on the workbench `tpcds` cluster (Spark 3.5.0): **17 PASS / 4 ship-as-is** out of 21 test rows. See [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
 
 ## Install
 
@@ -49,21 +49,21 @@ A Claude Code plugin that ships **18 model-invokable skills** for connecting Ora
 
 ## How to use
 
-### First-time setup (once per AIDP workspace)
+### First-time setup (once per workbench workspace)
 
 Tell Claude:
 
-> "Set up the AIDP connectors plugin in this workspace."
+> "Set up the Oracle AI Data Platform Workbench connectors plugin in this workspace."
 
-The `aidp-connectors-bootstrap` skill activates, uses the AIDP MCP tools to upload the helper package to `/Workspace/Shared/oracle_ai_data_platform_connectors/`, then runs [`examples/00_bootstrap_helpers.ipynb`](examples/00_bootstrap_helpers.ipynb) which prints `BOOTSTRAP OK` when the package imports cleanly.
+The `aidp-connectors-bootstrap` skill activates, uses the workbench MCP tools to upload the helper package to `/Workspace/Shared/oracle_ai_data_platform_connectors/`, then runs [`examples/00_bootstrap_helpers.ipynb`](examples/00_bootstrap_helpers.ipynb) which prints `BOOTSTRAP OK` when the package imports cleanly.
 
-(Manual alternative: upload `scripts/oracle_ai_data_platform_connectors/` to `/Workspace/Shared/oracle_ai_data_platform_connectors/scripts/oracle_ai_data_platform_connectors/` via the AIDP UI, then run the bootstrap notebook.)
+(Manual alternative: upload `scripts/oracle_ai_data_platform_connectors/` to `/Workspace/Shared/oracle_ai_data_platform_connectors/scripts/oracle_ai_data_platform_connectors/` via the workbench UI, then run the bootstrap notebook.)
 
 ### Day-to-day
 
-In a Claude Code session against your AIDP workspace, just describe what you want:
+In a Claude Code session against your Oracle AI Data Platform Workbench workspace, just describe what you want:
 
-> "I need to load ATP data into Spark in my AIDP notebook"
+> "I need to load ATP data into Spark in my Oracle AI Data Platform Workbench notebook"
 
 The relevant connector skill activates automatically and walks you through:
 
@@ -111,12 +111,12 @@ df.show(5)
 
 The `aidp-postgresql` skill prints exactly this snippet (with your env vars substituted) when you ask Claude to load Postgres data.
 
-## Auth methods that AIDP notebooks do NOT support today
+## Auth methods that Oracle AI Data Platform Workbench notebooks do NOT support today
 
-- **Instance Principal** — AIDP blocks IMDS (`169.254.169.254`); `InstancePrincipalsSecurityTokenSigner()` fails.
-- **Resource Principal** — AIDP sets `AIDP_AUTH=resource_principal` but does not provide `OCI_RESOURCE_PRINCIPAL_RPST` or `OCI_RESOURCE_PRINCIPAL_PRIVATE_PEM`.
+- **Instance Principal** — the workbench blocks IMDS (`169.254.169.254`); `InstancePrincipalsSecurityTokenSigner()` fails.
+- **Resource Principal** — the workbench sets `AIDP_AUTH=resource_principal` but does not provide `OCI_RESOURCE_PRINCIPAL_RPST` or `OCI_RESOURCE_PRINCIPAL_PRIVATE_PEM`.
 
-The skills surface these as a known limitation and route users to **API Key + inline PEM** (`aidp_connectors.auth.oci_config.from_inline_pem`) instead. Background: https://github.com/oracle-samples/oracle-aidp-samples and the AIDP team's notebook-auth investigation.
+The skills surface these as a known limitation and route users to **API Key + inline PEM** (`aidp_connectors.auth.oci_config.from_inline_pem`) instead. Background: https://github.com/oracle-samples/oracle-aidp-samples and the workbench team's notebook-auth investigation.
 
 ## Plugin development
 
@@ -127,9 +127,9 @@ claude plugin validate .
 # Run unit tests (no live OCI calls)
 python -m pytest tests/ -v
 
-# Live-test a connector against AIDP
+# Live-test a connector against the workbench
 oci session authenticate --profile AIDP_SESSION --region us-ashburn-1
-# Open examples/<connector>_*.ipynb in your AIDP workspace and run
+# Open examples/<connector>_*.ipynb in your Oracle AI Data Platform Workbench workspace and run
 ```
 
 Live-validation infrastructure is documented in [`tools/live_test_driver.py`](tools/live_test_driver.py); per-row results are in [`tests/live-results/`](tests/live-results/).
