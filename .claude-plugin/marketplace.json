@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
-  "name": "oracle-ai-data-platform-workbench-spark-connectors",
+  "name": "aidp-connectors",
   "version": "0.4.0",
   "description": "Single-plugin marketplace for the Oracle AI Data Platform Workbench Spark Connectors Claude Code plugin.",
   "owner": {
