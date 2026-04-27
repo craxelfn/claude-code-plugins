@@ -76,7 +76,7 @@ The relevant connector skill activates automatically and walks you through:
 
 Per-connector example notebooks are under [`examples/`](examples/) — one per (skill, auth) combo. The full live-test results matrix is in [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
 
-## Sample run (EPM Cloud Planning)
+## Sample run (Oracle EPM Cloud)
 
 ```python
 import os
