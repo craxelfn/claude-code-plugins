@@ -6,7 +6,7 @@ skill points users at one or two helpers below.
 
 Submodules:
     auth            - wallet, dbtoken, oci_config, user_principal, secrets
-    jdbc            - oracle (ALH/ATP/ExaCS),
+    jdbc            - oracle (ALH/ATP/ExaCS), hive (BDS Kerberos/JAAS),
                       runtime_load (load custom JDBC JARs without restart)
     rest            - fusion, epm, essbase
     streaming       - kafka

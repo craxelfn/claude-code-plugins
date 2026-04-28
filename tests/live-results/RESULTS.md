@@ -1,9 +1,11 @@
 # Live-test results
 
 
-**Summary:** 17 PASS, 0 DEFERRED, 4 NOT RUN out of 21 rows. Rows 16, 17, 21, 23 are explicitly ship-as-is (connector code + example notebook ship; customer validates against their own endpoint).
+**Summary:** 17 PASS, 0 DEFERRED, 5 NOT RUN out of 22 rows. Rows 7, 16, 17, 21, 23 are explicitly ship-as-is (connector code + example notebook ship; customer validates against their own endpoint).
 
-Row IDs 4 (ExaCS Wallet TCPS), 5 (ExaCS IAM DB-Token), 7 + 8 (`aidp-bds-hive` Kerberos + LDAP), and 18 (`aidp-oracle-db` plain TCP 1521) were removed. ExaCS rows 4/5 aren't supported by AIDP notebooks for ExaCS clusters. The `aidp-bds-hive` skill was dropped from the plugin (BDS Hive not in scope for this connector pack). Row 18 was dropped because the `aidp-alh` family already covers Oracle 26ai connectivity end-to-end across all three auth methods (wallet, IAM DB-Token, aidataplatform format handler) — a separate plain-1521 Oracle DB skill adds no incremental coverage and the JDBC code path is identical.
+Row IDs 4 (ExaCS Wallet TCPS), 5 (ExaCS IAM DB-Token), 8 (`aidp-bds-hive` LDAP), and 18 (`aidp-oracle-db` plain TCP 1521) were removed. ExaCS rows 4/5 aren't supported by AIDP notebooks for ExaCS clusters. Row 8 (BDS LDAP) is out of scope for v0.5.0 — only Kerberos (row 7) is shipped because the customer-supplied test environment is Kerberos-only. Row 18 was dropped because the `aidp-alh` family already covers Oracle 26ai connectivity end-to-end across all three auth methods (wallet, IAM DB-Token, aidataplatform format handler) — a separate plain-1521 Oracle DB skill adds no incremental coverage and the JDBC code path is identical.
+
+**v0.5.0 (2026-04-28)** — re-introduces `aidp-bds-hive` (row 7) as ship-as-is. Connectivity probe from the AIDP `tpcds` cluster against the customer BDS endpoint confirmed the same VCN-peering blocker documented for row 16: `*.oraclevcn.com` DNS doesn't resolve from the cluster pod and TCP 10010 is unreachable. Skill ships with full Kerberos-via-JAAS code path (no `kinit` binary required — AIDP cluster images don't ship MIT Kerberos client) and a runnable example notebook with TCP-probe pre-flight; customers run from a workbench whose cluster is peered with the BDS subnet.
 
 **v0.2.0** added rows 14–25 covering Object Storage, Iceberg, Postgres, MySQL/HeatWave, SQL Server, Snowflake, ADLS Gen2, AWS S3, generic REST, custom JDBC, Excel — all sourced from the official `oracle-samples/oracle-aidp-samples` repo.
 
@@ -18,6 +20,7 @@ Row IDs 4 (ExaCS Wallet TCPS), 5 (ExaCS IAM DB-Token), 7 + 8 (`aidp-bds-hive` Ke
 | 2 | `aidp-alh` | IAM DB-Token (>25 min refresh) | [`alh_dbtoken_query.ipynb`](../../examples/alh_dbtoken_query.ipynb) | PASS | 1 | 1777274391 |
 | 3 | `aidp-alh` | API Key + inline OCI config | [`alh_catalog_sync_apikey.ipynb`](../../examples/alh_catalog_sync_apikey.ipynb) | PASS | 5 | 1777274630 |
 | 6 | `aidp-exacs` | Plain user/pwd on TCP 1521 + NNE AES256 | [`exacs_user_password.ipynb`](../../examples/exacs_user_password.ipynb) | PASS | - | None |
+| 7 | `aidp-bds-hive` | Kerberos via JAAS keytab login | [`bds_hive_kerberos.ipynb`](../../examples/bds_hive_kerberos.ipynb) | NOT RUN | - | - |
 | 9 | `aidp-fusion-rest` | HTTP Basic | [`fusion_rest_basic.ipynb`](../../examples/fusion_rest_basic.ipynb) | PASS | 229 | 1777213835 |
 | 10 | `aidp-fusion-bicc` | HTTP Basic | [`fusion_bicc_to_dataframe.ipynb`](../../examples/fusion_bicc_to_dataframe.ipynb) | PASS | - | None |
 | 11 | `aidp-epm-cloud` | Basic (tenancy.user@domain) | [`epm_planning_basic.ipynb`](../../examples/epm_planning_basic.ipynb) | PASS | 1 | 1777213859 |

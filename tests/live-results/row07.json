@@ -1,0 +1,30 @@
+{
+  "connector": "aidp-bds-hive",
+  "auth": "Kerberos via JAAS Krb5LoginModule keytab login (no kinit binary)",
+  "result": "NOT RUN",
+  "rows": null,
+  "schema": null,
+  "decision": "Ship as-is with example notebook (2026-04-28). Connectivity probe from the AIDP `tpcds` cluster against the customer-supplied BDS HS2 endpoint `nitishun0-0.rgroverprdpub1.rgroverprd.oraclevcn.com:10010` confirmed two structural blockers that match the documented AIDP private-workspace VCN limitation: (1) DNS resolution for `*.oraclevcn.com` fails from the cluster pod (cross-VCN DNS not configured), (2) TCP probe fails (no VCN peering between AIDP's hidden 10.111.0.0/16 cluster VCN and the customer's `rgroverprd.oraclevcn.com` VCN). This is the same finding documented for row 16 (`aidp-mysql`).",
+  "what_was_validated_offline_on_cluster_2026_04_28": [
+    "Java available at /usr/bin/java — Hive JDBC driver will work",
+    "/etc/krb5.conf skeleton present — JVM Kerberos subsystem functional",
+    "Maven Central reachable via NAT egress — runtime-load of hive-jdbc-standalone JAR will work in any peered cluster",
+    "MIT Kerberos client binaries (kinit, klist, ktutil) NOT present on cluster image — confirms the JAAS-based login pattern (rather than `kinit`) is the correct approach for AIDP"
+  ],
+  "skill_correctness": "skills/aidp-bds-hive/SKILL.md uses JAAS Krb5LoginModule (no kinit dependency), runtime-loads org.apache.hive.jdbc.HiveDriver from Maven Central, and constructs a Kerberos-authenticated jdbc:hive2 URL. helper at scripts/oracle_ai_data_platform_connectors/jdbc/hive.py. examples/bds_hive_kerberos.ipynb is shape-correct and includes a TCP-probe pre-flight cell that fails fast if VCN peering is missing.",
+  "to_validate_at_runtime_for_a_customer": "From a workbench whose cluster is VCN-peered with the BDS subnet (HS2 port open, KDC reachable, cross-VCN DNS or BDS hostname/IP), upload the keytab to /tmp/, set BDS_HS2_HOST/PORT/DATABASE/TABLE/HS2_PRINCIPAL/KEYTAB_PATH env vars, and run examples/bds_hive_kerberos.ipynb end-to-end.",
+  "customer_inputs_received": {
+    "hs2_host": "nitishun0-0.rgroverprdpub1.rgroverprd.oraclevcn.com",
+    "hs2_port": 10010,
+    "hs2_principal": "hive/nitishun0-0.rgroverprdpub1.rgroverprd.oraclevcn.com@NITISH.ORACLE.COM",
+    "realm": "NITISH.ORACLE.COM",
+    "kdc_hosts": [
+      "nitishmn0-0.rgroverprdpub1.rgroverprd.oraclevcn.com:88",
+      "nitishmn1-0.rgroverprdpub1.rgroverprd.oraclevcn.com:88"
+    ],
+    "database": "test",
+    "table": "test_sample",
+    "keytab_local": "C:/Users/anuma/Downloads/hive.service.keytab"
+  },
+  "timestamp_utc": null
+}

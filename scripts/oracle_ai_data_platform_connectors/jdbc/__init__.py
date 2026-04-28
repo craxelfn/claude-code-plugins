@@ -11,6 +11,11 @@ from .runtime_load import (
     add_spark_connector_at_runtime,
     download_jdbc_jar,
 )
+from .hive import (
+    build_hive_jdbc_url,
+    kerberos_login_via_jaas,
+    runtime_load_hive_driver,
+)
 
 __all__ = [
     "build_oracle_jdbc_url",
@@ -20,4 +25,7 @@ __all__ = [
     "add_jdbc_jar_at_runtime",
     "add_spark_connector_at_runtime",
     "download_jdbc_jar",
+    "build_hive_jdbc_url",
+    "kerberos_login_via_jaas",
+    "runtime_load_hive_driver",
 ]
