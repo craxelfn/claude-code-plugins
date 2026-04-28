@@ -6,9 +6,17 @@ A Claude Code plugin that ships **18 model-invokable skills** for connecting Ora
 
 ## Install
 
+From the official Claude Code plugin directory (recommended):
+
+```
+/plugin install oracle-ai-data-platform-workbench-spark-connectors@claude-plugins-official
+```
+
+Or directly from this repo (gets the latest pre-release commits):
+
 ```
 /plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors
-/plugin install oracle-ai-data-platform-workbench-spark-connectors
+/plugin install oracle-ai-data-platform-workbench-spark-connectors@aidp-connectors
 ```
 
 ## What's in here

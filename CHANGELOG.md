@@ -2,6 +2,16 @@
 
 All notable changes to this plugin are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this plugin adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-28
+
+Documentation-only release. Plugin code, skills, and helpers are unchanged from `0.4.0`.
+
+### Changed
+- README install path now leads with the official Claude Code plugin directory:
+  `/plugin install oracle-ai-data-platform-workbench-spark-connectors@claude-plugins-official`
+  (Anthropic published the plugin to the official directory on 2026-04-27.)
+- Direct-from-repo install retained as a secondary path for users who want pre-release commits.
+
 ## [0.4.0] — 2026-04-27
 
 First public-marketplace-ready release. Live-validated end-to-end on AIDP `tpcds` cluster (Spark 3.5.0).
