@@ -2,24 +2,6 @@
 
 All notable changes to this plugin are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this plugin adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] — 2026-04-28
-
-Adds the `aidp-bds-hive` connector for Oracle Big Data Service HiveServer2 over Kerberos. **19 connector skills** total (was 18).
-
-### Added
-- **`aidp-bds-hive`** — Read Hive tables on Oracle Big Data Service over JDBC with Kerberos auth.
-  - Pure-Java keytab login via `Krb5LoginModule` + JAAS — works **without `kinit`/`klist` binaries** (AIDP cluster images don't ship MIT Kerberos client tools).
-  - Runtime-loads `org.apache.hive.jdbc.HiveDriver` from the Hive standalone uber-jar on Maven Central — no cluster Library tab attach needed.
-  - Helper module: [scripts/oracle_ai_data_platform_connectors/jdbc/hive.py](scripts/oracle_ai_data_platform_connectors/jdbc/hive.py) (`build_hive_jdbc_url`, `kerberos_login_via_jaas`, `runtime_load_hive_driver`).
-  - Example notebook: [examples/bds_hive_kerberos.ipynb](examples/bds_hive_kerberos.ipynb) — includes TCP-probe pre-flight cell.
-  - Routing skill (`aidp-connectors-overview`) updated to fire on "BDS / Big Data Service / HS2 / Kerberos keytab".
-
-### Test status
-- Row 7 ships as **NOT RUN** (ship-as-is). Connectivity probe from the AIDP `tpcds` cluster against the customer BDS endpoint at `*.rgroverprdpub1.rgroverprd.oraclevcn.com:10010` confirmed the same VCN-peering structural blocker documented for row 16 (`aidp-mysql`): the AIDP cluster pod CIDR can't resolve `*.oraclevcn.com` DNS and has no L3 reachability to customer VCNs without explicit peering. The skill code itself is environment-agnostic — customers with a peered workbench run the example notebook end-to-end. Detailed rationale in [tests/live-results/row07.json](tests/live-results/row07.json).
-
-### Why JAAS instead of `kinit`
-The original 0.x plan flagged the cluster's MIT Kerberos client binaries as "unknown — verify before shipping". This release confirms they are **absent** (`shutil.which("kinit")` returns `None`) and ships the Krb5LoginModule pattern that works without them.
-
 ## [0.4.1] — 2026-04-28
 
 Documentation-only release. Plugin code, skills, and helpers are unchanged from `0.4.0`.

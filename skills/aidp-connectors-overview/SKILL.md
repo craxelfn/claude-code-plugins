@@ -32,7 +32,6 @@ Otherwise, pick the right skill from this table and **invoke that skill**. Don't
 | "OCI Streaming", "Kafka on OCI", "stream pool", "structured streaming Kafka" | [`aidp-streaming-kafka`](../aidp-streaming-kafka/SKILL.md) |
 | "OCI Object Storage", "oci://", "external volume", "external table on bucket" | [`aidp-object-storage`](../aidp-object-storage/SKILL.md) |
 | "Iceberg", "Apache Iceberg", "time travel", "snapshots", "schema evolution" | [`aidp-iceberg`](../aidp-iceberg/SKILL.md) |
-| "BDS", "Big Data Service", "HiveServer2", "HS2", "hive2 JDBC", "Kerberos keytab", "principal", "krb5.conf", "Hadoop on OCI" | [`aidp-bds-hive`](../aidp-bds-hive/SKILL.md) |
 
 ### External RDBMS (non-Oracle)
 

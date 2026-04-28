@@ -1,8 +1,8 @@
 # Oracle AI Data Platform Workbench — Spark Connectors
 
-A Claude Code plugin that ships **19 model-invokable skills** for connecting Oracle AI Data Platform Workbench Spark notebooks to every data source these notebooks commonly need. Each skill produces plain Python (Spark JDBC, Spark structured streaming, Spark `oci://`/`s3a://`/`abfss://`, or REST → Spark DataFrame) that runs in the notebook without any additional runtime.
+A Claude Code plugin that ships **18 model-invokable skills** for connecting Oracle AI Data Platform Workbench Spark notebooks to every data source these notebooks commonly need. Each skill produces plain Python (Spark JDBC, Spark structured streaming, Spark `oci://`/`s3a://`/`abfss://`, or REST → Spark DataFrame) that runs in the notebook without any additional runtime.
 
-**Live-validated** on the workbench `tpcds` cluster (Spark 3.5.0): **17 PASS / 5 ship-as-is** out of 22 test rows. See [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
+**Live-validated** on the workbench `tpcds` cluster (Spark 3.5.0): **17 PASS / 4 ship-as-is** out of 21 test rows. See [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
 
 ## Install
 
@@ -21,7 +21,7 @@ Or directly from this repo (gets the latest pre-release commits):
 
 ## What's in here
 
-21 skills total (19 connectors + 1 bootstrap + 1 routing).
+20 skills total (18 connectors + 1 bootstrap + 1 routing).
 
 ### Oracle / OCI sources
 | Skill | Target | Transport | Recommended auth |
@@ -37,7 +37,6 @@ Or directly from this repo (gets the latest pre-release commits):
 | `aidp-streaming-kafka` | OCI Streaming | Spark structured streaming | SASL/PLAIN with OCI auth token |
 | `aidp-object-storage` | OCI Object Storage native | Spark `oci://` | Implicit IAM (workspace identity) |
 | `aidp-iceberg` | Apache Iceberg on OCI Object Storage | Iceberg Hadoop catalog on `oci://` | Implicit IAM |
-| `aidp-bds-hive` | Oracle Big Data Service HiveServer2 | Spark JDBC (`jdbc:hive2://`) | Kerberos via JAAS keytab login (no `kinit` needed) |
 
 ### External RDBMS (`aidataplatform` format)
 | Skill | Target | Transport | Recommended auth |
