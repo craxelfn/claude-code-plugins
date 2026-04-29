@@ -1,18 +1,22 @@
 # Oracle AI Data Platform Workbench — Spark Connectors
 
+> **Canonical home:** [`oracle-samples/oracle-aidp-samples/ai/claude-code-plugins/oracle-ai-data-platform-workbench-spark-connectors`](https://github.com/oracle-samples/oracle-aidp-samples/tree/main/ai/claude-code-plugins/oracle-ai-data-platform-workbench-spark-connectors).
+> This repository is now a personal development mirror. End users should install via Anthropic's community marketplace (see below), which sources from the canonical Oracle-org location.
+
 A Claude Code plugin that ships **18 model-invokable skills** for connecting Oracle AI Data Platform Workbench Spark notebooks to every data source these notebooks commonly need. Each skill produces plain Python (Spark JDBC, Spark structured streaming, Spark `oci://`/`s3a://`/`abfss://`, or REST → Spark DataFrame) that runs in the notebook without any additional runtime.
 
 **Live-validated** on the workbench `tpcds` cluster (Spark 3.5.0): **17 PASS / 4 ship-as-is** out of 21 test rows. See [`tests/live-results/RESULTS.md`](tests/live-results/RESULTS.md).
 
 ## Install
 
-From the official Claude Code plugin directory (recommended):
+From Anthropic's community plugin marketplace (recommended):
 
 ```
-/plugin install oracle-ai-data-platform-workbench-spark-connectors@claude-plugins-official
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install oracle-ai-data-platform-workbench-spark-connectors
 ```
 
-Or directly from this repo (gets the latest pre-release commits):
+Or from this development mirror (gets the latest pre-release commits):
 
 ```
 /plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors
