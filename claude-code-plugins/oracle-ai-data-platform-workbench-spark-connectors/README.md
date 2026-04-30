@@ -19,7 +19,7 @@ From Anthropic's community plugin marketplace (recommended):
 Or from this development mirror (gets the latest pre-release commits):
 
 ```
-/plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors
+/plugin marketplace add ahmedawan-oracle/claude-code-plugins
 /plugin install oracle-ai-data-platform-workbench-spark-connectors@aidp-connectors
 ```
 

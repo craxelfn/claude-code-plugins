@@ -22,7 +22,7 @@ End users should install from Anthropic's community marketplace (sources from th
 This personal mirror is intended for **pre-release / development** snapshots — to install from here directly:
 
 ```
-/plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors
+/plugin marketplace add ahmedawan-oracle/claude-code-plugins
 /plugin install <plugin-name>@aidp-connectors
 ```
 

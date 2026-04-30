@@ -5,8 +5,8 @@
   "author": {
     "name": "Ahmed Awan"
   },
-  "homepage": "https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors",
-  "repository": "https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors",
+  "homepage": "https://github.com/oracle-samples/oracle-aidp-samples/tree/main/ai/claude-code-plugins/oracle-ai-data-platform-workbench-spark-connectors",
+  "repository": "https://github.com/oracle-samples/oracle-aidp-samples",
   "license": "MIT",
   "keywords": [
     "oracle",

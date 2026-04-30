@@ -37,7 +37,7 @@ When you `/plugin marketplace add` and `/plugin install` from the public GitHub 
 ## Contact
 
 For questions about this privacy policy, open an issue at
-<https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors/issues>.
+<https://github.com/ahmedawan-oracle/claude-code-plugins/issues>.
 
 ## Changes
 

@@ -100,5 +100,5 @@ for r in banners:
 
 ## References
 - Helpers: [scripts/oracle_ai_data_platform_connectors/jdbc/oracle.py](../../scripts/oracle_ai_data_platform_connectors/jdbc/oracle.py)
-- Live-validated reference notebook (the source of the Option A pattern): [`exacs_intransit_encryption_demo.ipynb`](https://github.com/ahmedawan-oracle/oracle-ai-data-platform-workbench-spark-connectors) on workspace `exacs-private-test` — proves AES256 NNE end-to-end on a customer ExaCS cluster running Oracle 23ai.
+- Live-validated reference notebook (the source of the Option A pattern): [`exacs_intransit_encryption_demo.ipynb`](https://github.com/oracle-samples/oracle-aidp-samples/tree/main/ai/claude-code-plugins/oracle-ai-data-platform-workbench-spark-connectors) on workspace `exacs-private-test` — proves AES256 NNE end-to-end on a customer ExaCS cluster running Oracle 23ai.
 - AIDP private endpoint design (PE-ARCH 1a–3c, SCAN Proxy): see workspace memory `oci_private_endpoint_design.md`.
