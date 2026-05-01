@@ -176,6 +176,58 @@ class TestImportWorkbook:
         assert "file" in call.kwargs["files"]
 
 
+class TestExportWorkbook:
+    def test_writes_dva_to_output_dir(self, tmp_path: Path) -> None:
+        s = MagicMock()
+        resp = MagicMock(status_code=200, content=b"PK\x03\x04fake-dva-bytes",
+                        text="<binary>", headers={})
+        s.request.return_value = resp
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        out = client.export_workbook("CFO Dashboard", output_dir=tmp_path / "wb")
+
+        assert out.exists()
+        assert out.read_bytes() == b"PK\x03\x04fake-dva-bytes"
+        assert out.name == "CFO Dashboard.dva"
+
+        call = s.request.call_args
+        assert call.kwargs["method"] == "POST"
+        assert call.kwargs["url"] == "https://oac.example.com/api/20210901/catalog/workbooks/exports"
+        body = call.kwargs["json"]
+        assert body["name"] == "CFO Dashboard"
+        assert body["includeData"] is True
+        assert body["includeCredentials"] is False
+
+    def test_uses_full_path_when_provided(self, tmp_path: Path) -> None:
+        s = MagicMock()
+        resp = MagicMock(status_code=200, content=b"PK\x03\x04",
+                        text="", headers={})
+        s.request.return_value = resp
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        client.export_workbook(
+            "/@Catalog/users/oacadmin1/AIDP Fusion - Supplier Spend Workbook",
+            output_dir=tmp_path,
+        )
+        body = s.request.call_args.kwargs["json"]
+        assert body["path"] == "/@Catalog/users/oacadmin1/AIDP Fusion - Supplier Spend Workbook"
+        assert body["name"] == "AIDP Fusion - Supplier Spend Workbook"
+
+    def test_uses_content_disposition_filename_when_present(self, tmp_path: Path) -> None:
+        s = MagicMock()
+        resp = MagicMock(status_code=200, content=b"PK", text="",
+                        headers={"Content-Disposition": 'attachment; filename="server-named.dva"'})
+        s.request.return_value = resp
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        out = client.export_workbook("X", output_dir=tmp_path)
+        assert out.name == "server-named.dva"
+
+    def test_4xx_raises(self, tmp_path: Path) -> None:
+        s = MagicMock()
+        s.request.return_value = MagicMock(status_code=404, text="not found", content=b"")
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        with pytest.raises(OacRestError, match="HTTP 404"):
+            client.export_workbook("missing-wb", output_dir=tmp_path)
+
+
 class TestTokenRetryOn401:
     def test_refreshes_token_once_on_401(self, tmp_path: Path) -> None:
         s = MagicMock()

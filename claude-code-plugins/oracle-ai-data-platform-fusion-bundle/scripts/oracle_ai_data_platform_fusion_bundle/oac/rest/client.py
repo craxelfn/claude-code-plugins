@@ -263,6 +263,80 @@ class OacRestClient:
                     return items
         return []
 
+    def export_workbook(
+        self,
+        workbook_path: str,
+        *,
+        output_dir: Path | str = "oac/workbooks",
+        include_data: bool = True,
+        include_credentials: bool = False,
+        password: str | None = None,
+    ) -> Path:
+        """``POST /api/<v>/catalog/workbooks/exports`` — download a workbook as ``.dva``.
+
+        Captures a workbook from a live OAC instance into a portable ``.dva``
+        archive that can be redistributed (committed to the bundle, copied to
+        another OAC, etc.). Pairs with :meth:`import_workbook` for round-trip.
+
+        Args:
+            workbook_path: Catalog path of the workbook to export. Two accepted shapes:
+                - Just the workbook name: ``"AIDP Fusion - Supplier Spend Workbook"``
+                  (resolved against the calling user's My Folders).
+                - Full catalog path: ``"/@Catalog/users/<u>/<workbook-name>"``.
+            output_dir: Local directory to write the ``.dva`` to (created if missing).
+            include_data: Embed the cached query results in the .dva so the workbook
+                can be browsed offline (or in another OAC) without re-running queries.
+            include_credentials: Include connection credentials (PEM, etc.) in the
+                .dva. **Default False** — credentials should be installed separately
+                via ``dashboard install`` so the .dva can be safely committed.
+            password: Optional protect-password applied to the archive.
+
+        Returns:
+            Path to the saved ``.dva`` file.
+
+        Raises:
+            OacRestError: if OAC rejects the request.
+        """
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        body: dict[str, Any] = {
+            "name": workbook_path.rsplit("/", 1)[-1],
+            "path": workbook_path if workbook_path.startswith("/") else None,
+            "includeData": include_data,
+            "includeCredentials": include_credentials,
+        }
+        if password:
+            body["password"] = password
+        # Drop None entries
+        body = {k: v for k, v in body.items() if v is not None}
+
+        response = self._request(
+            "POST", "/catalog/workbooks/exports",
+            json_body=body,
+            extra_headers={"Accept": "application/octet-stream"},
+        )
+        if response.status_code not in (200, 201):
+            raise OacRestError(
+                f"export_workbook failed: HTTP {response.status_code}: {response.text}",
+                response=response,
+            )
+
+        # File-name preference: Content-Disposition > workbook-name + .dva
+        filename = body["name"]
+        if not filename.endswith(".dva"):
+            filename = f"{filename}.dva"
+        cd = response.headers.get("Content-Disposition", "")
+        if "filename=" in cd:
+            try:
+                filename = cd.split("filename=", 1)[1].strip(' "')
+            except Exception:
+                pass
+
+        out_path = out / filename
+        out_path.write_bytes(response.content)
+        return out_path
+
     def import_workbook(
         self,
         dva_path: Path | str,

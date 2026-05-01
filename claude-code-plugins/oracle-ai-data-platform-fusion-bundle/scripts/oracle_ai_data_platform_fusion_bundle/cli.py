@@ -273,6 +273,94 @@ def dashboard_install(
         )
 
 
+@dashboard.command("export")
+@click.option("--target", type=click.Choice(["oac"]), default="oac")
+@click.option("--oac-url", required=True, help="OAC instance URL (e.g. https://your-oac.example.com).")
+@click.option("--workbook", "workbook_path", required=True, multiple=True,
+              help="Workbook name OR full catalog path (e.g. '/@Catalog/users/oacadmin1/My Wb'). "
+                   "Pass multiple times to export several workbooks in one run.")
+@click.option("--output-dir", default=Path("oac/workbooks"), show_default=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Local directory to write the .dva files to.")
+@click.option("--include-data/--no-include-data", default=True, show_default=True,
+              help="Embed cached query results in the .dva (offline-portable) vs. re-query on import.")
+@click.option("--include-credentials/--no-include-credentials", default=False, show_default=True,
+              help="Embed connection credentials (PEM, etc.) in the .dva. Off by default so .dva is "
+                   "safe to commit; the bundle's `dashboard install` re-installs the AIDP connection separately.")
+@click.option("--idcs-url", required=True,
+              help="IDCS stripe URL (https://idcs-<stripe>.identity.oraclecloud.com).")
+@click.option("--client-id", required=True)
+@click.option("--client-secret", required=True,
+              help="IDCS confidential-app client_secret, or ${vault:OCID}.")
+@click.option("--oauth-scope", default=None,
+              help="Override auto-derived scope (default: <oac-url>urn:opc:resource:consumer::all offline_access).")
+@click.option("--auth-flow", type=click.Choice(["auth_code", "device"]), default="auth_code",
+              show_default=True)
+def dashboard_export(
+    target: str,
+    oac_url: str,
+    workbook_path: tuple[str, ...],
+    output_dir: Path,
+    include_data: bool,
+    include_credentials: bool,
+    idcs_url: str,
+    client_id: str,
+    client_secret: str,
+    oauth_scope: str | None,
+    auth_flow: str,
+) -> None:
+    """Export OAC workbooks to local ``.dva`` archives via REST.
+
+    Pairs with ``dashboard install`` for round-trip: build a workbook in OAC,
+    export it here, commit the ``.dva`` to your bundle, and ``dashboard install``
+    will re-import it on any other OAC instance.
+    """
+    from .oac.rest import (OacOauthFlow, OacRestClient, OacRestError,
+                           derive_oac_scope, discover_oac_audience)
+    from .utils import vault
+
+    # Audience auto-discovery
+    if oauth_scope:
+        resolved_scope = oauth_scope
+    else:
+        try:
+            audience = discover_oac_audience(oac_url)
+            resolved_scope = derive_oac_scope(oac_url, audience=audience)
+        except Exception as exc:
+            console.print(f"[yellow]audience discovery failed ({exc}); falling back to oac_url[/yellow]")
+            resolved_scope = derive_oac_scope(oac_url)
+
+    fetcher = OacOauthFlow(
+        idcs_url=idcs_url,
+        client_id=client_id,
+        client_secret=vault.resolve(client_secret),
+        scope=resolved_scope,
+        flow=auth_flow,
+    )
+    client = OacRestClient(oac_url, fetcher)
+
+    failures: list[str] = []
+    for wb in workbook_path:
+        try:
+            console.print(f"Exporting [bold]{wb}[/bold] ...")
+            out = client.export_workbook(
+                wb,
+                output_dir=output_dir,
+                include_data=include_data,
+                include_credentials=include_credentials,
+            )
+            console.print(f"  [green]wrote {out.stat().st_size:,} bytes[/green] -> [bold]{out}[/bold]")
+        except OacRestError as exc:
+            console.print(f"  [red]failed:[/red] {exc}")
+            failures.append(wb)
+        except Exception as exc:
+            console.print(f"  [red]failed:[/red] {exc}")
+            failures.append(wb)
+
+    if failures:
+        sys.exit(1)
+
+
 @dashboard.command("validate")
 @click.option("--target", type=click.Choice(["oac"]), default="oac")
 @click.option("--oac-url", required=True)
