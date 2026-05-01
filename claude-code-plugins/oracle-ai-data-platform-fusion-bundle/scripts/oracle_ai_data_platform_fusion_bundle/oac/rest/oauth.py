@@ -113,6 +113,7 @@ class OacOauthFlow:
         token_path: Path | str | None = None,
         flow: Literal["auth_code", "device"] = "auth_code",
         callback_port: int = 8765,
+        prompt_login: bool = False,
         timeout: int = 30,
         session: requests.Session | None = None,
     ) -> None:
@@ -127,6 +128,7 @@ class OacOauthFlow:
         self._scope = scope
         self._flow = flow
         self._callback_port = callback_port
+        self._prompt_login = prompt_login
         self._timeout = timeout
         self._session = session or requests.Session()
 
@@ -202,6 +204,7 @@ class OacOauthFlow:
         redirect_uri = f"http://localhost:{self._callback_port}/callback"
 
         result: dict[str, str | None] = {"code": None, "state": None, "error": None}
+        expected_state = state  # closure into the handler — only accept matching callbacks
 
         class CallbackHandler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_args, **_kwargs) -> None:
@@ -210,37 +213,57 @@ class OacOauthFlow:
             def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
                 parsed = urllib.parse.urlparse(self.path)
                 qs = urllib.parse.parse_qs(parsed.query)
-                if parsed.path == "/callback":
-                    result["code"] = qs.get("code", [None])[0]
-                    result["state"] = qs.get("state", [None])[0]
-                    result["error"] = qs.get("error", [None])[0]
-                    self.send_response(200)
+                if parsed.path != "/callback":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+
+                got_state = qs.get("state", [None])[0]
+                got_error = qs.get("error", [None])[0]
+                # Reject stale-tab callbacks: only accept the state we just generated.
+                # Returning 410 lets the stale browser tab show a clear error rather
+                # than silently consuming our valid one.
+                if got_state != expected_state and not got_error:
+                    self.send_response(410)
                     self.send_header("Content-Type", "text/html")
                     self.end_headers()
                     self.wfile.write(
-                        b"<h1>OAC consent received.</h1>"
-                        b"<p>You can close this tab and return to the terminal.</p>"
+                        b"<h1>Stale OAuth callback ignored.</h1>"
+                        b"<p>This tab is from a previous flow. Close it and complete consent in the newer tab.</p>"
                     )
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
-                else:
-                    self.send_response(404)
-                    self.end_headers()
+                    return
+
+                # Matching callback (or any error): accept + signal completion.
+                result["code"] = qs.get("code", [None])[0]
+                result["state"] = got_state
+                result["error"] = got_error
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<h1>OAC consent received.</h1>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                )
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
 
         server = socketserver.TCPServer(("127.0.0.1", self._callback_port), CallbackHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
+            authorize_params = {
+                "response_type": "code",
+                "client_id": self._client_id,
+                "redirect_uri": redirect_uri,
+                "scope": self._scope,
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
+            if self._prompt_login:
+                # Force IDCS to re-prompt user (don't reuse cached SSO session).
+                # Useful for switching identities between OAC instances.
+                authorize_params["prompt"] = "login"
             authorize_url = (
-                self._authorize_endpoint
-                + "?"
-                + urllib.parse.urlencode({
-                    "response_type": "code",
-                    "client_id": self._client_id,
-                    "redirect_uri": redirect_uri,
-                    "scope": self._scope,
-                    "state": state,
-                    "code_challenge": challenge,
-                    "code_challenge_method": "S256",
-                })
+                self._authorize_endpoint + "?" + urllib.parse.urlencode(authorize_params)
             )
             print(f"[oac-oauth] Opening browser for one-time consent at {self._idcs_url}")
             print(f"[oac-oauth] If browser doesn't open, paste this URL manually:\n  {authorize_url}")

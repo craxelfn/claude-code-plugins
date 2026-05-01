@@ -4,7 +4,7 @@
 >
 > Same pattern shown in the official Oracle blog [Bring Fusion Data into AIDP Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc), productized.
 
-**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + `oacai.cealinfra.com` OAC instance (TC1, TC7, TC8, TC9, TC10/b/c/d all PASS — see [tests/live/](tests/live/)). 112 unit tests passing. CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
+**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + `oacai.cealinfra.com` OAC instance (TC1, TC7, TC8, TC9, TC10/b/c/d/h/h-2 all PASS — see [tests/live/](tests/live/)). **132 unit tests passing.** OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
 
 **Positioning**: This bundle is **additive to and complementary with** Oracle's managed Fusion data offerings. It productizes Option 1 of the BICC blog's three-option architecture (BICC into AIDP for "Custom AI and ML, raw data access, data engineering"). Never positioned as a replacement for FDI, OAC, OTBI, BIP, or Data Transforms — different jobs, same Oracle ecosystem.
 

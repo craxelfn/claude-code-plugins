@@ -524,3 +524,64 @@ The `IdcsTokenFetcher` name remains as a backwards-compat alias to `OacOauthFlow
 
 - **AIDP connectionType discovery via UI capture**: when a maintainer has Chrome open, capturing the OAC UI's actual `POST /api/20210901/catalog/connections` body (via DevTools Network) will reveal the internal connectionType string. That would unblock connection creation via REST too.
 - **File an Oracle RFE**: ask Oracle to publish the AIDP connectionType discriminator + JSON schema in the public REST API docs.
+
+## TC10h-2 — full doc audit + refactor to Oracle-documented endpoints (2026-05-01)
+
+After TC10h proved the Auth Code + PKCE auth model works, an audit of the full OAC docs portal (https://docs.oracle.com/en/cloud/paas/analytics-cloud/index.html) plus the canonical openapi.json revealed that the bundle was using **multiple endpoints that don't exist in Oracle's public REST API**:
+
+| Bundle assumption | Reality |
+|---|---|
+| `POST /catalog/workbooks/imports` | NOT in openapi.json — UI-only, no API stability |
+| `POST /catalog/workbooks/exports` (.dva) | Real path is `/catalog/workbooks/{id}/exports`, exports PDF/PNG only (async work-request) |
+| `GET /catalog/workbooks?name=` | Real path is `GET /catalog?type=workbooks&search=` |
+| `DELETE /catalog/connections/{name}` | Path-param must be **Base64URL-encoded object ID**, not plain name |
+| `DELETE /catalog/workbooks/{id}` | Doesn't exist publicly |
+
+Oracle's only documented programmatic mechanism for moving workbook content is **Snapshots** (full-instance BAR archives). Per `Take Snapshots and Restore Information` admin guide, snapshots can be Custom-built to include only the bundle's workbooks (Catalog Content + Shared Folders) and exclude all per-customer secrets (Credentials, Connections, User Folders).
+
+### Refactor scope
+
+| Layer | Before | After |
+|---|---|---|
+| `OacRestClient.import_workbook` | multipart `.dva` POST to `/imports` | **REMOVED** (endpoint doesn't exist) |
+| `OacRestClient.export_workbook` | JSON POST to `/exports` expecting `.dva` | **REMOVED** (would have exported PDF/PNG anyway) |
+| `OacRestClient.delete_workbook` | DELETE on plain name | **REMOVED** (no public endpoint) |
+| `OacRestClient.list_connections` | `GET /catalog/connections` | **FIXED**: `GET /catalog?type=connections&search=...` |
+| `OacRestClient.delete_connection` | DELETE on plain name | **FIXED**: Base64URL-encode `'<owner>'.'<name>'` |
+| `OacRestClient.register_snapshot` | — | **NEW**: `POST /snapshots` (REGISTER from OCI Object Storage) |
+| `OacRestClient.restore_snapshot` | — | **NEW**: `POST /system/actions/restoreSnapshot` (returns work-request ID) |
+| `OacRestClient.poll_work_request` | — | **NEW**: `GET /workRequests/{id}` until terminal status |
+| `OacRestClient.delete_snapshot` / `list_snapshots` / `get_snapshot` | — | **NEW** |
+| `oac/install.py` | multipart .dva imports per file | snapshot register + restore + poll (one .bar per release) |
+| `oac/uninstall.py` | per-workbook delete loop | connection delete + optional snapshot deregister |
+| `dashboard export` CLI subcommand | added in TC10h follow-up | **REMOVED** (was on the wrong endpoint) |
+| Bundle assets | `oac/workbooks/*.dva` | `bundle-vN.bar` ships as a release artifact (not in repo) |
+
+### Test results
+
+```
+============================= 132 passed in 3.14s =============================
+```
+
+(was 122; net +10: -4 export-workbook tests, +14 snapshot/encode/restore/poll tests)
+
+### Final architecture (TC10h-2)
+
+End-to-end install uses **only Oracle-documented public endpoints**:
+
+```
+1. POST /api/20210901/catalog/connections                (create AIDP connection — body schema is open `type:object`)
+2. POST /api/20210901/snapshots                          (register customer-uploaded .bar — async)
+3. POST /api/20210901/system/actions/restoreSnapshot     (restore — async, returns oa-work-request-id)
+4. GET  /api/20210901/workRequests/{id}                  (poll until SUCCEEDED)
+```
+
+The only inferred-shape risk is the AIDP `connectionType: "idljdbc"` payload (TC10h capture) — Oracle hasn't published this as an official sample. The bundle handles it by allowing `--connection-type` override and falling back to `--print-only` if the body is rejected.
+
+### Sources
+
+- [REST endpoints index](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/rest-endpoints.html)
+- [OpenAPI spec (38 paths)](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/openapi.json)
+- [Snapshot REST API Prerequisites](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/prerequisites.html)
+- [Options When You Take a Snapshot](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-take-snapshot.html)
+- [Options When You Restore a Snapshot](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-restore-snapshot.html)

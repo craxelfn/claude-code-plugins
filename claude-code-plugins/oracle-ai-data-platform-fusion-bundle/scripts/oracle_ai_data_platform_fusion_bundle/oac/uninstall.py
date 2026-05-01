@@ -1,11 +1,16 @@
 """Implementation of ``aidp-fusion-bundle dashboard uninstall --target oac``.
 
-Removes the bundle's OAC artifacts in reverse order:
-  1. Each imported ``oac/workbooks/*.dva`` workbook (matched by name)
-  2. The bundle's data source connection (default ``aidp_fusion_jdbc``)
+Removes the bundle's OAC artifacts in this order:
+  1. Optionally deregister the bundle's snapshot record (``--snapshot-id``)
+  2. Delete the bundle's data source connection (default ``aidp_fusion_jdbc``)
 
-Customer data in AIDP (gold marts, BICC bronze tables) is untouched. Only
-the OAC catalog entries the bundle created are removed.
+Caveat: there is no public REST endpoint to selectively delete workbooks
+that were restored from a snapshot. If you want to fully roll back the
+restored workbooks, take a snapshot BEFORE installing and restore that
+"pre-install" snapshot to revert. Or use OAC Console -> Catalog to
+manually delete the ``/shared/AIDP_Fusion_Bundle/`` folder.
+
+Customer data in AIDP (gold marts, BICC bronze tables) is untouched.
 """
 
 from __future__ import annotations
@@ -21,17 +26,17 @@ from .rest import OacOauthFlow, OacRestClient, OacRestError, derive_oac_scope
 class UninstallParams:
     oac_url: str
     connection_name: str
-    workbook_names: list[str]
+    snapshot_id: str | None
     idcs_url: str
     client_id: str
     client_secret: str
-    oauth_scope: str = ""  # Empty triggers auto-derive from oac_url
+    oauth_scope: str = ""  # Empty triggers auto-derive
 
 
 @dataclass
 class UninstallResult:
-    deleted_workbooks: list[str]
     connection_deleted: bool
+    snapshot_deleted: bool | None = None  # None = not requested
 
 
 def uninstall(params: UninstallParams, *, console: Console | None = None) -> UninstallResult:
@@ -45,30 +50,31 @@ def uninstall(params: UninstallParams, *, console: Console | None = None) -> Uni
     )
     client = OacRestClient(params.oac_url, fetcher)
 
-    # Workbooks first, so the connection can be cleanly removed afterwards.
-    deleted_workbooks: list[str] = []
-    for wb_name in params.workbook_names:
+    # Snapshot deregistration (optional)
+    snapshot_deleted: bool | None = None
+    if params.snapshot_id:
+        console.print(f"Deregistering snapshot [bold]{params.snapshot_id}[/bold] ...")
         try:
-            matches = client.list_workbooks(name=wb_name)
+            snapshot_deleted = client.delete_snapshot(params.snapshot_id)
+            console.print(
+                "  [green]done[/green]" if snapshot_deleted
+                else "  [yellow]not found (already absent)[/yellow]"
+            )
         except OacRestError as exc:
-            console.print(f"[red]list_workbooks(name={wb_name}) failed:[/red] {exc}")
-            continue
-        for wb in matches:
-            wb_id = str(wb.get("id") or wb.get("workbookId") or "")
-            if not wb_id:
-                continue
-            console.print(f"Deleting workbook [bold]{wb_name}[/bold] (id={wb_id}) ...")
-            try:
-                if client.delete_workbook(wb_id):
-                    deleted_workbooks.append(wb_name)
-                    console.print("  [green]done[/green]")
-            except OacRestError as exc:
-                console.print(f"  [red]failed:[/red] {exc}")
+            console.print(f"  [red]failed:[/red] {exc}")
+            snapshot_deleted = False
 
     # Connection
     console.print(f"Deleting connection [bold]{params.connection_name}[/bold] ...")
     try:
-        connection_deleted = client.delete_connection(params.connection_name)
+        existing = client.find_connection(params.connection_name)
+        if existing:
+            connection_deleted = client.delete_connection(
+                str(existing.get("id") or existing.get("connectionId") or params.connection_name),
+                owner=existing.get("owner"),
+            )
+        else:
+            connection_deleted = False
         console.print(
             "  [green]done[/green]"
             if connection_deleted
@@ -79,7 +85,8 @@ def uninstall(params: UninstallParams, *, console: Console | None = None) -> Uni
         connection_deleted = False
 
     return UninstallResult(
-        deleted_workbooks=deleted_workbooks, connection_deleted=connection_deleted
+        connection_deleted=connection_deleted,
+        snapshot_deleted=snapshot_deleted,
     )
 
 

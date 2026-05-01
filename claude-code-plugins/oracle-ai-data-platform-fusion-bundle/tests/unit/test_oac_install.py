@@ -1,16 +1,15 @@
 """Unit tests for the dashboard install flow.
 
-The bundle ships a hybrid install design (verified TC10h, 2026-05-01):
+The bundle ships a hybrid install design (TC10h-2 refactor, 2026-05-01) that uses
+ONLY Oracle-documented public REST endpoints:
 
-    * Connection: always writes the 6-key JSON via ``render_template`` so the
-      admin can upload through OAC's UI (3-min one-time step). The AIDP
-      connectionType for OAC's REST is undocumented by Oracle.
-    * Workbooks: imported via REST using Auth Code + PKCE + Refresh Token.
-      Skipped if ``--skip-workbooks`` is set or if no ``oac/workbooks/*.dva``
-      files exist.
+    1. POST /catalog/connections                     (create AIDP connection)
+    2. POST /snapshots                               (register customer-uploaded .bar)
+    3. POST /system/actions/restoreSnapshot          (async restore)
+    4. GET  /workRequests/{id}                       (poll until SUCCEEDED)
 
-Tests mock ``OacOauthFlow`` (the new auth class) and ``OacRestClient`` to
-isolate from network calls.
+There is NO public REST endpoint for workbook .dva imports — that path was
+removed in this refactor.
 """
 
 from __future__ import annotations
@@ -41,10 +40,15 @@ def _params(tmp_path: Path, **overrides) -> InstallParams:
         "client_secret": None,
         "oauth_scope": "https://oac.example.comurn:opc:resource:consumer::all offline_access",
         "auth_flow": "auth_code",
+        "prompt_login": False,
         "private_key_pem_path": pem,
-        "workbooks_dir": tmp_path / "workbooks",
+        "bar_bucket": None,
+        "bar_uri": None,
+        "bar_password": None,
+        "snapshot_name": "aidp-fusion-bundle",
         "print_only": False,
         "skip_workbooks": False,
+        "overwrite_connection": False,
     }
     defaults.update(overrides)
     return InstallParams(**defaults)
@@ -52,7 +56,6 @@ def _params(tmp_path: Path, **overrides) -> InstallParams:
 
 class TestPrintOnly:
     def test_writes_json_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``--print-only`` writes the 6-key JSON to oac/data_source/."""
         monkeypatch.chdir(tmp_path)
         result = install(_params(tmp_path, print_only=True))
         assert result.json_template_path is not None
@@ -65,7 +68,6 @@ class TestPrintOnly:
     def test_print_only_makes_no_oauth_or_rest_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--print-only`` short-circuits before any auth or REST."""
         monkeypatch.chdir(tmp_path)
         with patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
@@ -78,80 +80,44 @@ class TestPrintOnly:
 
 
 class TestRestInstall:
-    """Default mode: try REST connection POST; fall back to print-only JSON on schema-level 4xx; import workbooks via REST."""
+    """Connection POST + snapshot register/restore against fully-specified params."""
 
-    def test_creates_connection_via_rest_then_imports_workbooks(
-        self, tmp_path: Path
-    ) -> None:
-        wb_dir = tmp_path / "workbooks"; wb_dir.mkdir()
-        (wb_dir / "supplier_spend.dva").write_bytes(b"PK\x03\x04fake")
-
+    def test_creates_connection_and_restores_snapshot(self, tmp_path: Path) -> None:
         with patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
         ) as oauth_cls, patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacRestClient"
         ) as client_cls:
             client_inst = client_cls.return_value
-            client_inst.find_connection.return_value = None  # not yet present
-            client_inst.create_connection.return_value = {"id": "conn-99"}
-            client_inst.import_workbook.return_value = {"id": "wb-7"}
+            client_inst.find_connection.return_value = None
+            client_inst.create_connection.return_value = {"connectionId": "conn-99"}
+            client_inst.register_snapshot.return_value = {"id": "snap-7"}
+            client_inst.restore_snapshot.return_value = "wr-42"
+            client_inst.poll_work_request.return_value = {"status": "SUCCEEDED"}
 
             params = _params(
                 tmp_path,
-                workbooks_dir=wb_dir,
                 idcs_url="https://idcs-x.identity.oraclecloud.com",
                 client_id="cid",
                 client_secret="csec",
+                bar_bucket="customer-bucket",
+                bar_uri="bundles/v1.bar",
+                bar_password="hunter2",
             )
             result = install(params)
 
         oauth_cls.assert_called_once()
         client_cls.assert_called_once()
         client_inst.create_connection.assert_called_once()
-        client_inst.import_workbook.assert_called_once()
+        client_inst.register_snapshot.assert_called_once()
+        client_inst.restore_snapshot.assert_called_once_with("snap-7", password="hunter2")
+        client_inst.poll_work_request.assert_called_once()
         assert result.connection_id == "conn-99"
-        assert result.imported_workbooks == ["supplier_spend.dva"]
-        assert result.json_template_path is None  # REST succeeded; no print-only fallback needed
+        assert result.snapshot_id == "snap-7"
+        assert result.work_request_id == "wr-42"
+        assert result.work_request_status == "SUCCEEDED"
 
-    def test_falls_back_to_print_only_when_rest_post_returns_4xx(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """If OAC rejects the connection POST (e.g. schema mismatch), write the
-        JSON for the admin to upload via UI but continue with workbook imports."""
-        from oracle_ai_data_platform_fusion_bundle.oac.rest import OacRestError
-        monkeypatch.chdir(tmp_path)
-        wb_dir = tmp_path / "workbooks"; wb_dir.mkdir()
-        (wb_dir / "supplier_spend.dva").write_bytes(b"x")
-
-        with patch(
-            "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
-        ), patch(
-            "oracle_ai_data_platform_fusion_bundle.oac.install.OacRestClient"
-        ) as client_cls:
-            client_inst = client_cls.return_value
-            client_inst.find_connection.return_value = None
-            client_inst.create_connection.side_effect = OacRestError("HTTP 400 Invalid connectionType")
-            client_inst.import_workbook.return_value = {"id": "wb-1"}
-
-            params = _params(
-                tmp_path,
-                workbooks_dir=wb_dir,
-                idcs_url="https://idcs-x.identity.oraclecloud.com",
-                client_id="cid",
-                client_secret="csec",
-            )
-            result = install(params)
-
-        # JSON template was written for manual UI upload
-        assert result.json_template_path is not None
-        assert result.json_template_path.exists()
-        assert result.connection_id is None
-        # Workbook import still ran
-        assert result.imported_workbooks == ["supplier_spend.dva"]
-
-    def test_skips_create_when_connection_already_present(
-        self, tmp_path: Path
-    ) -> None:
+    def test_skips_create_when_connection_already_present(self, tmp_path: Path) -> None:
         with patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
         ), patch(
@@ -170,39 +136,33 @@ class TestRestInstall:
         client_inst.create_connection.assert_not_called()
         assert result.connection_id == "existing-1"
 
-    def test_requires_idcs_creds(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="--idcs-url"):
-            install(_params(tmp_path))  # no idcs_url / client_id / secret
-
-    def test_skip_workbooks_flag(self, tmp_path: Path) -> None:
-        wb_dir = tmp_path / "workbooks"; wb_dir.mkdir()
-        (wb_dir / "supplier_spend.dva").write_bytes(b"x")
+    def test_overwrite_connection_deletes_then_creates(self, tmp_path: Path) -> None:
         with patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
         ), patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacRestClient"
         ) as client_cls:
             client_inst = client_cls.return_value
-            client_inst.find_connection.return_value = None
-            client_inst.create_connection.return_value = {"id": "c"}
+            client_inst.find_connection.return_value = {"id": "old", "owner": "admin"}
+            client_inst.create_connection.return_value = {"connectionId": "new"}
             params = _params(
                 tmp_path,
-                workbooks_dir=wb_dir,
                 idcs_url="https://idcs-x.identity.oraclecloud.com",
                 client_id="cid",
                 client_secret="csec",
                 skip_workbooks=True,
+                overwrite_connection=True,
             )
-            install(params)
-        client_inst.import_workbook.assert_not_called()
+            result = install(params)
+        client_inst.delete_connection.assert_called_once()
+        client_inst.create_connection.assert_called_once()
+        assert result.connection_id == "new"
 
-    def test_workbook_import_failure_does_not_crash_install(
-        self, tmp_path: Path
-    ) -> None:
-        """A failing workbook import is reported; install continues / returns."""
-        from oracle_ai_data_platform_fusion_bundle.oac.rest import OacRestError
-        wb_dir = tmp_path / "workbooks"; wb_dir.mkdir()
-        (wb_dir / "broken.dva").write_bytes(b"x")
+    def test_requires_idcs_creds(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="--idcs-url"):
+            install(_params(tmp_path))  # no idcs_url / client_id / secret
+
+    def test_skip_workbooks_skips_snapshot_phase(self, tmp_path: Path) -> None:
         with patch(
             "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
         ), patch(
@@ -210,14 +170,61 @@ class TestRestInstall:
         ) as client_cls:
             client_inst = client_cls.return_value
             client_inst.find_connection.return_value = None
-            client_inst.create_connection.return_value = {"id": "c"}
-            client_inst.import_workbook.side_effect = OacRestError("boom")
+            client_inst.create_connection.return_value = {"connectionId": "c"}
             params = _params(
                 tmp_path,
-                workbooks_dir=wb_dir,
+                idcs_url="https://idcs-x.identity.oraclecloud.com",
+                client_id="cid",
+                client_secret="csec",
+                bar_bucket="b",
+                bar_uri="x.bar",
+                skip_workbooks=True,
+            )
+            install(params)
+        client_inst.register_snapshot.assert_not_called()
+        client_inst.restore_snapshot.assert_not_called()
+
+    def test_no_bar_args_skips_snapshot_with_warning(self, tmp_path: Path) -> None:
+        """If --bar-bucket/--bar-uri aren't set, we install the connection only."""
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.install.OacRestClient"
+        ) as client_cls:
+            client_inst = client_cls.return_value
+            client_inst.find_connection.return_value = None
+            client_inst.create_connection.return_value = {"connectionId": "c"}
+            params = _params(
+                tmp_path,
                 idcs_url="https://idcs-x.identity.oraclecloud.com",
                 client_id="cid",
                 client_secret="csec",
             )
             result = install(params)
-        assert result.imported_workbooks == []
+        client_inst.register_snapshot.assert_not_called()
+        assert result.connection_id == "c"
+        assert result.snapshot_id is None
+
+    def test_failed_work_request_records_status(self, tmp_path: Path) -> None:
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.install.OacOauthFlow"
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.install.OacRestClient"
+        ) as client_cls:
+            client_inst = client_cls.return_value
+            client_inst.find_connection.return_value = None
+            client_inst.create_connection.return_value = {"connectionId": "c"}
+            client_inst.register_snapshot.return_value = {"id": "s"}
+            client_inst.restore_snapshot.return_value = "wr"
+            client_inst.poll_work_request.return_value = {"status": "FAILED", "error": "boom"}
+
+            params = _params(
+                tmp_path,
+                idcs_url="https://idcs-x.identity.oraclecloud.com",
+                client_id="cid",
+                client_secret="csec",
+                bar_bucket="b",
+                bar_uri="x.bar",
+            )
+            result = install(params)
+        assert result.work_request_status == "FAILED"

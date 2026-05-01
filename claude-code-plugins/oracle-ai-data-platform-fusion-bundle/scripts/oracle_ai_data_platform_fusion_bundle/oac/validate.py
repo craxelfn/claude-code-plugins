@@ -1,45 +1,48 @@
 """Implementation of ``aidp-fusion-bundle dashboard validate --target oac``.
 
-Read-only probe: confirms the bundle's connection + workbooks exist in OAC.
-Does NOT touch AIDP-side data. Useful in CI to detect drift between what
-the bundle expects and what's actually in the customer's OAC catalog.
+Read-only probe: confirms the bundle's connection is present in OAC. Optionally
+checks that a named snapshot is registered. Does NOT touch AIDP-side data.
+Useful in CI to detect drift between what the bundle expects and what's
+actually installed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from rich.console import Console
 
-from .rest import OacOauthFlow, OacRestClient, OacRestError
+from .rest import OacOauthFlow, OacRestClient, OacRestError, derive_oac_scope
 
 
 @dataclass(frozen=True)
 class ValidateParams:
     oac_url: str
     connection_name: str
-    workbook_names: list[str]
+    snapshot_name: str | None
     idcs_url: str
     client_id: str
     client_secret: str
-    oauth_scope: str = ""  # Empty triggers auto-derive from oac_url
+    oauth_scope: str = ""  # empty triggers auto-derive
 
 
 @dataclass
 class ValidateResult:
     connection_present: bool
-    present_workbooks: list[str] = field(default_factory=list)
-    missing_workbooks: list[str] = field(default_factory=list)
+    snapshot_present: bool | None = None  # None = not probed
 
     @property
     def all_ok(self) -> bool:
-        return self.connection_present and not self.missing_workbooks
+        if not self.connection_present:
+            return False
+        if self.snapshot_present is False:  # explicitly probed and missing
+            return False
+        return True
 
 
 def validate(params: ValidateParams, *, console: Console | None = None) -> ValidateResult:
     console = console or Console()
 
-    from .rest import derive_oac_scope
     fetcher = OacOauthFlow(
         idcs_url=params.idcs_url,
         client_id=params.client_id,
@@ -48,35 +51,39 @@ def validate(params: ValidateParams, *, console: Console | None = None) -> Valid
     )
     client = OacRestClient(params.oac_url, fetcher)
 
-    result = ValidateResult(connection_present=False)
-
     # Connection
     try:
         connection = client.find_connection(params.connection_name)
     except OacRestError as exc:
         console.print(f"[red]find_connection failed:[/red] {exc}")
         connection = None
-    result.connection_present = connection is not None
+    connection_present = connection is not None
     console.print(
         f"Connection [bold]{params.connection_name}[/bold]: "
         f"{'[green]present[/green]' if connection else '[red]MISSING[/red]'}"
     )
 
-    # Workbooks
-    for wb_name in params.workbook_names:
+    # Snapshot (optional probe)
+    snapshot_present: bool | None = None
+    if params.snapshot_name:
         try:
-            matches = client.list_workbooks(name=wb_name)
+            snapshots = client.list_snapshots()
+            snapshot_present = any(
+                s.get("name") == params.snapshot_name or s.get("displayName") == params.snapshot_name
+                for s in snapshots
+            )
+            console.print(
+                f"Snapshot [bold]{params.snapshot_name}[/bold]: "
+                f"{'[green]registered[/green]' if snapshot_present else '[red]NOT REGISTERED[/red]'}"
+            )
         except OacRestError as exc:
-            console.print(f"[red]list_workbooks(name={wb_name}) failed:[/red] {exc}")
-            matches = []
-        if matches:
-            result.present_workbooks.append(wb_name)
-            console.print(f"Workbook [bold]{wb_name}[/bold]: [green]present[/green]")
-        else:
-            result.missing_workbooks.append(wb_name)
-            console.print(f"Workbook [bold]{wb_name}[/bold]: [red]MISSING[/red]")
+            console.print(f"[red]list_snapshots failed:[/red] {exc}")
+            snapshot_present = False
 
-    return result
+    return ValidateResult(
+        connection_present=connection_present,
+        snapshot_present=snapshot_present,
+    )
 
 
 __all__ = ["ValidateParams", "ValidateResult", "validate"]

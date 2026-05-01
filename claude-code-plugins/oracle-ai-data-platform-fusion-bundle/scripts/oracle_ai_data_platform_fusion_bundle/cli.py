@@ -168,9 +168,16 @@ def dashboard() -> None:
 @click.option("--private-key-pem", required=True,
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Path to the private API key PEM file.")
-@click.option("--workbooks-dir", default=Path("oac/workbooks"), show_default=True,
-              type=click.Path(file_okay=False, path_type=Path),
-              help="Directory containing .dva workbook archives to import.")
+@click.option("--bar-bucket", default=None,
+              help="OCI Object Storage bucket containing the bundle's .bar snapshot. "
+                   "Customer-uploaded; the bundle ships only the connection + IAM glue. "
+                   "Omit to skip workbook restore (connection-only install).")
+@click.option("--bar-uri", default=None,
+              help="Object name (relative path) of the .bar in --bar-bucket.")
+@click.option("--bar-password", default=None,
+              help="BAR password (if the .bar was created with password protection).")
+@click.option("--snapshot-name", default="aidp-fusion-bundle",
+              help="Display name for the registered snapshot (default: aidp-fusion-bundle).")
 @click.option("--idcs-url", default=None,
               help="IDCS stripe URL (https://idcs-<stripe>.identity.oraclecloud.com). "
                    "Required unless --print-only.")
@@ -181,15 +188,19 @@ def dashboard() -> None:
               help="IDCS confidential-app client_secret, or ${vault:OCID}. "
                    "Required unless --print-only.")
 @click.option("--oauth-scope", default=None,
-              help="Override the auto-derived scope (default: <oac-url>urn:opc:resource:consumer::all "
+              help="Override the auto-derived scope (default: <audience>urn:opc:resource:consumer::all "
                    "offline_access). Only set if your IDCS admin published a custom scope.")
 @click.option("--auth-flow", type=click.Choice(["auth_code", "device"]), default="auth_code",
               show_default=True,
               help="OAuth flow: auth_code opens browser (laptop), device for headless boxes.")
+@click.option("--prompt-login", is_flag=True,
+              help="Force IDCS to reprompt for credentials (don't reuse cached SSO session).")
 @click.option("--print-only", is_flag=True,
               help="Skip OAC REST calls; write the connection JSON for manual UI upload.")
 @click.option("--skip-workbooks", is_flag=True,
-              help="Create the connection but don't import any .dva workbooks.")
+              help="Create the connection but don't restore the snapshot (workbooks).")
+@click.option("--overwrite-connection", is_flag=True,
+              help="Delete + recreate the connection if it already exists (default: skip).")
 def dashboard_install(
     target: str,
     oac_url: str,
@@ -202,21 +213,32 @@ def dashboard_install(
     cluster_key: str,
     catalog: str,
     private_key_pem: Path,
-    workbooks_dir: Path,
+    bar_bucket: str | None,
+    bar_uri: str | None,
+    bar_password: str | None,
+    snapshot_name: str,
     idcs_url: str | None,
     client_id: str | None,
     client_secret: str | None,
     oauth_scope: str | None,
     auth_flow: str,
+    prompt_login: bool,
     print_only: bool,
     skip_workbooks: bool,
+    overwrite_connection: bool,
 ) -> None:
-    """Register AIDP JDBC data source in OAC + import oac/workbooks/*.dva via OAC REST API.
+    """Register AIDP JDBC connection in OAC + restore the workbook snapshot via REST.
+
+    Architecture (TC10h-2 refactor, 2026-05-01) — Oracle-documented endpoints only:
+      1. POST /catalog/connections                       (creates AIDP connection)
+      2. POST /snapshots                                 (registers customer-uploaded .bar)
+      3. POST /system/actions/restoreSnapshot            (async restore)
+      4. GET  /workRequests/{id}                         (polls until SUCCEEDED)
 
     Two modes:
       * Default: full REST install. First run opens browser for one-time SSO consent;
-        refresh token persists for silent reuse. Requires --idcs-url, --client-id,
-        --client-secret. The signed-in user must have BI Service Administrator role on OAC.
+        refresh token persists for silent reuse. The signed-in user must hold the
+        BI Service Administrator role on OAC.
       * --print-only: writes the 6-key JSON for manual UI upload (no IDCS app needed).
     """
     from .oac.install import InstallParams, install
@@ -227,7 +249,6 @@ def dashboard_install(
     if oauth_scope:
         resolved_scope = oauth_scope
     else:
-        # Auto-discover the IDCS audience prefix (different host from oac_url)
         try:
             audience = discover_oac_audience(oac_url)
             resolved_scope = derive_oac_scope(oac_url, audience=audience)
@@ -250,10 +271,15 @@ def dashboard_install(
         client_secret=resolved_secret,
         oauth_scope=resolved_scope,
         auth_flow=auth_flow,
+        prompt_login=prompt_login,
         private_key_pem_path=private_key_pem,
-        workbooks_dir=workbooks_dir,
+        bar_bucket=bar_bucket,
+        bar_uri=bar_uri,
+        bar_password=bar_password,
+        snapshot_name=snapshot_name,
         print_only=print_only,
         skip_workbooks=skip_workbooks,
+        overwrite_connection=overwrite_connection,
     )
     try:
         result = install(params, console=console)
@@ -261,104 +287,16 @@ def dashboard_install(
         console.print(f"[red]install failed:[/red] {exc}")
         sys.exit(1)
 
-    if result.imported_workbooks:
-        console.print(
-            f"\n[bold green]Done.[/bold green] Connection: [bold]{connection_name}[/bold] "
-            f"({result.connection_id}); workbooks: {', '.join(result.imported_workbooks)}"
-        )
-    elif result.connection_id:
-        console.print(
-            f"\n[bold green]Done.[/bold green] Connection: [bold]{connection_name}[/bold] "
-            f"({result.connection_id}). No workbooks imported."
-        )
-
-
-@dashboard.command("export")
-@click.option("--target", type=click.Choice(["oac"]), default="oac")
-@click.option("--oac-url", required=True, help="OAC instance URL (e.g. https://your-oac.example.com).")
-@click.option("--workbook", "workbook_path", required=True, multiple=True,
-              help="Workbook name OR full catalog path (e.g. '/@Catalog/users/oacadmin1/My Wb'). "
-                   "Pass multiple times to export several workbooks in one run.")
-@click.option("--output-dir", default=Path("oac/workbooks"), show_default=True,
-              type=click.Path(file_okay=False, path_type=Path),
-              help="Local directory to write the .dva files to.")
-@click.option("--include-data/--no-include-data", default=True, show_default=True,
-              help="Embed cached query results in the .dva (offline-portable) vs. re-query on import.")
-@click.option("--include-credentials/--no-include-credentials", default=False, show_default=True,
-              help="Embed connection credentials (PEM, etc.) in the .dva. Off by default so .dva is "
-                   "safe to commit; the bundle's `dashboard install` re-installs the AIDP connection separately.")
-@click.option("--idcs-url", required=True,
-              help="IDCS stripe URL (https://idcs-<stripe>.identity.oraclecloud.com).")
-@click.option("--client-id", required=True)
-@click.option("--client-secret", required=True,
-              help="IDCS confidential-app client_secret, or ${vault:OCID}.")
-@click.option("--oauth-scope", default=None,
-              help="Override auto-derived scope (default: <oac-url>urn:opc:resource:consumer::all offline_access).")
-@click.option("--auth-flow", type=click.Choice(["auth_code", "device"]), default="auth_code",
-              show_default=True)
-def dashboard_export(
-    target: str,
-    oac_url: str,
-    workbook_path: tuple[str, ...],
-    output_dir: Path,
-    include_data: bool,
-    include_credentials: bool,
-    idcs_url: str,
-    client_id: str,
-    client_secret: str,
-    oauth_scope: str | None,
-    auth_flow: str,
-) -> None:
-    """Export OAC workbooks to local ``.dva`` archives via REST.
-
-    Pairs with ``dashboard install`` for round-trip: build a workbook in OAC,
-    export it here, commit the ``.dva`` to your bundle, and ``dashboard install``
-    will re-import it on any other OAC instance.
-    """
-    from .oac.rest import (OacOauthFlow, OacRestClient, OacRestError,
-                           derive_oac_scope, discover_oac_audience)
-    from .utils import vault
-
-    # Audience auto-discovery
-    if oauth_scope:
-        resolved_scope = oauth_scope
-    else:
-        try:
-            audience = discover_oac_audience(oac_url)
-            resolved_scope = derive_oac_scope(oac_url, audience=audience)
-        except Exception as exc:
-            console.print(f"[yellow]audience discovery failed ({exc}); falling back to oac_url[/yellow]")
-            resolved_scope = derive_oac_scope(oac_url)
-
-    fetcher = OacOauthFlow(
-        idcs_url=idcs_url,
-        client_id=client_id,
-        client_secret=vault.resolve(client_secret),
-        scope=resolved_scope,
-        flow=auth_flow,
-    )
-    client = OacRestClient(oac_url, fetcher)
-
-    failures: list[str] = []
-    for wb in workbook_path:
-        try:
-            console.print(f"Exporting [bold]{wb}[/bold] ...")
-            out = client.export_workbook(
-                wb,
-                output_dir=output_dir,
-                include_data=include_data,
-                include_credentials=include_credentials,
-            )
-            console.print(f"  [green]wrote {out.stat().st_size:,} bytes[/green] -> [bold]{out}[/bold]")
-        except OacRestError as exc:
-            console.print(f"  [red]failed:[/red] {exc}")
-            failures.append(wb)
-        except Exception as exc:
-            console.print(f"  [red]failed:[/red] {exc}")
-            failures.append(wb)
-
-    if failures:
-        sys.exit(1)
+    # Summary
+    parts: list[str] = []
+    if result.connection_id:
+        parts.append(f"connection={connection_name} (id={result.connection_id})")
+    if result.snapshot_id:
+        parts.append(f"snapshot={result.snapshot_id} (status={result.work_request_status})")
+    if result.json_template_path:
+        parts.append(f"json={result.json_template_path}")
+    if parts:
+        console.print(f"\n[bold green]Done.[/bold green] " + " | ".join(parts))
 
 
 @dashboard.command("validate")
@@ -370,8 +308,9 @@ def dashboard_export(
 @click.option("--client-secret", required=True,
               help="IDCS confidential-app client_secret, or ${vault:OCID}.")
 @click.option("--oauth-scope", default=None,
-              help="Override auto-derived scope (default: <oac-url>urn:opc:resource:consumer::all offline_access).")
-@click.option("--workbooks", default="", help="Comma-separated workbook names (default: probe none).")
+              help="Override auto-derived scope.")
+@click.option("--snapshot-name", default=None,
+              help="Snapshot display name to verify is registered (default: probe none).")
 def dashboard_validate(
     target: str,
     oac_url: str,
@@ -379,18 +318,17 @@ def dashboard_validate(
     idcs_url: str,
     client_id: str,
     client_secret: str,
-    oauth_scope: str,
-    workbooks: str,
+    oauth_scope: str | None,
+    snapshot_name: str | None,
 ) -> None:
-    """Probe OAC: confirm connection + workbooks exist (read-only)."""
+    """Probe OAC: confirm connection (and optionally a snapshot) is present (read-only)."""
     from .oac.validate import ValidateParams, validate
     from .utils import vault
 
-    workbook_names = [w.strip() for w in workbooks.split(",") if w.strip()]
     params = ValidateParams(
         oac_url=oac_url,
         connection_name=connection_name,
-        workbook_names=workbook_names,
+        snapshot_name=snapshot_name,
         idcs_url=idcs_url,
         client_id=client_id,
         client_secret=vault.resolve(client_secret),
@@ -407,10 +345,9 @@ def dashboard_validate(
 @click.option("--idcs-url", required=True)
 @click.option("--client-id", required=True)
 @click.option("--client-secret", required=True)
-@click.option("--oauth-scope", default=None,
-              help="Override auto-derived scope (default: <oac-url>urn:opc:resource:consumer::all offline_access).")
-@click.option("--workbooks", default="",
-              help="Comma-separated workbook names to remove (default: only delete connection).")
+@click.option("--oauth-scope", default=None, help="Override auto-derived scope.")
+@click.option("--snapshot-id", default=None,
+              help="Snapshot ID to deregister (omit to skip).")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
 def dashboard_uninstall(
     target: str,
@@ -419,24 +356,30 @@ def dashboard_uninstall(
     idcs_url: str,
     client_id: str,
     client_secret: str,
-    oauth_scope: str,
-    workbooks: str,
+    oauth_scope: str | None,
+    snapshot_id: str | None,
     yes: bool,
 ) -> None:
-    """Remove imported OAC workbooks + the bundle's data source."""
+    """Remove the bundle's connection (and optionally deregister its snapshot).
+
+    Note: workbook restored content cannot be selectively deleted via the public
+    REST API — to fully roll back, restore an earlier snapshot of the OAC instance.
+    Or use Console -> Catalog to delete the /shared/AIDP_Fusion_Bundle/ folder.
+    """
     from .oac.uninstall import UninstallParams, uninstall
     from .utils import vault
 
     if not yes:
         click.confirm(
-            f"Remove connection '{connection_name}' + workbooks from {oac_url}?",
+            f"Remove connection '{connection_name}'"
+            + (f" + deregister snapshot {snapshot_id}" if snapshot_id else "")
+            + f" from {oac_url}?",
             abort=True,
         )
-    workbook_names = [w.strip() for w in workbooks.split(",") if w.strip()]
     params = UninstallParams(
         oac_url=oac_url,
         connection_name=connection_name,
-        workbook_names=workbook_names,
+        snapshot_id=snapshot_id,
         idcs_url=idcs_url,
         client_id=client_id,
         client_secret=vault.resolve(client_secret),
@@ -446,7 +389,7 @@ def dashboard_uninstall(
     console.print(
         f"\n[bold]Removed:[/bold] "
         f"connection={result.connection_deleted}, "
-        f"workbooks={result.deleted_workbooks}"
+        f"snapshot={result.snapshot_deleted}"
     )
 
 

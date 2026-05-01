@@ -2,20 +2,25 @@
 
 Public API:
     * :class:`OacOauthFlow` — Auth Code + PKCE / Device flow with refresh-token persistence
-    * :func:`derive_oac_scope` — build the canonical scope string from an OAC URL
+    * :func:`derive_oac_scope` / :func:`discover_oac_audience` — build the canonical scope string
     * :class:`AidpConnectionPayload` / :func:`build_payload` / :func:`render_template`
       — build and serialize the 6-key AIDP JDBC connection JSON
-    * :class:`OacRestClient` — Bearer-authenticated wrapper for
-      ``/api/<v>/catalog/connections`` and ``/api/<v>/catalog/workbooks/imports``
+    * :class:`OacRestClient` — Bearer-authenticated wrapper for the documented public endpoints:
+      ``/catalog/connections``, ``/snapshots``, ``/system/actions/restoreSnapshot``,
+      ``/workRequests/{id}``
+    * :class:`WorkRequestStatus` — enum of OAC's async-op statuses
+    * :func:`encode_catalog_id` — Base64URL-encode a catalog object's plain ID for path-params
 """
 
-from .client import OacRestClient, OacRestError
+from .client import OacRestClient, OacRestError, WorkRequestStatus, encode_catalog_id
 from .connection import AidpConnectionPayload, build_dsn, build_payload, render_template
 from .oauth import IdcsTokenFetcher, OacOauthFlow, TokenBundle, derive_oac_scope, discover_oac_audience
 
 __all__ = [
     "OacRestClient",
     "OacRestError",
+    "WorkRequestStatus",
+    "encode_catalog_id",
     "AidpConnectionPayload",
     "build_dsn",
     "build_payload",
