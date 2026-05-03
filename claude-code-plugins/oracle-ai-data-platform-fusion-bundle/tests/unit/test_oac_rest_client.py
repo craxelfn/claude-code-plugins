@@ -56,6 +56,8 @@ class TestListConnections:
         # NOT `/catalog/connections` (which is POST-only).
         assert call.kwargs["url"] == "https://oac.example.com/api/20210901/catalog"
         assert call.kwargs["params"]["type"] == "connections"
+        # search defaults to "*" (otherwise OAC returns a TypeInfo header, not items).
+        assert call.kwargs["params"]["search"] == "*"
         assert call.kwargs["headers"]["Authorization"] == "Bearer tok"
 
     def test_search_query_param(self) -> None:
@@ -66,6 +68,14 @@ class TestListConnections:
         params = s.request.call_args.kwargs["params"]
         assert params == {"type": "connections", "search": "aidp_fusion"}
 
+    def test_default_search_is_wildcard(self) -> None:
+        """Without an explicit search, helper passes ``search=*`` (live OAC requires this)."""
+        s = MagicMock()
+        s.request.return_value = MagicMock(status_code=200, json=lambda: [])
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        client.list_connections()
+        assert s.request.call_args.kwargs["params"]["search"] == "*"
+
     def test_dict_with_items_key(self) -> None:
         s = MagicMock()
         resp = MagicMock(status_code=200)
@@ -73,6 +83,21 @@ class TestListConnections:
         s.request.return_value = resp
         client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
         assert [c["name"] for c in client.list_connections()] == ["x"]
+
+    def test_drops_typeinfo_header_rows(self) -> None:
+        """OAC sometimes mixes a ``[{"type": "connections"}]`` header with no name —
+        drop those rows so callers see real records only."""
+        s = MagicMock()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = [
+            {"type": "connections"},  # TypeInfo header, no name
+            {"name": "real_conn", "id": "abc", "type": "connections"},
+        ]
+        s.request.return_value = resp
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        out = client.list_connections()
+        assert len(out) == 1
+        assert out[0]["name"] == "real_conn"
 
     def test_raises_on_non_200(self) -> None:
         s = MagicMock()
@@ -93,6 +118,28 @@ class TestFindConnection:
         out = client.find_connection("aidp_fusion_jdbc")
         assert out is not None
         assert out["id"] == "abc"
+
+    def test_passes_name_as_search_term(self) -> None:
+        """find_connection narrows server-side via search=<name>."""
+        s = MagicMock()
+        s.request.return_value = MagicMock(status_code=200, json=lambda: [])
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        client.find_connection("aidp_fusion_jdbc")
+        assert s.request.call_args.kwargs["params"]["search"] == "aidp_fusion_jdbc"
+
+    def test_substring_search_does_not_false_match(self) -> None:
+        """OAC's search is substring; helper enforces exact-match client-side."""
+        s = MagicMock()
+        # Server returns multiple substring hits — only the exact name should be picked.
+        s.request.return_value = MagicMock(
+            status_code=200,
+            json=lambda: [
+                {"name": "aidp_fusion_jdbc_v2", "id": "wrong"},
+                {"name": "other_aidp_fusion_jdbc_clone", "id": "also_wrong"},
+            ],
+        )
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+        assert client.find_connection("aidp_fusion_jdbc") is None
 
     def test_no_match(self) -> None:
         s = MagicMock()

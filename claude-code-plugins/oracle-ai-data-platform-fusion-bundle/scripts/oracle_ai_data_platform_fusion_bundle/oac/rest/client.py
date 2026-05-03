@@ -191,15 +191,29 @@ class OacRestClient:
 
     # ------------------------------------------------------------ connections
     def list_connections(self, *, search: str | None = None) -> list[dict[str, Any]]:
-        """``GET /api/<v>/catalog?type=connections[&search=<term>]`` — list connections.
+        """``GET /api/<v>/catalog?type=connections&search=<term>`` — list connections.
 
         Per Oracle's openapi.json, the documented connection-list endpoint is the
         generic ``/catalog`` browse with ``type=connections`` filter (NOT
         ``/catalog/connections`` which is POST-only).
+
+        Important behavior verified live on OAC 20210901 (TC10h-3, 2026-05-03):
+        when ``search`` is omitted, the response is a single-element TypeInfo
+        header (e.g. ``[{"type": "connections"}]``) instead of the actual
+        connection list. The ``search`` parameter is **required** to retrieve
+        items. Passing ``"*"`` returns all items the caller can see; passing
+        a substring narrows to matching names. The bundle therefore defaults
+        ``search`` to ``"*"`` when the caller doesn't specify one.
+
+        Each returned item exposes (live response, 2026-05-03):
+        ``owner, path, name, id, lastModified, type, parentId, objectId``.
+        ``id`` is the Base64URL-encoded catalog ID usable with the per-object
+        endpoints (``GET/PUT/DELETE /catalog/connections/{id}``).
         """
-        params: dict[str, Any] = {"type": "connections"}
-        if search:
-            params["search"] = search
+        params: dict[str, Any] = {
+            "type": "connections",
+            "search": search if search else "*",
+        }
         response = self._request("GET", "/catalog", params=params)
         if response.status_code != 200:
             raise OacRestError(
@@ -207,17 +221,26 @@ class OacRestClient:
                 response=response,
             )
         body = response.json()
+        items: list[dict[str, Any]] = []
         if isinstance(body, list):
-            return body
-        if isinstance(body, dict):
+            items = body
+        elif isinstance(body, dict):
             for key in ("items", "connections", "results"):
-                items = body.get(key)
-                if isinstance(items, list):
-                    return items
-        return []
+                v = body.get(key)
+                if isinstance(v, list):
+                    items = v
+                    break
+        # Drop TypeInfo header rows that lack a ``name`` (the endpoint mixes
+        # them in when nothing matched search, returning only ``{"type": "..."}``).
+        return [item for item in items if isinstance(item, dict) and item.get("name")]
 
     def find_connection(self, name: str) -> dict[str, Any] | None:
-        """Return the connection record whose display name matches ``name``, or ``None``."""
+        """Return the connection record whose display name matches ``name``, or ``None``.
+
+        Uses ``search=<name>`` for the server-side narrow then matches exactly
+        on the ``name`` / ``displayName`` field client-side (search is a
+        substring match — exact-match is enforced here).
+        """
         for conn in self.list_connections(search=name):
             if conn.get("name") == name or conn.get("displayName") == name:
                 return conn
