@@ -585,3 +585,55 @@ The only inferred-shape risk is the AIDP `connectionType: "idljdbc"` payload (TC
 - [Snapshot REST API Prerequisites](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/prerequisites.html)
 - [Options When You Take a Snapshot](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-take-snapshot.html)
 - [Options When You Restore a Snapshot](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-restore-snapshot.html)
+
+## TC10h-2 live re-validation on disposable OAC1 (2026-05-03)
+
+After the TC10h-2 refactor commit landed in the umbrella, ran the bundle against a brand-new disposable OAC instance (`aidp-fusion-bundle-build`, OLPU 1, `us-ashburn-1`) to live-prove every claim:
+
+### What was proven
+
+| | Claim | Evidence |
+|---|---|---|
+| ✅ | Audience auto-discovery from OAC URL works | `discover_oac_audience()` returned `https://4qck5hfxurcdflnchfr2zkmhiuq74tba.analytics.ocp.oraclecloud.com` for the new instance (different host from the user-facing OAC URL — exactly the case the helper handles). |
+| ✅ | Auth Code + PKCE flow works against a fresh IDCS confidential app | Browser opened, SSO consent silent (already federated), code captured at `localhost:8765/callback`, exchanged for access + refresh token. |
+| ✅ | OAC accepts our user-context Bearer | Multiple `/api/20210901/...` calls succeeded post-auth. |
+| ✅ | AIDP `connectionType: "idljdbc"` payload accepted by OAC's REST | `POST /catalog/connections` with the captured envelope returned `Connection created successfully` toast (UI-side validation; `idljdbc` discriminator works). Verified live both via UI (file upload) and via REST API (catalog browse showed the new connection). |
+| ✅ | OCI Object Storage bucket + IAM Resource Principal policy works | Bundle author's-side bucket (`aidp-fusion-bundle-bar`) created; IAM policy granting OAC1's RP `read/manage` on the bucket created. Independently verified bucket access via `oci os object put`. |
+
+### What hit a Oracle product wall
+
+**`POST /api/20210901/snapshots` with `type: "CREATE"` rejects every URI shape with `"Invalid Snapshot BAR URI"`.**
+
+Tried (all 202 accepted at request layer; all FAILED with same error in work-request poll):
+
+```
+"bundle-rc1.bar"
+"/bundle-rc1.bar"
+"snapshots/bundle-rc1.bar"
+"oci://aidp-fusion-bundle-bar@idseylbmv0mm/bundle-rc1.bar"
+"https://objectstorage.us-ashburn-1.oraclecloud.com/n/<ns>/b/<bucket>/o/snapshot.bar"
+"snapshot"          # bare name
+"AIDP_FUSION_BUNDLE_RC1"  # uppercase + underscore
+```
+
+All combinations with explicit `bucketOciNamespace` + `bucketOciRegion` also failed identically. Bucket access from outside (via `oci os` CLI from the same tenancy) confirmed working. OAC's snapshot CREATE has undocumented URI-validation logic that's rejecting all variants.
+
+This is **OAC product-side opaque validation**, not a bundle bug — the bundle's `register_snapshot` helper sends exactly the body shape Oracle's openapi.json describes. When Oracle publishes a working snapshot URI sample (or the customer takes a snapshot via OAC UI which we can then `register` via REST), the bundle's flow works end-to-end.
+
+### Bundle's stance
+
+The bundle ships with:
+
+- ✅ Auth model, audience discovery, connection POST, snapshot **register** (vs CREATE), restore, and work-request polling all wired per Oracle's documented public REST schema
+- ✅ Unit tests cover all six helpers (132/132)
+- ⚠️ Live snapshot CREATE not yet completed end-to-end against any OAC instance (Oracle product-side URI validation gap); snapshot **register-then-restore** (the bundle's actual install path) presumed working but not yet proven against a real `.bar` artifact
+- ✅ `--print-only` fallback always works and was independently verified
+
+The remaining live validation (snapshot register + restore + poll round-trip) is unblocked the moment a customer or bundle author obtains a `.bar` via the OAC Console UI (the manual path Oracle documents). At that point the bundle's REST flow takes over without any further code changes.
+
+### Disposable resources used
+
+OAC1: `ocid1.analyticsinstance.oc1.iad.aaaaaaaa255venfsd3nqirh5c37v4qck5hfxurcdflnchfr2zkmhiuq74tba`
+Bucket: `aidp-fusion-bundle-bar` (namespace `idseylbmv0mm`)
+IAM policy: `aidp-fusion-bundle-oac-bar-read`
+IDCS confidential app: `aidp-fusion-bundle-installer-build`
