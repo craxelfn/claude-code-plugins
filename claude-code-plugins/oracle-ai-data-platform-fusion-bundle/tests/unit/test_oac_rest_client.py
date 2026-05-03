@@ -206,9 +206,10 @@ class TestDeleteConnection:
 # -------------------------------------------------------------- snapshots
 class TestRegisterSnapshot:
     def test_register_via_oci_object_storage(self) -> None:
+        """POST body shape — uses wait=False to skip the async work-request poll."""
         s = MagicMock()
-        resp = MagicMock(status_code=202, text='{"id":"snap-1"}')
-        resp.json.return_value = {"id": "snap-1", "name": "fusion-bundle"}
+        resp = MagicMock(status_code=202, text='{"workRequestId":"wr-1"}')
+        resp.json.return_value = {"workRequestId": "wr-1"}
         s.request.return_value = resp
         client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
 
@@ -217,8 +218,9 @@ class TestRegisterSnapshot:
             bucket="customer-bucket",
             bar_uri="bundles/fusion-v1.bar",
             password="hunter2",
+            wait=False,
         )
-        assert out["id"] == "snap-1"
+        assert out == {"workRequestId": "wr-1"}
 
         call = s.request.call_args
         assert call.kwargs["method"] == "POST"
@@ -235,9 +237,9 @@ class TestRegisterSnapshot:
 
     def test_no_password_when_none(self) -> None:
         s = MagicMock()
-        s.request.return_value = MagicMock(status_code=202, text='{}', json=lambda: {})
+        s.request.return_value = MagicMock(status_code=202, text='{"workRequestId":"wr-x"}', json=lambda: {"workRequestId": "wr-x"})
         client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
-        client.register_snapshot(name="x", bucket="b", bar_uri="b.bar")
+        client.register_snapshot(name="x", bucket="b", bar_uri="b.bar", wait=False)
         body = s.request.call_args.kwargs["json"]
         assert "password" not in body
 
@@ -246,7 +248,76 @@ class TestRegisterSnapshot:
         s.request.return_value = MagicMock(status_code=400, text="bad")
         client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
         with pytest.raises(OacRestError, match="HTTP 400"):
-            client.register_snapshot(name="x", bucket="b", bar_uri="b.bar")
+            client.register_snapshot(name="x", bucket="b", bar_uri="b.bar", wait=False)
+
+    def test_wait_true_polls_then_returns_snapshot_record(self) -> None:
+        """When wait=True (default): POST → poll workRequest → look up snapshot by name."""
+        s = MagicMock()
+        post_resp = MagicMock(status_code=202, text='{"workRequestId":"wr-1"}', headers={})
+        post_resp.json.return_value = {"workRequestId": "wr-1"}
+
+        wr_resp = MagicMock(status_code=200, text='{"id":"wr-1","status":"SUCCEEDED"}')
+        wr_resp.json.return_value = {"id": "wr-1", "status": "SUCCEEDED", "resources": []}
+
+        list_resp = MagicMock(status_code=200, text='[]')
+        list_resp.json.return_value = [
+            {"id": "snap-1", "name": "fusion-bundle"},
+            {"id": "snap-2", "name": "other"},
+        ]
+
+        s.request.side_effect = [post_resp, wr_resp, list_resp]
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+
+        out = client.register_snapshot(
+            name="fusion-bundle",
+            bucket="b",
+            bar_uri="b.bar",
+            poll_interval=0,
+        )
+        assert out == {"id": "snap-1", "name": "fusion-bundle"}
+
+    def test_wait_true_uses_workrequest_resources_id_when_present(self) -> None:
+        """If the work-request payload exposes the snapshot id directly, fetch by id."""
+        s = MagicMock()
+        post_resp = MagicMock(status_code=202, text='{"workRequestId":"wr-2"}', headers={})
+        post_resp.json.return_value = {"workRequestId": "wr-2"}
+
+        wr_resp = MagicMock(status_code=200, text='{}')
+        wr_resp.json.return_value = {
+            "id": "wr-2",
+            "status": "SUCCEEDED",
+            "resources": [{"entityType": "snapshot", "identifier": "snap-77"}],
+        }
+
+        get_resp = MagicMock(status_code=200, text='{}')
+        get_resp.json.return_value = {"id": "snap-77", "name": "fusion-bundle"}
+
+        s.request.side_effect = [post_resp, wr_resp, get_resp]
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+
+        out = client.register_snapshot(
+            name="fusion-bundle",
+            bucket="b",
+            bar_uri="b.bar",
+            poll_interval=0,
+        )
+        assert out == {"id": "snap-77", "name": "fusion-bundle"}
+
+    def test_wait_true_raises_if_workrequest_failed(self) -> None:
+        s = MagicMock()
+        post_resp = MagicMock(status_code=202, text='{"workRequestId":"wr-x"}', headers={})
+        post_resp.json.return_value = {"workRequestId": "wr-x"}
+
+        wr_resp = MagicMock(status_code=200, text='{}')
+        wr_resp.json.return_value = {"id": "wr-x", "status": "FAILED"}
+
+        s.request.side_effect = [post_resp, wr_resp]
+        client = OacRestClient("https://oac.example.com", _fetcher(), session=s)
+
+        with pytest.raises(OacRestError, match="terminated as FAILED"):
+            client.register_snapshot(
+                name="fusion-bundle", bucket="b", bar_uri="b.bar", poll_interval=0,
+            )
 
 
 class TestRestoreSnapshot:

@@ -637,3 +637,44 @@ OAC1: `ocid1.analyticsinstance.oc1.iad.aaaaaaaa255venfsd3nqirh5c37v4qck5hfxurcdf
 Bucket: `aidp-fusion-bundle-bar` (namespace `idseylbmv0mm`)
 IAM policy: `aidp-fusion-bundle-oac-bar-read`
 IDCS confidential app: `aidp-fusion-bundle-installer-build`
+
+---
+
+## TC10h-3 — Snapshot register + restore round-trip live-validated (2026-05-03)
+
+After the OAC Console UI was used to take a snapshot named `aidp-fusion-bundle-rc1` and the resulting `.bar` was confirmed in the bucket (180,537 bytes — file URI shape `file:///<folder>/<name>.bar`), the snapshot REGISTER + RESTORE + work-request poll round-trip was exercised end-to-end against OAC1 via the bundle's helpers (`scripts/oracle_ai_data_platform_fusion_bundle/oac/rest/client.py`).
+
+### What was proven live
+
+| ✅/❌ | Step | Evidence |
+|---|---|---|
+| ✅ | Snapshot CREATE via REST works | First REST CREATE with `"uri": "file:///aidp-fusion-bundle/bundle-v0.1.0a0-rc1.bar"` succeeded (snapshot `id=6e01ce21-f8a3-481b-a333-4a0e0db0844f`). The `file:///<folder>/<name>.bar` URI shape was the missing piece — none of the seven URI variants tried in TC10h were correct. |
+| ✅ | `.bar` download from bucket works | `oci os object get` returned a 180,537-byte JAR/ZIP archive at `C:/Temp/oac_bar/bundle-v0.1.0a0-rc1.bar`. |
+| ✅ | Snapshot REGISTER via REST works | `POST /api/20210901/snapshots type=REGISTER` with the same `file:///` URI returned 202 + `{"workRequestId": "lfc-cb:13346-c7:3962263"}` (async). Polling the work request reached `SUCCEEDED`; subsequent `GET /snapshots` showed the new snapshot record `id=b5b86271-6b03-4c8c-8979-563d2b5aace3 name=aidp-fusion-bundle-roundtrip-rc1`. The bundle's `register_snapshot` helper was updated this run to handle the async response (poll → look up by name) — it had previously assumed synchronous `id` return. |
+| ✅ | Snapshot RESTORE via REST works | `POST /api/20210901/system/actions/restoreSnapshot` with `{"snapshot": {"id": "b5b86271-..."}}` returned 202 + `oa-work-request-id: lfc-cc:13347-ch:3962283`. |
+| ✅ | Work-request poll reaches SUCCEEDED | `GET /api/20210901/workRequests/lfc-cc:13347-ch:3962283` returned `status=SUCCEEDED, percentComplete=100, operationType=RESTORE_SNAPSHOT, resources=[{resourceType: SYSTEM, actionResult: SNAPSHOT_RESTORED}]`. Total elapsed `timeAccepted → timeFinished`: ~32 seconds (`2026-05-03T09:17:48Z → 09:18:20Z`). |
+| ✅ | Restored snapshot re-creates the AIDP connection | The connection had been deleted on OAC1 before the round-trip. After RESTORE, `GET /api/20210901/catalog/connections/L3VzZXJzL2FobWVkLnNoYWh6YWQuYXdhbkBvcmFjbGUuY29tL2FpZHBfZnVzaW9uX2pkYmM` returned HTTP 200 with `name=aidp_fusion_jdbc, type=connections, path=/@Catalog/users/ahmed.shahzad.awan@oracle.com/aidp_fusion_jdbc` — the snapshot brought it back exactly as it had been when captured. |
+
+### Bundle helper bug fixed during this run
+
+`OacRestClient.register_snapshot` previously assumed a synchronous response with a top-level `id` field. The actual API returns `202 + {"workRequestId": "..."}`. The helper was updated to:
+
+1. Read `workRequestId` from the response body (or `oa-work-request-id` header / `Location` fallback).
+2. Poll the work request to terminal status via `poll_work_request`.
+3. Look up the registered snapshot by name (or by ID from the work-request `resources[].identifier`) and return that record.
+4. Accept a `wait=False` opt-out for callers that want the raw async response.
+
+### What's still product-side blocked (not a bundle issue)
+
+- `POST /catalog/connections` with the captured `connectionType: "idljdbc"` payload still returns HTTP 400 from OAC's REST validator (`required property 'serviceName' not found... 'password' not found... 'connectionString' not found`). The validator falls through to generic Oracle DB schemas because AIDP isn't in Oracle's 11 published `connectionType` samples. The body shape works at the wire layer when posted via the UI's session, but the public REST validator rejects it.
+- This is the same limitation TC10h-2 documented and the reason the bundle ships with `--print-only` fallback for the connection step. It does **not** affect snapshot register/restore, which is the bundle's actual install path: customers who already have the AIDP connection (created via OAC UI) get a fully REST-driven snapshot install.
+
+### Net status: bundle is install-ready against any OAC where the AIDP connection already exists (or is created via UI)
+
+The 3-of-4 OAC REST calls in the bundle's install path (`register_snapshot`, `restore_snapshot`, `poll_work_request`) are now live-validated end-to-end against a real `.bar` produced by Oracle's snapshot machinery. The 4th call (`create_connection`) has the documented Oracle product-side validator gap and ships with a `--print-only` fallback.
+
+### Artifacts (this run)
+
+- Round-trip script: `C:/Temp/snapshot_roundtrip.py` (output: `C:/Temp/snapshot_roundtrip2.out`)
+- Restore-verification script: `C:/Temp/verify_restore.py` (output: `C:/Temp/verify_restore.out`)
+- Direct connection GET: `C:/Temp/debug_conn_direct.py`

@@ -351,6 +351,9 @@ class OacRestClient:
         storage_type: Literal["OCI_NATIVE"] = "OCI_NATIVE",
         auth_type: Literal["OCI_RESOURCE_PRINCIPAL"] = "OCI_RESOURCE_PRINCIPAL",
         password: str | None = None,
+        wait: bool = True,
+        timeout: int = 600,
+        poll_interval: int = 5,
     ) -> dict[str, Any]:
         """``POST /api/<v>/snapshots`` (REGISTER) — register a pre-uploaded ``.bar``.
 
@@ -358,6 +361,11 @@ class OacRestClient:
         (https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/prerequisites.html),
         the BAR must already live in OCI Object Storage; this call registers it
         with OAC so a subsequent restore knows where to read.
+
+        REGISTER is async: the POST returns 202 with body ``{"workRequestId": "..."}``.
+        With ``wait=True`` (default), this method polls the work request to terminal
+        status, then looks up the snapshot by name in :meth:`list_snapshots` and returns
+        that record (including the ``id`` needed by :meth:`restore_snapshot`).
 
         Args:
             name: Display name for the registered snapshot (any string).
@@ -370,13 +378,19 @@ class OacRestClient:
                 the prerequisites doc.
             password: Optional BAR password. If the BAR was created with a password,
                 pass it here so OAC can decrypt during restore.
+            wait: Block until the REGISTER work request reaches terminal status. If False,
+                returns immediately with ``{"workRequestId": ...}`` from the POST body.
+            timeout: Max seconds to wait for the work request when ``wait=True``.
+            poll_interval: Seconds between polls.
 
         Returns:
-            The registered snapshot record (includes the ``id`` you'll pass to
-            :meth:`restore_snapshot`).
+            When ``wait=True``: the registered snapshot record with ``id``.
+            When ``wait=False``: the raw POST response body (``{"workRequestId": ...}``).
 
         Raises:
-            OacRestError: if OAC rejects the request.
+            OacRestError: if OAC rejects the request or polling fails.
+            RuntimeError: if the work request succeeds but no snapshot named ``name``
+                appears in the list.
         """
         body: dict[str, Any] = {
             "type": "REGISTER",
@@ -397,7 +411,53 @@ class OacRestClient:
                 f"register_snapshot failed: HTTP {response.status_code}: {response.text}",
                 response=response,
             )
-        return response.json() if response.text else {}
+        post_body = response.json() if response.text else {}
+        if not wait:
+            return post_body
+
+        work_request_id = (
+            post_body.get("workRequestId")
+            or post_body.get("id")
+            or response.headers.get("oa-work-request-id")
+            or response.headers.get("Location", "").rsplit("/", 1)[-1]
+        )
+        if not work_request_id:
+            # Some deployments may return the snapshot record synchronously.
+            if isinstance(post_body, dict) and post_body.get("id"):
+                return post_body
+            raise RuntimeError(
+                f"register_snapshot: no workRequestId in response and no synchronous id; "
+                f"body={post_body!r} headers={dict(response.headers)}"
+            )
+
+        wr = self.poll_work_request(work_request_id, timeout=timeout, poll_interval=poll_interval)
+        wr_status = wr.get("status") or wr.get("lifecycleState") or "<unknown>"
+        if wr_status != WorkRequestStatus.SUCCEEDED:
+            raise OacRestError(
+                f"register_snapshot work request {work_request_id} terminated as "
+                f"{wr_status}: {wr}",
+            )
+
+        # Find the registered snapshot record by name (or by id from the work request).
+        wr_resources = wr.get("resources") or []
+        snapshot_id_from_wr = None
+        for r in wr_resources:
+            if (r.get("entityType") or "").lower() == "snapshot":
+                snapshot_id_from_wr = r.get("identifier") or r.get("id")
+                break
+        if snapshot_id_from_wr:
+            try:
+                return self.get_snapshot(snapshot_id_from_wr)
+            except OacRestError:
+                pass
+
+        for s in self.list_snapshots():
+            if s.get("name") == name:
+                return s
+        raise RuntimeError(
+            f"register_snapshot work request {work_request_id} SUCCEEDED but no "
+            f"snapshot named {name!r} found in list_snapshots()"
+        )
 
     def get_snapshot(self, snapshot_id: str) -> dict[str, Any]:
         """``GET /api/<v>/snapshots/{id}``."""
