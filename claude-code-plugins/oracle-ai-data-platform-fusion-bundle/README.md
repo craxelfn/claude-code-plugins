@@ -4,7 +4,7 @@
 >
 > Same pattern shown in the official Oracle blog [Bring Fusion Data into AIDP Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc), productized.
 
-**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + `oacai.cealinfra.com` OAC instance (TC1, TC7, TC8, TC9, TC10/b/c/d/h/h-2 all PASS — see [tests/live/](tests/live/)). **132 unit tests passing.** OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
+**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (`oacai.cealinfra.com` for TC10/b/c/d/h/h-2; disposable OAC1 for TC10h-3/h-4 — see [tests/live/](tests/live/) for full evidence trail). **139 unit tests passing.** **`dashboard install` validated end-to-end on OAC1 (TC10h-4, 2026-05-03)**: precheck → snapshot REGISTER → RESTORE → workRequest poll, all four documented OAC REST calls green in a single command. OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
 
 **Positioning**: This bundle is **additive to and complementary with** Oracle's managed Fusion data offerings. It productizes Option 1 of the BICC blog's three-option architecture (BICC into AIDP for "Custom AI and ML, raw data access, data engineering"). Never positioned as a replacement for FDI, OAC, OTBI, BIP, or Data Transforms — different jobs, same Oracle ecosystem.
 
@@ -37,14 +37,30 @@ aidp-fusion-bundle bootstrap --check-iam
 # 4. Run the orchestrator (first time = full extract; subsequent = incremental)
 aidp-fusion-bundle run --mode seed
 
-# 5. Upload the bundle's snapshot .bar to your OCI Object Storage bucket
+# 5. Upload the bundle's snapshot .bar to your OCI Object Storage bucket.
+#    Snapshots use a folder-prefixed object name; `--bar-uri` later passes the
+#    Oracle-documented `file:///<folder>/<name>.bar` shape.
 oci os object put --bucket-name aidp-fusion-bundle-bar \
-                  --file ./bundle-v0.1.0a0.bar --name bundle-v0.1.0a0.bar
+                  --file ./bundle-v0.1.0a0.bar \
+                  --name aidp-fusion-bundle/bundle-v0.1.0a0.bar
 
-# 6. Install OAC connection + restore the snapshot (one-time per OAC instance)
+# 6. Create the AIDP connection in OAC once via the UI (one-time per OAC).
+#    OAC's REST validator does not yet bless AIDP's `idljdbc` connectionType,
+#    so the connection is created via the UI on first install (see step 6a).
+#    Subsequent runs of `dashboard install` re-use the existing connection
+#    automatically (precheck via `find_connection`).
+#
+# 6a. (One-time, in OAC UI) Data → Connections → Create → "Oracle AI Data
+#     Platform" → upload the 6-key JSON written by `--print-only`:
+aidp-fusion-bundle dashboard install --target oac --oac-url ... --print-only
+# Then upload `oac/data_source/aidp_fusion_jdbc.json` + your private key PEM.
+
+# 6b. Run the REST install (snapshot register + restore; reuses the
+#     UI-created connection):
 aidp-fusion-bundle dashboard install --target oac \
   --oac-url https://your-oac.example.com \
-  --bar-bucket aidp-fusion-bundle-bar --bar-uri bundle-v0.1.0a0.bar
+  --bar-bucket aidp-fusion-bundle-bar \
+  --bar-uri 'file:///aidp-fusion-bundle/bundle-v0.1.0a0.bar'
 # (See docs/oac_rest_api_setup.md for the full args + IAM/Resource Principal setup)
 
 # 7. Print MCP config snippet for end users (paste into claude_desktop_config.json)
@@ -68,12 +84,14 @@ After step 7, restart your AI client and ask "what's our AR aging?" — OAC MCP 
                                                                  ▼
 ┌─────────────────────────────────┐    REST API    ┌──────────────────────────────┐
 │ aidp-fusion-bundle dashboard    │───────────────▶│       Oracle Analytics       │
-│  install --target oac           │  (1) POST      │       Cloud (OAC)            │
-│                                 │      /catalog/ │                              │
-│  - POST /catalog/connections    │      conns     │  - data source: aidp_fusion  │
-│  - POST /snapshots (.bar)       │  (2) POST      │  - workbooks: cfo_dashboard, │
-│  - POST /system/.../restore     │      /snapshot │    ar_aging, ap_aging, ...   │
-│  - GET  /workRequests/{id}      │      restore   │                              │
+│  install --target oac           │  (1) GET       │       Cloud (OAC)            │
+│                                 │      /catalog  │                              │
+│  - GET  /catalog?type=conns     │      ?search=* │  - data source: aidp_fusion  │
+│         &search=<name> (precheck│  (2) POST      │    (created via UI once;     │
+│         — skip POST if exists)  │      /snapshot │    bundle reuses on re-run)  │
+│  - POST /snapshots (.bar)       │      register  │  - workbooks: cfo_dashboard, │
+│  - POST /system/.../restore     │  (3) POST      │    ar_aging, ap_aging, ...   │
+│  - GET  /workRequests/{id}      │      /restore  │                              │
 └─────────────────────────────────┘                └──────────────┬───────────────┘
                                                                  │ Logical SQL
                                                                  ▼

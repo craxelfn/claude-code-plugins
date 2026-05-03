@@ -63,16 +63,27 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
 
 5. **Install OAC dashboards** (one-time per OAC instance):
    ```bash
-   # 5a. Upload the bundle's bundle-vN.bar to your OCI Object Storage bucket
+   # 5a. Upload bundle-vN.bar to your OCI Object Storage bucket. Use a folder
+   #     prefix in the object name; --bar-uri later passes the Oracle-documented
+   #     `file:///<folder>/<name>.bar` shape.
    oci os object put --bucket-name aidp-fusion-bundle-bar \
-                     --file ./bundle-v0.1.0a0.bar --name bundle-v0.1.0a0.bar
+                     --file ./bundle-v0.1.0a0.bar \
+                     --name aidp-fusion-bundle/bundle-v0.1.0a0.bar
 
-   # 5b. Run the install (POST connection + register/restore snapshot + poll)
+   # 5b. (One-time, in OAC UI) Create the AIDP connection. Run the bundle
+   #     in --print-only mode to write the 6-key JSON, then upload it via
+   #     OAC UI: Data → Connections → Create → "Oracle AI Data Platform".
+   aidp-fusion-bundle dashboard install --target oac --oac-url ... --print-only
+
+   # 5c. Run the REST install (snapshot register + restore + poll). The bundle
+   #     uses GET /catalog?type=connections&search=<name> to find the existing
+   #     connection and skip the POST. Subsequent installs re-use it.
    aidp-fusion-bundle dashboard install --target oac \
      --oac-url https://oac.example.com \
-     --bar-bucket aidp-fusion-bundle-bar --bar-uri bundle-v0.1.0a0.bar
+     --bar-bucket aidp-fusion-bundle-bar \
+     --bar-uri 'file:///aidp-fusion-bundle/bundle-v0.1.0a0.bar'
    ```
-   Uses ONLY Oracle-documented public REST endpoints: `POST /catalog/connections`, `POST /snapshots`, `POST /system/actions/restoreSnapshot`, `GET /workRequests/{id}`. See `docs/oac_rest_api_setup.md` for the one-time IDCS confidential-app + Object Storage Resource Principal setup.
+   Uses ONLY Oracle-documented public REST endpoints: `GET /catalog?type=connections&search=<name>` (precheck), `POST /catalog/connections` (skipped when precheck finds the existing connection — the realistic flow), `POST /snapshots`, `POST /system/actions/restoreSnapshot`, `GET /workRequests/{id}`. See `docs/oac_rest_api_setup.md` for the one-time IDCS confidential-app + Object Storage Resource Principal setup.
 
 6. **End users chat with the data** via OAC MCP. Print the MCP config snippet:
    ```bash
@@ -87,6 +98,9 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
 - **First extract is slow** — BICC builds a full snapshot on first call; subsequent runs use `fusion.initial.extract-date` for incremental.
 - **499 row/page hard cap on Fusion REST** (per MOS Doc ID 2429019.1) — bundle's REST fallback enforces this; anything >5k rows must use BICC.
 - **OAC MCP is read-only** — it cannot create workbooks or register data sources. Bundle uses **OAC REST API** for write operations; MCP is for end-user chat consumption only.
+- **`POST /catalog/connections` REST validator does not bless AIDP `idljdbc`** — Oracle's validator falls through to generic Oracle DB schemas requiring `serviceName`/`password`/`connectionString`. The realistic flow is therefore: customer creates the connection via OAC UI once (using the 6-key JSON written by `--print-only`), then `dashboard install` re-uses it via the precheck on subsequent runs. (✅ Live-validated TC10h-4, 2026-05-03 against disposable OAC1.)
+- **Snapshot BAR URI shape is `file:///<folder>/<name>.bar`** — NOT `oci://...`, NOT bare object name, NOT the OCI Object Storage HTTPS URL. None of the seven URI variants tried during TC10h were correct. Verified live TC10h-3.
+- **OAC catalog browse needs `search=*`** — `GET /catalog?type=connections` (no search) returns a single-element TypeInfo header (`[{"type":"connections"}]`), NOT the actual list. Bundle's `list_connections` defaults `search="*"` so the precheck works. (Caught + fixed during TC10h-3 live validation.)
 - **Use ExtractPVOs for bulk, NOT OTBI reporting PVOs** — pdf1 Pro Tip; bundle's catalog refuses OTBI PVOs with a clear warning.
 
 ## References

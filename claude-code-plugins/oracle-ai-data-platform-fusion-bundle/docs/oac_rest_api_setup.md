@@ -1,12 +1,13 @@
 # OAC REST API setup — automating `dashboard install`
 
-The bundle's `aidp-fusion-bundle dashboard install --target oac` command is built on **only Oracle-documented public REST endpoints** (audit done 2026-05-01 against [openapi.json](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/openapi.json) — see TC10h-2 in `tests/live/TC10_oac_integration_results.md`):
+The bundle's `aidp-fusion-bundle dashboard install --target oac` command is built on **only Oracle-documented public REST endpoints** (audit done 2026-05-01 against [openapi.json](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/openapi.json) — see TC10h-2/h-3/h-4 in `tests/live/TC10_oac_integration_results.md`):
 
 ```
-1. POST /api/20210901/catalog/connections                (create AIDP connection)
-2. POST /api/20210901/snapshots                          (register customer-uploaded .bar)
-3. POST /api/20210901/system/actions/restoreSnapshot     (async restore)
-4. GET  /api/20210901/workRequests/{id}                  (poll until SUCCEEDED)
+1. GET  /api/20210901/catalog?type=connections&search=<name>  (precheck — skip POST if found)
+2. POST /api/20210901/catalog/connections                     (create AIDP connection — see "Realistic flow" below)
+3. POST /api/20210901/snapshots                               (register customer-uploaded .bar)
+4. POST /api/20210901/system/actions/restoreSnapshot          (async restore)
+5. GET  /api/20210901/workRequests/{id}                       (poll until SUCCEEDED)
 ```
 
 The bundle ships:
@@ -15,6 +16,15 @@ The bundle ships:
 - A `bundle-vN.bar` file as a release artifact (workbook content)
 
 Customers upload the `.bar` to their own OCI Object Storage bucket once. The bundle then runs the four REST calls above to install everything.
+
+## Realistic deployment flow (live-validated TC10h-4, 2026-05-03)
+
+OAC's REST validator on `POST /catalog/connections` does not yet bless the AIDP `idljdbc` connectionType (it falls through to generic Oracle DB schemas requiring `serviceName`/`password`/`connectionString`). The bundle therefore uses this flow on first install:
+
+1. **(One-time, OAC UI)** Customer creates the AIDP connection via OAC UI: Data → Connections → Create → "Oracle AI Data Platform" → upload the 6-key JSON written by `aidp-fusion-bundle dashboard install --print-only` plus the API-key PEM. This is the path Oracle documents in the [AIDP-from-OAC Quick Start blog](https://blogs.oracle.com/ai-data-platform/continuing-your-oracle-ai-data-platform-journey-quick-start-guide).
+2. **All subsequent runs** of `dashboard install` are pure REST: the precheck (`GET /catalog?type=connections&search=<name>`) finds the existing connection and skips the `POST /catalog/connections` step entirely; snapshot register + restore + poll then deploy the `.bar`.
+
+The bundle's `--overwrite-connection` flag still triggers the POST and would hit the validator gap; use `--print-only` + UI re-upload if you need to recreate the connection.
 
 ---
 
@@ -90,11 +100,13 @@ OCI Console → **Object Storage → Buckets → Create**.
 
 Download `bundle-vN.bar` from the bundle's release artifacts (or build it yourself with `bundle build-bar` — see "Bundle author workflow" below).
 
-Upload via OCI Console (Bucket → Upload Object) or `oci os object put`:
+Upload via OCI Console (Bucket → Upload Object) or `oci os object put`. Use a **folder-prefixed object name** — `--bar-uri` later passes the Oracle-documented `file:///<folder>/<name>.bar` shape, which is the only URI variant OAC's snapshot machinery accepts (verified live TC10h-3, 2026-05-03):
+
 ```bash
 oci os object put --bucket-name aidp-fusion-bundle-bar \
                   --file ./bundle-v0.1.0a0.bar \
-                  --name bundle-v0.1.0a0.bar
+                  --name aidp-fusion-bundle/bundle-v0.1.0a0.bar
+# Object name above maps to --bar-uri 'file:///aidp-fusion-bundle/bundle-v0.1.0a0.bar'
 ```
 
 ### Step 7 — Grant OAC's Resource Principal access to the bucket
@@ -126,7 +138,7 @@ aidp-fusion-bundle dashboard install --target oac \
   --client-id <step-4-client-id> \
   --client-secret '<step-4-client-secret>' \
   --bar-bucket aidp-fusion-bundle-bar \
-  --bar-uri bundle-v0.1.0a0.bar \
+  --bar-uri 'file:///aidp-fusion-bundle/bundle-v0.1.0a0.bar' \
   --bar-password '<bar-password-if-protected>' \
   --snapshot-name aidp-fusion-bundle-v0.1.0a0
 ```
@@ -136,10 +148,11 @@ aidp-fusion-bundle dashboard install --target oac \
 **Subsequent runs** — silent refresh-token round-trip; no browser pop-up.
 
 The bundle then:
-1. POSTs the 6-key AIDP connection JSON
-2. Registers the snapshot from your Object Storage bucket (async)
-3. Restores the snapshot (async, returns `oa-work-request-id`)
-4. Polls the work request until `SUCCEEDED`
+1. **GETs** `/catalog?type=connections&search=<connection-name>` to find an existing connection (the realistic-flow precheck — see top of this doc)
+2. If no existing connection, **POSTs** the 6-key AIDP connection JSON (subject to the `idljdbc` validator gap; if it 400s, fall back to `--print-only` + OAC UI upload)
+3. **Registers** the snapshot from your Object Storage bucket (async, returns `workRequestId`)
+4. **Restores** the snapshot (async, returns `oa-work-request-id` header)
+5. **Polls** the work request until `SUCCEEDED`
 
 ---
 
@@ -226,7 +239,19 @@ The user that signed in via SSO doesn't have **BI Service Administrator** role o
 
 ### `HTTP 400 connection schema invalid` on `POST /catalog/connections`
 
-The AIDP `idljdbc` connectionType is reverse-engineered from the OAC UI's create-connection traffic and is **not in Oracle's published 11 connectionType samples**. Newer OAC versions may reject it. Workaround: re-run with `--print-only` and upload via Data → Connections → Create → "Oracle AI Data Platform".
+The AIDP `idljdbc` connectionType is reverse-engineered from the OAC UI's create-connection traffic and is **not in Oracle's published 11 connectionType samples**. OAC's REST validator therefore falls through to generic Oracle DB schemas requiring `serviceName`/`password`/`connectionString`. **This is the expected first-install path:** create the connection once via the OAC UI (re-run with `--print-only` to write the JSON, then upload via Data → Connections → Create → "Oracle AI Data Platform"). All subsequent `dashboard install` runs reuse the existing connection via the precheck — pure REST.
+
+### `Invalid Snapshot BAR URI` on `POST /snapshots`
+
+The URI shape must be exactly `file:///<folder>/<name>.bar`. Common mistakes:
+- `bundle-v0.1.0a0.bar` (bare object name) — wrong, fails validation.
+- `oci://<bucket>@<namespace>/<object>` — wrong; OAC's snapshot machinery does not accept the OCI-native URI scheme here.
+- `https://objectstorage.<region>.oraclecloud.com/n/<ns>/b/<bucket>/o/<object>` — wrong; pre-authenticated request URLs aren't accepted either.
+- The bundle expects you to upload with a folder-prefixed name (e.g. `--name aidp-fusion-bundle/bundle-v0.1.0a0.bar`) and pass `--bar-uri 'file:///aidp-fusion-bundle/bundle-v0.1.0a0.bar'`.
+
+### `find_connection` returns `None` even though the connection exists
+
+Old client versions called `GET /catalog?type=connections` without a `search` parameter, which OAC answers with a single-element TypeInfo header (`[{"type":"connections"}]`) — not the actual list. Fixed in `52ce2c7` (TC10h-3): `list_connections` now defaults `search="*"`. Upgrade the bundle if you see this on a build older than 2026-05-03.
 
 ### Snapshot restore fails with `ACCESS_DENIED`
 
@@ -265,4 +290,5 @@ Copy the URL printed below "Opening browser..." and paste into any browser. Or s
 - [Options When You Take a Snapshot (Custom mode content-type filters)](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-take-snapshot.html)
 - [Options When You Restore a Snapshot](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acmgp/options-when-you-restore-snapshot.html)
 - [Predefined OAC Application Roles](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acabi/predefined-application-roles.html)
-- [TC10 live test results](../tests/live/TC10_oac_integration_results.md) — full evidence trail TC10a–TC10h-2
+- [TC10 live test results](../tests/live/TC10_oac_integration_results.md) — full evidence trail TC10a–TC10h-4 (h-3: snapshot register/restore round-trip; h-4: end-to-end `dashboard install` SUCCESS on disposable OAC1)
+- [AIDP-from-OAC Quick Start blog](https://blogs.oracle.com/ai-data-platform/continuing-your-oracle-ai-data-platform-journey-quick-start-guide) — Oracle's documented UI flow for creating the AIDP connection in OAC
