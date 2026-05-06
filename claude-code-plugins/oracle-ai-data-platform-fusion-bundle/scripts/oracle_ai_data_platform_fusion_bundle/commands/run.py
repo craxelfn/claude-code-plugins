@@ -172,9 +172,9 @@ def _run_via_aidp_dispatch(
 ) -> int:
     """Submit one AIDP REST job per dataset.
 
-    The bundle ships ``notebooks/run_orchestrator.ipynb`` (TODO) which is
-    the per-dataset entry point. Until that notebook is published, this
-    command prints the dispatch plan so the user can run it manually.
+    Phase 2 will ship ``notebooks/run_orchestrator.ipynb`` as the per-dataset
+    entry point. Until then, this command prints the dispatch plan so the
+    user can run it manually inside an AIDP notebook session.
     """
     console.print(
         f"[bold]Dispatch plan[/bold] (env=[cyan]{env_name}[/cyan], mode=[cyan]{mode}[/cyan]):"
@@ -190,8 +190,8 @@ def _run_via_aidp_dispatch(
         )
     console.print(table)
     console.print(
-        "\n[yellow]NOTE:[/yellow] dispatch submission is wired only when "
-        "[cyan]notebooks/run_orchestrator.ipynb[/cyan] exists in the workspace. "
+        "\n[yellow]NOTE:[/yellow] Phase 2 will wire dispatch submission via "
+        "[cyan]notebooks/run_orchestrator.ipynb[/cyan]. "
         "Today, run those commands manually inside an AIDP notebook session."
     )
     return 0

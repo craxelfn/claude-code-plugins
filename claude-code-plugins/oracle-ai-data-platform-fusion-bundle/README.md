@@ -19,6 +19,10 @@
 5. **BI & reporting via JDBC** — OAC, Tableau, Power BI consume the gold layer
 6. **Delta Sharing** (v3 roadmap) — share curated datasets with other teams or external partners
 
+> **Phase 1 vs Phase 2**:
+> - **Wired in 0.1.0-alpha** (✅): BICC → bronze landing, OAC connection install (REST), `dashboard install` / `validate` / `uninstall`, MCP config emission, 139 unit tests, end-to-end live validation on disposable OAC1.
+> - **Stubbed (Phase 2 / 0.2.0)** (🚧): silver/gold transforms, conformed dimensions (`dim_supplier`, `dim_account`, `dim_calendar`, `dim_item`, `dim_org`), 5 gold marts (`supplier_spend`, `gl_balance`, `ap_aging`, `ar_aging`, `po_backlog`), `.bar` release artifact.
+
 ---
 
 ## Quickstart
@@ -135,18 +139,18 @@ Run `aidp-fusion-bundle catalog probe --pod <url>` to reconcile placeholders aga
 
 ## Use cases
 
-1. **New AIDP customer onboarding** — `bundle.yaml` with `examples/full_finance.yaml`, run orchestrator, walk away, return to a populated bronze + silver + gold + OAC workbooks.
-2. **CFO demo in 30 minutes** — clone repo → `bootstrap` → `run --mode seed` → `dashboard install --target oac` → open OAC workbook → optionally chat via OAC MCP.
-3. **Custom GenAI agents grounded on Fusion data** — `ai_generate("which suppliers had >$1M Q1 spend?")` against the bundle's curated gold marts via OCI Generative AI.
-4. **Fusion-side of the SAP-modernization pattern** — Fusion data lands here; SAP data via parallel pipeline; both unified in AIDP gold layer.
-5. **Build cross-source data products** — combine Fusion + Salesforce/Workday/S3/Postgres via the same `aidataplatform` connector family.
-6. **Cross-module analytics** — order-to-cash health (AR × PO), commitments-vs-actuals (PO × GL), with conformed dimensions.
-7. **Conformed dim reuse** — your existing AIDP notebooks join to `fusion_silver.dim_account` instead of re-deriving.
-8. **Daily incremental refresh** — schedule the orchestrator as an AIDP job; bundle handles watermarks + Fusion's first-then-incremental BICC behavior.
-9. **Fusion quarterly-update resilience** — schema-drift detection auto-evolves on adds, quarantines on remove/change.
-10. **SOX-ready audit trail** — every load writes `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`; Iceberg/Delta time-travel + audit columns satisfy auditors.
-11. **Customer customizations** — extend `dim_account` for additional COA segments per `docs/customizing.md`; no fork needed.
-12. **Pod migration** — change `fusion.serviceUrl` in `bundle.yaml`, re-run `seed`, bundle reloads everything against new pod.
+1. **New AIDP customer onboarding** *(Phase 2 🚧)* — `bundle.yaml` with `examples/full_finance.yaml`, run orchestrator, walk away, return to a populated bronze + silver + gold + OAC workbooks.
+2. **CFO demo in 30 minutes** *(0.1.0a ⚠ partial — gold marts stubbed)* — clone repo → `bootstrap` → `run --mode seed` → `dashboard install --target oac` → open OAC workbook → optionally chat via OAC MCP.
+3. **Custom GenAI agents grounded on Fusion data** *(0.1.0a ✅)* — `ai_generate("which suppliers had >$1M Q1 spend?")` against the bundle's curated gold marts via OCI Generative AI.
+4. **Fusion-side of the SAP-modernization pattern** *(Phase 2 🚧)* — Fusion data lands here; SAP data via parallel pipeline; both unified in AIDP gold layer.
+5. **Build cross-source data products** *(Phase 2 🚧)* — combine Fusion + Salesforce/Workday/S3/Postgres via the same `aidataplatform` connector family.
+6. **Cross-module analytics** *(Phase 2 🚧)* — order-to-cash health (AR × PO), commitments-vs-actuals (PO × GL), with conformed dimensions.
+7. **Conformed dim reuse** *(Phase 2 🚧)* — your existing AIDP notebooks join to `fusion_silver.dim_account` instead of re-deriving.
+8. **Daily incremental refresh** *(Phase 2 🚧)* — schedule the orchestrator as an AIDP job; bundle handles watermarks + Fusion's first-then-incremental BICC behavior.
+9. **Fusion quarterly-update resilience** *(Phase 2 🚧)* — schema-drift detection auto-evolves on adds, quarantines on remove/change.
+10. **SOX-ready audit trail** *(0.1.0a ✅)* — every load writes `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`; Iceberg/Delta time-travel + audit columns satisfy auditors.
+11. **Customer customizations** *(Phase 2 🚧)* — extend `dim_account` for additional COA segments per `docs/customizing.md`; no fork needed.
+12. **Pod migration** *(Phase 2 🚧)* — change `fusion.serviceUrl` in `bundle.yaml`, re-run `seed`, bundle reloads everything against new pod.
 
 ---
 

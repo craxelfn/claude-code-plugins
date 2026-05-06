@@ -27,11 +27,11 @@ All notable changes to this project are documented here.
 ### Tests
 - 139/139 passing (was 132 after TC10h-2; net +7 for TC10h-3 fixes — 3 async REGISTER paths, 4 list/find connection paths). End-to-end `dashboard install` validated live on disposable OAC1.
 
-## [0.1.0-alpha] — TBD (Phase 1 gate, week 1)
+## [0.1.0-alpha] — 2026-05-05
 
 Phase 1 deliverable per [PLAN](../../../.claude/plans/oracle-ai-data-platform-fusion-bundle.md): core BICC path + Supplier Extract.
 
-### Planned
+### Achieved
 - BICC extractor for `FscmTopModelAM.SupplierExtractPVO` mirroring [`oracle-aidp-samples/data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb`](../../../data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb)
 - GL trio (Journal Lines, Period Balances, Chart of Accounts)
 - `dim_account` + `dim_calendar` + `dim_supplier`
