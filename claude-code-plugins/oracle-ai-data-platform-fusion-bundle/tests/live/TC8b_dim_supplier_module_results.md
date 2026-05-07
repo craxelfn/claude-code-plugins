@@ -83,13 +83,12 @@ TC8 referenced "`Vendor` (human name)" — `CALVIN.ROTH`, `anu.rathi`, etc. The 
 
 The 143-column extract has multiple name-shaped fields (`ALIASPARTYNAME`, `ALTERNATENAMEPARTYNAME`, etc.), but the primary supplier DBA name needs identification via `DESCRIBE`-and-sample on the live AIDP catalog.
 
-## Impact on P1.1 plan
+## Decisions baked into the shipped `dim_supplier.py` module
 
-The PLAN_P1.1_dim_supplier.md was updated 2026-05-07 to reflect:
-- **§3.3 / §3.4** — all SQL uses UPPERCASE column refs
-- **§3.3** — `supplier_name` becomes `supplier_name_proxy` until the right column is identified
-- **§4.2** — `id_populated_pct(vendor_id)` expectation flipped from `0.0` to `1.0`; new assertion: 5/5 top-spend vendors must appear in `silver.dim_supplier.vendor_id`
-- **§6 / §7** — column-name risk closed; supplier-name column risk added (smaller scope)
+* **All bronze refs are UPPERCASE** (`SEGMENT1`, `VENDORID`, `PARTYID`, `LASTUPDATEDATE`, …) — verified live above; matches the BICC connector's column convention for `SupplierExtractPVO`.
+* **`NULLIF(CAST(... AS BIGINT), 0)` defensively** on every ID column, regardless of which pod the bundle runs against. Demo pods may return `0` for missing IDs; production pods may return real bigints. Same code path handles both.
+* **`id_populated_pct(spark, column="vendor_id")` helper** ships as a runtime diagnostic. Used initially to inform a join-vs-fallback picker in `gold.supplier_spend`, but that picker has since been removed in favor of a single LEFT-JOIN form (see TC8c). The helper remains useful for ops / observability.
+* **Supplier name source** — the module COALESCEs `AlternateNamePartyName → AliasPartyName → TaxReportingName → NULL`. On eseb-test 9.1% of rows resolve to a populated name (e.g. `Dell Inc`, `UPS`, `STAPLES INC`); the rest are accurately NULL. Production pods are expected to populate at least one of these cleanly. `CREATEDBY` was deliberately not chosen as the supplier-name source — it holds the Fusion *user* who created the record (`CALVIN.ROTH`, `LIZ.MORGAN`), not the supplier's company name.
 
 ## Side effect on backlog
 
@@ -221,9 +220,9 @@ Re-running the same CTAS twice produces identical row counts and a fresh `silver
 
 This validates the audit-lineage design — every rebuild gets a fresh per-run timestamp while the data shape stays stable.
 
-### Pytest unit tests (14/14 passing, no regressions)
+### Pytest unit tests (14/14 passing for `test_dim_supplier.py`, zero regressions)
 
-`pytest tests/unit/test_dim_supplier.py -v` collected and passed all 14 tests in 0.02s. Full unit suite: **153/153 pass** (was 139 + 14 new = 153). Zero regressions in the existing extractor / OAC / catalog / commands / vault tests.
+`pytest tests/unit/test_dim_supplier.py -v` collected and passed all 14 tests in 0.02s. The new tests integrated cleanly into the bundle's full unit suite — no regressions in the existing extractor / OAC / catalog / commands / vault tests. (Total suite count grows as later P1 items land; current totals live in the top-level CHANGELOG.)
 
 ### Final schema (14 columns — matches plan)
 
@@ -271,4 +270,3 @@ silver_built_at         timestamp     # per-build audit
 - Original TC8 results (the document being corrected): [`TC8_supplier_spend_results.md`](TC8_supplier_spend_results.md)
 - TC1 / TC7 BICC bronze evidence: [`TC1_TC7_results.md`](TC1_TC7_results.md)
 - Catalog entry under correction: [`schema/fusion_catalog.py:67-78`](../../scripts/oracle_ai_data_platform_fusion_bundle/schema/fusion_catalog.py#L67) (no change required — bronze table name is unaffected)
-- P1.1 plan: [`PLAN_P1.1_dim_supplier.md`](../../PLAN_P1.1_dim_supplier.md) (untracked working note)

@@ -4,7 +4,7 @@
 >
 > Same pattern shown in the official Oracle blog [Bring Fusion Data into AIDP Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc), productized.
 
-**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (`oacai.cealinfra.com` for TC10/b/c/d/h/h-2; disposable OAC1 for TC10h-3/h-4 — see [tests/live/](tests/live/) for full evidence trail). **139 unit tests passing.** **`dashboard install` validated end-to-end on OAC1 (TC10h-4, 2026-05-03)**: precheck → snapshot REGISTER → RESTORE → workRequest poll, all four documented OAC REST calls green in a single command. OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
+**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (`oacai.cealinfra.com` for TC10/b/c/d/h/h-2; disposable OAC1 for TC10h-3/h-4 — see [tests/live/](tests/live/) for full evidence trail). **187 unit tests passing.** **`dashboard install` validated end-to-end on OAC1 (TC10h-4, 2026-05-03)**: precheck → snapshot REGISTER → RESTORE → workRequest poll, all four documented OAC REST calls green in a single command. OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
 
 **Positioning**: This bundle is **additive to and complementary with** Oracle's managed Fusion data offerings. It productizes Option 1 of the BICC blog's three-option architecture (BICC into AIDP for "Custom AI and ML, raw data access, data engineering"). Never positioned as a replacement for FDI, OAC, OTBI, BIP, or Data Transforms — different jobs, same Oracle ecosystem.
 
@@ -20,7 +20,7 @@
 6. **Delta Sharing** (v3 roadmap) — share curated datasets with other teams or external partners
 
 > **Phase 1 vs Phase 2**:
-> - **Wired in 0.1.0-alpha** (✅): BICC → bronze landing, OAC connection install (REST), `dashboard install` / `validate` / `uninstall`, MCP config emission, 139 unit tests, end-to-end live validation on disposable OAC1.
+> - **Wired in 0.1.0-alpha** (✅): BICC → bronze landing, OAC connection install (REST), `dashboard install` / `validate` / `uninstall`, MCP config emission, 187 unit tests, end-to-end live validation on disposable OAC1.
 > - **Stubbed (Phase 2 / 0.2.0)** (🚧): silver/gold transforms, conformed dimensions (`dim_supplier`, `dim_account`, `dim_calendar`, `dim_item`, `dim_org`), 5 gold marts (`supplier_spend`, `gl_balance`, `ap_aging`, `ar_aging`, `po_backlog`), `.bar` release artifact.
 
 ---

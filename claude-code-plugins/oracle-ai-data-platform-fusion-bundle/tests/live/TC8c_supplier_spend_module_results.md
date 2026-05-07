@@ -86,7 +86,6 @@ gold_built_at          timestamp
 
 ## References
 
-* P1.2 acceptance criteria: [`BACKLOG.md`](../../BACKLOG.md) §P1.2 (untracked working note)
 * TC8 original prototype evidence: [`TC8_supplier_spend_results.md`](TC8_supplier_spend_results.md)
 * TC8b dim_supplier module: [`TC8b_dim_supplier_module_results.md`](TC8b_dim_supplier_module_results.md)
 * Module: [`scripts/.../transforms/gold/supplier_spend.py`](../../scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/supplier_spend.py)
