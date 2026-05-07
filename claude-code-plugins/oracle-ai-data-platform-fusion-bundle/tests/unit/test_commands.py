@@ -146,8 +146,12 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, ["run", "--mode", "incremental"])
-        assert result.exit_code == 0
+        # Exit code 2 = "PLAN ONLY, no work performed". The plan IS still printed,
+        # but the command intentionally fails so CI doesn't mistake the dry-run for
+        # a real pipeline execution. Will become 0 once P1.5 wires dispatch submission.
+        assert result.exit_code == 2
         assert "Dispatch plan" in result.output
+        assert "PLAN ONLY" in result.output
         # at least one of the minimal-template datasets should be listed
         assert "gl_journal_lines" in result.output or "fusion_catalog" in result.output
 
@@ -157,7 +161,25 @@ class TestRun:
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "incremental", "--datasets", "gl_journal_lines",
         ])
-        assert result.exit_code == 0
+        # Same exit-code-2 contract as test_dispatch_plan_dry_run — see comment above.
+        assert result.exit_code == 2
+
+    def test_inline_without_orchestrator_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`run --inline` must NOT silently succeed when orchestrator.run is missing.
+
+        Until P1.5 lands, the orchestrator subpackage has no run() function. The CLI
+        must surface this explicitly (exit code 2 + message pointing at the dim/gold
+        module import path) rather than returning 0 like a no-op.
+        """
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--inline"])
+        assert result.exit_code == 2
+        assert "P1.5" in result.output
+        # The message should point users at the modules they CAN use today
+        assert "dim_supplier" in result.output
 
 
 class TestStatus:

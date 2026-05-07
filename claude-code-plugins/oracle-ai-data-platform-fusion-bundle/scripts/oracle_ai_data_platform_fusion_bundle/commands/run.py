@@ -151,13 +151,18 @@ def _run_inline(
     fn = getattr(orchestrator, "run", None)
     if fn is None:
         console.print(
-            "[yellow]orchestrator.run() not implemented yet[/yellow] — "
-            "the inline path expects an AIDP notebook to import "
-            "[cyan]oracle_ai_data_platform_fusion_bundle.orchestrator[/cyan] "
-            "and call its run(bundle_data, mode, dataset_ids) entry point."
+            "[red]orchestrator.run() is not implemented yet (BACKLOG P1.5).[/red]\n"
+            "The Phase 2 silver/gold modules are importable as a Python package "
+            "([cyan]oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier[/cyan], "
+            "[cyan]...dimensions.dim_calendar[/cyan], "
+            "[cyan]...transforms.gold.supplier_spend[/cyan]), but the CLI's "
+            "inline run path is not wired to them yet — that's P1.5's deliverable.\n"
+            "\nWorkaround for now: from inside an AIDP notebook session, import the "
+            "modules directly and call their build(spark, ...) functions in dependency "
+            "order: dim_calendar → dim_supplier → supplier_spend."
         )
         console.print(f"\nWould have run: mode={mode}, datasets={dataset_ids}")
-        return 0
+        return 2
     fn(bundle_data, mode=mode, dataset_ids=dataset_ids)
     return 0
 
@@ -190,11 +195,13 @@ def _run_via_aidp_dispatch(
         )
     console.print(table)
     console.print(
-        "\n[yellow]NOTE:[/yellow] Phase 2 will wire dispatch submission via "
-        "[cyan]notebooks/run_orchestrator.ipynb[/cyan]. "
-        "Today, run those commands manually inside an AIDP notebook session."
+        "\n[red]PLAN ONLY — no work performed.[/red] Phase 2 will wire dispatch "
+        "submission via [cyan]notebooks/run_orchestrator.ipynb[/cyan] (BACKLOG P1.5). "
+        "Until then, run the printed commands manually inside an AIDP notebook session, "
+        "OR import the silver/gold modules directly from a notebook (see CHANGELOG)."
     )
-    return 0
+    # Exit non-zero so CI / scripts don't mistake the plan-print for a real run.
+    return 2
 
 
 __all__ = ["run", "status"]
