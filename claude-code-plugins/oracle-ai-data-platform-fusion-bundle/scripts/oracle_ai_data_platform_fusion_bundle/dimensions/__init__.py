@@ -3,9 +3,10 @@
 Phase 2 (v0.2.0) wires these one by one:
 
 * :mod:`dim_supplier` — productized from TC8's prototype.
+* :mod:`dim_account` — Chart of Accounts; required by ``gold.gl_balance``.
 * :mod:`dim_calendar` — system-generated; required by ``gold.gl_balance`` and
   ``gold.po_backlog``.
-* ``dim_account`` (P1.3), ``dim_item`` (P1.6) — pending.
+* ``dim_item`` (P1.6) — pending.
 * ``dim_org`` (P1.7) — deferred until customer HCM pod is available (P3.8).
 
 Each module follows the same pattern:
@@ -17,6 +18,6 @@ Each module follows the same pattern:
 * optional helpers (e.g. :func:`dim_supplier.id_populated_pct`) feeding gold-layer decisions
 """
 
-from . import dim_calendar, dim_supplier
+from . import dim_account, dim_calendar, dim_supplier
 
-__all__ = ["dim_calendar", "dim_supplier"]
+__all__ = ["dim_account", "dim_calendar", "dim_supplier"]
