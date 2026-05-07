@@ -1,17 +1,17 @@
 {
-  "name": "aidp-connectors",
+  "name": "oracle-ai-data-platform-workbench-suite",
   "owner": {
     "name": "Ahmed Awan"
   },
   "metadata": {
-    "version": "0.5.0",
-    "description": "Personal development marketplace hosting Claude Code plugins authored by Ahmed Awan. Plugins live under claude-code-plugins/<plugin-name>/, mirroring the layout in oracle-samples/oracle-aidp-samples/ai/claude-code-plugins/."
+    "version": "0.6.0",
+    "description": "Personal development marketplace hosting Claude Code plugins for Oracle AI Data Platform (AIDP) Workbench. Bundles the Spark connectors plugin (oracle-ai-data-platform-workbench-spark-connectors), the workbench router (oracle-ai-data-platform-workbench-router), and the Fusion bundle (oracle-ai-data-platform-fusion-bundle). Plugins live under claude-code-plugins/<plugin-name>/, mirroring the layout in oracle-samples/oracle-aidp-samples/ai/claude-code-plugins/."
   },
   "plugins": [
     {
       "name": "oracle-ai-data-platform-workbench-spark-connectors",
-      "description": "Oracle AI Data Platform Workbench Spark connectors for Claude Code. 18 connector skills covering every data source workbench customers commonly need: Oracle Autonomous DB family (ALH/ADW/ATP), ExaCS, Fusion ERP REST, Fusion BICC, EPM Cloud Planning, Essbase 21c, OCI Streaming, OCI Object Storage, Apache Iceberg, plus PostgreSQL, MySQL/HeatWave, SQL Server, Snowflake, Azure ADLS Gen2, AWS S3, generic REST, custom JDBC, and Excel. Live-validated end-to-end on Spark 3.5.0.",
-      "version": "0.4.1",
+      "description": "Oracle AI Data Platform Workbench Spark connectors for Claude Code. 23 connector skills covering every data source workbench customers commonly need: Oracle Autonomous DB family (ALH/ADW/ATP), generic Oracle Database, ExaCS, Oracle PeopleSoft, Oracle Siebel, Fusion ERP REST, Fusion BICC, EPM Cloud Planning, Essbase 21c, OCI Streaming, OCI Object Storage, Apache Iceberg, plus PostgreSQL, MySQL/HeatWave, SQL Server, Apache Hive, Salesforce, Snowflake, Azure ADLS Gen2, AWS S3, generic REST, custom JDBC, and Excel. v0.5.0 adds 5 new connectors + pushdown/catalog/manifest patterns from oracle-samples PR #46.",
+      "version": "0.5.0",
       "source": "./claude-code-plugins/oracle-ai-data-platform-workbench-spark-connectors/",
       "category": "data",
       "keywords": [
@@ -30,7 +30,35 @@
         "postgresql",
         "mysql",
         "sqlserver",
-        "iceberg"
+        "iceberg",
+        "peoplesoft",
+        "siebel",
+        "salesforce",
+        "hive",
+        "pushdown"
+      ]
+    },
+    {
+      "name": "oracle-ai-data-platform-workbench-router",
+      "description": "[ORACLE-INTERNAL] Complete AIDP toolkit. Routes AIDP prompts across 5 execution surfaces (MCP / REST / Python SDK / OCI CLI / WebSocket Jupyter Wire). 8 skills, hook-driven intent detection, RO/RW/DEPLOY security envelopes, JSONL audit log, prerequisite bootstrap, WebSocket cell-execution helper. Requires an AIDP MCP server (Oracle-internal preview, not yet GA). Additive to AIDP — no DFL surface, no FDI/OAC/OTBI/BIP positioning.",
+      "version": "0.3.0",
+      "source": "./claude-code-plugins/oracle-ai-data-platform-workbench-router/",
+      "category": "development",
+      "keywords": [
+        "oracle",
+        "aidp",
+        "ai-data-platform",
+        "router",
+        "auto-routing",
+        "mcp",
+        "rest",
+        "sdk",
+        "oci-cli",
+        "websocket",
+        "jupyter",
+        "lakehouse",
+        "agent",
+        "workbench"
       ]
     },
     {
