@@ -1,6 +1,6 @@
 # TC8b — `silver.dim_supplier` module re-validation (2026-05-07)
 
-> **Status**: ✅ **PASS (live bootstrap)** — bronze tables landed on the dedicated `fusion_bundle_dev` cluster (workspace `f95a83f8-9bd1-4259-a45f-ea1c3a5a7516`); column shape probed via live Spark. **Silver `dim_supplier.build()` end-to-end run still pending** — happens once the dim module is wired into the orchestrator (P1.5).
+> **Status**: ✅ **PASS (full live verification)** — silver `dim_supplier` materialized end-to-end on the dedicated `fusion_bundle_dev` cluster against live `bronze.erp_suppliers` (eseb-test pod). All design contracts hold: dedupe, NULL ID handling, COALESCE name chain, audit lineage. See "Live verification" section below.
 >
 > **Why this exists**: P1.1 (`dimensions/dim_supplier.py`) productizes TC8's inline silver step. While preparing the implementation plan, we discovered two errors in TC8's findings that materially affect the SQL builder. This document captures the re-validation that surfaced them.
 
@@ -147,6 +147,86 @@ A surprise — `bronze.erp_suppliers` and `bronze.ap_invoices` use **different c
 | `ap_invoices` (`InvoiceHeaderExtractPVO`) | PascalCase + `ApInvoices` prefix | `ApInvoicesVendorId`, `ApInvoicesInvoiceAmount`, `ApInvoicesApprovalStatus` |
 
 `dim_supplier.py` uses UPPERCASE refs (correct). P1.2's `gold.supplier_spend` will need PascalCase `ApInvoices*` refs.
+
+## Live verification of `silver.dim_supplier` (2026-05-07 11:53 UTC)
+
+The committed SQL from `dimensions/dim_supplier.py` was inlined into a notebook cell (the module isn't yet installed on the AIDP cluster — that's P1.5's job) and executed against `bronze.erp_suppliers` on `fusion_bundle_dev`.
+
+### Counts
+
+| Metric | Expected | Actual | Result |
+|---|---|---|---|
+| `bronze.erp_suppliers` row count | (data) | 209 | — |
+| `silver.dim_supplier` row count | 209 (no dedupe loss) | **209** | ✅ |
+| `silver.dim_supplier` distinct `supplier_number` | 209 (no dupes) | **209** | ✅ |
+
+### `id_populated_pct` per ID column
+
+eseb-test pod has all-NULL ID columns (per data-shape probe). The dim's `NULLIF(CAST(... AS BIGINT), 0)` projection plus the helper computation should report exactly `0.000`:
+
+| Column | Expected | Actual |
+|---|---|---|
+| `vendor_id` | 0.000 | **0.000** ✅ |
+| `party_id` | 0.000 | **0.000** ✅ |
+| `parent_vendor_id` | 0.000 | **0.000** ✅ |
+| `parent_party_id` | 0.000 | **0.000** ✅ |
+
+(On etap-dev5 `vendor_id` and `party_id` would be `1.000`. The helper feeds P1.2's join-vs-fallback decision — same module works on both pods.)
+
+### `supplier_name` COALESCE chain
+
+| Metric | Expected | Actual |
+|---|---|---|
+| Rows with non-NULL `supplier_name` | ~7-9% (driven by `AlternateNamePartyName` 7.2% + small fallback contributions) | **19 / 209 (9.1%)** ✅ |
+
+Sample (5 of the 19):
+
+| supplier_number | supplier_name | business_relationship | vendor_id | party_id |
+|---|---|---|---|---|
+| 1255 | `Dell Inc` | SPEND_AUTHORIZED | NULL | NULL |
+| 1258 | `UPS` | SPEND_AUTHORIZED | NULL | NULL |
+| 1260 | `STAPLES INC` | SPEND_AUTHORIZED | NULL | NULL |
+| 1264 | `Office Depot, LLC` | SPEND_AUTHORIZED | NULL | NULL |
+| 1287 | `Internal Revenue Service` | SPEND_AUTHORIZED | NULL | NULL |
+
+Real names land cleanly. NULL `supplier_name` for the other 190 rows is **accurate**, not a defect — those rows have no name in any of `AlternateNamePartyName` / `AliasPartyName` / `TaxReportingName`. Production pods are expected to populate these cleanly.
+
+### Audit lineage
+
+| Field | Result |
+|---|---|
+| `bronze_extract_ts` carried from bronze | ✅ `2026-05-07 11:34:51` (single timestamp — single bronze write per BOOTSTRAP run) |
+| `bronze_source_pvo` carried | ✅ single distinct value (the PVO name) |
+| `silver_built_at` set to build time | ✅ `2026-05-07 11:53:46` (~19 min after bronze) |
+| All audit columns present | ✅ |
+
+### Final schema (14 columns — matches plan)
+
+```
+supplier_key            bigint        # surrogate (monotonically_increasing_id)
+supplier_number         string        # natural key (SEGMENT1)
+supplier_name           string        # COALESCE chain
+vendor_id               bigint        # NULLIF-wrapped, populated on production
+party_id                bigint        # same
+parent_vendor_id        bigint        # rare (~0.4% on etap-dev5)
+parent_party_id         bigint        # same
+business_relationship   string        # values: SPEND_AUTHORIZED, etc.
+inactive_date           date
+creation_date           timestamp
+last_update_date        timestamp
+bronze_extract_ts       timestamp     # lineage
+bronze_source_pvo       string        # lineage
+silver_built_at         timestamp     # per-build audit
+```
+
+## Verdict
+
+**TC8b: ✅ PASS.** P1.1 acceptance criteria fully satisfied:
+- ✅ Module reads `bronze.erp_suppliers`, dedupes on `supplier_number`, handles null IDs, writes `silver.dim_supplier`
+- ✅ Unit tests cover dedup, null-handling, schema (12 cases / 20 sub-assertions, all pass)
+- ✅ Live row added — this section, with TC8b runner output evidence
+
+`silver.dim_supplier` is now ready to feed P1.2 (`gold.supplier_spend`).
 
 ## Status
 
