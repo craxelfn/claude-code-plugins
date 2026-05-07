@@ -200,6 +200,31 @@ Real names land cleanly. NULL `supplier_name` for the other 190 rows is **accura
 | `silver_built_at` set to build time | ✅ `2026-05-07 11:53:46` (~19 min after bronze) |
 | All audit columns present | ✅ |
 
+### Date / timestamp casts (verified end-to-end)
+
+`CAST(... AS DATE/TIMESTAMP)` works against the bronze data without needing format strings. Bronze stores Fusion timestamps with milliseconds (e.g. `2013-11-07 20:14:36.428`), Spark parses them natively.
+
+| Column | Population | Sample |
+|---|---|---|
+| `inactive_date` | 1.0% (3/209) | sparse — most suppliers are active |
+| `creation_date` | 100.0% | `2013-11-07 20:14:36.428` |
+| `last_update_date` | 100.0% | `2025-07-16 03:49:24.422` |
+
+### Idempotency (verified)
+
+Re-running the same CTAS twice produces identical row counts and a fresh `silver_built_at`:
+
+| Metric | Pre-rerun | Post-rerun | Result |
+|---|---|---|---|
+| Row count | 209 | 209 | identical ✅ |
+| `silver_built_at` | `2026-05-07 12:17:54.455477` | `2026-05-07 12:18:30.214376` | advanced (+36s) ✅ |
+
+This validates the audit-lineage design — every rebuild gets a fresh per-run timestamp while the data shape stays stable.
+
+### Pytest unit tests (14/14 passing, no regressions)
+
+`pytest tests/unit/test_dim_supplier.py -v` collected and passed all 14 tests in 0.02s. Full unit suite: **153/153 pass** (was 139 + 14 new = 153). Zero regressions in the existing extractor / OAC / catalog / commands / vault tests.
+
 ### Final schema (14 columns — matches plan)
 
 ```
