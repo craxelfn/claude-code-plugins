@@ -8,16 +8,15 @@
 * **TC8b** (2026-05-07, eseb-test) — productized `silver.dim_supplier` as `dimensions/dim_supplier.py`. 209 rows, dedupe + NULLIF + COALESCE name chain all live-validated.
 * **TC8c** (2026-05-07, eseb-test) — productized `gold.supplier_spend` as `transforms/gold/supplier_spend.py`. **This file.**
 
-## Picker logic — verified live
+## Live run shape (verified)
 
-`build()` calls `id_populated_pct(spark, silver_table=..., column="vendor_id")` and compares against `DEFAULT_JOIN_THRESHOLD = 0.5`. On eseb-test:
+The live verification ran the inlined CTAS that was the picker's "spend-only" form at the time. **Pre-PR review surfaced a financial-correctness issue with the picker design** (an INNER JOIN form would silently drop invoices for vendors missing from the dim, understating spend), and the module was refactored to a single LEFT-JOIN form post-TC8c.
 
-```
-[picker] id_populated_pct(vendor_id) = 0.000, threshold = 0.5
-[picker] use_join_form = False  →  spend-only fallback chosen
-```
+The numbers below are still accurate for eseb-test under the new LEFT-JOIN design — when every `dim_supplier.vendor_id` is NULL (eseb-test), no rows match the LEFT JOIN, so all dim attributes come out NULL. Mathematically identical to the pre-refactor "spend-only" output. The semantics changed; the live result didn't.
 
-This is the canonical demo-pod path. Production pods (where `vendor_id` is populated) would land on the JOIN form — same module, different runtime decision, identical output schema.
+For background on the design change, see CHANGELOG `Changed (Phase 2 in progress)` — *"P1.2 follow-up — gold.supplier_spend switched from a two-form picker to a single LEFT-JOIN form for financial correctness"*.
+
+A re-run on the cluster post-refactor would surface the same row count, same grand total, same top-5 — verified by inspection (the SQL difference between the old "spend-only" form and the new LEFT-JOIN form does not affect the output when no dim rows match).
 
 ## Counts vs TC8 reference
 
