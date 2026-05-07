@@ -142,10 +142,10 @@ def build(
 
 
 __all__ = [
-    "TARGET_SILVER_TABLE",
-    "DEFAULT_START_DATE",
     "DEFAULT_END_DATE",
     "DEFAULT_FISCAL_START_MONTH",
+    "DEFAULT_START_DATE",
+    "TARGET_SILVER_TABLE",
     "build",
     "build_dim_calendar_sql",
 ]

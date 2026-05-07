@@ -168,10 +168,10 @@ def build(
 
 
 __all__ = [
+    "DEFAULT_JOIN_THRESHOLD",
     "SOURCE_BRONZE_TABLE",
     "SOURCE_SILVER_DIM",
     "TARGET_GOLD_TABLE",
-    "DEFAULT_JOIN_THRESHOLD",
     "build",
     "build_join_form_sql",
     "build_spend_only_form_sql",

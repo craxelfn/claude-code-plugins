@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 
 import pytest
-
 from oracle_ai_data_platform_fusion_bundle.dimensions import dim_calendar
 from oracle_ai_data_platform_fusion_bundle.dimensions.dim_calendar import (
     DEFAULT_END_DATE,
