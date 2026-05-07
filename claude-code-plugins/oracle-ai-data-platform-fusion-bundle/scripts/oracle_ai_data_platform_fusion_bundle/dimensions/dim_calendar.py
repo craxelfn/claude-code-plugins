@@ -16,7 +16,7 @@ Design notes
 
 * **Fiscal calendar** — configurable via ``fiscal_start_month`` (1..12).
   Default 1 (calendar year = fiscal year). Common Fusion conventions:
-  ``7`` (Jul-Jun: FY26 spans Jul 2025 – Jun 2026), ``10`` (Oct-Sep: US federal).
+  ``7`` (Jul-Jun: FY26 spans Jul 2025 - Jun 2026), ``10`` (Oct-Sep: US federal).
   Fiscal year is named by the calendar year **the fiscal year ends in** when
   ``fiscal_start_month > 1`` (so Jul 2025 → FY 2026 with ``fiscal_start_month=7``).
 
@@ -123,13 +123,13 @@ FROM dates
 
 
 def build(
-    spark: "SparkSession",
+    spark: SparkSession,
     *,
     start_date: str = DEFAULT_START_DATE,
     end_date:   str = DEFAULT_END_DATE,
     fiscal_start_month: int = DEFAULT_FISCAL_START_MONTH,
     silver_table: str = TARGET_SILVER_TABLE,
-) -> "DataFrame":
+) -> DataFrame:
     """Materialize ``silver.dim_calendar``; returns a DataFrame backed by it."""
     sql = build_dim_calendar_sql(
         start_date=start_date,

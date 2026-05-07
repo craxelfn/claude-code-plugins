@@ -1,4 +1,4 @@
-"""gold.supplier_spend — supplier × approval-status spend mart.
+"""gold.supplier_spend — supplier x approval-status spend mart.
 
 Productizes TC8's prototype which proved the SQL on `saasfademo1` (etap-dev5)
 demo pod: $3.2B aggregate / 236 records / top vendor `300000047507499` at
@@ -100,12 +100,12 @@ GROUP BY
 
 
 def build(
-    spark: "SparkSession",
+    spark: SparkSession,
     *,
     bronze_invoices: str = SOURCE_BRONZE_TABLE,
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
-) -> "DataFrame":
+) -> DataFrame:
     """Materialize ``gold.supplier_spend``; returns a DataFrame backed by it.
 
     The single LEFT-JOIN form preserves every invoice — no path-selection

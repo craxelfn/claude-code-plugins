@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-
 from oracle_ai_data_platform_fusion_bundle import cli
-
 
 # ---------------------------------------------------------------------------
 # init
@@ -189,7 +186,6 @@ class TestStatus:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         # Ensure pyspark import fails — patch SparkSession import
-        import sys as _sys
         # If pyspark is importable, the test path differs; we only assert exit 0 either way.
         result = CliRunner().invoke(cli.main, ["status"])
         assert result.exit_code == 0

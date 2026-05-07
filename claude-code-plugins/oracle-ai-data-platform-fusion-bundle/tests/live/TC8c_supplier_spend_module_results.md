@@ -73,16 +73,16 @@ gold_built_at          timestamp
 ## Verdict
 
 **TC8c: ✅ PASS.** P1.2 acceptance criteria fully satisfied:
-- ✅ Module reads `bronze.ap_invoices`, optionally joins `silver.dim_supplier`, writes `gold.supplier_spend`
-- ✅ Demo-pod / production switch works at runtime via `id_populated_pct() >= 0.5`
-- ✅ Unit tests cover both forms + picker + schema parity (20 cases / 23 sub-assertions, all pass; 173/173 full suite pass with zero regressions)
+- ✅ Module reads `bronze.ap_invoices` and `silver.dim_supplier` via a single LEFT JOIN, writes `gold.supplier_spend`
+- ✅ Invoice-preserving contract: every invoice dollar lands in the output; dim attributes (`supplier_number`, `supplier_name`, `business_relationship`) are NULL when the invoice's vendor isn't in the dim
+- ✅ Unit tests cover the LEFT-JOIN invariant + invoice-preserving grouping (`CAST(inv.ApInvoicesVendorId AS BIGINT)`) + regression guards forbidding INNER JOIN re-introduction (17 cases, all pass; suite-total tracked in top-level CHANGELOG)
 - ✅ Live row added — this section, with TC8c runner output evidence
 
 `gold.supplier_spend` is now ready for downstream consumption (OAC workbooks, GenAI grounding, JDBC clients). The pattern is set for the remaining 4 gold marts: `gl_balance` (P1.8), `ap_aging` (P1.9), `ar_aging` (P1.10), `po_backlog` (P1.11).
 
 ## What's still pending
 
-* **JOIN form live verification** — needs a pod with populated `VENDORID`/`PARTYID` (etap-dev5 or a customer pod). Currently blocked by Casey.Brown credential rotation (P3.7 in BACKLOG). The branch is theoretically supported (same module, same SQL, just `pct >= threshold` returns true instead of false) and the helper math has been live-verified to return 0.0 — it would simply return 1.0 on the production-shape side.
+* **Live verification on a pod with populated `vendor_id` in `silver.dim_supplier`** (etap-dev5 or a customer pod, where the dim's vendor_id is populated and the LEFT JOIN therefore matches and pulls dim attributes through). Currently blocked by Casey.Brown credential rotation (P3.7 in BACKLOG). On eseb-test the LEFT JOIN runs, every invoice is preserved as required, and dim attributes come out as NULL — same numerical aggregate as TC8's reference. The same module / same SQL would simply produce populated dim attributes on a pod where `vendor_id` is non-NULL.
 
 ## References
 

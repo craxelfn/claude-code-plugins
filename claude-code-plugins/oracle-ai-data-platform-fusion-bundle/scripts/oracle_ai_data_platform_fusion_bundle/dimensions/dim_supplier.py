@@ -96,11 +96,11 @@ WHERE _rn = 1
 
 
 def build(
-    spark: "SparkSession",
+    spark: SparkSession,
     *,
     bronze_table: str = SOURCE_BRONZE_TABLE,
     silver_table: str = TARGET_SILVER_TABLE,
-) -> "DataFrame":
+) -> DataFrame:
     """Materialize ``silver.dim_supplier`` from ``bronze.erp_suppliers``.
 
     Runs the SQL from :func:`build_dim_supplier_sql` against ``spark`` and
@@ -111,12 +111,12 @@ def build(
 
 
 def id_populated_pct(
-    spark: "SparkSession",
+    spark: SparkSession,
     *,
     silver_table: str = TARGET_SILVER_TABLE,
     column: str = "vendor_id",
 ) -> float:
-    """Return the fraction (0.0–1.0) of rows where ``column`` IS NOT NULL.
+    """Return the fraction (0.0-1.0) of rows where ``column`` IS NOT NULL.
 
     Used by P1.2's ``gold.supplier_spend`` to decide between the canonical
     join-form (``vendor_id`` populated) and a spend-only fallback (``vendor_id``

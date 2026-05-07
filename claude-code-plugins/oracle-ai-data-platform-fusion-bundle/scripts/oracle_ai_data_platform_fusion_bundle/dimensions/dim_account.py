@@ -119,11 +119,11 @@ WHERE _rn = 1
 
 
 def build(
-    spark: "SparkSession",
+    spark: SparkSession,
     *,
     bronze_table: str = SOURCE_BRONZE_TABLE,
     silver_table: str = TARGET_SILVER_TABLE,
-) -> "DataFrame":
+) -> DataFrame:
     """Materialize ``silver.dim_account`` from ``bronze.gl_coa``.
 
     Runs the SQL from :func:`build_dim_account_sql` against ``spark`` and
