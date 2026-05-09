@@ -49,3 +49,15 @@ tests/live/results/*.png
 # Locally-built bundle snapshot (release artifact, ships separately — not in repo)
 *.bar
 oac/bundle-*.bar
+
+# Private working notes & environment-specific scripts — kept locally only.
+# These contain hardcoded cluster IDs, vault OCIDs, internal pod URLs, and
+# step-level details that must NEVER be pushed to a public branch.
+PLAN_*.md
+BLOCKER_*.md
+LIMITS.md
+OVERVIEW_*.md
+BOOTSTRAP_*.py
+FIX_*.py
+TC*_runner.py
+TC_*_runner.py
