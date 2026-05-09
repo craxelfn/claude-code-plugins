@@ -10,9 +10,9 @@
 |---|---|---:|
 | **P0** | Pre-flight hygiene — fix things that make the alpha misleading or shipping-blocked | 6 |
 | **P1** | Phase 2 dataflow — implement the actual product (transforms / dimensions / gold marts / release) | 16 |
-| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 14 |
-| **P3** | Roadmap, upstream advocacy, tracked blockers | 8 |
-| **Total** | | **44** |
+| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 17 |
+| **P3** | Roadmap, upstream advocacy, tracked blockers | 9 |
+| **Total** | | **48** |
 
 ## Effort legend
 
@@ -138,11 +138,18 @@
 
 ## Theme: Remaining gold marts (each ~200 LOC; replicate P1.2 pattern)
 
-### `[ ]` P1.8 — `transforms/gold/gl_balance.py`
+### `[~]` P1.8 — `transforms/gold/gl_balance.py` (commit pending; live `TC23_gl_balance_results.md`)
 **Why**: Period balances by account × period — core CFO dashboard mart.
-**Size**: S
-**Depends on**: P1.3 (`dim_account`), P1.4 (`dim_calendar`)
-**Accept**: writes `gold.gl_balance`; unit-tested; sample SQL committed under `tests/live/sql/`.
+**Size**: S → **delivered S+** (added BOOTSTRAP Step 7 + COALESCE fix from live finding)
+**Depends on**: P1.3 (`dim_account`) ✅; P1.4 (`dim_calendar`) ✅ — but **dim_calendar dep was nominal**, not used in the SQL (grain mismatch: daily dim vs period fact; period context comes from fact's `period_year`/`period_num` directly). See [`PLAN_P1.8_gl_balance.md`](PLAN_P1.8_gl_balance.md) §2.5 for the deviation rationale.
+**Accept**:
+- ✅ `transforms/gold/gl_balance.py` follows `supplier_spend.py` pattern (constants → SQL builder → Spark wrapper)
+- ✅ Writes `fusion_catalog.gold.gl_balance` Delta — 10,184,102 rows / 22 cols landed live (`actual_flag='A'` only; encumbrance + budget deferred to v0.3)
+- ✅ Single LEFT JOIN to `silver.dim_account`; **no `dim_calendar` join** (grain mismatch)
+- ✅ NULL-propagation regression caught + fixed: `closing_balance` formula uses `COALESCE(..., 0)` per cast (live `null_closing_balance` = 0)
+- ✅ 21 new unit tests; suite 207 → **228** all pass; ruff clean
+- ✅ Live evidence: [`tests/live/TC23_gl_balance_results.md`](tests/live/TC23_gl_balance_results.md)
+- ✅ BOOTSTRAP extended with **Step 7** (`BalanceExtractPVO` → `bronze.gl_period_balances`) + Step 8 column-shape probe
 
 ### `[ ]` P1.9 — `transforms/gold/ap_aging.py`
 **Why**: Payable age bands (current / 30–60 / 60–90 / 90+). Drives AP aging dashboard.
@@ -305,6 +312,30 @@
 **Depends on**: nothing
 **Accept**: covers (a) pre-commit (`ruff`, `mypy`?), (b) test running, (c) live-test conventions (TC numbering), (d) PR template.
 
+## Theme: Plugin durability across Fusion releases
+
+### `[ ]` P2.16 — Schema-drift fingerprint + `catalog drift` command
+**Why**: Every gold mart and silver dim hardcodes column names that came from a one-time live probe of the source PVO (e.g. `CodeCombinationCodeCombinationId`, `ApInvoicesVendorId`). Oracle revs PVOs across Fusion releases — column renames are uncommon but documented (the abbreviated-vs-full-AM-hierarchy thing in pdf1 was exactly this drift class). Today nothing detects this; first symptom on a customer's upgraded pod is `silver` build failing with "column not found" — loud, but no mitigation path.
+**Size**: M
+**Depends on**: P1.1 / P1.3 / P1.4 bronze tables existing on a live pod (✅ all done)
+**Accept**:
+- New `tests/live/schemas/<pvo_id>.json` snapshot per confirmed PVO, capturing `[(col_name, dtype)]` plus the date + Fusion release the snapshot was taken on.
+- New `aidp-fusion-bundle catalog drift` CLI command that re-extracts each PVO, computes a fresh fingerprint, diffs vs stored, exits non-zero with a clear summary of added/removed/renamed/retyped columns.
+- Snapshots committed for the existing PVOs (`erp_suppliers`, `ap_invoices`, `gl_coa`, `ar_invoices`, `ar_receipts`, `po_orders`, `po_receipts`).
+- Unit test on the diff function with synthetic before/after schemas.
+- README "operations" section documents the command and recommends running it after Fusion-release upgrades.
+
+### `[ ]` P2.17 — Fusion release-version detection + support-matrix warning
+**Why**: Even before any drift fires, customers should know whether their Fusion release is one we've actually verified. Today the bundle is silent; if a customer is on an unverified release, they discover the gap only when something breaks.
+**Size**: S
+**Depends on**: nothing
+**Accept**:
+- `SUPPORTED_FUSION_RELEASES: set[str]` constant in `schema/fusion_catalog.py` (or new `schema/support_matrix.py`); seeded with the releases we've live-verified against (e.g. `{"25C", "26A"}`).
+- New helper that reads the customer's Fusion release at runtime (Fusion exposes its release version via a REST `about`-style endpoint — confirm exact path during implementation; pdf1 / aidp-fusion-bicc skill likely have a hint).
+- `aidp-fusion-bundle install` and `aidp-fusion-bundle run` print a clear warning (not a hard failure) when the detected release is not in `SUPPORTED_FUSION_RELEASES`. Exit code 0 — informational.
+- README "compatibility" section lists the supported releases and the policy ("verified releases get version-pinned bundle releases; later releases require running `catalog drift` first").
+- Unit test mocks the about-endpoint response and verifies the warning fires for an unknown release and stays silent for a known one.
+
 ---
 
 # P3 — Roadmap, upstream, tracked blockers (don't act now; track)
@@ -362,6 +393,12 @@
 **Size**: 0 (blocker only)
 **Depends on**: customer engagement
 **Accept**: PVO name added to `schema/fusion_catalog.py`; P1.7 unblocks.
+
+### `[ ]` P3.9 — Dedicated CI test pod for live PVO regression
+**Why**: P2.16 (`catalog drift`) gives customers a tool to detect drift on their pod, but without a CI-accessible Fusion pod we can't catch drift between releases on the bundle's own side. Demo pod (`saasfademo1`) is shared, rate-limited, and unreliable for scheduled runs; customer pods must never be touched from CI. The right fix is an AIDP-side dedicated plugin-CI pod with stable creds, refreshed monthly, opt-in for the plugin to run a small live extract per PVO and assert schema fingerprint stability.
+**Size**: 0 (blocker only — depends on AIDP infra)
+**Depends on**: AIDP team provisioning a CI-accessible Fusion pod; P2.16 fingerprint command exists
+**Accept**: GitHub Actions (or AIDP-internal CI) workflow runs nightly: extracts each `confirmed=True` PVO, diffs against stored fingerprint, opens an issue on drift. Same pod is reused for the saas-batch live test (P2.11) so it covers two blockers at once.
 
 ---
 

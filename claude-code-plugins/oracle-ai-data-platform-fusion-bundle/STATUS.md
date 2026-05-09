@@ -1,8 +1,10 @@
 # Plugin Status — `oracle-ai-data-platform-fusion-bundle`
 
-> **Snapshot date**: 2026-05-05
-> **Version**: 0.1.0-alpha
-> **Verdict**: **Tier-1 complete, end-to-end live-validated.** Ready for Phase 2 (transforms / dimensions / gold marts / saas-batch live).
+> **Snapshot date**: 2026-05-09
+> **Version**: 0.1.0-alpha (Phase 2 in progress toward 0.2.0)
+> **Verdict**: **Phase 2 mid-flight.** Dim layer 3/4 shipped + 1 deferred (P1.6 blocked by L2). Gold layer 2/5 shipped (`supplier_spend`, `gl_balance`). Tests 159 → **228** all pass. Limit registry stood up at [`LIMITS.md`](LIMITS.md).
+>
+> **Recent (2026-05-09)** — P1.8 `gold.gl_balance` shipped + live (TC23, 10.18M rows). BOOTSTRAP extended with Step 7 + step-shape probe; NULL-propagation regression caught + fixed in same session via COALESCE.
 
 This document is a current-state audit of the second plugin in this repo: what's already implemented and live-validated, how the pieces fit together, what's still on the roadmap, and what's blocking each remaining item.
 
