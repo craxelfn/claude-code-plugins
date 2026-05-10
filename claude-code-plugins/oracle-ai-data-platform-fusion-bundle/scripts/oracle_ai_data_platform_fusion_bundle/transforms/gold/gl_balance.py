@@ -83,10 +83,14 @@ overkill for monetary data).
 Filter philosophy
 -----------------
 
-* `BalanceActualFlag = 'A'` — actuals only for v0.2.0. Encumbrance (`'E'`) and
-  budget (`'B'`) are deferred to v0.3 as additional `gl_*_balance` marts or as
-  a non-breaking column expansion here. Confirmed live: 10.18M actuals + 1.03M
-  encumbrances on this pod (~91 % retained).
+* `BalanceActualFlag` filter — defaults to ``'A'`` (actuals only), which is the
+  canonical CFO-dashboard view. Configurable via ``actual_flag_filter`` so
+  tenants whose dashboards need encumbrance (``'E'``) or budget (``'B'``)
+  balances can override at build time, and ``None`` disables the filter
+  entirely (surface every flag and let the consumer slice). Confirmed live
+  on saasfademo1: 10.18M actuals + 1.03M encumbrances (~91 % retained at
+  default). Without this knob the mart would silently drop encumbrance-heavy
+  tenants' balances — a plugin-portability gap; per round-6 review.
 * `BalanceCodeCombinationId IS NOT NULL` — null-CCID rows can't join the dim
   and aren't meaningful balance rows; mirrors ``supplier_spend``'s null-vendor
   filter.
@@ -108,12 +112,15 @@ SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.gl_period_balances"
 SOURCE_SILVER_DIM:   Final[str] = "fusion_catalog.silver.dim_account"
 TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.gl_balance"
 
+DEFAULT_ACTUAL_FLAG_FILTER: Final[str] = "A"
+
 
 def build_gl_balance_sql(
     *,
     bronze_balances: str = SOURCE_BRONZE_TABLE,
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
+    actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.gl_balance``.
 
@@ -121,10 +128,38 @@ def build_gl_balance_sql(
     projection shape; called by :func:`build` to materialize the table.
 
     Single LEFT JOIN to ``silver.dim_account`` (fact preserved); no
-    ``dim_calendar`` join (grain mismatch — period vs day). Filters to
-    ``BalanceActualFlag = 'A'`` and non-null CCID. Casts amount columns from
-    source ``decimal(38,30)`` to ``DECIMAL(28,2)`` for output.
+    ``dim_calendar`` join (grain mismatch — period vs day). Casts amount
+    columns from source ``decimal(38,30)`` to ``DECIMAL(28,2)`` for output.
+
+    ``actual_flag_filter`` controls the WHERE-clause filter on
+    ``BalanceActualFlag``:
+
+    * ``"A"`` (default) — actuals only; the canonical CFO-dashboard view.
+    * ``"E"`` / ``"B"`` — encumbrance / budget only for tenants whose
+      dashboards need those balance types.
+    * ``None`` — disable the filter; surface all flags. Consumers slice
+      on ``actual_flag`` themselves. Use when the mart powers multi-tab
+      dashboards that compare actuals vs encumbrances.
+
+    Plugin-portability: hardcoding ``'A'`` would drop balances entirely on
+    a tenant whose data is predominantly encumbrance / budget. The knob
+    keeps the default cheap (no flag filter on the consumer) while
+    allowing override per-deployment. Per round-6 review.
     """
+    if actual_flag_filter is None:
+        where_clauses = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
+    else:
+        if actual_flag_filter not in {"A", "E", "B"}:
+            raise ValueError(
+                "actual_flag_filter must be one of 'A' (actuals), 'E' "
+                "(encumbrance), 'B' (budget), or None to disable; "
+                f"got {actual_flag_filter!r}"
+            )
+        where_clauses = (
+            f"WHERE b.BalanceActualFlag = '{actual_flag_filter}'\n"
+            "  AND b.BalanceCodeCombinationId IS NOT NULL"
+        )
+
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
@@ -161,8 +196,7 @@ SELECT
 FROM {bronze_balances} b
 LEFT JOIN {silver_dim}  da
   ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)
-WHERE b.BalanceActualFlag = 'A'
-  AND b.BalanceCodeCombinationId IS NOT NULL
+{where_clauses}
 """
 
 
@@ -172,23 +206,28 @@ def build(
     bronze_balances: str = SOURCE_BRONZE_TABLE,
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
+    actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
 ) -> DataFrame:
     """Materialize ``gold.gl_balance``; returns a DataFrame backed by it.
 
     Runs the SQL from :func:`build_gl_balance_sql` and returns the freshly-
     written gold table. Idempotent — uses ``CREATE OR REPLACE`` so reruns
-    produce the same shape.
+    produce the same shape. ``actual_flag_filter`` is forwarded to the SQL
+    builder (default ``'A'`` for the canonical actuals view; pass ``None``
+    to surface all flags).
     """
     sql = build_gl_balance_sql(
         bronze_balances=bronze_balances,
         silver_dim=silver_dim,
         gold_table=gold_table,
+        actual_flag_filter=actual_flag_filter,
     )
     spark.sql(sql)
     return spark.table(gold_table)
 
 
 __all__ = [
+    "DEFAULT_ACTUAL_FLAG_FILTER",
     "SOURCE_BRONZE_TABLE",
     "SOURCE_SILVER_DIM",
     "TARGET_GOLD_TABLE",

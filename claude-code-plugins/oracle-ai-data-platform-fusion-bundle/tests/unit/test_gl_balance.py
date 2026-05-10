@@ -19,6 +19,7 @@ import re
 
 from oracle_ai_data_platform_fusion_bundle.transforms.gold import gl_balance
 from oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance import (
+    DEFAULT_ACTUAL_FLAG_FILTER,
     SOURCE_BRONZE_TABLE,
     SOURCE_SILVER_DIM,
     TARGET_GOLD_TABLE,
@@ -246,6 +247,7 @@ class TestNoSilentBalanceDropContract:
 class TestModuleExports:
     def test_all_includes_public_surface(self) -> None:
         expected = {
+            "DEFAULT_ACTUAL_FLAG_FILTER",
             "SOURCE_BRONZE_TABLE",
             "SOURCE_SILVER_DIM",
             "TARGET_GOLD_TABLE",
@@ -258,3 +260,44 @@ class TestModuleExports:
         from oracle_ai_data_platform_fusion_bundle.transforms import gold
         assert "gl_balance" in gold.__all__
         assert hasattr(gold, "gl_balance")
+
+
+class TestActualFlagFilterKnob:
+    """Plugin-portability (round-6 review): a hardcoded ``BalanceActualFlag = 'A'``
+    filter would silently drop balance rows on tenants whose data is
+    predominantly encumbrance (``'E'``) or budget (``'B'``). The knob
+    accepts each documented Fusion value, ``None`` to disable, and
+    rejects everything else.
+    """
+
+    def test_default_is_actuals(self) -> None:
+        """Backward-compatible default — same shape as pre-knob versions."""
+        assert DEFAULT_ACTUAL_FLAG_FILTER == "A"
+        sql = build_gl_balance_sql()
+        assert "BalanceActualFlag = 'A'" in sql
+
+    def test_encumbrance_override(self) -> None:
+        sql = build_gl_balance_sql(actual_flag_filter="E")
+        assert "BalanceActualFlag = 'E'" in sql
+        assert "BalanceActualFlag = 'A'" not in sql
+
+    def test_budget_override(self) -> None:
+        sql = build_gl_balance_sql(actual_flag_filter="B")
+        assert "BalanceActualFlag = 'B'" in sql
+
+    def test_none_disables_filter(self) -> None:
+        """``None`` removes the flag filter entirely — consumer slices on
+        ``actual_flag`` themselves. CCID-NOT-NULL filter remains.
+        """
+        sql = build_gl_balance_sql(actual_flag_filter=None)
+        assert "BalanceActualFlag = " not in sql
+        assert "BalanceCodeCombinationId IS NOT NULL" in sql
+
+    def test_invalid_filter_rejected(self) -> None:
+        import pytest
+        with pytest.raises(ValueError, match="actual_flag_filter"):
+            build_gl_balance_sql(actual_flag_filter="X")
+
+    def test_ccid_filter_still_present_under_default(self) -> None:
+        sql = build_gl_balance_sql()
+        assert "BalanceCodeCombinationId IS NOT NULL" in sql
