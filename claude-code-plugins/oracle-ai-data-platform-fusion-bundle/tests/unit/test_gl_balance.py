@@ -404,6 +404,20 @@ class TestCoaSegmentMapKnob:
         with pytest.raises(ValueError, match=r"valid SQL identifier"):
             build_gl_balance_sql(coa_segment_map={1: "drop table; --"})
 
+    def test_digit_leading_alias_rejected(self) -> None:
+        """Unquoted SQL identifiers cannot start with a digit. Caught at
+        config-validation rather than as a cryptic Spark parse error.
+        """
+        import pytest
+        for bad in ("123company", "9account", "0_x"):
+            with pytest.raises(ValueError, match=r"valid SQL identifier"):
+                build_gl_balance_sql(coa_segment_map={1: bad})
+
+    def test_non_string_alias_rejected(self) -> None:
+        import pytest
+        with pytest.raises(ValueError, match=r"valid SQL identifier"):
+            build_gl_balance_sql(coa_segment_map={1: 42})  # type: ignore[dict-item]
+
     def test_duplicate_alias_rejected(self) -> None:
         import pytest
         with pytest.raises(ValueError, match=r"duplicated"):

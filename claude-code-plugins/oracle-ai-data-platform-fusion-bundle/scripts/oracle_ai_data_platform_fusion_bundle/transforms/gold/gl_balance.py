@@ -102,6 +102,7 @@ Filter philosophy
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
@@ -114,6 +115,11 @@ SOURCE_SILVER_DIM:   Final[str] = "fusion_catalog.silver.dim_account"
 TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.gl_balance"
 
 DEFAULT_ACTUAL_FLAG_FILTER: Final[str] = "A"
+
+#: Strict SQL-identifier pattern — same shape ``dim_account`` uses for its
+#: own semantic-alias validation. Configured output column names must match
+#: this so a misconfigured tenant config can't produce malformed SQL.
+_SQL_IDENTIFIER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: Default mapping of COA segment position (1-based) → ``gl_balance`` output
 #: column name. Matches the Fusion-conventional six-segment ordering so
@@ -143,10 +149,10 @@ def _validate_coa_segment_map(coa_segment_map: Mapping[int, str]) -> None:
                 f"coa_segment_map position {pos!r} (alias {alias!r}) is "
                 f"out of range [1, {_MAX_COA_SEGMENT}]"
             )
-        if not alias or not alias.replace("_", "").isalnum():
+        if not isinstance(alias, str) or not _SQL_IDENTIFIER_RE.match(alias):
             raise ValueError(
                 f"coa_segment_map alias {alias!r} (position {pos}) is not "
-                "a valid SQL identifier — only [A-Za-z0-9_] allowed"
+                "a valid SQL identifier — must match ^[A-Za-z_][A-Za-z0-9_]*$"
             )
     seen: set[str] = set()
     for alias in coa_segment_map.values():

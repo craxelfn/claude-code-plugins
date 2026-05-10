@@ -78,6 +78,7 @@ Other design notes
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
@@ -90,6 +91,13 @@ TARGET_SILVER_TABLE: Final[str] = "fusion_catalog.silver.dim_account"
 
 #: Fusion's COA supports up to 30 segments. Most tenants populate ≤6.
 MAX_FUSION_SEGMENTS: Final[int] = 30
+
+#: Strict SQL-identifier pattern — must start with letter or underscore,
+#: only ASCII letters / digits / underscores after. Matches what unquoted
+#: identifiers can be in Spark SQL without backticks. We use this for
+#: configured semantic alias names so a misconfigured tenant config can't
+#: produce malformed SQL or accidentally allow injection.
+_SQL_IDENTIFIER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: Conventional Fusion segment ordering at the canonical positions 1..6.
 #: This is the **default** semantic mapping — tenants whose COA differs can
@@ -158,10 +166,10 @@ def _validate_segment_map(
                 f"semantic_segment_map position {pos!r} (alias {alias!r}) is "
                 f"out of range [1, {n_segments}]"
             )
-        if not alias or not alias.replace("_", "").isalnum():
+        if not isinstance(alias, str) or not _SQL_IDENTIFIER_RE.match(alias):
             raise ValueError(
                 f"semantic_segment_map alias {alias!r} (position {pos}) is not "
-                "a valid SQL identifier — only [A-Za-z0-9_] allowed"
+                "a valid SQL identifier — must match ^[A-Za-z_][A-Za-z0-9_]*$"
             )
     seen_aliases = set()
     for alias in semantic_map.values():

@@ -314,6 +314,36 @@ class TestSemanticSegmentMap:
                 semantic_segment_map={1: "company; DROP TABLE x;--"},
             )
 
+    def test_map_digit_leading_alias_rejected(self) -> None:
+        """SQL identifiers cannot start with a digit (unquoted). The old
+        ``.isalnum()`` check accepted ``"123abc"`` because it's alphanumeric,
+        but Spark's SQL parser would reject it with a cryptic error. The
+        strict regex catches it at config-validation time.
+        """
+        import pytest
+        for bad in ("123abc", "5company", "42", "0_segment"):
+            with pytest.raises(ValueError, match=r"valid SQL identifier"):
+                build_dim_account_sql(semantic_segment_map={1: bad})
+
+    def test_map_non_string_alias_rejected(self) -> None:
+        """A misconfigured tenant config (e.g. YAML that resolves the value
+        to int 1 instead of "company") fails at validation with a clear
+        error rather than producing malformed SQL.
+        """
+        import pytest
+        with pytest.raises(ValueError, match=r"valid SQL identifier"):
+            build_dim_account_sql(semantic_segment_map={1: 42})  # type: ignore[dict-item]
+
+    def test_map_underscore_and_letter_leading_accepted(self) -> None:
+        """The two valid leading characters are letters (A-Za-z) and
+        underscore (_). Both must continue to work.
+        """
+        sql = build_dim_account_sql(
+            semantic_segment_map={1: "_private_seg", 2: "Company_Code"},
+        )
+        assert "AS _private_seg" in sql
+        assert "AS Company_Code" in sql
+
     def test_map_duplicate_alias_rejected(self) -> None:
         import pytest
         with pytest.raises(ValueError, match=r"duplicated"):
