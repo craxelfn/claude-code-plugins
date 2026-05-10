@@ -450,15 +450,18 @@ class TestDecideDueDateMode:
             coalesced_frac=0.85, gate_threshold=0.90,
         ) == DUE_DATE_MODE_PROXY  # 0.85 < 0.90 custom gate
 
-    def test_missing_coverage_raises_when_cols_set(self) -> None:
-        """``coalesced_frac=None`` is invalid if at least one real-date column
-        is configured — the caller must measure coverage first."""
-        import pytest
-        with pytest.raises(ValueError, match="coalesced_frac is required"):
-            decide_due_date_mode(
-                terms_date_col="ApInvoicesTermsDate", due_date_col=None,
-                coalesced_frac=None,
-            )
+    def test_missing_coverage_defaults_to_real_when_cols_set(self) -> None:
+        """``coalesced_frac=None`` + cols set = empty open-invoice population
+        (nothing to measure coverage against). Ship empty canonical
+        ``gold.ap_aging`` rather than relabeling to the proxy mart —
+        proxy mode is the answer for low data quality on existing rows,
+        not for "no rows at all". Tomorrow's data lands in the right
+        shape and consumers don't have to re-pivot.
+        """
+        assert decide_due_date_mode(
+            terms_date_col="ApInvoicesTermsDate", due_date_col=None,
+            coalesced_frac=None,
+        ) == DUE_DATE_MODE_REAL
 
     def test_out_of_range_fraction_rejected(self) -> None:
         import pytest
@@ -621,3 +624,110 @@ class TestCancelledAliasDetection:
         detected = detect_ap_aging_params(spark)
         assert detected["cancelled_col"]  == "ApInvoicesCancelledFlag"
         assert detected["cancelled_kind"] == CANCELLED_KIND_FLAG
+
+
+class TestCoverageMeasurementAnsiSafety:
+    """Plugin-portability / ANSI Spark safety: the coverage probe used
+    ``SUM(...) / COUNT(*)`` directly, which faults under ANSI mode when
+    the WHERE clause yields zero rows. The query now uses
+    ``NULLIF(COUNT(*), 0)`` for the divisor; an empty population returns
+    a NULL fraction, which the build path translates to "no measurement
+    available" → default to real mode (the empty-data semantics).
+    """
+
+    def test_coverage_query_uses_nullif_count_divisor(self) -> None:
+        """We can't run Spark in unit tests, but we can read the SQL the
+        Spark-side helper would emit by exercising it through the
+        ``_measure_due_date_coverage`` SQL composition. Build a minimal
+        fake spark stub and capture the SQL string.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            _measure_due_date_coverage,
+        )
+        captured: dict[str, str] = {}
+
+        class _Row:
+            def __getitem__(self, k: str) -> int: return 0
+
+        class _DF:
+            def collect(self) -> list[_Row]: return [_Row()]
+
+        class _Spark:
+            def sql(self, q: str) -> _DF:
+                captured["sql"] = q
+                return _DF()
+
+        _measure_due_date_coverage(
+            _Spark(),  # type: ignore[arg-type]
+            bronze_table="fusion_catalog.bronze.ap_invoices",
+            terms_date_col="ApInvoicesTermsDate",
+            due_date_col=None,
+            cancelled_col=None,
+            cancelled_kind="date",
+            null_invoice_date_policy="drop",
+        )
+        assert "NULLIF(COUNT(*), 0)" in captured["sql"], (
+            "coverage probe MUST use NULLIF in the divisor to be ANSI-safe; "
+            "raw COUNT(*) faults under strict ANSI Spark when the WHERE "
+            "clause yields zero rows"
+        )
+
+    def test_empty_population_returns_none(self) -> None:
+        """When the open-invoice population is empty, the measurement
+        returns None (not 0.0). 0.0 would route the auto-mode router to
+        proxy mode under the 80% gate, silently relabeling an empty
+        canonical mart to the proxy variant. None preserves "no data"
+        semantics so :func:`decide_due_date_mode` can default to real.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            _measure_due_date_coverage,
+        )
+
+        class _EmptyRow:
+            def __getitem__(self, k: str):
+                # COUNT(*) over zero rows is 0; SUM/NULLIF yields NULL
+                return {"open_n": 0, "coalesced_frac": None}[k]
+
+        class _DF:
+            def collect(self) -> list: return [_EmptyRow()]
+
+        class _Spark:
+            def sql(self, q: str): return _DF()
+
+        result = _measure_due_date_coverage(
+            _Spark(),  # type: ignore[arg-type]
+            bronze_table="fusion_catalog.bronze.ap_invoices",
+            terms_date_col="ApInvoicesTermsDate",
+            due_date_col=None,
+            cancelled_col=None,
+            cancelled_kind="date",
+            null_invoice_date_policy="drop",
+        )
+        assert result is None, (
+            "empty open-invoice population must return None, not 0.0 — "
+            "otherwise auto-mode routing relabels empty canonical mart to "
+            "proxy under the 80% gate"
+        )
+
+    def test_no_real_cols_returns_none(self) -> None:
+        """When neither real-date column is configured, the measurement
+        is a no-op (None). The caller routes directly to proxy via
+        decide_due_date_mode without needing the coverage number.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            _measure_due_date_coverage,
+        )
+
+        class _Spark:
+            def sql(self, q: str): raise AssertionError("must not query Spark")
+
+        result = _measure_due_date_coverage(
+            _Spark(),  # type: ignore[arg-type]
+            bronze_table="fusion_catalog.bronze.ap_invoices",
+            terms_date_col=None,
+            due_date_col=None,
+            cancelled_col=None,
+            cancelled_kind="date",
+            null_invoice_date_policy="drop",
+        )
+        assert result is None

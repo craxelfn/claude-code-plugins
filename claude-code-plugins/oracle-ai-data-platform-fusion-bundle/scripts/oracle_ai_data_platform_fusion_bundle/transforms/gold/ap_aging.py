@@ -154,11 +154,16 @@ def decide_due_date_mode(
       open-invoice population) decides:
         * ``>= gate_threshold`` (default 0.80) → ``"real"``
         * ``<  gate_threshold``                → ``"proxy"``
+    * If at least one real-date column exists but ``coalesced_frac`` is
+      ``None`` — i.e. the measurement returned no data because the open
+      population is empty — default to ``"real"``. Empty mart, canonical
+      name; tomorrow's data fits the shape without re-pivot. Proxy mode
+      is the answer for *low data quality*, not *no data*.
 
     Coverage below threshold means too many rows would land on NET-30
     silent fallback, which would publish fake due-date aging under the
     canonical ``gold.ap_aging`` name. Proxy mode (under a different table
-    name) is the honest representation. Per reviewer Blocker #3.
+    name) is the honest representation.
 
     This is a pure function so unit tests can exercise the gate logic
     without Spark; the build path computes ``coalesced_frac`` via
@@ -167,10 +172,13 @@ def decide_due_date_mode(
     if not (terms_date_col or due_date_col):
         return DUE_DATE_MODE_PROXY
     if coalesced_frac is None:
-        raise ValueError(
-            "coalesced_frac is required when at least one of "
-            "terms_date_col / due_date_col is set"
-        )
+        # Cols set, but no measurement (e.g. empty open-invoice population
+        # — nothing to compute coverage over). Default to real mode so the
+        # tenant ships an empty canonical ``gold.ap_aging``; tomorrow when
+        # they have invoices the shape is already correct and consumers
+        # don't need to re-pivot. Proxy mode is a fallback for *low data
+        # quality* (sparse due-dates on present rows), not for *no data*.
+        return DUE_DATE_MODE_REAL
     if not 0.0 <= coalesced_frac <= 1.0:
         raise ValueError(
             f"coalesced_frac must be in [0.0, 1.0], got {coalesced_frac!r}"
@@ -187,16 +195,30 @@ def _measure_due_date_coverage(
     cancelled_col:   str | None,
     cancelled_kind:  str,
     null_invoice_date_policy: str,
-) -> float:
+) -> float | None:
     """Run the coalesced due-date coverage query over the open-invoice population.
 
     Uses the same WHERE clause the mart will use (vendor NOT NULL, optional
     invoice-date NOT NULL, cancelled exclusion, ``<> 0`` filter) so the gate
     measures coverage on exactly the rows the mart will aggregate. Spark-side;
-    not unit-tested directly. Returns 0.0 if the open population is empty.
+    not unit-tested directly.
+
+    Returns:
+
+    * ``None`` if the open population is empty — there's no data to
+      compute coverage against, so the caller (``decide_due_date_mode``)
+      defaults to real mode rather than relabeling the empty mart.
+    * ``None`` if neither real-date column is configured (caller will
+      route directly to proxy mode regardless of fraction).
+    * Otherwise the coalesced non-NULL fraction in ``[0.0, 1.0]``.
+
+    The SQL uses ``NULLIF(COUNT(*), 0)`` for the divisor so the query
+    doesn't fault under ANSI Spark when the WHERE clause yields zero
+    rows. The ``open_n`` projection lets the caller distinguish "empty
+    population" from "all rows missing real dates".
     """
     if not (terms_date_col or due_date_col):
-        return 0.0
+        return None
 
     cancelled_clause   = _cancelled_filter(cancelled_col, cancelled_kind)
     invoice_date_clause = _invoice_date_filter(null_invoice_date_policy)
@@ -210,16 +232,16 @@ def _measure_due_date_coverage(
 
     sql = f"""\
 SELECT
-  COUNT(*)                                                                 AS open_n,
-  SUM(CASE WHEN {has_real_date_expr} THEN 1 ELSE 0 END) * 1.0 / COUNT(*)   AS coalesced_frac
+  COUNT(*)                                                                              AS open_n,
+  SUM(CASE WHEN {has_real_date_expr} THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)     AS coalesced_frac
 FROM {bronze_table} inv
 WHERE inv.ApInvoicesVendorId IS NOT NULL
 {invoice_date_clause}{cancelled_clause}    AND CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(28, 2))
       - CAST(COALESCE(inv.ApInvoicesAmountPaid, 0) AS DECIMAL(28, 2)) <> 0
 """
     row = spark.sql(sql).collect()[0]
-    if row["open_n"] == 0:
-        return 0.0
+    if row["open_n"] == 0 or row["coalesced_frac"] is None:
+        return None
     return float(row["coalesced_frac"])
 
 
