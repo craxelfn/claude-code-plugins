@@ -11,7 +11,16 @@ Phase 2 deliverables:
   currency) (P1.8). Single LEFT-JOIN form to ``silver.dim_account``; no
   ``dim_calendar`` join because that dim is daily-grain (period-context comes
   from the fact's ``period_year`` / ``period_num`` columns).
-* ``ap_aging`` (P1.9), ``ar_aging`` (P1.10), ``po_backlog`` (P1.11) — pending.
+* :mod:`ap_aging` — AP payables aging by (vendor, currency, aging_bucket)
+  (P1.9). Plugin-portable: ships both ``due_date_mode="real"`` (canonical
+  ``gold.ap_aging`` with COALESCE(TermsDate, DueDate, NET-30)) and
+  ``"proxy"`` (``gold.ap_outstanding_by_invoice_age`` for tenants where
+  real due-date coverage is below the 80% gate). Currency in grain;
+  filter ``open_amount <> 0`` invariant; injectable ``as_of_date_expr``;
+  schema-variant knobs for the Fusion AP column dialects observed across
+  tenants. Use ``ap_aging.detect_ap_aging_params(spark)`` to auto-populate
+  the schema-variant kwargs for the current tenant.
+* ``ar_aging`` (P1.10), ``po_backlog`` (P1.11) — pending.
 
 Per-pod data shape varies — production pods have populated supplier
 identifiers (``vendor_id`` 100%); demo pods like eseb-test have them all
@@ -27,6 +36,6 @@ missing from the dim, understating spend.
 no longer load-bearing for path selection.
 """
 
-from . import gl_balance, supplier_spend
+from . import ap_aging, gl_balance, supplier_spend
 
-__all__ = ["gl_balance", "supplier_spend"]
+__all__ = ["ap_aging", "gl_balance", "supplier_spend"]

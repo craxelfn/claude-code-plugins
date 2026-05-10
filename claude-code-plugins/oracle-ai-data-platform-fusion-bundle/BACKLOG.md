@@ -151,11 +151,12 @@
 - ✅ Live evidence: [`tests/live/TC23_gl_balance_results.md`](tests/live/TC23_gl_balance_results.md)
 - ✅ BOOTSTRAP extended with **Step 7** (`BalanceExtractPVO` → `bronze.gl_period_balances`) + Step 8 column-shape probe
 
-### `[ ]` P1.9 — `transforms/gold/ap_aging.py`
-**Why**: Payable age bands (current / 30–60 / 60–90 / 90+). Drives AP aging dashboard.
-**Size**: M (aging-period config logic non-trivial)
-**Depends on**: bronze.ap_invoices ✅, bronze.ap_payments ✅, bronze.ap_aging_periods (config)
-**Accept**: writes `gold.ap_aging`; unit-tested with synthetic invoices spanning all buckets; sample SQL committed.
+### `[~]` P1.9 — `transforms/gold/ap_aging.py` (shipped 2026-05-10, TC24 live)
+**Why**: Payable age bands (current / 1–30 / 31–60 / 61–90 / 91+). Drives AP aging dashboard.
+**Size**: M (plugin-portable schema variants + due-date-mode gate + currency-in-grain)
+**Depends on**: bronze.ap_invoices ✅, silver.dim_supplier ✅ (lean path; no ap_payments / ap_aging_periods needed)
+**Accept**: ✅ writes `gold.ap_aging` (real mode) or `gold.ap_outstanding_by_invoice_age` (proxy mode) on `fusion_bundle_dev`; 40 unit tests covering both modes + schema variants + decision gate; TC24 live evidence shows per-currency reconciliation `delta = 0.00` across 12 currencies, 100% terms_date provenance, $-126K credits preserved across 5 currencies.
+**Shipped**: `transforms/gold/ap_aging.py` (plugin-portable; `due_date_mode='auto'` default + 80% coverage gate; `<> 0` filter invariant; mode-aware `max_days_*` column name). Live evidence: `tests/live/TC24_ap_aging_results.md`.
 
 ### `[ ]` P1.10 — `transforms/gold/ar_aging.py`
 **Why**: Customer aging — collections KPI.
