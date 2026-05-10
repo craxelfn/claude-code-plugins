@@ -172,11 +172,10 @@
 
 ## Theme: Plugin-portability follow-ups (round-6 audit)
 
-### `[ ]` P1.11a — `dim_account` + `gl_balance` segment portability
-**Why**: `dimensions/dim_account.py:86` hardcodes **six** COA segments with semantic names (`company`, `cost_center`, `account`, `subaccount`, `product`, `intercompany`); `transforms/gold/gl_balance.py:137` consumes those semantics directly. Fusion COA configuration is tenant-specific — segment count varies (4–30), order varies, and the meaning of each segment is set by the customer's chart of accounts design. Tenants with >6 segments get truncated `code_combination`; tenants with different segment ordering get wrong semantic labels (e.g. their segment 2 might be "department", not "cost_center").
-**Size**: M — refactor `dim_account` to emit generic `segment_01..segment_30`, build `code_combination` from detected/configured active segments, surface a tenant-config mapping for optional semantic aliases. Update `gl_balance.py` to read from the generic segment columns. Live re-verification on `fusion_bundle_dev` (TC23 redux) + portability test against a synthesized non-six-segment schema in unit tests.
-**Depends on**: nothing — can land before P1.10.
-**Accept**: dim_account emits `segment_NN` columns up to the detected max; `code_combination` is built from active segments only (no padding to 6); a tenant-config mapping (YAML / probe-result) optionally aliases segments into semantic names; gl_balance reads through the alias mapping with sensible defaults.
+### `[~]` P1.11a — `dim_account` segment portability (shipped 2026-05-11)
+**Why**: `dim_account` hardcoded **six** COA segments with semantic names; tenants with >6 populated segments lost data, tenants with different segment ordering got wrong labels.
+**Done**: `dim_account` now emits all 30 positional `segment_01..segment_30` columns by default (configurable via `n_segments`), `code_combination` is built via `CONCAT_WS` over all configured segments (`CONCAT_WS` skips NULLs so sparse tenants produce clean keys), and semantic aliases are tenant-configurable via `semantic_segment_map: Mapping[int, str]` with the Fusion-conventional six as the default (preserves `gl_balance`'s consumer interface — `company`, `cost_center`, etc. all still emitted on the demo pod). Adds `detect_active_segments(spark)` probe helper for orchestrators that want to size `n_segments` per tenant. Validation rejects out-of-range positions, invalid SQL identifiers, and duplicate aliases. 12 new unit tests (test_dim_account 20 → 32).
+**Note**: `gl_balance` is unchanged — by preserving the default semantic aliases as the Fusion-conventional six, the downstream mart and existing dashboards / queries keep working. Tenants with non-conventional COA designs override the map and either (a) read positional `segment_NN` directly, or (b) author their own `gl_balance` variant from the positional columns.
 
 ## Theme: Transforms framework (extract reusable pieces)
 
