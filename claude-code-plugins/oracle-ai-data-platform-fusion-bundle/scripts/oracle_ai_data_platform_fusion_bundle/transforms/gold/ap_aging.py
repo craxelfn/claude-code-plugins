@@ -490,6 +490,10 @@ def detect_ap_aging_params(
 
     if has("ApInvoicesCancelledDate"):
         cancelled_col, cancelled_kind = "ApInvoicesCancelledDate", CANCELLED_KIND_DATE
+    elif has("ApInvoicesCancelDate"):
+        # Alias variant (some Fusion extracts omit the "led" suffix).
+        # Same semantics as ApInvoicesCancelledDate (non-NULL = cancelled).
+        cancelled_col, cancelled_kind = "ApInvoicesCancelDate", CANCELLED_KIND_DATE
     elif has("ApInvoicesCancelledFlag"):
         cancelled_col, cancelled_kind = "ApInvoicesCancelledFlag", CANCELLED_KIND_FLAG
     else:

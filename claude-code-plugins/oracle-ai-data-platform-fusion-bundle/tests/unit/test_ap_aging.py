@@ -553,3 +553,71 @@ class TestCurrencyDetectionAndGate:
         ])
         detected = detect_ap_aging_params(spark)
         assert detected["currency_col"] is None
+
+
+class TestCancelledAliasDetection:
+    """Cancelled-flag variant detection: Fusion AP extracts emit one of
+    three column names depending on the BICC packaging — all three are
+    auto-detected so a default-args ``build(spark)`` works on any pod.
+
+    Priority order: ``ApInvoicesCancelledDate`` (canonical) →
+    ``ApInvoicesCancelDate`` (alias without the "led" suffix) →
+    ``ApInvoicesCancelledFlag`` (Y/N boolean variant). The first two are
+    date columns (kind="date"); the third is a Y/N flag (kind="flag").
+    """
+
+    @staticmethod
+    def _fake_spark(cols: list[str]):
+        class _Field:
+            def __init__(self, name: str): self.name = name
+        fields = [_Field(c) for c in cols]
+        class _Table:
+            schema = fields
+        class _Spark:
+            def table(self, _name: str): return _Table()
+        return _Spark()
+
+    def test_cancel_date_alias_detected(self) -> None:
+        """A tenant whose extract emits ``ApInvoicesCancelDate`` (no "led")
+        is still detected. Without this, the mart would silently include
+        cancelled invoices in aging on those tenants.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            CANCELLED_KIND_DATE,
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesInvoiceCurrencyCode", "ApInvoicesCancelDate",
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["cancelled_col"]  == "ApInvoicesCancelDate"
+        assert detected["cancelled_kind"] == CANCELLED_KIND_DATE
+
+    def test_canonical_cancelled_date_wins_over_alias(self) -> None:
+        """When both alias and canonical exist, canonical wins to keep
+        behavior predictable across mixed-schema tenants.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesInvoiceCurrencyCode",
+            "ApInvoicesCancelledDate", "ApInvoicesCancelDate",
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["cancelled_col"] == "ApInvoicesCancelledDate"
+
+    def test_flag_variant_used_only_when_neither_date_present(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            CANCELLED_KIND_FLAG,
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesInvoiceCurrencyCode", "ApInvoicesCancelledFlag",
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["cancelled_col"]  == "ApInvoicesCancelledFlag"
+        assert detected["cancelled_kind"] == CANCELLED_KIND_FLAG

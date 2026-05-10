@@ -22,10 +22,12 @@ import re
 from oracle_ai_data_platform_fusion_bundle.transforms.gold import supplier_spend
 from oracle_ai_data_platform_fusion_bundle.transforms.gold.supplier_spend import (
     DEFAULT_CURRENCY_COL,
+    KNOWN_CURRENCY_COL_ALIASES,
     SOURCE_BRONZE_TABLE,
     SOURCE_SILVER_DIM,
     TARGET_GOLD_TABLE,
     build_supplier_spend_sql,
+    detect_currency_col,
 )
 
 
@@ -243,3 +245,77 @@ class TestCurrencyInGrain:
 
     def test_currency_in_module_exports(self) -> None:
         assert "DEFAULT_CURRENCY_COL" in supplier_spend.__all__
+
+
+class TestCurrencyDetection:
+    """Plugin-portability: ``build(spark)`` must detect the currency column
+    alias automatically — same contract ``ap_aging.build`` honors. A tenant
+    using the ``ApInvoicesCurrencyCode`` alias instead of canonical
+    ``ApInvoicesInvoiceCurrencyCode`` should NOT fail Spark analysis from
+    a default-args call.
+    """
+
+    @staticmethod
+    def _fake_spark(cols: list[str]):
+        class _Field:
+            def __init__(self, name: str): self.name = name
+        fields = [_Field(c) for c in cols]
+        class _Table:
+            schema = fields
+        class _Spark:
+            def table(self, _name: str): return _Table()
+        return _Spark()
+
+    def test_known_aliases_include_both_variants(self) -> None:
+        assert "ApInvoicesInvoiceCurrencyCode" in KNOWN_CURRENCY_COL_ALIASES
+        assert "ApInvoicesCurrencyCode"        in KNOWN_CURRENCY_COL_ALIASES
+
+    def test_detects_canonical(self) -> None:
+        spark = self._fake_spark(["ApInvoicesInvoiceCurrencyCode", "other_col"])
+        assert detect_currency_col(spark) == "ApInvoicesInvoiceCurrencyCode"
+
+    def test_detects_alias(self) -> None:
+        """Tenants using only the alias variant — detect picks it up."""
+        spark = self._fake_spark(["ApInvoicesCurrencyCode", "other_col"])
+        assert detect_currency_col(spark) == "ApInvoicesCurrencyCode"
+
+    def test_canonical_wins_when_both_present(self) -> None:
+        spark = self._fake_spark([
+            "ApInvoicesInvoiceCurrencyCode", "ApInvoicesCurrencyCode",
+        ])
+        assert detect_currency_col(spark) == "ApInvoicesInvoiceCurrencyCode"
+
+    def test_returns_none_when_neither_present(self) -> None:
+        """Caller (the build path) is responsible for hard-gating; the detect
+        helper just reports None."""
+        spark = self._fake_spark(["ApInvoicesVendorId", "ApInvoicesInvoiceAmount"])
+        assert detect_currency_col(spark) is None
+
+    def test_detect_in_module_exports(self) -> None:
+        for name in ("KNOWN_CURRENCY_COL_ALIASES", "detect_currency_col"):
+            assert name in supplier_spend.__all__
+
+
+class TestAmountPaidCoalesce:
+    """Plugin-portability / NULL-propagation fix: a group of invoices where
+    every ``ApInvoicesAmountPaid`` is NULL would have produced ``total_paid =
+    NULL`` without ``COALESCE`` (Spark SUM propagates NULL through CAST). Same
+    pattern ap_aging and gl_balance use.
+    """
+
+    def test_amount_paid_coalesced(self) -> None:
+        sql = build_supplier_spend_sql()
+        assert re.search(
+            r"SUM\(\s*COALESCE\(\s*CAST\(\s*inv\.ApInvoicesAmountPaid\s+AS\s+DECIMAL\(20,\s*2\)\s*\)\s*,\s*0\s*\)\s*\)",
+            sql,
+        ), "total_paid SUM must COALESCE NULL AmountPaid to 0 to avoid NULL propagation"
+
+    def test_invoice_amount_also_coalesced(self) -> None:
+        """Symmetric protection for total_invoice_amount — NULL invoice amounts
+        are extremely rare but the COALESCE makes the aggregation robust.
+        """
+        sql = build_supplier_spend_sql()
+        assert re.search(
+            r"SUM\(\s*COALESCE\(\s*CAST\(\s*inv\.ApInvoicesInvoiceAmount\s+AS\s+DECIMAL\(20,\s*2\)\s*\)\s*,\s*0\s*\)\s*\)",
+            sql,
+        )
