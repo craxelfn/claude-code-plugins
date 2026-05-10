@@ -20,6 +20,7 @@ import re
 from oracle_ai_data_platform_fusion_bundle.transforms.gold import gl_balance
 from oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance import (
     DEFAULT_ACTUAL_FLAG_FILTER,
+    DEFAULT_COA_SEGMENT_MAP,
     SOURCE_BRONZE_TABLE,
     SOURCE_SILVER_DIM,
     TARGET_GOLD_TABLE,
@@ -81,12 +82,23 @@ class TestSqlBuilder:
         """code_combination / account_type / segment columns come from dim.
 
         NULL where the fact's CCID isn't in the dim — LEFT-JOIN behavior;
-        the financial number stays accurate.
+        the financial number stays accurate. Plugin-portability note:
+        ``company`` / ``cost_center`` etc. are now sourced from positional
+        ``da.segment_NN`` columns (always emitted by ``dim_account``)
+        rather than from optional semantic aliases — see the
+        ``coa_segment_map`` knob.
         """
         sql = build_gl_balance_sql()
-        for col in ("code_combination", "account_type", "company", "cost_center"):
+        # Non-segment dim attributes still pulled by name
+        for col in ("code_combination", "account_type"):
             assert re.search(rf"da\.{col}\s+AS\s+{col}", sql), (
                 f"{col} must be selected from the dim alias `da`"
+            )
+        # Segment-backed output columns now come from da.segment_NN positions
+        for pos, alias in [(1, "company"), (2, "cost_center")]:
+            assert re.search(rf"da\.segment_{pos:02d}\s+AS\s+{alias}", sql), (
+                f"{alias} must be sourced from da.segment_{pos:02d} (positional, "
+                "always emitted by dim_account regardless of tenant COA shape)"
             )
 
     def test_no_dim_calendar_join(self) -> None:
@@ -301,3 +313,102 @@ class TestActualFlagFilterKnob:
     def test_ccid_filter_still_present_under_default(self) -> None:
         sql = build_gl_balance_sql()
         assert "BalanceCodeCombinationId IS NOT NULL" in sql
+
+
+class TestCoaSegmentMapKnob:
+    """Plugin-portability: gl_balance reads positional ``segment_NN`` columns
+    from ``silver.dim_account`` (always emitted) rather than the dim's
+    optional semantic aliases (which are now tenant-configurable in
+    dim_account and may not exist on non-conventional COA designs).
+    The ``coa_segment_map`` knob controls which positions become which
+    output column names.
+    """
+
+    def test_default_map_is_fusion_conventional(self) -> None:
+        assert dict(DEFAULT_COA_SEGMENT_MAP) == {
+            1: "company",
+            2: "cost_center",
+            3: "natural_account",
+            4: "subaccount",
+            5: "product",
+            6: "intercompany",
+        }
+
+    def test_default_emits_canonical_six_segments(self) -> None:
+        """Backwards-compat: the default produces the same output column
+        names gl_balance had pre-refactor, so dashboards keep working.
+        """
+        sql = build_gl_balance_sql()
+        for pos, alias in DEFAULT_COA_SEGMENT_MAP.items():
+            assert re.search(rf"da\.segment_{pos:02d}\s+AS\s+{alias}", sql), (
+                f"default map must emit da.segment_{pos:02d} AS {alias}"
+            )
+
+    def test_does_not_read_optional_dim_aliases_by_default(self) -> None:
+        """The whole point of this refactor: do NOT read ``da.company`` /
+        ``da.cost_center`` / ``da.account`` etc. anymore — those are
+        optional in dim_account now, and a non-conventional COA tenant
+        wouldn't have them.
+        """
+        sql = build_gl_balance_sql()
+        for forbidden in (
+            r"da\.company\b",
+            r"da\.cost_center\b",
+            r"da\.account\b(?!_)",   # avoid matching da.account_type / da.account_key
+            r"da\.subaccount\b",
+            r"da\.product\b",
+            r"da\.intercompany\b",
+        ):
+            assert not re.search(forbidden, sql), (
+                f"gl_balance must NOT read {forbidden!r} from dim_account — "
+                "those aliases are tenant-optional. Use da.segment_NN instead."
+            )
+
+    def test_custom_map_relabels_segments(self) -> None:
+        """A tenant whose COA puts natural account at segment 5 passes
+        a custom map. Output column name follows the map value; backing
+        position follows the map key.
+        """
+        sql = build_gl_balance_sql(
+            coa_segment_map={
+                1: "company",
+                2: "department",      # tenant calls segment 2 "department"
+                5: "natural_account", # natural account at position 5
+            },
+        )
+        assert re.search(r"da\.segment_01\s+AS\s+company", sql)
+        assert re.search(r"da\.segment_02\s+AS\s+department", sql)
+        assert re.search(r"da\.segment_05\s+AS\s+natural_account", sql)
+        # Default-only aliases must NOT appear under the custom map
+        assert not re.search(r"AS\s+cost_center\b", sql)
+        assert not re.search(r"AS\s+subaccount\b", sql)
+
+    def test_empty_map_omits_segment_columns(self) -> None:
+        """Caller can produce a segment-less mart and let consumers read
+        ``segment_NN`` directly from ``silver.dim_account``.
+        """
+        sql = build_gl_balance_sql(coa_segment_map={})
+        assert not re.search(r"da\.segment_\d{2}\s+AS", sql)
+        # Non-segment dim attributes still present
+        assert "da.code_combination" in sql
+        assert "da.account_type" in sql
+
+    def test_invalid_position_rejected(self) -> None:
+        import pytest
+        for bad_pos in (0, -1, 31, 100):
+            with pytest.raises(ValueError, match=r"out of range"):
+                build_gl_balance_sql(coa_segment_map={bad_pos: "x"})
+
+    def test_invalid_alias_rejected(self) -> None:
+        import pytest
+        with pytest.raises(ValueError, match=r"valid SQL identifier"):
+            build_gl_balance_sql(coa_segment_map={1: "drop table; --"})
+
+    def test_duplicate_alias_rejected(self) -> None:
+        import pytest
+        with pytest.raises(ValueError, match=r"duplicated"):
+            build_gl_balance_sql(coa_segment_map={1: "x", 2: "x"})
+
+    def test_map_in_exports(self) -> None:
+        import oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance as mod
+        assert "DEFAULT_COA_SEGMENT_MAP" in mod.__all__

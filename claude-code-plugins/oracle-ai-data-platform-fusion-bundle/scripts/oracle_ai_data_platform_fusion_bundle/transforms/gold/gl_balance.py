@@ -102,6 +102,7 @@ Filter philosophy
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -114,6 +115,66 @@ TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.gl_balance"
 
 DEFAULT_ACTUAL_FLAG_FILTER: Final[str] = "A"
 
+#: Default mapping of COA segment position (1-based) → ``gl_balance`` output
+#: column name. Matches the Fusion-conventional six-segment ordering so
+#: tenants whose COA follows that layout (the saasfademo1 demo pod and the
+#: majority of production tenants) reproduce the pre-refactor column shape
+#: exactly. Tenants whose COA puts natural account at, say, segment 5 pass
+#: a custom map (``{1: "company", 5: "natural_account", ...}``) so the
+#: output column name matches its data. Pass ``{}`` to suppress segment
+#: columns entirely (consumers read ``segment_NN`` from the dim directly).
+DEFAULT_COA_SEGMENT_MAP: Final[Mapping[int, str]] = {
+    1: "company",
+    2: "cost_center",
+    3: "natural_account",
+    4: "subaccount",
+    5: "product",
+    6: "intercompany",
+}
+
+#: Maximum segment position ``dim_account`` can emit (Fusion's COA cap).
+_MAX_COA_SEGMENT: Final[int] = 30
+
+
+def _validate_coa_segment_map(coa_segment_map: Mapping[int, str]) -> None:
+    for pos, alias in coa_segment_map.items():
+        if not 1 <= pos <= _MAX_COA_SEGMENT:
+            raise ValueError(
+                f"coa_segment_map position {pos!r} (alias {alias!r}) is "
+                f"out of range [1, {_MAX_COA_SEGMENT}]"
+            )
+        if not alias or not alias.replace("_", "").isalnum():
+            raise ValueError(
+                f"coa_segment_map alias {alias!r} (position {pos}) is not "
+                "a valid SQL identifier — only [A-Za-z0-9_] allowed"
+            )
+    seen: set[str] = set()
+    for alias in coa_segment_map.values():
+        if alias in seen:
+            raise ValueError(
+                f"coa_segment_map alias {alias!r} is duplicated — each "
+                "alias must be unique"
+            )
+        seen.add(alias)
+
+
+def _segment_select_lines(coa_segment_map: Mapping[int, str]) -> str:
+    """Emit ``da.segment_NN AS <alias>`` lines for the configured map.
+
+    Reading positional ``segment_NN`` columns (always emitted by
+    ``dim_account``) decouples gl_balance from the dim's optional
+    semantic aliases, which are tenant-configurable and may not exist on
+    non-conventional COA designs. Returns ``""`` when the map is empty
+    (suppress segment columns entirely — consumers read positional
+    columns from the dim directly).
+    """
+    if not coa_segment_map:
+        return ""
+    return "\n".join(
+        f"  da.segment_{pos:02d}{' ' * max(1, 64 - len(f'da.segment_{pos:02d}'))}AS {alias},"
+        for pos, alias in sorted(coa_segment_map.items())
+    )
+
 
 def build_gl_balance_sql(
     *,
@@ -121,6 +182,7 @@ def build_gl_balance_sql(
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
+    coa_segment_map: Mapping[int, str] | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.gl_balance``.
 
@@ -138,13 +200,23 @@ def build_gl_balance_sql(
     * ``"E"`` / ``"B"`` — encumbrance / budget only for tenants whose
       dashboards need those balance types.
     * ``None`` — disable the filter; surface all flags. Consumers slice
-      on ``actual_flag`` themselves. Use when the mart powers multi-tab
-      dashboards that compare actuals vs encumbrances.
+      on ``actual_flag`` themselves.
 
-    Plugin-portability: hardcoding ``'A'`` would drop balances entirely on
-    a tenant whose data is predominantly encumbrance / budget. The knob
-    keeps the default cheap (no flag filter on the consumer) while
-    allowing override per-deployment. Per round-6 review.
+    ``coa_segment_map`` controls how dim_account's positional
+    ``segment_NN`` columns are surfaced. Defaults to
+    :data:`DEFAULT_COA_SEGMENT_MAP` (the Fusion-conventional six). Tenants
+    whose COA puts natural account at a different segment override the
+    map (``{1: "company", 5: "natural_account", ...}``); the output column
+    names follow the map values. Pass ``{}`` to omit segment columns
+    entirely — consumers can read ``da.segment_NN`` from ``silver.dim_account``
+    if they want a tenant-agnostic shape.
+
+    Plugin-portability: gl_balance used to read ``da.company``,
+    ``da.cost_center``, etc. directly. Those aliases are now optional in
+    dim_account (the dim's ``semantic_segment_map`` is tenant-configurable),
+    so a non-conventional COA tenant could find them missing. Reading
+    positional ``segment_NN`` instead decouples gl_balance from the dim's
+    alias contract — positional columns are always emitted.
     """
     if actual_flag_filter is None:
         where_clauses = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
@@ -160,6 +232,12 @@ def build_gl_balance_sql(
             "  AND b.BalanceCodeCombinationId IS NOT NULL"
         )
 
+    if coa_segment_map is None:
+        coa_segment_map = DEFAULT_COA_SEGMENT_MAP
+    _validate_coa_segment_map(coa_segment_map)
+    segment_select_block = _segment_select_lines(coa_segment_map)
+    segment_select_block = f"{segment_select_block}\n" if segment_select_block else ""
+
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
@@ -169,13 +247,7 @@ SELECT
   CAST(b.BalanceCodeCombinationId   AS BIGINT)                     AS account_id,
   da.code_combination                                              AS code_combination,
   da.account_type                                                  AS account_type,
-  da.company                                                       AS company,
-  da.cost_center                                                   AS cost_center,
-  da.account                                                       AS natural_account,
-  da.subaccount                                                    AS subaccount,
-  da.product                                                       AS product,
-  da.intercompany                                                  AS intercompany,
-  CAST(b.BalancePeriodYear          AS BIGINT)                     AS period_year,
+{segment_select_block}  CAST(b.BalancePeriodYear          AS BIGINT)                     AS period_year,
   CAST(b.BalancePeriodNum           AS BIGINT)                     AS period_num,
   b.BalancePeriodName                                              AS period_name,
   b.BalanceCurrencyCode                                            AS currency_code,
@@ -207,6 +279,7 @@ def build(
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
+    coa_segment_map: Mapping[int, str] | None = None,
 ) -> DataFrame:
     """Materialize ``gold.gl_balance``; returns a DataFrame backed by it.
 
@@ -214,13 +287,16 @@ def build(
     written gold table. Idempotent — uses ``CREATE OR REPLACE`` so reruns
     produce the same shape. ``actual_flag_filter`` is forwarded to the SQL
     builder (default ``'A'`` for the canonical actuals view; pass ``None``
-    to surface all flags).
+    to surface all flags). ``coa_segment_map`` controls which positional
+    ``segment_NN`` columns from ``silver.dim_account`` are surfaced and
+    under what names (default: Fusion-conventional six-segment ordering).
     """
     sql = build_gl_balance_sql(
         bronze_balances=bronze_balances,
         silver_dim=silver_dim,
         gold_table=gold_table,
         actual_flag_filter=actual_flag_filter,
+        coa_segment_map=coa_segment_map,
     )
     spark.sql(sql)
     return spark.table(gold_table)
@@ -228,6 +304,7 @@ def build(
 
 __all__ = [
     "DEFAULT_ACTUAL_FLAG_FILTER",
+    "DEFAULT_COA_SEGMENT_MAP",
     "SOURCE_BRONZE_TABLE",
     "SOURCE_SILVER_DIM",
     "TARGET_GOLD_TABLE",
