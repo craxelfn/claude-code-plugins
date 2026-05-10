@@ -170,6 +170,14 @@
 **Depends on**: P1.1 (`dim_supplier`), P1.4 (`dim_calendar`); bronze.po_orders ✅, bronze.po_receipts ✅
 **Accept**: writes `gold.po_backlog`; unit-tested; sample SQL committed.
 
+## Theme: Plugin-portability follow-ups (round-6 audit)
+
+### `[ ]` P1.11a — `dim_account` + `gl_balance` segment portability
+**Why**: `dimensions/dim_account.py:86` hardcodes **six** COA segments with semantic names (`company`, `cost_center`, `account`, `subaccount`, `product`, `intercompany`); `transforms/gold/gl_balance.py:137` consumes those semantics directly. Fusion COA configuration is tenant-specific — segment count varies (4–30), order varies, and the meaning of each segment is set by the customer's chart of accounts design. Tenants with >6 segments get truncated `code_combination`; tenants with different segment ordering get wrong semantic labels (e.g. their segment 2 might be "department", not "cost_center").
+**Size**: M — refactor `dim_account` to emit generic `segment_01..segment_30`, build `code_combination` from detected/configured active segments, surface a tenant-config mapping for optional semantic aliases. Update `gl_balance.py` to read from the generic segment columns. Live re-verification on `fusion_bundle_dev` (TC23 redux) + portability test against a synthesized non-six-segment schema in unit tests.
+**Depends on**: nothing — can land before P1.10.
+**Accept**: dim_account emits `segment_NN` columns up to the detected max; `code_combination` is built from active segments only (no padding to 6); a tenant-config mapping (YAML / probe-result) optionally aliases segments into semantic names; gl_balance reads through the alias mapping with sensible defaults.
+
 ## Theme: Transforms framework (extract reusable pieces)
 
 ### `[ ]` P1.12 — Refactor `transforms/__init__.py` into a real framework

@@ -467,10 +467,12 @@ def detect_ap_aging_params(
     * ``cancelled_col`` + ``cancelled_kind`` — ``ApInvoicesCancelledDate``
       (``"date"``) or ``ApInvoicesCancelledFlag`` (``"flag"``); ``None`` if
       neither is present.
-
-    Currency column is not auto-detected because its absence is a hard
-    blocker (currency in grain is mandatory) — the caller should validate
-    presence separately and refuse to build if missing.
+    * ``currency_col`` — ``ApInvoicesInvoiceCurrencyCode`` (canonical) or
+      ``ApInvoicesCurrencyCode`` (alias variant); ``None`` if neither is
+      present. **Currency is mandatory** (currency-in-grain rule); the
+      build path treats ``None`` as a hard gate and refuses to materialize
+      the mart — see :func:`build`. Detection here just *measures*
+      presence; enforcement happens at build time.
 
     Does **not** decide ``due_date_mode`` or ``null_invoice_date_policy`` —
     those depend on population statistics (coalesced non-NULL fraction over
@@ -493,11 +495,19 @@ def detect_ap_aging_params(
     else:
         cancelled_col, cancelled_kind = None, CANCELLED_KIND_DATE  # kind moot when col=None
 
+    # Currency: first-match across the known Fusion BICC aliases. None means
+    # neither alias exists — the build path hard-gates on this.
+    currency_col = next(
+        (c for c in ("ApInvoicesInvoiceCurrencyCode", "ApInvoicesCurrencyCode") if has(c)),
+        None,
+    )
+
     return {
         "terms_date_col": terms_date_col,
         "due_date_col":   due_date_col,
         "cancelled_col":  cancelled_col,
         "cancelled_kind": cancelled_kind,
+        "currency_col":   currency_col,
     }
 
 
@@ -554,6 +564,20 @@ def build(
         if cancelled_col  == "ApInvoicesCancelledDate":
             cancelled_col  = detected["cancelled_col"]   # type: ignore[assignment]
             cancelled_kind = detected["cancelled_kind"]  # type: ignore[assignment]
+        if currency_col   == "ApInvoicesInvoiceCurrencyCode":
+            # Detected None means neither alias exists on the tenant; we
+            # hard-gate below. A detected non-None alias (e.g. the
+            # ``ApInvoicesCurrencyCode`` variant) overrides the default.
+            if detected["currency_col"] is None:
+                raise ValueError(
+                    "Currency column missing on bronze.ap_invoices — neither "
+                    "ApInvoicesInvoiceCurrencyCode nor ApInvoicesCurrencyCode "
+                    "is present. Cannot ship a single-currency-summed AP "
+                    "aging mart (currency-in-grain rule). Re-extract bronze "
+                    "with currency, or pass an explicit currency_col= override "
+                    "if your tenant uses a different alias."
+                )
+            currency_col = detected["currency_col"]      # type: ignore[assignment]
 
     if due_date_mode == DUE_DATE_MODE_AUTO:
         coalesced_frac: float | None

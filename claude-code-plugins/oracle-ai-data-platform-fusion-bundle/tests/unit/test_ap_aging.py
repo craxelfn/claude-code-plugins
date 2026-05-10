@@ -476,3 +476,80 @@ class TestDecideDueDateMode:
         import pytest
         with pytest.raises(ValueError, match="due_date_mode"):
             build_ap_aging_sql(due_date_mode=DUE_DATE_MODE_AUTO)
+
+
+class TestCurrencyDetectionAndGate:
+    """Round-6 plugin-portability fix: currency must be detected (canonical
+    + alias) and absence hard-gates the build with a clear error. Earlier
+    versions hardcoded ``ApInvoicesInvoiceCurrencyCode`` and would fail late
+    inside Spark on tenants with the ``ApInvoicesCurrencyCode`` alias.
+
+    We exercise the detect helper's contract directly via a minimal fake
+    spark — the helper only needs ``spark.table(name).schema`` to return an
+    iterable of objects with a ``.name`` attribute.
+    """
+
+    @staticmethod
+    def _fake_spark(cols: list[str]):
+        """Minimal duck-typed Spark substitute for ``detect_ap_aging_params``.
+
+        Returns a stub whose ``.table(name).schema`` is a list of objects with
+        ``.name`` attributes. We don't need Spark itself; we only need the
+        detect helper's read interface.
+        """
+        class _Field:
+            def __init__(self, name: str): self.name = name
+        fields = [_Field(c) for c in cols]
+        class _Table:
+            schema = fields
+        class _Spark:
+            def table(self, _name: str): return _Table()
+        return _Spark()
+
+    def test_detects_canonical_currency_col(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesInvoiceCurrencyCode",
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["currency_col"] == "ApInvoicesInvoiceCurrencyCode"
+
+    def test_detects_alias_currency_col(self) -> None:
+        """Tenants using the ``ApInvoicesCurrencyCode`` alias instead of the
+        canonical ``ApInvoicesInvoiceCurrencyCode`` are equally supported.
+        """
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesCurrencyCode",   # alias, no canonical
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["currency_col"] == "ApInvoicesCurrencyCode"
+
+    def test_canonical_wins_when_both_present(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+            "ApInvoicesInvoiceCurrencyCode", "ApInvoicesCurrencyCode",
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["currency_col"] == "ApInvoicesInvoiceCurrencyCode"
+
+    def test_neither_present_returns_none(self) -> None:
+        """Caller (the build path) is responsible for hard-gating; the
+        detect helper just reports None."""
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging import (
+            detect_ap_aging_params,
+        )
+        spark = self._fake_spark([
+            "ApInvoicesVendorId", "ApInvoicesInvoiceDate",  # no currency
+        ])
+        detected = detect_ap_aging_params(spark)
+        assert detected["currency_col"] is None

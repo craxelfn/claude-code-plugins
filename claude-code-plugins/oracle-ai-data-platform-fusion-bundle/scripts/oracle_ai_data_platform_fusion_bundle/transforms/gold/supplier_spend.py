@@ -1,14 +1,25 @@
-"""gold.supplier_spend — supplier x approval-status spend mart.
+"""gold.supplier_spend — supplier x currency x approval-status spend mart.
 
 Productizes TC8's prototype which proved the SQL on `saasfademo1` (etap-dev5)
 demo pod: $3.2B aggregate / 236 records / top vendor `300000047507499` at
 $892.7M.
 
+Currency in grain (mandatory)
+-----------------------------
+
+Round-6 review surfaced that an earlier version of this mart aggregated
+amounts across all currencies — same bug class TC23 documented for
+gl_balance and that reviewer Blocker #1 fixed for ap_aging. ``saasfademo1``
+holds invoices in 12 different currencies (USD/GBP/EUR/CNY/JPY/AUD/INR/
+CHF/AED/PLN/TRY/MXN as of 2026-05-10); summing them produces meaningless
+totals. ``currency_code = UPPER(ApInvoicesInvoiceCurrencyCode)`` is now in
+the grain. Consumers do their own FX rollups (or stay within a currency).
+
 Design — single LEFT-JOIN form (financial-correctness invariant)
 ----------------------------------------------------------------
 
-The grain is **(invoice's vendor_id, approval_status)**. We use a single
-LEFT JOIN from `bronze.ap_invoices` → `silver.dim_supplier`:
+The grain is **(invoice's vendor_id, currency_code, approval_status)**.
+We use a single LEFT JOIN from `bronze.ap_invoices` → `silver.dim_supplier`:
 
 * The invoice side is *always preserved* — every invoice dollar appears in
   exactly one output row, regardless of whether its vendor is in the dim.
@@ -56,12 +67,15 @@ SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.ap_invoices"
 SOURCE_SILVER_DIM:   Final[str] = "fusion_catalog.silver.dim_supplier"
 TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.supplier_spend"
 
+DEFAULT_CURRENCY_COL: Final[str] = "ApInvoicesInvoiceCurrencyCode"
+
 
 def build_supplier_spend_sql(
     *,
     bronze_invoices: str = SOURCE_BRONZE_TABLE,
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
+    currency_col:    str = DEFAULT_CURRENCY_COL,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.supplier_spend``.
 
@@ -70,6 +84,10 @@ def build_supplier_spend_sql(
     dollar appears in the output regardless of whether its vendor matches the
     dim. Dim attributes (`supplier_number`, `supplier_name`,
     `business_relationship`) are NULL when no match exists.
+
+    ``currency_col`` defaults to the canonical Fusion BICC column
+    ``ApInvoicesInvoiceCurrencyCode``; pass ``ApInvoicesCurrencyCode`` (or
+    any other alias) for tenants whose extract uses a different name.
     """
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
@@ -77,6 +95,7 @@ USING DELTA
 AS
 SELECT
   CAST(inv.ApInvoicesVendorId AS BIGINT)                           AS vendor_id,
+  UPPER(CAST(inv.{currency_col} AS STRING))                        AS currency_code,
   ds.supplier_number                                               AS supplier_number,
   ds.supplier_name                                                 AS supplier_name,
   ds.business_relationship                                         AS business_relationship,
@@ -92,6 +111,7 @@ LEFT JOIN {silver_dim} ds
 WHERE inv.ApInvoicesVendorId IS NOT NULL
 GROUP BY
   CAST(inv.ApInvoicesVendorId AS BIGINT),
+  UPPER(CAST(inv.{currency_col} AS STRING)),
   ds.supplier_number,
   ds.supplier_name,
   ds.business_relationship,
@@ -105,23 +125,28 @@ def build(
     bronze_invoices: str = SOURCE_BRONZE_TABLE,
     silver_dim:      str = SOURCE_SILVER_DIM,
     gold_table:      str = TARGET_GOLD_TABLE,
+    currency_col:    str = DEFAULT_CURRENCY_COL,
 ) -> DataFrame:
     """Materialize ``gold.supplier_spend``; returns a DataFrame backed by it.
 
     The single LEFT-JOIN form preserves every invoice — no path-selection
     logic. The dim is consulted opportunistically for attributes; missing
-    matches yield NULL dim columns rather than dropping invoices.
+    matches yield NULL dim columns rather than dropping invoices. Currency
+    is in the grain (round-6 review) — cross-currency aggregation is the
+    consumer's responsibility.
     """
     sql = build_supplier_spend_sql(
         bronze_invoices=bronze_invoices,
         silver_dim=silver_dim,
         gold_table=gold_table,
+        currency_col=currency_col,
     )
     spark.sql(sql)
     return spark.table(gold_table)
 
 
 __all__ = [
+    "DEFAULT_CURRENCY_COL",
     "SOURCE_BRONZE_TABLE",
     "SOURCE_SILVER_DIM",
     "TARGET_GOLD_TABLE",

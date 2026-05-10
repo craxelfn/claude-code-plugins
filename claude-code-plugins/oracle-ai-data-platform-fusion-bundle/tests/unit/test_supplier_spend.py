@@ -21,6 +21,7 @@ import re
 
 from oracle_ai_data_platform_fusion_bundle.transforms.gold import supplier_spend
 from oracle_ai_data_platform_fusion_bundle.transforms.gold.supplier_spend import (
+    DEFAULT_CURRENCY_COL,
     SOURCE_BRONZE_TABLE,
     SOURCE_SILVER_DIM,
     TARGET_GOLD_TABLE,
@@ -196,3 +197,49 @@ class TestModuleExports:
             assert not hasattr(supplier_spend, name), (
                 f"{name} still defined as a module attribute — clean it up."
             )
+
+
+class TestCurrencyInGrain:
+    """Round-6 plugin-portability fix: currency_code in grain.
+
+    Without it, ``total_invoice_amount`` and ``total_paid`` sum across
+    currencies — meaningless on any multi-currency pod. ``saasfademo1``
+    has 12 distinct currencies on AP invoices (USD/GBP/EUR/CNY/JPY/AUD/
+    INR/CHF/AED/PLN/TRY/MXN as of 2026-05-10). Same lesson TC23 documented
+    for gl_balance and reviewer Blocker #1 enforced for ap_aging.
+    """
+
+    def test_default_currency_col_is_canonical(self) -> None:
+        assert DEFAULT_CURRENCY_COL == "ApInvoicesInvoiceCurrencyCode"
+
+    def test_currency_code_projected_uppercased(self) -> None:
+        sql = build_supplier_spend_sql()
+        assert re.search(
+            r"UPPER\(\s*CAST\(\s*inv\.ApInvoicesInvoiceCurrencyCode\s+AS\s+STRING\s*\)\s*\)\s+AS\s+currency_code",
+            sql,
+        ), "currency_code must be UPPER'd and projected as a grain key"
+
+    def test_currency_code_in_group_by(self) -> None:
+        """Without GROUP BY currency, amounts would still aggregate across
+        currencies even if the column is projected. Both must be present.
+        """
+        sql = build_supplier_spend_sql()
+        group_by_clause = sql[sql.upper().rindex("GROUP BY"):]
+        assert re.search(
+            r"UPPER\(\s*CAST\(\s*inv\.ApInvoicesInvoiceCurrencyCode\s+AS\s+STRING\s*\)\s*\)",
+            group_by_clause,
+        ), "currency_code expression must appear in GROUP BY clause"
+
+    def test_currency_col_override_threads_through(self) -> None:
+        """Tenants with an aliased currency column (e.g.
+        ``ApInvoicesCurrencyCode``) override the default; the override
+        must reach both the SELECT projection and the GROUP BY.
+        """
+        sql = build_supplier_spend_sql(currency_col="ApInvoicesCurrencyCode")
+        assert "ApInvoicesCurrencyCode" in sql
+        assert "ApInvoicesInvoiceCurrencyCode" not in sql, (
+            "override must REPLACE the default column reference, not coexist"
+        )
+
+    def test_currency_in_module_exports(self) -> None:
+        assert "DEFAULT_CURRENCY_COL" in supplier_spend.__all__
