@@ -196,30 +196,50 @@ class TestStatus:
         """P1.5b — ``status()`` must read ``fusion_bundle_state`` from the
         tenant's ``aidp.bronzeSchema`` (not the hardcoded ``'bronze'``).
 
-        Writes a bundle.yaml with ``aidp.bronzeSchema: raw`` + ``aidp.catalog:
-        my_lake``, invokes ``status`` with pyspark unavailable (so the command
-        falls back to printing the SQL query), and asserts the printed query
-        targets ``my_lake.raw.fusion_bundle_state``.
+        The scaffolded template (``examples/minimal_gl_only.yaml``) uses
+        ``apiVersion`` and already has a full ``aidp:`` block with all
+        four keys defaulted. We parse the YAML and *mutate* the existing
+        ``aidp`` mapping in-place, then dump it back — a string-replace
+        would either no-op (the template uses camelCase ``apiVersion``,
+        not ``api_version``) or produce duplicate ``aidp:`` blocks where
+        PyYAML would keep the later default one.
+
+        After the mutation we sanity-check the parsed fixture before
+        invoking ``status`` so a future template rename doesn't silently
+        make the assertion vacuous.
         """
         import sys
+
+        import yaml
 
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
 
-        # Inject custom aidp block after the api_version line.
         bundle_path = tmp_path / "bundle.yaml"
-        orig = bundle_path.read_text(encoding="utf-8")
-        new = orig.replace(
-            "api_version: aidp-fusion-bundle/v1",
-            "api_version: aidp-fusion-bundle/v1\n"
-            "aidp:\n"
-            "  catalog: my_lake\n"
-            "  bronzeSchema: raw\n"
-            "  silverSchema: clean\n"
-            "  goldSchema: marts\n",
-            1,
+        bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+        # The scaffolded template MUST have the aidp block — pin that
+        # contract so a template rename surfaces here, not as a confusing
+        # status-test failure.
+        assert isinstance(bundle.get("aidp"), dict), (
+            "scaffolded template must already carry an `aidp:` block; "
+            "if the template shape changes, this test (and the "
+            "TablePaths.from_bundle contract) needs updating."
         )
-        bundle_path.write_text(new, encoding="utf-8")
+
+        # Mutate the existing aidp mapping in place.
+        bundle["aidp"]["catalog"]      = "my_lake"
+        bundle["aidp"]["bronzeSchema"] = "raw"
+        bundle["aidp"]["silverSchema"] = "clean"
+        bundle["aidp"]["goldSchema"]   = "marts"
+
+        bundle_path.write_text(
+            yaml.safe_dump(bundle, sort_keys=False), encoding="utf-8"
+        )
+
+        # Sanity: round-trip the YAML and verify the mutation actually took.
+        reread = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+        assert reread["aidp"]["catalog"]      == "my_lake"
+        assert reread["aidp"]["bronzeSchema"] == "raw"
 
         # Force the fallback-print path (no pyspark).
         monkeypatch.setitem(sys.modules, "pyspark", None)
