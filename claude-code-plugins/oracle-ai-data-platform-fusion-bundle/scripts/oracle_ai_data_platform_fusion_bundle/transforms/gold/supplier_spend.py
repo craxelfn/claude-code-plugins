@@ -59,13 +59,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.ap_invoices"
-SOURCE_SILVER_DIM:   Final[str] = "fusion_catalog.silver.dim_supplier"
-TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.supplier_spend"
+SOURCE_BRONZE_TABLE: Final[str] = DEFAULT_PATHS.bronze("ap_invoices")
+SOURCE_SILVER_DIM:   Final[str] = DEFAULT_PATHS.silver("dim_supplier")
+TARGET_GOLD_TABLE:   Final[str] = DEFAULT_PATHS.gold("supplier_spend")
 
 DEFAULT_CURRENCY_COL: Final[str] = "ApInvoicesInvoiceCurrencyCode"
 
@@ -79,9 +81,10 @@ KNOWN_CURRENCY_COL_ALIASES: Final[tuple[str, ...]] = (
 
 def build_supplier_spend_sql(
     *,
-    bronze_invoices: str = SOURCE_BRONZE_TABLE,
-    silver_dim:      str = SOURCE_SILVER_DIM,
-    gold_table:      str = TARGET_GOLD_TABLE,
+    paths:           TablePaths | None = None,
+    bronze_invoices: str | None = None,
+    silver_dim:      str | None = None,
+    gold_table:      str | None = None,
     currency_col:    str = DEFAULT_CURRENCY_COL,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.supplier_spend``.
@@ -95,7 +98,19 @@ def build_supplier_spend_sql(
     ``currency_col`` defaults to the canonical Fusion BICC column
     ``ApInvoicesInvoiceCurrencyCode``; pass ``ApInvoicesCurrencyCode`` (or
     any other alias) for tenants whose extract uses a different name.
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver/gold
+    table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
+    Explicit per-table kwargs win over ``paths``.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_invoices is None:
+        bronze_invoices = paths.bronze("ap_invoices")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_supplier")
+    if gold_table is None:
+        gold_table = paths.gold("supplier_spend")
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
@@ -153,9 +168,10 @@ def build(
     spark: SparkSession,
     *,
     auto_detect: bool = True,
-    bronze_invoices: str = SOURCE_BRONZE_TABLE,
-    silver_dim:      str = SOURCE_SILVER_DIM,
-    gold_table:      str = TARGET_GOLD_TABLE,
+    paths:           TablePaths | None = None,
+    bronze_invoices: str | None = None,
+    silver_dim:      str | None = None,
+    gold_table:      str | None = None,
     currency_col:    str = DEFAULT_CURRENCY_COL,
 ) -> DataFrame:
     """Materialize ``gold.supplier_spend``; returns a DataFrame backed by it.
@@ -173,7 +189,20 @@ def build(
     whose extract uses some other alias). If neither alias is found AND
     no explicit override is passed, ``build`` raises a clear ValueError
     — the mart cannot ship without currency in grain.
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver/gold
+    table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
+    Explicit per-table kwargs win over ``paths``.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_invoices is None:
+        bronze_invoices = paths.bronze("ap_invoices")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_supplier")
+    if gold_table is None:
+        gold_table = paths.gold("supplier_spend")
+
     if auto_detect and currency_col == DEFAULT_CURRENCY_COL:
         detected = detect_currency_col(spark, bronze_invoices=bronze_invoices)
         if detected is None:

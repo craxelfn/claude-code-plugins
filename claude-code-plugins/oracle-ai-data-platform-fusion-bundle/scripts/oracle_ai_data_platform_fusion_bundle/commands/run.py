@@ -74,9 +74,13 @@ def status(
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
     bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
-    aidp = bundle.get("aidp", {})
-    catalog = aidp.get("catalog", "fusion_catalog")
-    state_table = f"{catalog}.bronze.fusion_bundle_state"
+    # Resolve the state-table path through TablePaths so a tenant's
+    # ``aidp.bronzeSchema`` config flows through correctly (P1.5b — the
+    # pre-refactor code hardcoded 'bronze' as the schema regardless of
+    # bundle.yaml.aidp.bronzeSchema).
+    from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+    paths = TablePaths.from_bundle(bundle)
+    state_table = paths.bronze("fusion_bundle_state")
 
     try:
         from pyspark.sql import SparkSession  # type: ignore[import-not-found]

@@ -38,18 +38,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.erp_suppliers"
-TARGET_SILVER_TABLE: Final[str] = "fusion_catalog.silver.dim_supplier"
+SOURCE_BRONZE_TABLE: Final[str] = DEFAULT_PATHS.bronze("erp_suppliers")
+TARGET_SILVER_TABLE: Final[str] = DEFAULT_PATHS.silver("dim_supplier")
 
 
 def build_dim_supplier_sql(
     *,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_table: str = TARGET_SILVER_TABLE,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_supplier``.
 
@@ -59,7 +62,18 @@ def build_dim_supplier_sql(
     The dedupe rule keeps the row with the most-recent ``_extract_ts`` per
     ``SEGMENT1``. NULL ``SEGMENT1`` rows are filtered (real data-quality issue
     if seen; bundle treats it as an error to surface, not silently quarantine).
+
+    Resolution order for table paths: explicit ``bronze_table`` / ``silver_table``
+    kwargs win, else ``paths.bronze("erp_suppliers")`` / ``paths.silver("dim_supplier")``
+    when ``paths`` is set, else ``DEFAULT_PATHS`` (matches the pre-P1.5b
+    ``Final[str]`` constant values byte-for-byte).
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("erp_suppliers")
+    if silver_table is None:
+        silver_table = paths.silver("dim_supplier")
     return f"""\
 CREATE OR REPLACE TABLE {silver_table}
 USING DELTA
@@ -98,14 +112,25 @@ WHERE _rn = 1
 def build(
     spark: SparkSession,
     *,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_table: str = TARGET_SILVER_TABLE,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_supplier`` from ``bronze.erp_suppliers``.
 
     Runs the SQL from :func:`build_dim_supplier_sql` against ``spark`` and
     returns a DataFrame backed by the freshly-written silver table.
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver
+    table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
+    Explicit per-table kwargs win over ``paths``.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("erp_suppliers")
+    if silver_table is None:
+        silver_table = paths.silver("dim_supplier")
     spark.sql(build_dim_supplier_sql(bronze_table=bronze_table, silver_table=silver_table))
     return spark.table(silver_table)
 

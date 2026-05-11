@@ -2,8 +2,9 @@
 
 > **Snapshot date**: 2026-05-10
 > **Version**: 0.1.0-alpha (Phase 2 in progress toward 0.2.0)
-> **Verdict**: **Phase 2 mid-flight.** Dim layer 3/4 shipped + 1 deferred (P1.6 blocked by L2). Gold layer 3/5 shipped (`supplier_spend`, `gl_balance`, `ap_aging`). Tests 228 → **268** all pass. Limit registry at [`LIMITS.md`](LIMITS.md).
+> **Verdict**: **Phase 2 mid-flight.** Dim layer 3/4 shipped + 1 deferred (P1.6 blocked by L2). Gold layer 3/5 shipped (`supplier_spend`, `gl_balance`, `ap_aging`). Tests 268 → **306** all pass (38 P1.5b plumbing tests). Limit registry at [`LIMITS.md`](LIMITS.md).
 >
+> **Recent (2026-05-11)** — P1.5b catalog/schema plumbing shipped. New `config/paths.py` (`TablePaths` frozen dataclass + `DEFAULT_PATHS` singleton + `from_bundle()` classmethod with strict SQL-identifier validation). Every shipped mart/dim accepts `paths: TablePaths | None` on `build()`; `commands/run.py status()` now reads `aidp.bronzeSchema` instead of hardcoding `'bronze'`. `ap_aging.build()` resolves `gold_table` AFTER the auto-router resolves `due_date_mode` (critical ordering invariant locked by F + G build()-level fake-Spark tests). Backwards-compat byte-perfect — module-level `Final[str]` constants derive from `DEFAULT_PATHS` so their string values are unchanged.
 > **Recent (2026-05-10)** — P1.9 `gold.ap_aging` shipped + live (TC24, 132 rows × 12 currencies, $-126K credits preserved across 5 currencies). Plugin-portable design: `due_date_mode='auto'` with 80% coverage gate, mode-aware `max_days_*` column name, schema-variant knobs for the Fusion AP column dialects observed across tenants.
 > **Recent (2026-05-09)** — P1.8 `gold.gl_balance` shipped + live (TC23, 10.18M rows). BOOTSTRAP extended with Step 7 + step-shape probe; NULL-propagation regression caught + fixed in same session via COALESCE.
 

@@ -189,3 +189,44 @@ class TestStatus:
         # If pyspark is importable, the test path differs; we only assert exit 0 either way.
         result = CliRunner().invoke(cli.main, ["status"])
         assert result.exit_code == 0
+
+    def test_reads_configured_bronze_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5b — ``status()`` must read ``fusion_bundle_state`` from the
+        tenant's ``aidp.bronzeSchema`` (not the hardcoded ``'bronze'``).
+
+        Writes a bundle.yaml with ``aidp.bronzeSchema: raw`` + ``aidp.catalog:
+        my_lake``, invokes ``status`` with pyspark unavailable (so the command
+        falls back to printing the SQL query), and asserts the printed query
+        targets ``my_lake.raw.fusion_bundle_state``.
+        """
+        import sys
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        # Inject custom aidp block after the api_version line.
+        bundle_path = tmp_path / "bundle.yaml"
+        orig = bundle_path.read_text(encoding="utf-8")
+        new = orig.replace(
+            "api_version: aidp-fusion-bundle/v1",
+            "api_version: aidp-fusion-bundle/v1\n"
+            "aidp:\n"
+            "  catalog: my_lake\n"
+            "  bronzeSchema: raw\n"
+            "  silverSchema: clean\n"
+            "  goldSchema: marts\n",
+            1,
+        )
+        bundle_path.write_text(new, encoding="utf-8")
+
+        # Force the fallback-print path (no pyspark).
+        monkeypatch.setitem(sys.modules, "pyspark", None)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", None)
+
+        result = CliRunner().invoke(cli.main, ["status"])
+        assert result.exit_code == 0
+        assert "my_lake.raw.fusion_bundle_state" in result.output
+        # Critically, the pre-P1.5b hardcoded shape must NOT appear.
+        assert "my_lake.bronze.fusion_bundle_state" not in result.output

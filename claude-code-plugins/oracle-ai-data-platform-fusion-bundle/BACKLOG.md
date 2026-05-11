@@ -9,10 +9,10 @@
 | Class | Meaning | Total |
 |---|---|---:|
 | **P0** | Pre-flight hygiene — fix things that make the alpha misleading or shipping-blocked | 6 |
-| **P1** | Phase 2 dataflow — implement the actual product (transforms / dimensions / gold marts / release) | 16 |
-| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 17 |
+| **P1** | Phase 2 dataflow — implement the actual product (transforms / dimensions / gold marts / release) | 20 |
+| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 22 |
 | **P3** | Roadmap, upstream advocacy, tracked blockers | 9 |
-| **Total** | | **48** |
+| **Total** | | **57** |
 
 ## Effort legend
 
@@ -186,10 +186,49 @@
 * `gl_balance` does a large fact `LEFT JOIN` to a small dim — broadcast-friendly. Spark AQE handles this automatically; **do not add a broadcast hint blindly**. Only add hints after live measurement on a tenant whose shuffle cost is documented.
 **Accept**: per-tenant config flows from a single YAML to all four mart modules; orchestrator caches probe results within a refresh; coverage in live evidence on at least one non-saasfademo1 tenant (or a synthesized schema-variant test pod).
 
+### `[~]` P1.5b — Catalog/schema name plumbing (shipped 2026-05-11)
+**Why**: `bundle.yaml` declared `aidp.{catalog,bronzeSchema,silverSchema,goldSchema}` and the Pydantic schema accepted them — but no module read them at build time. Every dim/gold module hardcoded `fusion_catalog.X.Y` as `Final[str]` defaults. `commands/run.py:78-79` had the same bug in `status()` (hardcoded `'bronze'` schema for `fusion_bundle_state`).
+**Done**: New `scripts/.../config/paths.py` with the `TablePaths` frozen dataclass + `DEFAULT_PATHS` singleton + `from_bundle()` classmethod. Strict SQL-identifier validation (`^[A-Za-z_][A-Za-z0-9_]*$`) at construction — rejects injection, non-strings, leading-digit identifiers, hyphens, dots. Every shipped module (`dim_supplier`, `dim_account`, `dim_calendar`, `supplier_spend`, `gl_balance`, `ap_aging`) accepts `paths: TablePaths | None` on its `build()`; module-level constants derive from `DEFAULT_PATHS` so value strings stay byte-identical (every existing test passes unchanged). Explicit per-table kwargs still win over `paths`. `commands/run.py status()` now uses `TablePaths.from_bundle(bundle).bronze("fusion_bundle_state")`. `ap_aging.build()` resolves `gold_table` AFTER the auto-router resolves `due_date_mode` (critical ordering — F + G build()-level fake-Spark tests lock this invariant). 38 new tests (23 in `test_paths.py` + 14 mart/dim threading tests + 1 status test).
+**Source rules**: CLAUDE.md §"What varies per tenant: Tenant-declared policy → bundle.yaml". CONTRIBUTING.md §"Module checklist" + §"Wiring".
+
 ### `[ ]` P1.Xb — Schema preflight before `CREATE OR REPLACE TABLE`
 **Why**: Today each mart module validates its own kwargs and (in ap_aging's case) hard-gates on the currency column. But required bronze / silver column existence isn't checked uniformly — a missing column failures inside Spark with a cryptic `UNRESOLVED_COLUMN` analysis error. A unified preflight that runs before `spark.sql(CREATE OR REPLACE)` gives customers a clear, actionable error.
 **Size**: S — one helper (`preflight_required_columns(spark, table, required_cols) → None | raise`), invoked from each mart's `build()` after kwarg validation and before SQL execution. Per-mart required-column lists tied to the post-detect kwargs (e.g. `ap_aging` requires `ApInvoicesVendorId`, `ApInvoicesInvoiceDate`, `ApInvoicesInvoiceAmount`, `ApInvoicesAmountPaid`, the detected currency col, and the detected/configured cancelled + terms-date cols).
 **Accept**: every shipped mart's `build()` raises a `MartPreflightError` (or similar) listing the missing column(s) by name when bronze/silver schema doesn't match expectations; unit-tested via the same fake-Spark stub pattern used for `detect_*_params` tests; ap_aging's existing currency-presence hard-gate is folded into this preflight so the contract is uniform.
+
+## Theme: Medallion performance & incrementality (round-6 perf audit, 2026-05-11)
+
+### `[ ]` P1.17 — Switch dims + gold marts from `CREATE OR REPLACE` to `MERGE INTO` with watermark gate
+**Why**: Every silver/gold module emits `CREATE OR REPLACE TABLE … USING DELTA AS SELECT …` (`dim_account.py:223`, `dim_supplier.py:64`, `transforms/gold/supplier_spend.py:100`, `transforms/gold/gl_balance.py:248`, `transforms/gold/ap_aging.py:428`). That's a full table rewrite every refresh — the **medallion-architecture concept break**: bronze is supposed to grow incrementally, silver/gold MERGE on changed slices, but today a daily refresh of `gold.gl_balance` rewrites all 11M rows. On a tenant with 5 years of GL history (~50M rows projected), daily incremental refresh costs the same as the seed load. Same problem applies to `supplier_spend` and `ap_aging`. Cascades into three already-noted side-effects: `monotonically_increasing_id()` surrogate keys are unstable (P1.19); window-function dedupe sorts the full bronze every rebuild (`dim_account.py:243-252`, `dim_supplier.py:87-94`); `ap_aging` double-scans `bronze.ap_invoices` (P2.20). Fix the root, the rest fall out.
+**Size**: L — six modules + watermark-write contract + live re-verification of TC22 / TC23 / TC24 incremental shape.
+**Depends on**: P1.5 (orchestrator) — MERGE needs the orchestrator to advance the watermark in `fusion_bundle_state` after each successful build. Building MERGE logic on top of a not-yet-wired dispatch path is wasted work.
+**Accept**:
+- Each `build()` accepts `refresh_mode: Literal["seed", "incremental"]`. `"seed"` keeps the existing `CREATE OR REPLACE` shape (first run, full backfill). `"incremental"` emits `MERGE INTO target USING (… filtered by _extract_ts > last_watermark …) ON target.<natural_key> = src.<natural_key> WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`.
+- Watermark is read from + written to `fusion_bundle_state` by the orchestrator only — mart modules stay stateless.
+- `dim_calendar` is exempt — fully deterministic, no source watermark; stays on `CREATE OR REPLACE`.
+- Live evidence: TC22b / TC23b / TC24b — same tenant, two consecutive runs with synthetic mid-extract delta; assert second run touches only delta rows (Delta-table version diff or `OPTIMIZE`-side stats).
+
+### `[ ]` P1.18 — Partition + Z-ORDER bronze + silver + gold tables
+**Why**: None of the `CREATE OR REPLACE TABLE … USING DELTA` statements declare `PARTITIONED BY` or run `OPTIMIZE … ZORDER BY`. OAC dashboards filtering `gold.gl_balance` by `period_year` or `currency_code` do full-table scans every query — on 11M rows + future history that's a 1s tile vs a 30s tile. Bronze `gl_period_balances` (11M rows today on `fusion_bundle_dev`) isn't partitioned either, so even gold-side `WHERE BalanceActualFlag = 'A'` filters scan every file. Delta data-skipping helps but only on the first ~32 columns; explicit Z-ORDER on dashboard-filter columns is order-of-magnitude better.
+**Size**: M — pure DDL changes to the `CREATE TABLE` SQL each module emits + optional post-MERGE `OPTIMIZE ZORDER BY` runs. No logic changes.
+**Depends on**: nothing — independent of P1.17 (partitioning works under both `CREATE OR REPLACE` and `MERGE`). Ships now as a quick win.
+**Accept**:
+- `bronze.gl_period_balances`: `PARTITIONED BY (BalancePeriodYear)`.
+- `bronze.ap_invoices`: `PARTITIONED BY (_extract_date)` (computed audit column; supports incremental MERGE in P1.17).
+- `gold.gl_balance`: `PARTITIONED BY (period_year)` + `OPTIMIZE … ZORDER BY (currency_code, ledger_id, account_id)`.
+- `gold.ap_aging` / `gold.ap_outstanding_by_invoice_age` / `gold.supplier_spend`: no partition (small relative to balance fact) but `OPTIMIZE … ZORDER BY (currency_code, vendor_id)`.
+- `dim_account`, `dim_supplier`, `dim_calendar`: no partitioning (tiny; broadcast-joinable as-is).
+- Live evidence: re-run TC23 (gl_balance) and TC24 (ap_aging) with `EXPLAIN FORMATTED` captured pre + post, showing partition-pruning + data-skipping firing for a `WHERE period_year = 2025 AND currency_code = 'USD'`-style filter.
+
+### `[ ]` P1.19 — Replace `monotonically_increasing_id()` with `xxhash64(natural_key)` for surrogate keys
+**Why**: `dim_account.account_key` (`dim_account.py:227`) and `dim_supplier.supplier_key` (`dim_supplier.py:68`) both use `monotonically_increasing_id()`. Partition-local, non-deterministic across rebuilds — documented in the module docstrings as "downstream marts MUST join on the natural key, never on the surrogate". Fine under today's full-rebuild pattern, but breaks under P1.17's incremental MERGE (a row's surrogate would change every refresh, invalidating any downstream cache keyed on it). Same blocker for any future Type-2 SCD variant. `dim_supplier`'s docstring already names the upgrade: `xxhash64(natural_key)`. Apply to `dim_account` (`xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))`) too.
+**Size**: S — one SQL expression per dim + a unit test asserting stability across two builds of the same bronze snapshot.
+**Depends on**: nothing for the change itself; logically pairs with P1.17 — ship together so MERGE's correctness story includes stable surrogates.
+**Accept**:
+- `dim_account.account_key = xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))`.
+- `dim_supplier.supplier_key = xxhash64(SEGMENT1)`.
+- Unit test: build the same dim twice from a fixed bronze snapshot; assert every surrogate value matches.
+- Docstring updated in both modules to drop the "non-stable across rebuilds" caveat.
 
 ## Theme: Transforms framework (extract reusable pieces)
 
@@ -328,11 +367,9 @@
 **Depends on**: nothing
 **Accept**: `PRIVACY.md` exists with at minimum: data-flow diagram, what credentials touch what files, retention policy.
 
-### `[ ]` P2.15 — Add `CONTRIBUTING.md`
+### `[x]` P2.15 — Add `CONTRIBUTING.md` (shipped 2026-05-11)
 **Why**: Once the oracle-samples PR merges (P1.15), external contributors will arrive. Set the bar.
-**Size**: S
-**Depends on**: nothing
-**Accept**: covers (a) pre-commit (`ruff`, `mypy`?), (b) test running, (c) live-test conventions (TC numbering), (d) PR template.
+**Done**: `CONTRIBUTING.md` ships covering (a) `make test` + `ruff` pre-commit, (b) test running (unit + live-gated under `AIDP_FUSION_BUNDLE_INTEGRATION=1`), (c) live-test conventions (TC numbering, evidence-file shape, tenant identification, anomaly handling, re-verification-after-refactor rule), (d) PR template with plugin-portability checklist, (e) module checklist for new dim/mart spanning code shape, plugin-portability, medallion correctness, performance, SQL correctness, and CLI wiring. Cross-refs `CLAUDE.md` for the working principles split.
 
 ## Theme: Plugin durability across Fusion releases
 
@@ -357,6 +394,55 @@
 - `aidp-fusion-bundle install` and `aidp-fusion-bundle run` print a clear warning (not a hard failure) when the detected release is not in `SUPPORTED_FUSION_RELEASES`. Exit code 0 — informational.
 - README "compatibility" section lists the supported releases and the policy ("verified releases get version-pinned bundle releases; later releases require running `catalog drift` first").
 - Unit test mocks the about-endpoint response and verifies the warning fires for an unknown release and stays silent for a known one.
+
+## Theme: Medallion performance — quick wins (round-6 perf audit, 2026-05-11)
+
+### `[ ]` P2.18 — Hoist decimal casts in `gl_balance` into a CTE
+**Why**: `transforms/gold/gl_balance.py:262-272` casts the same four `decimal(38,30)` amount columns to `DECIMAL(28, 2)` twice each — once in the surfaced projection (`begin_balance_dr`, `begin_balance_cr`, `period_net_dr`, `period_net_cr`) and again inside the `closing_balance` formula's `COALESCE(CAST(...))` wrappers. Catalyst doesn't reliably CSE across `CAST` boundaries on high-precision decimals; at 11M rows this is measurable CPU. `ap_aging` already gets this right via the `open_invoices` CTE (`ap_aging.py:431-445`) — cast once, outer SELECT operates on cast values.
+**Size**: XS — one CTE refactor + existing unit tests should pass unmodified (output column shape is the contract).
+**Depends on**: nothing.
+**Accept**: `build_gl_balance_sql` emits a `WITH balances AS (SELECT cast-once)` CTE; outer SELECT references `b.begin_balance_dr` etc. instead of `CAST(b.BalanceBeginBalanceDr AS DECIMAL(28,2))`; existing `test_gl_balance.py` 24+ tests pass without changes.
+
+### `[ ]` P2.19 — Project `currency_code` once in `supplier_spend` CTE
+**Why**: `transforms/gold/supplier_spend.py:105, 122-123` emits `UPPER(CAST(inv.{currency_col} AS STRING))` in both the SELECT projection and the GROUP BY — same expression twice. Spark usually CSEs this but with `UPPER(CAST(...))` chains it sometimes doesn't, and it prevents the shuffle from using a precomputed partition column. `ap_aging` already projects `currency_code` once in its `open_invoices` CTE; mirror the pattern.
+**Size**: XS — one CTE refactor.
+**Depends on**: nothing.
+**Accept**: `build_supplier_spend_sql` emits a CTE that projects `UPPER(CAST(inv.{currency_col} AS STRING)) AS currency_code` once; outer SELECT and GROUP BY reference `inv.currency_code` (or alias); existing `test_supplier_spend.py` tests pass with no output-shape change.
+
+### `[ ]` P2.20 — Single-pass `ap_aging` build (cache filtered bronze)
+**Why**: `ap_aging.build()` with `due_date_mode='auto'` runs `_measure_due_date_coverage()` (`transforms/gold/ap_aging.py:608-619`) — one full scan of `bronze.ap_invoices` with the open-invoice WHERE clause — then `build_ap_aging_sql()` re-scans the same filtered bronze for materialization. 50k rows on demo is nothing; on a tenant with 10M+ open invoices that's 2× the IO with identical filter predicates. Two viable fixes: (1) cache the filtered DataFrame between the two queries; (2) compute coverage as a windowed column inside the materialization, abort/rerun as proxy if below threshold (single scan, but couples concerns). Recommend (1) unless live evidence shows the cache size is prohibitive.
+**Size**: S — small refactor + live re-verification of TC24 to confirm timing improvement; ensure cache is released after the build.
+**Depends on**: nothing.
+**Accept**: one filtered-bronze scan per build in `due_date_mode='auto'`; live evidence (TC24c) shows ~halved IO vs TC24 baseline on the same tenant; existing 30+ `test_ap_aging.py` tests pass (cache is Spark-side, doesn't change the asserted SQL shape).
+
+### `[ ]` P2.21 — Add Delta auto-optimize table properties to bronze + silver + gold
+**Why**: None of the `CREATE OR REPLACE TABLE … USING DELTA` statements set `TBLPROPERTIES`. Daily incremental refresh on AIDP's Spark cluster will produce thousands of small files within a few months → manifest read time dominates per-query latency. Standard Delta-Lake fix is `delta.autoOptimize.optimizeWrite=true` + `delta.autoOptimize.autoCompact=true` on tables that get frequent writes (bronze + silver primarily; gold benefits less because gold is read-target, not write-hot-path).
+**Size**: S — DDL-only addition to each `CREATE TABLE` template + a periodic `OPTIMIZE` call in the orchestrator.
+**Depends on**: nothing.
+**Accept**:
+- Every bronze + silver `CREATE OR REPLACE TABLE` includes `TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true', 'delta.autoOptimize.autoCompact' = 'true')`.
+- Gold tables get `TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true')` (autoCompact less relevant for write-once-per-refresh gold).
+- Orchestrator (P1.5) runs `OPTIMIZE <gold_table>` weekly (or after seed load).
+- Unit test asserts emitted SQL contains the expected `TBLPROPERTIES` clauses.
+
+## Theme: Plugin-portability — evidence-driven knobs (deferred)
+
+### `[ ]` P2.22 — Evidence-driven knob backlog (defer until a customer hits each)
+**Why**: Round-6 plugin-portability audit (2026-05-11) surfaced more hardcoded values in the new dim/gold modules. The principle established with P1.5a / P1.11a is: knobs ship when a real tenant surfaces the variant, not preemptively. Capture the list so future-us doesn't re-derive it. None of these block any current customer.
+**Specific candidates** (location → trigger condition → knob shape when promoted):
+- **Aging bucket boundaries `0/30/60/90`** (`transforms/gold/ap_aging.py:314-339`, `_bucket_case`) — promote when a customer needs `0/15/30/45/60` or `0/30/60/90/120/150`. Shape: `aging_buckets: Sequence[tuple[int, str]]`.
+- **NET-30 residual fallback** (`transforms/gold/ap_aging.py:258-266`, `_due_date_coalesce_expr`) — promote when a customer's standard terms are NET-45 or NET-60. Shape: `net_days_fallback: int = 30`.
+- **Cancelled-flag truthy value `'Y'`** (`transforms/gold/ap_aging.py:295`, `_cancelled_filter`) — promote when a tenant's extract emits `'Cancelled'` / `'1'` / `'TRUE'`. Shape: `cancelled_flag_truthy: str = 'Y'`.
+- **`dim_supplier` hardcoded column names** (`dimensions/dim_supplier.py:63-95`) — no schema-variant knobs or `detect_*_params()` probe (regression from the `ap_aging` standard). Promote when a tenant's `SupplierExtractPVO` is missing `AlternateNamePartyName` / `BUSINESSRELATIONSHIP` / similar and crashes with `UNRESOLVED_COLUMN`. Fix shape: apply the same detect+kwargs pattern `ap_aging` uses.
+- **Fiscal-year naming convention** (`dimensions/dim_calendar.py:97-103`) — assumes "FY = calendar year FY ends in". Promote when an EU tenant uses "FY = calendar year FY begins in". Shape: `fy_naming: Literal["ends_in", "begins_in"] = "ends_in"`.
+
+**Out of scope (intentionally skipped)**:
+- COA segment default map (`dimensions/dim_account.py:106-113`, `transforms/gold/gl_balance.py:132-139`) — already overridable via `semantic_segment_map` / `coa_segment_map`; default matches majority Fusion convention; no action needed.
+- Calendar date range default `2020 → 2030` (`dimensions/dim_calendar.py:41-42`) — `start_date` / `end_date` kwargs already exist; only gap is surfacing them in `bundle.yaml` schema, which falls under P1.5b's plumbing scope.
+
+**Size**: 0 today (capture only); each promoted item is XS-S when triggered.
+**Depends on**: customer-driven evidence.
+**Accept**: this entry stays open until either (a) every sub-item has a fielded report + promoted backlog entry, or (b) v1.0 ships with confidence the list is non-load-bearing.
 
 ---
 

@@ -110,3 +110,36 @@ class TestModuleExports:
             "id_populated_pct",
         }
         assert expected.issubset(set(dim_supplier.__all__))
+
+
+class TestPathsThreading:
+    """P1.5b — tenant-aware table-path resolution.
+
+    Defaults must reproduce the pre-refactor literal values byte-for-byte;
+    a ``TablePaths`` override flows through to the SQL; explicit per-table
+    kwargs win over both.
+    """
+
+    def test_paths_none_matches_pre_refactor_defaults(self) -> None:
+        sql = build_dim_supplier_sql()
+        assert "fusion_catalog.bronze.erp_suppliers" in sql
+        assert "fusion_catalog.silver.dim_supplier"  in sql
+
+    def test_paths_threading_replaces_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_dim_supplier_sql(paths=TablePaths(catalog="my_lake"))
+        assert "my_lake.bronze.erp_suppliers" in sql
+        assert "my_lake.silver.dim_supplier"  in sql
+        assert "fusion_catalog" not in sql
+
+    def test_explicit_table_kwarg_wins_over_paths(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_dim_supplier_sql(
+            paths=TablePaths(catalog="my_lake"),
+            bronze_table="explicit.thing.X",
+            silver_table="explicit.thing.Y",
+        )
+        assert "explicit.thing.X" in sql
+        assert "explicit.thing.Y" in sql
+        assert "my_lake.bronze.erp_suppliers" not in sql
+        assert "my_lake.silver.dim_supplier"  not in sql

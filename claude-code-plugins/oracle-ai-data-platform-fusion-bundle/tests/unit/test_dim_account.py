@@ -376,3 +376,31 @@ class TestCodeCombinationCovers30Segments:
             assert f"CodeCombinationSegment{i}" in concat_args
         for i in range(5, 31):
             assert f"CodeCombinationSegment{i}" not in concat_args
+
+
+class TestPathsThreading:
+    """P1.5b — tenant-aware table-path resolution."""
+
+    def test_paths_none_matches_pre_refactor_defaults(self) -> None:
+        sql = build_dim_account_sql()
+        assert "fusion_catalog.bronze.gl_coa"     in sql
+        assert "fusion_catalog.silver.dim_account" in sql
+
+    def test_paths_threading_replaces_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_dim_account_sql(paths=TablePaths(catalog="my_lake"))
+        assert "my_lake.bronze.gl_coa"     in sql
+        assert "my_lake.silver.dim_account" in sql
+        assert "fusion_catalog" not in sql
+
+    def test_explicit_table_kwarg_wins_over_paths(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_dim_account_sql(
+            paths=TablePaths(catalog="my_lake"),
+            bronze_table="explicit.thing.X",
+            silver_table="explicit.thing.Y",
+        )
+        assert "explicit.thing.X" in sql
+        assert "explicit.thing.Y" in sql
+        assert "my_lake.bronze.gl_coa"      not in sql
+        assert "my_lake.silver.dim_account" not in sql

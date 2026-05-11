@@ -82,12 +82,14 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.gl_coa"
-TARGET_SILVER_TABLE: Final[str] = "fusion_catalog.silver.dim_account"
+SOURCE_BRONZE_TABLE: Final[str] = DEFAULT_PATHS.bronze("gl_coa")
+TARGET_SILVER_TABLE: Final[str] = DEFAULT_PATHS.silver("dim_account")
 
 #: Fusion's COA supports up to 30 segments. Most tenants populate ≤6.
 MAX_FUSION_SEGMENTS: Final[int] = 30
@@ -183,8 +185,9 @@ def _validate_segment_map(
 
 def build_dim_account_sql(
     *,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_table: str = TARGET_SILVER_TABLE,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
     n_segments: int = MAX_FUSION_SEGMENTS,
     semantic_segment_map: Mapping[int, str] | None = None,
 ) -> str:
@@ -210,6 +213,12 @@ def build_dim_account_sql(
     per ``CodeCombinationCodeCombinationId``. Rows with NULL CCID are
     filtered (would never join anyway).
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("gl_coa")
+    if silver_table is None:
+        silver_table = paths.silver("dim_account")
     if semantic_segment_map is None:
         semantic_segment_map = DEFAULT_SEMANTIC_SEGMENT_MAP
     _validate_segment_map(semantic_segment_map, n_segments)
@@ -289,8 +298,9 @@ def detect_active_segments(
 def build(
     spark: SparkSession,
     *,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_table: str = TARGET_SILVER_TABLE,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
     n_segments: int = MAX_FUSION_SEGMENTS,
     semantic_segment_map: Mapping[int, str] | None = None,
 ) -> DataFrame:
@@ -303,7 +313,17 @@ def build(
     Fusion-conventional six-segment ordering so saasfademo1 (and other
     tenants on the conventional COA design) reproduce the pre-refactor
     column shape exactly.
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver
+    table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
+    Explicit per-table kwargs win over ``paths``.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("gl_coa")
+    if silver_table is None:
+        silver_table = paths.silver("dim_account")
     spark.sql(
         build_dim_account_sql(
             bronze_table=bronze_table,

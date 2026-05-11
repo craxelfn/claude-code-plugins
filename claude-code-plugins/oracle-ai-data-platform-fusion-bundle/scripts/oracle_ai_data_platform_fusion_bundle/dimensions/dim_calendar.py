@@ -33,11 +33,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-TARGET_SILVER_TABLE: Final[str] = "fusion_catalog.silver.dim_calendar"
+TARGET_SILVER_TABLE: Final[str] = DEFAULT_PATHS.silver("dim_calendar")
 DEFAULT_START_DATE: Final[str]  = "2020-01-01"
 DEFAULT_END_DATE:   Final[str]  = "2030-12-31"
 DEFAULT_FISCAL_START_MONTH: Final[int] = 1   # calendar year = fiscal year
@@ -45,10 +47,11 @@ DEFAULT_FISCAL_START_MONTH: Final[int] = 1   # calendar year = fiscal year
 
 def build_dim_calendar_sql(
     *,
+    paths:      TablePaths | None = None,
     start_date: str = DEFAULT_START_DATE,
     end_date:   str = DEFAULT_END_DATE,
     fiscal_start_month: int = DEFAULT_FISCAL_START_MONTH,
-    silver_table: str = TARGET_SILVER_TABLE,
+    silver_table: str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_calendar``.
 
@@ -62,6 +65,10 @@ def build_dim_calendar_sql(
     Raises:
         ValueError: if ``fiscal_start_month`` is not in [1..12].
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if silver_table is None:
+        silver_table = paths.silver("dim_calendar")
     if not (1 <= fiscal_start_month <= 12):
         raise ValueError(
             f"fiscal_start_month must be in [1, 12]; got {fiscal_start_month}"
@@ -125,12 +132,22 @@ FROM dates
 def build(
     spark: SparkSession,
     *,
+    paths:      TablePaths | None = None,
     start_date: str = DEFAULT_START_DATE,
     end_date:   str = DEFAULT_END_DATE,
     fiscal_start_month: int = DEFAULT_FISCAL_START_MONTH,
-    silver_table: str = TARGET_SILVER_TABLE,
+    silver_table: str | None = None,
 ) -> DataFrame:
-    """Materialize ``silver.dim_calendar``; returns a DataFrame backed by it."""
+    """Materialize ``silver.dim_calendar``; returns a DataFrame backed by it.
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the silver table
+    identifier from the tenant's ``bundle.yaml.aidp.*`` config. Explicit
+    ``silver_table=`` wins over ``paths``.
+    """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if silver_table is None:
+        silver_table = paths.silver("dim_calendar")
     sql = build_dim_calendar_sql(
         start_date=start_date,
         end_date=end_date,

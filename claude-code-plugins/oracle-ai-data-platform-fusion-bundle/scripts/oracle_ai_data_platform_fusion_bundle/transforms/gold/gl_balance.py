@@ -106,13 +106,15 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-SOURCE_BRONZE_TABLE: Final[str] = "fusion_catalog.bronze.gl_period_balances"
-SOURCE_SILVER_DIM:   Final[str] = "fusion_catalog.silver.dim_account"
-TARGET_GOLD_TABLE:   Final[str] = "fusion_catalog.gold.gl_balance"
+SOURCE_BRONZE_TABLE: Final[str] = DEFAULT_PATHS.bronze("gl_period_balances")
+SOURCE_SILVER_DIM:   Final[str] = DEFAULT_PATHS.silver("dim_account")
+TARGET_GOLD_TABLE:   Final[str] = DEFAULT_PATHS.gold("gl_balance")
 
 DEFAULT_ACTUAL_FLAG_FILTER: Final[str] = "A"
 
@@ -184,9 +186,10 @@ def _segment_select_lines(coa_segment_map: Mapping[int, str]) -> str:
 
 def build_gl_balance_sql(
     *,
-    bronze_balances: str = SOURCE_BRONZE_TABLE,
-    silver_dim:      str = SOURCE_SILVER_DIM,
-    gold_table:      str = TARGET_GOLD_TABLE,
+    paths:           TablePaths | None = None,
+    bronze_balances: str | None = None,
+    silver_dim:      str | None = None,
+    gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
 ) -> str:
@@ -224,6 +227,15 @@ def build_gl_balance_sql(
     positional ``segment_NN`` instead decouples gl_balance from the dim's
     alias contract — positional columns are always emitted.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_balances is None:
+        bronze_balances = paths.bronze("gl_period_balances")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_account")
+    if gold_table is None:
+        gold_table = paths.gold("gl_balance")
+
     if actual_flag_filter is None:
         where_clauses = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
     else:
@@ -281,9 +293,10 @@ LEFT JOIN {silver_dim}  da
 def build(
     spark: SparkSession,
     *,
-    bronze_balances: str = SOURCE_BRONZE_TABLE,
-    silver_dim:      str = SOURCE_SILVER_DIM,
-    gold_table:      str = TARGET_GOLD_TABLE,
+    paths:           TablePaths | None = None,
+    bronze_balances: str | None = None,
+    silver_dim:      str | None = None,
+    gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
 ) -> DataFrame:
@@ -296,7 +309,19 @@ def build(
     to surface all flags). ``coa_segment_map`` controls which positional
     ``segment_NN`` columns from ``silver.dim_account`` are surfaced and
     under what names (default: Fusion-conventional six-segment ordering).
+
+    ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver/gold
+    table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
+    Explicit per-table kwargs win over ``paths``.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_balances is None:
+        bronze_balances = paths.bronze("gl_period_balances")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_account")
+    if gold_table is None:
+        gold_table = paths.gold("gl_balance")
     sql = build_gl_balance_sql(
         bronze_balances=bronze_balances,
         silver_dim=silver_dim,

@@ -731,3 +731,164 @@ class TestCoverageMeasurementAnsiSafety:
             null_invoice_date_policy="drop",
         )
         assert result is None
+
+
+class TestPathsThreading:
+    """P1.5b — tenant-aware table-path resolution.
+
+    Tests A/B/C are the standard threading triple (matches every other mart).
+    Tests D/E pin concrete-mode pure-SQL targets.
+    Tests F/G use a fake-Spark stub to exercise the critical ordering
+    invariant — gold_table must be resolved AFTER the auto-router resolves
+    due_date_mode (PLAN_P1.5b §4.2). Without this ordering, a tenant with
+    100% due-date coverage would silently land at the proxy mart's path.
+    """
+
+    # --- A/B/C: standard threading triple --------------------------------------
+
+    def test_paths_none_matches_pre_refactor_defaults(self) -> None:
+        sql = build_ap_aging_sql()  # default: due_date_mode='real'
+        assert "fusion_catalog.bronze.ap_invoices"  in sql
+        assert "fusion_catalog.silver.dim_supplier" in sql
+        assert "fusion_catalog.gold.ap_aging"       in sql
+
+    def test_paths_threading_replaces_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_ap_aging_sql(paths=TablePaths(catalog="my_lake"))
+        assert "my_lake.bronze.ap_invoices"  in sql
+        assert "my_lake.silver.dim_supplier" in sql
+        assert "my_lake.gold.ap_aging"       in sql
+        assert "fusion_catalog" not in sql
+
+    def test_explicit_table_kwarg_wins_over_paths(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_ap_aging_sql(
+            paths=TablePaths(catalog="my_lake"),
+            bronze_table="explicit.bronze.X",
+            silver_dim="explicit.silver.Y",
+            gold_table="explicit.gold.Z",
+        )
+        assert "explicit.bronze.X" in sql
+        assert "explicit.silver.Y" in sql
+        assert "explicit.gold.Z"   in sql
+        assert "my_lake" not in sql
+
+    # --- D/E: concrete-mode pure-SQL targets -----------------------------------
+
+    def test_paths_threading_real_mode_under_custom_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_ap_aging_sql(
+            paths=TablePaths(catalog="my_lake"),
+            due_date_mode=DUE_DATE_MODE_REAL,
+        )
+        assert "my_lake.gold.ap_aging" in sql
+        assert "my_lake.gold.ap_outstanding_by_invoice_age" not in sql
+
+    def test_paths_threading_proxy_mode_under_custom_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_ap_aging_sql(
+            paths=TablePaths(catalog="my_lake"),
+            due_date_mode=DUE_DATE_MODE_PROXY,
+            terms_date_col=None,
+            due_date_col=None,
+        )
+        assert "my_lake.gold.ap_outstanding_by_invoice_age" in sql
+        assert "my_lake.gold.ap_aging" not in sql.replace(
+            "my_lake.gold.ap_outstanding_by_invoice_age", ""
+        )
+
+    # --- F/G: build()-level — auto-router ordering invariant -------------------
+
+    @staticmethod
+    def _fake_spark_for_build(coverage_frac: float, cols: list[str]) -> object:
+        """Fake-Spark stub that:
+        * Returns a fake schema (for detect_ap_aging_params) over ``cols``.
+        * Captures every ``spark.sql(q)`` call to ``captured_sqls``.
+        * Returns predetermined rows for the coverage probe + a degenerate
+          row for the eventual CREATE-OR-REPLACE.
+        """
+        captured_sqls: list[str] = []
+
+        class _Field:
+            def __init__(self, name: str): self.name = name
+
+        fields = [_Field(c) for c in cols]
+
+        class _Table:
+            schema = fields
+
+        class _Row:
+            def __getitem__(self, k: str):
+                # Coverage probe expects open_n + coalesced_frac.
+                return {"open_n": 100, "coalesced_frac": coverage_frac}[k]
+
+        class _DF:
+            def collect(self) -> list: return [_Row()]
+            def show(self, *a, **kw) -> None: pass
+
+        class _Spark:
+            captured = captured_sqls
+
+            def sql(self, q: str) -> _DF:
+                captured_sqls.append(q)
+                return _DF()
+
+            def table(self, name: str) -> _Table:
+                return _Table()
+
+        return _Spark()
+
+    def test_build_auto_mode_above_threshold_resolves_real_table_under_custom_paths(self) -> None:
+        """F: coverage = 0.95 ≥ 0.80 gate → auto router lands on REAL mode →
+        CREATE-OR-REPLACE must target ``my_lake.gold.ap_aging``.
+
+        This test catches the regression where ``gold_table`` is resolved
+        BEFORE the auto-router runs (which would land on proxy because
+        ``due_date_mode == 'auto' != 'real'``).
+        """
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold import ap_aging
+
+        spark = self._fake_spark_for_build(
+            coverage_frac=0.95,
+            cols=[
+                "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+                "ApInvoicesInvoiceAmount", "ApInvoicesAmountPaid",
+                "ApInvoicesInvoiceCurrencyCode",
+                "ApInvoicesTermsDate",
+                "ApInvoicesCancelledDate",
+            ],
+        )
+        ap_aging.build(spark, paths=TablePaths(catalog="my_lake"))  # type: ignore[arg-type]
+
+        # Find the CREATE OR REPLACE SQL among captured calls.
+        create_sqls = [q for q in spark.captured if "CREATE OR REPLACE" in q]  # type: ignore[attr-defined]
+        assert create_sqls, "build() must issue a CREATE OR REPLACE TABLE"
+        assert "my_lake.gold.ap_aging" in create_sqls[0]
+        assert "my_lake.gold.ap_outstanding_by_invoice_age" not in create_sqls[0]
+
+    def test_build_auto_mode_below_threshold_resolves_proxy_table_under_custom_paths(self) -> None:
+        """G: coverage = 0.10 < 0.80 gate → auto router lands on PROXY mode →
+        CREATE-OR-REPLACE must target ``my_lake.gold.ap_outstanding_by_invoice_age``.
+        """
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold import ap_aging
+
+        spark = self._fake_spark_for_build(
+            coverage_frac=0.10,
+            cols=[
+                "ApInvoicesVendorId", "ApInvoicesInvoiceDate",
+                "ApInvoicesInvoiceAmount", "ApInvoicesAmountPaid",
+                "ApInvoicesInvoiceCurrencyCode",
+                "ApInvoicesTermsDate",
+                "ApInvoicesCancelledDate",
+            ],
+        )
+        ap_aging.build(spark, paths=TablePaths(catalog="my_lake"))  # type: ignore[arg-type]
+
+        create_sqls = [q for q in spark.captured if "CREATE OR REPLACE" in q]  # type: ignore[attr-defined]
+        assert create_sqls, "build() must issue a CREATE OR REPLACE TABLE"
+        assert "my_lake.gold.ap_outstanding_by_invoice_age" in create_sqls[0]
+        # Real table name must NOT appear (substring check after stripping the proxy table).
+        stripped = create_sqls[0].replace("my_lake.gold.ap_outstanding_by_invoice_age", "")
+        assert "my_lake.gold.ap_aging" not in stripped

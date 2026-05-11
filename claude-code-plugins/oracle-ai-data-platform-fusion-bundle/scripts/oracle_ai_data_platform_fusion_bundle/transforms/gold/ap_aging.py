@@ -103,14 +103,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
 
-SOURCE_BRONZE_TABLE:     Final[str] = "fusion_catalog.bronze.ap_invoices"
-SOURCE_SILVER_DIM:       Final[str] = "fusion_catalog.silver.dim_supplier"
-TARGET_GOLD_TABLE_REAL:  Final[str] = "fusion_catalog.gold.ap_aging"
-TARGET_GOLD_TABLE_PROXY: Final[str] = "fusion_catalog.gold.ap_outstanding_by_invoice_age"
+SOURCE_BRONZE_TABLE:     Final[str] = DEFAULT_PATHS.bronze("ap_invoices")
+SOURCE_SILVER_DIM:       Final[str] = DEFAULT_PATHS.silver("dim_supplier")
+TARGET_GOLD_TABLE_REAL:  Final[str] = DEFAULT_PATHS.gold("ap_aging")
+TARGET_GOLD_TABLE_PROXY: Final[str] = DEFAULT_PATHS.gold("ap_outstanding_by_invoice_age")
 
 DUE_DATE_MODE_REAL:  Final[str] = "real"
 DUE_DATE_MODE_PROXY: Final[str] = "proxy"
@@ -125,11 +127,19 @@ CANCELLED_KIND_DATE: Final[str] = "date"
 CANCELLED_KIND_FLAG: Final[str] = "flag"
 
 
-def _default_target(due_date_mode: str) -> str:
+def _default_target(due_date_mode: str, paths: TablePaths | None = None) -> str:
+    """Resolve the default gold-table path for the given (concrete) due-date mode.
+
+    Callers must have ALREADY resolved ``due_date_mode`` from
+    :data:`DUE_DATE_MODE_AUTO` via :func:`decide_due_date_mode` before calling
+    this helper — passing the still-unresolved ``"auto"`` sentinel raises.
+    """
+    if paths is None:
+        paths = DEFAULT_PATHS
     if due_date_mode == DUE_DATE_MODE_REAL:
-        return TARGET_GOLD_TABLE_REAL
+        return paths.gold("ap_aging")
     if due_date_mode == DUE_DATE_MODE_PROXY:
-        return TARGET_GOLD_TABLE_PROXY
+        return paths.gold("ap_outstanding_by_invoice_age")
     raise ValueError(
         f"due_date_mode must be {DUE_DATE_MODE_REAL!r} or {DUE_DATE_MODE_PROXY!r}, "
         f"got {due_date_mode!r}"
@@ -341,8 +351,9 @@ def _bucket_case(
 
 def build_ap_aging_sql(
     *,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_dim:   str = SOURCE_SILVER_DIM,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_dim:   str | None = None,
     gold_table:   str | None = None,
     due_date_mode: str = DUE_DATE_MODE_REAL,
     as_of_date_expr: str = "CURRENT_DATE()",
@@ -387,8 +398,14 @@ def build_ap_aging_sql(
             "real mode requires at least one of terms_date_col / due_date_col; "
             "pass due_date_mode='proxy' if neither column is available."
         )
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("ap_invoices")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_supplier")
     if gold_table is None:
-        gold_table = _default_target(due_date_mode)
+        gold_table = _default_target(due_date_mode, paths=paths)
 
     cancelled_clause   = _cancelled_filter(cancelled_col, cancelled_kind)
     invoice_date_clause = _invoice_date_filter(null_invoice_date_policy)
@@ -541,8 +558,9 @@ def build(
     spark: SparkSession,
     *,
     auto_detect: bool = True,
-    bronze_table: str = SOURCE_BRONZE_TABLE,
-    silver_dim:   str = SOURCE_SILVER_DIM,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_dim:   str | None = None,
     gold_table:   str | None = None,
     due_date_mode: str = DUE_DATE_MODE_AUTO,
     real_mode_gate_threshold: float = DEFAULT_REAL_MODE_GATE_THRESHOLD,
@@ -579,7 +597,26 @@ def build(
     ``due_date_mode='real'`` or ``'proxy'`` to skip the coverage measurement.
 
     All other knobs are forwarded to :func:`build_ap_aging_sql` unchanged.
+
+    Path resolution ordering (CRITICAL — see PLAN_P1.5b §4.2):
+
+    1. ``paths`` / sentinel kwargs resolve ``bronze_table`` and ``silver_dim``
+       (cheap; pure string assembly).
+    2. Schema-variant detection runs against the resolved ``bronze_table``.
+    3. ``due_date_mode='auto'`` auto-router measures coverage and resolves
+       to ``'real'`` or ``'proxy'``.
+    4. **Only now** can ``gold_table`` be resolved — its choice between the
+       real and proxy table names depends on the resolved mode. Resolving
+       earlier (under ``'auto'``) would catastrophically pick the proxy
+       table for every above-threshold tenant.
     """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("ap_invoices")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_supplier")
+
     if auto_detect:
         detected = detect_ap_aging_params(spark, bronze_table=bronze_table)
         # Explicit overrides win — only fill in unspecified args
@@ -626,6 +663,12 @@ def build(
             gate_threshold=real_mode_gate_threshold,
         )
 
+    # gold_table resolution MUST happen after due_date_mode is concrete —
+    # see PLAN_P1.5b §4.2. Resolving earlier under the 'auto' sentinel
+    # would silently pick the proxy table for high-coverage tenants.
+    if gold_table is None:
+        gold_table = _default_target(due_date_mode, paths=paths)
+
     sql = build_ap_aging_sql(
         bronze_table=bronze_table,
         silver_dim=silver_dim,
@@ -640,7 +683,7 @@ def build(
         currency_col=currency_col,
     )
     spark.sql(sql)
-    return spark.table(gold_table or _default_target(due_date_mode))
+    return spark.table(gold_table)
 
 
 __all__ = [

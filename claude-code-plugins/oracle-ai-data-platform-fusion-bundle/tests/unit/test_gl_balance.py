@@ -426,3 +426,34 @@ class TestCoaSegmentMapKnob:
     def test_map_in_exports(self) -> None:
         import oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance as mod
         assert "DEFAULT_COA_SEGMENT_MAP" in mod.__all__
+
+
+class TestPathsThreading:
+    """P1.5b — tenant-aware table-path resolution."""
+
+    def test_paths_none_matches_pre_refactor_defaults(self) -> None:
+        sql = build_gl_balance_sql()
+        assert "fusion_catalog.bronze.gl_period_balances" in sql
+        assert "fusion_catalog.silver.dim_account"        in sql
+        assert "fusion_catalog.gold.gl_balance"           in sql
+
+    def test_paths_threading_replaces_catalog(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_gl_balance_sql(paths=TablePaths(catalog="my_lake"))
+        assert "my_lake.bronze.gl_period_balances" in sql
+        assert "my_lake.silver.dim_account"        in sql
+        assert "my_lake.gold.gl_balance"           in sql
+        assert "fusion_catalog" not in sql
+
+    def test_explicit_table_kwarg_wins_over_paths(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        sql = build_gl_balance_sql(
+            paths=TablePaths(catalog="my_lake"),
+            bronze_balances="explicit.bronze.X",
+            silver_dim="explicit.silver.Y",
+            gold_table="explicit.gold.Z",
+        )
+        assert "explicit.bronze.X" in sql
+        assert "explicit.silver.Y" in sql
+        assert "explicit.gold.Z"   in sql
+        assert "my_lake" not in sql
