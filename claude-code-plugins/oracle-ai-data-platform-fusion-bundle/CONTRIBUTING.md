@@ -26,6 +26,38 @@ ruff format --check .
 
 ---
 
+## Claiming a backlog item (coordination norm)
+
+Before you start coding a backlog item, **commit the claim directly to `main`** — not to your feature branch. This is a small commit that flips `[ ]` → `[~]` and names you as the owner. The point is coordination: other contributors checking `BACKLOG.md` on `main` see what's in flight without having to scan open PRs or feature branches.
+
+### When you pick an item up
+
+1. On `main` (after pulling latest), edit the item's heading in `BACKLOG.md`:
+   - `### [ ] P1.X — <title>` → `### [~] P1.X — <title> (in progress — <your-handle>, <YYYY-MM-DD>)`
+2. Commit on `main` directly:
+   ```
+   git commit -m "fusion-bundle: BACKLOG — claim P1.X (<your-handle>)"
+   ```
+3. Push `main` immediately. **Don't batch claims with code** — the claim must land before others start their work, not after yours merges.
+4. *Then* branch off `main` for the implementation.
+
+### When you finish
+
+When the implementation PR merges, flip the marker again — same direct-to-`main` discipline:
+   - `### [~] P1.X — <title> (in progress — …)` → `### [x] P1.X — <title> (commit <SHA>, live <evidence-SHA>)`
+
+This matches the existing "Closes: BACKLOG.md P<N>" entry in the PR template (§"Commit + PR conventions"). The PR-merge commit and the `[~]` → `[x]` flip can be the same commit; the **claim** at start is the one that must be standalone.
+
+### If you stop working on an item
+
+Flip `[~]` → `[ ]` and remove the owner annotation in a one-line commit on `main`. Releases the lock so someone else can pick it up. Don't leave stale `[~]` markers — they're worse than `[ ]` because they hide availability.
+
+### Why direct-to-main (and not via PR)
+
+The claim is a coordination signal, not a code change. Running it through a PR adds review overhead for a single-line edit that's not technically reviewable. The downside (someone could fight over an item) is unlikely in practice and self-correcting (whoever pushes second sees the conflict and backs off).
+
+---
+
 ## Module checklist (new dim or mart)
 
 Use this as the PR template when shipping a new module.
