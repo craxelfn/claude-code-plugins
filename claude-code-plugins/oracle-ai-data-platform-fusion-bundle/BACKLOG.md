@@ -128,13 +128,15 @@
 **Size**: S
 **Depends on**: nothing
 **Accept**: writes `silver.dim_item`; unit-tested.
+**Zero-diff landing contract** (post-P1.5α): `dim_item` is registered in `orchestrator/registry.py` `KNOWN_DEFERRED_DIMS` with this ticket ID. When the module ships, the **only** orchestrator-side edit is moving `"dim_item"` from `KNOWN_DEFERRED_DIMS` into `SILVER_DIMS` with its builder + `depends_on_bronze`. No `schema/bundle.py` default edit, no `examples/*.yaml` edit, no customer-YAML migration. Any deviation from this is a P1.5α regression and blocks merge. The acceptance criterion above must include: "P1.5α deferred test for `dim_item` flips from `deferred` to `success` with no other diff" (one-line test update only).
 
 ### `[ ]` P1.7 — Implement `dimensions/dim_org.py` (pending PVO)
 **Why**: Cross-module dim; needed for HCM × Finance joins.
 **Size**: S (after PVO confirmed); blocked indefinitely without
-**Depends on**: customer pod access OR confirmed PVO name from BICC catalog (`catalog probe`)
+**Depends on**: customer pod access OR confirmed PVO name from BICC catalog (`catalog probe`); P3.8 unblocks.
 **Accept**: PVO name added to `schema/fusion_catalog.py` with ✅; `dim_org.py` writes `silver.dim_org`; unit-tested.
-**⚠ Blocker**: PVO name not yet identified. Treat as deferred until P3.C2 (customer HCM pod) becomes available.
+**⚠ Blocker**: PVO name not yet identified. Treat as deferred until P3.8 (customer HCM pod) becomes available.
+**Zero-diff landing contract** (post-P1.5α): `dim_org` is **in** the `DimensionsSpec.build` default (`schema/bundle.py:110`), **in** `examples/full_finance.yaml`, and is registered in `orchestrator/registry.py` `KNOWN_DEFERRED_DIMS` with this ticket ID. Today every seed run emits `RunStep(name="dim_org", status="deferred", error_message="P1.7 — …")`. When P1.7 ships, the **only** orchestrator-side edit is moving `"dim_org"` from `KNOWN_DEFERRED_DIMS` into `SILVER_DIMS` with its builder + `depends_on_bronze=("erp_org_hierarchy",)` (or whichever bronze the confirmed PVO lands as). No `schema/bundle.py` default edit, no `examples/full_finance.yaml` edit, no customer-YAML migration — customer bundles that already list `dim_org` just start producing rows. Any deviation from this is a P1.5α regression and blocks merge. The acceptance criterion above must include: "P1.5α deferred test for `dim_org` flips from `deferred` to `success` with no other diff" (one-line test update only).
 
 ## Theme: Remaining gold marts (each ~200 LOC; replicate P1.2 pattern)
 
@@ -163,12 +165,14 @@
 **Size**: M
 **Depends on**: bronze.ar_invoices ✅, bronze.ar_receipts ✅
 **Accept**: writes `gold.ar_aging`; unit-tested; sample SQL committed.
+**Zero-diff landing contract** (post-P1.5α): `ar_aging` is **in** the `GoldSpec.marts` default (`schema/bundle.py:116`), **in** `examples/full_finance.yaml`, and is registered in `orchestrator/registry.py` `KNOWN_DEFERRED_MARTS` with this ticket ID. Today every seed run emits `RunStep(name="ar_aging", status="deferred", error_message="P1.10 — …")`. When P1.10 ships, the **only** orchestrator-side edit is moving `"ar_aging"` from `KNOWN_DEFERRED_MARTS` into `GOLD_MARTS` with its builder + `depends_on_bronze=("ar_invoices", "ar_receipts")` + `depends_on_silver=("dim_supplier", "dim_calendar")` (mirror the `ap_aging` registry entry as the template). No `schema/bundle.py` default edit, no `examples/full_finance.yaml` edit, no customer-YAML migration. Any deviation from this is a P1.5α regression and blocks merge. The acceptance criterion above must include: "P1.5α deferred test for `ar_aging` flips from `deferred` to `success` with no other diff" (one-line test update only). The schema-default ↔ registry invariant lint (`tests/unit/test_registry_default_coverage.py`, shipped in P1.5α) enforces this contract automatically — moving the key from `KNOWN_DEFERRED_MARTS` to `GOLD_MARTS` keeps the lint green.
 
 ### `[ ]` P1.11 — `transforms/gold/po_backlog.py`
 **Why**: Open POs by supplier × due date — procurement KPI.
 **Size**: M
 **Depends on**: P1.1 (`dim_supplier`), P1.4 (`dim_calendar`); bronze.po_orders ✅, bronze.po_receipts ✅
 **Accept**: writes `gold.po_backlog`; unit-tested; sample SQL committed.
+**Zero-diff landing contract** (post-P1.5α): `po_backlog` is **in** the `GoldSpec.marts` default (`schema/bundle.py:116`), **in** `examples/full_finance.yaml`, and is registered in `orchestrator/registry.py` `KNOWN_DEFERRED_MARTS` with this ticket ID. Today every seed run emits `RunStep(name="po_backlog", status="deferred", error_message="P1.11 — …")`. When P1.11 ships, the **only** orchestrator-side edit is moving `"po_backlog"` from `KNOWN_DEFERRED_MARTS` into `GOLD_MARTS` with its builder + `depends_on_bronze=("po_orders", "po_receipts")` + `depends_on_silver=("dim_supplier", "dim_calendar")`. No `schema/bundle.py` default edit, no `examples/full_finance.yaml` edit, no customer-YAML migration. Any deviation from this is a P1.5α regression and blocks merge. The acceptance criterion above must include: "P1.5α deferred test for `po_backlog` flips from `deferred` to `success` with no other diff" (one-line test update only). The schema-default ↔ registry invariant lint (`tests/unit/test_registry_default_coverage.py`, shipped in P1.5α) enforces this contract automatically.
 
 ## Theme: Plugin-portability follow-ups (round-6 audit)
 
@@ -190,6 +194,20 @@
 **Why**: `bundle.yaml` declared `aidp.{catalog,bronzeSchema,silverSchema,goldSchema}` and the Pydantic schema accepted them — but no module read them at build time. Every dim/gold module hardcoded `fusion_catalog.X.Y` as `Final[str]` defaults. `commands/run.py:78-79` had the same bug in `status()` (hardcoded `'bronze'` schema for `fusion_bundle_state`).
 **Done**: New `scripts/.../config/paths.py` with the `TablePaths` frozen dataclass + `DEFAULT_PATHS` singleton + `from_bundle()` classmethod. Strict SQL-identifier validation (`^[A-Za-z_][A-Za-z0-9_]*$`) at construction — rejects injection, non-strings, leading-digit identifiers, hyphens, dots. Every shipped module (`dim_supplier`, `dim_account`, `dim_calendar`, `supplier_spend`, `gl_balance`, `ap_aging`) accepts `paths: TablePaths | None` on its `build()`; module-level constants derive from `DEFAULT_PATHS` so value strings stay byte-identical (every existing test passes unchanged). Explicit per-table kwargs still win over `paths`. `commands/run.py status()` now uses `TablePaths.from_bundle(bundle).bronze("fusion_bundle_state")`. `ap_aging.build()` resolves `gold_table` AFTER the auto-router resolves `due_date_mode` (critical ordering — F + G build()-level fake-Spark tests lock this invariant). 38 new tests (23 in `test_paths.py` + 14 mart/dim threading tests + 1 status test).
 **Source rules**: CLAUDE.md §"What varies per tenant: Tenant-declared policy → bundle.yaml". CONTRIBUTING.md §"Module checklist" + §"Wiring".
+
+### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command
+**Why**: P1.5α ships `--inline` as the architectural primary — works from inside an AIDP notebook session. But the CLAUDE.md "CLI is the contract" goal includes a second customer journey: **customer with Claude Code installed on their laptop** wants to type `/aidp-fusion-bundle run --mode seed` and have the bundle materialize without opening a browser or AIDP notebook by hand. The MCP-based dispatch primitive exists today — `oracle-ai-data-platform-workbench-spark-connectors/tools/live_test_driver.py` documents the canonical flow: `mcp__aidp__nb_save_file` → `mcp__aidp__nb_create_session` → `mcp__aidp__nb_execute_code` against a chosen cluster, with stdout captured between `AIDP_LIVE_TEST_RESULT_BEGIN/END` markers. This is **us-implementable** (no upstream gap); we just need to wrap the pattern as a slash command + companion skill on the fusion-bundle's existing Claude Code plugin surface (`.claude-plugin/plugin.json` already exists; `skills/aidp-fusion-bundle/` is the namespace).
+
+Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a working Claude Code MCP session against `fusion_bundle_dev`; if that integration surfaces issues, P1.5α's `--inline` correctness (TC26) shouldn't get held hostage. Ship the foundation, then build the convenience layer on top.
+
+**Size**: M — slash command file (`.claude-plugin/commands/run.md`) + companion skill (`skills/aidp-fusion-bundle/SKILL.md` extended with the dispatch flow) + a small `AIDP_LIVE_TEST_RESULT_BEGIN/END` marker emitter added to `_render_summary` so the captured stdout has parseable RunSummary JSON. ~3-4h plus live verification.
+**Depends on**: P1.5α shipped (slash command uploads `notebooks/run_orchestrator.ipynb`, which P1.5α produces). Modeled directly on `oracle-ai-data-platform-workbench-spark-connectors/tools/live_test_driver.py` — same pattern, production use instead of test-harness use.
+**Accept**:
+- `.claude-plugin/commands/run.md` slash command: takes `--mode`, `--datasets`, `--cluster` (default `fusion_bundle_dev`); orchestrates the MCP flow.
+- Companion skill: documents the per-step MCP calls so the skill is runnable end-to-end as a Claude Code agent flow (upload `notebooks/run_orchestrator.ipynb` + `bundle.yaml` → create session → execute cells → parse markers → render the RunSummary inline).
+- `_render_summary` emits the parseable JSON envelope between `AIDP_LIVE_TEST_RESULT_BEGIN` / `_END` markers (one extra `console.print(...)` in P1.5δ scope, ~10 LOC).
+- Live evidence: **TC27** captures one full dispatch on `fusion_bundle_dev` — slash command runs, MCP tools dispatch to AIDP, RunSummary JSON parsed, all 11 bronze + 3+2 silver + 3+2 gold rows verified in `fusion_bundle_state` post-run.
+- Failure-mode tests: MCP session unavailable → clear error; cluster name invalid → clear error; notebook execution timeout → clear error with timeout configuration hint.
 
 ### `[ ]` P1.Xb — Schema preflight before `CREATE OR REPLACE TABLE`
 **Why**: Today each mart module validates its own kwargs and (in ap_aging's case) hard-gates on the currency column. But required bronze / silver column existence isn't checked uniformly — a missing column failures inside Spark with a cryptic `UNRESOLVED_COLUMN` analysis error. A unified preflight that runs before `spark.sql(CREATE OR REPLACE)` gives customers a clear, actionable error.
@@ -229,6 +247,18 @@
 - `dim_supplier.supplier_key = xxhash64(SEGMENT1)`.
 - Unit test: build the same dim twice from a fixed bronze snapshot; assert every surrogate value matches.
 - Docstring updated in both modules to drop the "non-stable across rebuilds" caveat.
+
+### `[ ]` P1.20 — Implement Type-2 SCD on dim tables (`dim_supplier`, `dim_account`)
+**Why**: Today's dims overwrite on every rebuild — no history. A supplier's name change, a payment-terms revision, a COA account re-mapping, all silently mutate dim rows in place. Downstream marts joining on the natural key see "as-of-now" only; historical fact rows lose their original dim context (the GL balance from FY23 joins to the *current* account hierarchy, not the FY23 one). SOX trail and any "what did this look like at period close" question are unanswerable. Named as a future blocker in P1.17 and P1.19 but never tracked as its own deliverable. Reference shape exists at `oracle-aidp-samples/data-engineering/transformation/scd/slowly_changing_dimension_template.ipynb` — Jinja2-templated two-step MERGE+INSERT (expire matched-but-differing current row, then insert new version). Needs adaptation: replace `current_date()` with the orchestrator's run timestamp, add `xxhash64(natural_key || effective_start_date)` surrogate for the *version key* (separate from the natural-key surrogate from P1.19), wire `_extract_ts` / `_run_id` audit columns, templatize the PK (the sample hardcodes `customer_id`).
+**Size**: M — two dims × (DDL with `effective_start_date`, `effective_end_date`, `is_current` + two-step MERGE+INSERT + tracked-cols list + SQL-shape unit test + live evidence under TC25 / TC26 showing a tracked-col change produces two rows for the same natural key).
+**Depends on**: P1.17 (incremental MERGE foundation) and P1.19 (deterministic surrogates) — ship after both so the Type-2 version key is `xxhash64(natural_key || effective_start_date)` and the MERGE machinery already exists.
+**Accept**:
+- `dim_supplier` and `dim_account` carry `effective_start_date TIMESTAMP`, `effective_end_date TIMESTAMP` (NULL for current), `is_current BOOLEAN`, `version_key BIGINT` (= `xxhash64(natural_key || CAST(effective_start_date AS STRING))`).
+- Tracked-columns list per dim is explicit at the top of the module (e.g. `dim_supplier`: `supplier_name`, `business_relationship`, `pay_group`; `dim_account`: segment value descriptions).
+- Two-step pattern: (a) `MERGE INTO dim USING src ON dim.natural_key = src.natural_key AND dim.is_current = true WHEN MATCHED AND (any-tracked-col differs) THEN UPDATE SET is_current = false, effective_end_date = :run_ts`; (b) `INSERT` new versions where natural key is new OR any tracked col differs from current.
+- Downstream marts unchanged — they continue to join on the natural-key surrogate from P1.19, which is stable across versions. Point-in-time joins (fact's `_extract_ts` BETWEEN dim's `effective_start_date` AND `COALESCE(effective_end_date, '9999-12-31')`) are a follow-up, not part of this item.
+- Live evidence: TC25 (dim_supplier) and TC26 (dim_account) showing (1) initial seed produces N current rows, (2) re-run with a tracked-col mutation produces N+1 rows with the mutated supplier/account having one `is_current=false` row and one `is_current=true` row, (3) re-run with no changes is a no-op (no spurious new versions).
+- Empty-source case: zero rows, schema intact, no crash.
 
 ## Theme: Transforms framework (extract reusable pieces)
 
@@ -444,6 +474,25 @@
 **Depends on**: customer-driven evidence.
 **Accept**: this entry stays open until either (a) every sub-item has a fielded report + promoted backlog entry, or (b) v1.0 ships with confidence the list is non-load-bearing.
 
+## Theme: Security hardening
+
+### `[ ]` P2.23 — Secret-handling hardening before first non-`saasfademo1` customer
+**Why**: P1.5α ships `SecretStr` wrapping (`_resolve_password()` in `orchestrator/runtime.py` — see `PLAN_P1.5_orchestrator.md` §4.9) so resolved credentials don't leak through `repr`/`str`/`debug` accidents. But the schema-level footgun is still open: `schema/bundle.py:73` declares `password: str` and accepts a literal value equally with `${vault:OCID}` / `${env:VAR}` — Pydantic does not reject `password: hunter2`. In dev phase this is acceptable (1 user, both example bundles use the sigil, demo-pod creds, `_resolve_password()` logs a WARN on literals). At first non-`saasfademo1` customer onboarding, this becomes a real "creds in git history" risk and must be closed before the customer's `bundle.yaml` lands in a repo. Four hardening items, each cheap individually, sized together because they share the secret-resolution code path.
+**Size**: M — schema-validator + preflight + env-var gating + lint, ~3-4h plus tests.
+**Depends on**: P1.5α shipped (this builds on `_resolve_password()` + `SecretStr` plumbing). Triggered by P3.7 (first non-`saasfademo1` customer) — must land **before** that customer's bundle is committed anywhere.
+**Items**:
+1. **Reject literal passwords at config-load**: Pydantic `field_validator` on `FusionConn.password` enforces the sigil grammar (`^\$\{vault:OCID\}$` or `^\$\{env:VAR\}$`). Literal values raise `ValueError` at `bundle.yaml` load — fails fast, before any orchestrator code runs, before Spark touches anything. Removes the dev-phase WARN from `_resolve_password()` since the validator catches it first.
+2. **Vault-OCID accessibility preflight**: `orchestrator.run()` setup calls `aidputils.secrets.get(ocid)` once before any DAG dispatch. Fails fast with a clear "vault OCID not accessible — check IAM policy" before the first bronze extract. Same shape for `${env:VAR}` — assert env-var is set at startup, not at first BICC call.
+3. **Env-var gating in `commands/catalog.py:76`**: today's `pwd = password or os.environ.get("FUSION_BICC_PASSWORD")` is a perfectly valid dev convenience for the ad-hoc CLI flow, but bundle-driven `run` should agree with the bundle path on policy. Add `--allow-env-creds` flag (or `AIDP_ENV=dev` gate) so prod CLI runs reject env-var-derived creds unless the bundle explicitly opts in via `password: ${env:VAR}`.
+4. **Debug-log masking lint**: grep rule (CI step) preventing `debug(...password...)` / `debug(...bundle.fusion...)` patterns. Catches the future "added a debug call and accidentally logged the password" defect at PR time, not production time. Complements `SecretStr`'s `repr` masking — the regex catches the case where someone calls `secret.get_secret_value()` and logs the result.
+
+**Accept**:
+- `bundle.yaml` with `password: hunter2` is rejected by Pydantic with a clear error message naming both sigil forms.
+- `orchestrator.run()` exits 2 with "vault OCID `ocid1.vaultsecret.…` not accessible — check IAM" when the OCID is bad, before any Spark work.
+- `aidp-fusion-bundle catalog probe --pod X` (no `--password`, no `--allow-env-creds`) errors with "set --password or pass --allow-env-creds for dev use" instead of silently picking up `FUSION_BICC_PASSWORD` from env.
+- CI greps the repo for `debug(.*password|debug(.*\.fusion\.` and fails the build on a match.
+- Unit tests cover all four items; live evidence on `saasfademo1` shows the validator + preflight running cleanly with the existing example bundles.
+
 ---
 
 # P3 — Roadmap, upstream, tracked blockers (don't act now; track)
@@ -461,6 +510,36 @@
 **Size**: L
 **Depends on**: P1.13 (need the marts to share); AIDP-side Delta Sharing provisioning
 **Accept**: bundle.yaml `delta_sharing: { enabled: true, recipients: [...] }` block; CLI emits share-recipient config.
+
+### `[ ]` P3.10 — Orchestrator parallel execution
+**Why**: P1.5α explicitly chose sequential execution (`PLAN_P1.5_orchestrator.md` §7). Rationale at the time: saasfademo1 seed run finishes in <2 min and parallelism complicates failure-mode semantics. Trigger to revisit: any tenant where the seed run exceeds ~5 min wall-clock, OR where multiple bronze extracts could run concurrently against independent PVOs. The orchestrator's DAG already encodes dependencies (`depends_on_bronze`, `depends_on_silver`) — parallelism is a scheduler swap, not a re-architecture (e.g. `concurrent.futures` thread pool driving `graphlib.TopologicalSorter`'s ready-set).
+**Size**: M — swap the topo executor for a ready-set scheduler; preserve fail-fast semantics; bounded worker count (config knob, default 4).
+**Depends on**: P1.5α shipped; live evidence on at least one tenant where sequential runtime is the bottleneck.
+**Accept**:
+- `orchestrator.run()` gains `max_workers: int = 1` kwarg (default keeps today's sequential behavior).
+- Independent bronze extracts (no shared PVO) and independent dim builds run concurrently up to `max_workers`.
+- Fail-fast preserved: a failed step still skips dependents and halts new dispatches.
+- Live evidence: TC<N> showing wall-clock reduction on a tenant with ≥4 enabled datasets.
+
+### `[ ]` P3.11 — Orchestrator step-level retries
+**Why**: P1.5α explicitly chose fail-fast (`PLAN_P1.5_orchestrator.md` §7) — re-run the CLI if a step fails. Trigger to revisit: transient BICC failures (rate-limit 429s, network blips, OAC connection timeouts) observed in real customer runs. Distinct from P2.1 (BICC API-key bootstrap exp backoff, one-shot at install time) — this is per-step retry at run time. Should be scoped to *transient* errors only (network, rate-limit), not data-correctness errors (schema mismatch, NULL currency hard-gate); the orchestrator must classify before retrying or it will mask real bugs.
+**Size**: M — retry policy (max attempts, backoff curve), error classification (`RetryableError` vs `FatalError`), `fusion_bundle_state` schema extension (attempt count per step).
+**Depends on**: P1.5α shipped; a documented transient-failure incident from a real run.
+**Accept**:
+- `orchestrator.run()` gains `retry_policy: RetryPolicy | None = None` kwarg (default: no retries — preserves today's fail-fast).
+- Module-raised exceptions classified into retryable (network, rate-limit) vs fatal (schema, data); only retryable trigger retry.
+- `fusion_bundle_state` rows record `attempt: int` so post-hoc analysis sees retry behavior.
+- Unit-tested with a fake extractor that raises retryable then succeeds.
+
+### `[ ]` P3.12 — Orchestrator failure alerting / notifications
+**Why**: `NotificationsSpec` already exists in `schema/bundle.py` but no consumer. P1.5α §7 acknowledges this and defers. Trigger to revisit: first customer asking for "tell me when the daily seed run fails" — likely after the bundle is in scheduled production use (post-v0.2.0). Channels customers will want: email (SMTP), Slack webhook, OCI Notifications service. Keep the alerter pluggable so a customer with a custom incident-management tool can wire their own.
+**Size**: M — define `Alerter` protocol; ship two concrete implementations (Slack webhook + OCI Notifications); orchestrator invokes on `RunSummary.failed > 0` after the run completes.
+**Depends on**: P1.5α shipped; at least one customer asking for it (don't speculate on payload shape).
+**Accept**:
+- `bundle.yaml` `notifications: { on_failure: [...] }` block consumed by the orchestrator after the run.
+- Slack webhook + OCI Notifications implementations included; both unit-tested with a fake HTTP layer.
+- Failure alert payload includes: bundle project, run_id, failed step name + error message, link to `fusion_bundle_state` query for full detail.
+- Alerter invocation never blocks or fails the run itself (log + swallow on alerter exception).
 
 ## Theme: Upstream advocacy (not bundle-fixable)
 
@@ -481,6 +560,18 @@
 **Size**: XS
 **Depends on**: nothing on our side
 **Accept**: issue filed; if accepted, this backlog item references the doc fix.
+
+### `[ ]` P3.13 — File issue with Oracle AIDP team re: notebook-job submission REST API
+**Why**: AIDP exposes neither a `.aidp/cli.js notebook-job` verb nor a `/api/notebook-jobs` REST endpoint today. `.aidp/cli.js` is agent-flow-management only (`list-agents`, `create-agent`, `attach-compute`, `deploy`). The codebase's existing REST clients (OAC, Fusion saas-batch, BICC) cover non-AIDP surfaces; no AIDP-side notebook-execution REST client exists because the endpoint doesn't exist. Three customer journeys for `aidp-fusion-bundle run`:
+1. ✅ From inside an AIDP notebook session: `--inline` works (P1.5α).
+2. ✅ From Claude Code on a laptop: MCP-based dispatch via `mcp__aidp__*` tools works (P1.5δ).
+3. ❌ From a bare laptop terminal — no Claude Code, no notebook session (CI / cron / scripts): no working path. Would require AIDP to ship a REST notebook-job API.
+
+Surface 3 is not currently load-bearing — primary customer journeys are 1 and 2 — but filing the issue captures the gap and lets Oracle prioritize. When AIDP ships the REST API, a new BACKLOG item (P1.5ε, say) wraps it into the CLI as a third execution surface.
+
+**Size**: XS (file issue); blocking surface 3 until resolved.
+**Depends on**: nothing on our side.
+**Accept**: issue filed with use-case (fusion-bundle laptop-terminal dispatch); GitHub / Oracle internal link captured here. When AIDP ships the API, file a new BACKLOG item to wire it.
 
 ## Theme: Tracked blockers (waiting for environments)
 
