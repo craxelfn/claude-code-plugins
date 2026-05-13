@@ -28,6 +28,8 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from ..schema.refs import render_tree
+
 
 def run(
     bundle_path: Path,
@@ -45,7 +47,7 @@ def run(
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
 
-    bundle_data = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+    bundle_data = render_tree(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
     requested_ids = _resolve_datasets(bundle_data, datasets)
     if not requested_ids:
         console.print("[red]no datasets to run[/red] (none enabled in bundle.yaml or all filtered out)")
@@ -75,7 +77,7 @@ def status(
     if not bundle_path.exists():
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
-    bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+    bundle = render_tree(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
     aidp = bundle.get("aidp", {})
     catalog = aidp.get("catalog", "fusion_catalog")
     state_table = f"{catalog}.bronze.fusion_bundle_state"

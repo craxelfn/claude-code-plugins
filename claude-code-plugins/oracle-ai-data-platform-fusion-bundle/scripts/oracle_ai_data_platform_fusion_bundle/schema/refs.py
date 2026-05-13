@@ -55,6 +55,41 @@ def render_vars(value: str, *, extra: dict[str, str] | None = None) -> str:
     return _VAR_RE.sub(_sub, value)
 
 
+def render_tree(value: object, *, extra: dict[str, str] | None = None) -> object:
+    """Recursively expand ``${VAR}`` in every string inside a dict/list tree.
+
+    Used by the YAML loaders in ``bootstrap`` and ``validate`` so placeholders
+    like ``${FUSION_BICC_BASE_URL}`` in ``bundle.yaml`` resolve from the shell
+    environment before Pydantic validates the model.
+
+    Unknown ``${VAR}`` references are left intact (no exception) so downstream
+    code can still flag them. ``${vault:OCID}`` references are preserved
+    untouched — those are resolved later at orchestrator startup.
+    """
+    if isinstance(value, str):
+        return _render_lenient(value, extra=extra)
+    if isinstance(value, dict):
+        return {k: render_tree(v, extra=extra) for k, v in value.items()}
+    if isinstance(value, list):
+        return [render_tree(item, extra=extra) for item in value]
+    return value
+
+
+def _render_lenient(value: str, *, extra: dict[str, str] | None = None) -> str:
+    """Like :func:`render_vars` but leave unknown ``${VAR}`` alone."""
+    extra = extra or {}
+
+    def _sub(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in extra:
+            return extra[key]
+        if key in os.environ:
+            return os.environ[key]
+        return match.group(0)
+
+    return _VAR_RE.sub(_sub, value)
+
+
 def find_vault_refs(value: str) -> Iterator[VaultRef]:
     """Yield every :class:`VaultRef` embedded in ``value``."""
     for match in _VAULT_RE.finditer(value):
