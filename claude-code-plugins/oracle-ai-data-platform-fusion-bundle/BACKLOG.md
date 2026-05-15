@@ -195,8 +195,34 @@
 **Done**: New `scripts/.../config/paths.py` with the `TablePaths` frozen dataclass + `DEFAULT_PATHS` singleton + `from_bundle()` classmethod. Strict SQL-identifier validation (`^[A-Za-z_][A-Za-z0-9_]*$`) at construction — rejects injection, non-strings, leading-digit identifiers, hyphens, dots. Every shipped module (`dim_supplier`, `dim_account`, `dim_calendar`, `supplier_spend`, `gl_balance`, `ap_aging`) accepts `paths: TablePaths | None` on its `build()`; module-level constants derive from `DEFAULT_PATHS` so value strings stay byte-identical (every existing test passes unchanged). Explicit per-table kwargs still win over `paths`. `commands/run.py status()` now uses `TablePaths.from_bundle(bundle).bronze("fusion_bundle_state")`. `ap_aging.build()` resolves `gold_table` AFTER the auto-router resolves `due_date_mode` (critical ordering — F + G build()-level fake-Spark tests lock this invariant). 38 new tests (23 in `test_paths.py` + 14 mart/dim threading tests + 1 status test).
 **Source rules**: CLAUDE.md §"What varies per tenant: Tenant-declared policy → bundle.yaml". CONTRIBUTING.md §"Module checklist" + §"Wiring".
 
-### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command
-**Why**: P1.5α ships `--inline` as the architectural primary — works from inside an AIDP notebook session. But the CLAUDE.md "CLI is the contract" goal includes a second customer journey: **customer with Claude Code installed on their laptop** wants to type `/aidp-fusion-bundle run --mode seed` and have the bundle materialize without opening a browser or AIDP notebook by hand. The MCP-based dispatch primitive exists today — `oracle-ai-data-platform-workbench-spark-connectors/tools/live_test_driver.py` documents the canonical flow: `mcp__aidp__nb_save_file` → `mcp__aidp__nb_create_session` → `mcp__aidp__nb_execute_code` against a chosen cluster, with stdout captured between `AIDP_LIVE_TEST_RESULT_BEGIN/END` markers. This is **us-implementable** (no upstream gap); we just need to wrap the pattern as a slash command + companion skill on the fusion-bundle's existing Claude Code plugin surface (`.claude-plugin/plugin.json` already exists; `skills/aidp-fusion-bundle/` is the namespace).
+### `[~]` P1.5α-fix1 — PLAN §4.4 review corrections (blocker on α implementation)
+**Why**: Read-through of `PLAN_P1.5_orchestrator.md` §4.4 (the `_execute_node` + run-loop pseudocode) surfaced two correctness bugs in the as-drafted code. Both must be reflected in the plan BEFORE α implementation starts — they're not "fix in α" issues, they're "α as drafted is wrong" issues. Filing as a single trackable item so the corrections don't get lost between drafting and committing.
+
+**Bug 1 — BICC double-pull on bronze count** (PLAN line 525). `[FIXED in plan 2026-05-15]`
+- **Problem**: bronze branch did `df.write...saveAsTable(target); return RunStep.success(..., row_count=df.count())`. `df` is the lazy `extract_pvo()` (`reader.load()`) wrapped with audit columns — calling `.count()` after the write actions the plan a SECOND time, triggering a second BICC HTTP fetch against Fusion. BICC extracts are not idempotent (each call opens a new `_extract_ts` window), so the count could differ from what was just written, and every bronze extract doubles Fusion load on the customer's tenant.
+- **Fix**: count from the materialized Delta target — `row_count=spark.table(target).count()`. Applied to PLAN §4.4 lines 525-537. Acceptance-criteria checklist updated with the unit-test contract: fake-Spark stub records every method call on the `extract_pvo` return; assert exactly one action terminator (`saveAsTable`) and zero `.count()` / `.collect()` / `.show()` calls. Silver/gold branches exempt: module contract is that `build()` writes the target inside the call and returns `spark.table(<resolved>)`, so `.count()` is a cheap Delta read.
+
+**Bug 2 — Failure cascade never runs** (PLAN line 477). `[ANALYZED, decision pending]`
+- **Problem**: The success-path branch checks `if step.status == "failed" and node.is_required_upstream(): _skip_dependents(...)`, but `_execute_node` only ever returns `RunStep.success(...)` or **raises** — there's no return path that produces `status="failed"`. So that branch is dead code. The exception-path branch catches, writes a failed step, then `break`s — **without calling `_skip_dependents`**. Net: failed upstreams produce 1 `failed` row + 0 `skipped` rows, contradicting §4.7 and the acceptance criterion that mandates downstream `status="skipped"` cascade rows.
+- **Decision pending**: three options on the table.
+  - **Option A** — `_execute_node` catches everything, returns `RunStep.failed(...)` on any exception. Single loop branch; risk of over-catching (state-write/cascade-helper bugs masked as "module failures").
+  - **Option B** — Keep `_execute_node` raising; add `_skip_dependents(...)` call inside the orchestrator's `except` block. Smallest change; requires editing §4.7 prose ("`_execute_node` caught" → "orchestrator caught"); two-path structure persists.
+  - **Option C** — Hybrid: `_execute_node` wraps **only** the module dispatch in try/except (returns `RunStep.failed` on module errors), state-write / cascade-helper exceptions propagate as orchestrator bugs. Single loop branch + preserves "module failure vs orchestrator bug" distinction. Recommended.
+  - Tradeoffs and reasoning in conversation log; not duplicating here to avoid drift.
+- **Fix path**: pick option (default **C**), patch PLAN §4.4 pseudocode, add the cascade unit test to acceptance criteria:
+  > Cascade test: stub `dim_supplier.build` to raise; submit a plan with `supplier_spend` depending on `dim_supplier`. Assert RunSummary contains 1 `failed` step (with traceback in `error_message`) + 1 `skipped` step for `supplier_spend` (with `error_message` referencing `dim_supplier`); both rows written to state-table (two `write_state_row` calls); loop terminates after cascade — no later nodes attempted.
+
+**Size**: S — plan edits only, no code. ~30 min for Option C application + checklist update.
+**Depends on**: nothing. Must land before any α implementation commit.
+**Accept**:
+- Bug 1: PLAN §4.4 + acceptance criteria reflect target-table counting. **(Done 2026-05-15.)**
+- Bug 2: PLAN §4.4 pseudocode rewritten per chosen option; §4.7 prose aligned; acceptance criteria gains the cascade test.
+- Both bugs traceable from PLAN_P1.5 back to this BACKLOG entry for audit.
+
+### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
+**Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
+
+**Why (original)**: P1.5α ships `--inline` as the architectural primary — works from inside an AIDP notebook session. But the CLAUDE.md "CLI is the contract" goal includes a second customer journey: **customer with Claude Code installed on their laptop** wants to type `/aidp-fusion-bundle run --mode seed` and have the bundle materialize without opening a browser or AIDP notebook by hand. The MCP-based dispatch primitive exists today — `oracle-ai-data-platform-workbench-spark-connectors/tools/live_test_driver.py` documents the canonical flow: `mcp__aidp__nb_save_file` → `mcp__aidp__nb_create_session` → `mcp__aidp__nb_execute_code` against a chosen cluster, with stdout captured between `AIDP_LIVE_TEST_RESULT_BEGIN/END` markers. This is **us-implementable** (no upstream gap); we just need to wrap the pattern as a slash command + companion skill on the fusion-bundle's existing Claude Code plugin surface (`.claude-plugin/plugin.json` already exists; `skills/aidp-fusion-bundle/` is the namespace).
 
 Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a working Claude Code MCP session against `fusion_bundle_dev`; if that integration surfaces issues, P1.5α's `--inline` correctness (TC26) shouldn't get held hostage. Ship the foundation, then build the convenience layer on top.
 
@@ -208,6 +234,39 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - `_render_summary` emits the parseable JSON envelope between `AIDP_LIVE_TEST_RESULT_BEGIN` / `_END` markers (one extra `console.print(...)` in P1.5δ scope, ~10 LOC).
 - Live evidence: **TC27** captures one full dispatch on `fusion_bundle_dev` — slash command runs, MCP tools dispatch to AIDP, RunSummary JSON parsed, all 11 bronze + 3+2 silver + 3+2 gold rows verified in `fusion_bundle_state` post-run.
 - Failure-mode tests: MCP session unavailable → clear error; cluster name invalid → clear error; notebook execution timeout → clear error with timeout configuration hint.
+
+### `[ ]` P1.5ε — Laptop-terminal REST dispatch (formerly P3.13 advocacy; REST API shipped 2026-04-30)
+**Why**: Surface 3 of the three execution surfaces for `aidp-fusion-bundle run` — a bare laptop terminal, no Claude Code, no notebook session (CI / cron / scripts) — was thought to be blocked upstream. As of the 2026-04-30 `aiwap` REST release (https://docs.oracle.com/en/cloud/paas/ai-data-platform/aiwap/rest-endpoints.html, OpenAPI at `aiwap/swagger.json`), it's implementable. Public model is the **Workflow `jobs`/`jobRuns` job-submission pattern**, not a kernel-execute channel (the `sessions` endpoints carry metadata only — no public `/execute`). The three customer journeys for `aidp-fusion-bundle run` become:
+1. ✅ From inside an AIDP notebook session: `--inline` works (P1.5α).
+2. ✅ From Claude Code on a laptop: MCP-based dispatch (P1.5δ).
+3. 🟡 From a bare laptop terminal: REST dispatch (this item).
+
+**Why P1.5ε, not P1.5α**: P1.5α (`--inline`) is the architectural primary because the orchestrator needs Spark + checkpointer + `aidputils.secrets` + Delta catalog — all notebook-runtime objects. REST dispatch is a wrapper that uploads `notebooks/run_orchestrator.ipynb` to AIDP and submits it as a job; it depends on the notebook existing and being final, which is a P1.5α deliverable. Ship α first, ε after.
+
+**Schema facts** (captured from `aiwap/swagger.json` so the implementer doesn't re-derive):
+- **Path prefix**: `/20260430/aiDataPlatforms/{aiDataPlatformId}/workspaces/{workspaceKey}/...`
+- **Flow**: `POST .../notebook/api/contents/{path}` (upload `.ipynb`) → `POST .../jobs` (create job; one `tasks[]` entry of `type: NOTEBOOK_TASK`) → `POST .../jobRuns` (submit; `{jobKey, parameters[], queue}`) → poll `GET .../jobRuns/{key}` for `state.status` ∈ `{PENDING, QUEUED, RUNNING, SUCCESS, FAILED, CANCELED, TIMED_OUT}` → `POST .../taskRuns/{taskRunKey}/actions/fetchOutput {outputKey}` for the RunSummary.
+- **`NotebookTask`**: `notebookPath: string` (required), `cluster: JobCluster` (required), `source: WORKSPACE | GIT_PROVIDER` (default `WORKSPACE`), `parameters: array<{name, value}>` (**not a map** — both fields string-typed), `timeoutSeconds`, `isStreaming`. **`SPARK_SUBMIT_TASK` is in the `Task.type` enum but has no schema definition — treat as reserved.**
+- **`JobCluster`**: `clusterKey` (task-local nickname, **not a global cluster OCID**) + `newCluster: NewClusterConfiguration`. Existing-cluster reuse happens at the **job** level via `jobClusters[]` (referenced by `clusterKey`); there is no `existingClusterId` field on the task.
+- **Output**: `fetchOutput` returns `data[]` typed `NOTEBOOK | TEXT_PLAIN | APPLICATION_JSON | NOTEBOOK_PATH | FILE_PATH | …`, plus `errorTrace`, `isTruncated`, `outputParameters[]`. `oidlUtils.notebook.exit(json.dumps(summary.to_dict()))` at the end of `run_orchestrator.ipynb` is the correct surfacing primitive — NOT the `AIDP_LIVE_TEST_RESULT_BEGIN/END` stdout markers P1.5δ uses (those are an MCP-channel artifact). Plan a small notebook tweak (one cell, ~3 LOC) to call `notebook.exit(...)` so the RunSummary comes back as a typed `APPLICATION_JSON` output rather than scraped from stdout.
+- **Auth**: *inferred OCI request signing, not literally confirmed in the `aiwap` doc tree.* `swagger.json` has `securityDefinitions: {}` and no `aiwap` page mentions auth at all. Strong indirect signals — `oci.ai_data_platform.AiDataPlatformClient` exists in the OCI Python SDK (control-plane only — data-plane endpoints under `/workspaces/{wk}/...` are **not yet wrapped**), the OCID-keyed path shape, and the absence of any other auth scheme in the spec — all point to OCI request signing (RSA-SHA256 over canonical header set). **Empirical signed-curl probe against a real tenant is the load-bearing prerequisite for this item** — do it before anything else.
+- **`datalake-tenant-id` header**: required only on `/notebook/api/sessions` and `/notebook/api/contents/{contentPath}` (the Jupyter passthrough); **not on `/jobs`, `/jobRuns`, or `fetchOutput`**. Origin of the value is undocumented; if the upload step needs it, probe.
+
+**Implementation sketch**:
+- Build an `aidp_rest` client module: `requests` with `auth=oci.signer.Signer(...)`, or alternatively shell out to `oci raw-request` (CLI does the signing). Resource-principal / instance-principal signers when running in-cloud.
+- New file: `scripts/.../dispatch/aidp_rest.py` — `upload_notebook(path) → workspace_path`, `create_job(notebook_path, cluster_ref) → job_key`, `submit_run(job_key, parameters) → run_key`, `poll_run(run_key) → terminal_status`, `fetch_output(task_run_key) → RunSummary`.
+- `commands/run.py:_run_via_aidp_dispatch()` becomes a real implementation that threads `bundle_path` + cluster reference from `aidp-deploy.config.json`.
+- Add `notebook.exit(json.dumps(summary.to_dict()))` cell to `notebooks/run_orchestrator.ipynb` (1 LOC + 1 import).
+
+**Size**: M (~1-2 days). Lion's share is the auth empirical work + the `aidp_rest` client wrapper; the orchestrator is unaffected.
+**Depends on**: P1.5α shipped (notebook + orchestrator exist); empirical confirmation of OCI signing against a real tenant (one signed `curl` against `GET /workspaces/{wk}` or similar low-stakes endpoint).
+**Accept**:
+- Empirical evidence file `tests/live/TC28_rest_auth_probe.md` showing a signed request to AIDP returning 200 (not 401/403).
+- `aidp-fusion-bundle run --mode seed` (no `--inline`) against `fusion_bundle_dev` from a laptop terminal returns exit code 0 and prints the RunSummary. Live evidence at `tests/live/TC29_rest_dispatch.md`.
+- Unit tests cover the four `aidp_rest` primitives with `responses`-mocked HTTP.
+- `_run_via_aidp_dispatch()` error message removed (function does real work now).
+
+**File upstream issue if blocked**: if OCI signing turns out NOT to be the right scheme, OR if `datalake-tenant-id` is required on `/notebook/api/contents` and the origin is non-discoverable, file an issue with the AIDP team to get the auth-and-headers spec published in the `aiwap` doc tree (current gap: `swagger.json` has empty `securityDefinitions`).
 
 ### `[ ]` P1.Xb — Schema preflight before `CREATE OR REPLACE TABLE`
 **Why**: Today each mart module validates its own kwargs and (in ap_aging's case) hard-gates on the currency column. But required bronze / silver column existence isn't checked uniformly — a missing column failures inside Spark with a cryptic `UNRESOLVED_COLUMN` analysis error. A unified preflight that runs before `spark.sql(CREATE OR REPLACE)` gives customers a clear, actionable error.
@@ -561,17 +620,8 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 **Depends on**: nothing on our side
 **Accept**: issue filed; if accepted, this backlog item references the doc fix.
 
-### `[ ]` P3.13 — File issue with Oracle AIDP team re: notebook-job submission REST API
-**Why**: AIDP exposes neither a `.aidp/cli.js notebook-job` verb nor a `/api/notebook-jobs` REST endpoint today. `.aidp/cli.js` is agent-flow-management only (`list-agents`, `create-agent`, `attach-compute`, `deploy`). The codebase's existing REST clients (OAC, Fusion saas-batch, BICC) cover non-AIDP surfaces; no AIDP-side notebook-execution REST client exists because the endpoint doesn't exist. Three customer journeys for `aidp-fusion-bundle run`:
-1. ✅ From inside an AIDP notebook session: `--inline` works (P1.5α).
-2. ✅ From Claude Code on a laptop: MCP-based dispatch via `mcp__aidp__*` tools works (P1.5δ).
-3. ❌ From a bare laptop terminal — no Claude Code, no notebook session (CI / cron / scripts): no working path. Would require AIDP to ship a REST notebook-job API.
-
-Surface 3 is not currently load-bearing — primary customer journeys are 1 and 2 — but filing the issue captures the gap and lets Oracle prioritize. When AIDP ships the REST API, a new BACKLOG item (P1.5ε, say) wraps it into the CLI as a third execution surface.
-
-**Size**: XS (file issue); blocking surface 3 until resolved.
-**Depends on**: nothing on our side.
-**Accept**: issue filed with use-case (fusion-bundle laptop-terminal dispatch); GitHub / Oracle internal link captured here. When AIDP ships the API, file a new BACKLOG item to wire it.
+### `[~]` ~~P3.13 — File issue with Oracle AIDP team re: notebook-job submission REST API~~ — **PROMOTED to P1.5ε**
+**Why cancelled**: Oracle published the `aiwap` REST API on 2026-04-30, including the `POST /jobs` + `POST /jobRuns` + `fetchOutput` flow this item asked for. No longer an advocacy item — implementable work, now tracked as **P1.5ε** under "Plugin-portability follow-ups." See that entry for schema facts and acceptance criteria.
 
 ## Theme: Tracked blockers (waiting for environments)
 
