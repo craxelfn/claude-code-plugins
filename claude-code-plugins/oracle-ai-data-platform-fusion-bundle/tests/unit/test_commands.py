@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-
 from oracle_ai_data_platform_fusion_bundle import cli
-
 
 # ---------------------------------------------------------------------------
 # init
@@ -146,8 +143,12 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, ["run", "--mode", "incremental"])
-        assert result.exit_code == 0
+        # Exit code 2 = "PLAN ONLY, no work performed". The plan IS still printed,
+        # but the command intentionally fails so CI doesn't mistake the dry-run for
+        # a real pipeline execution. Will become 0 once P1.5 wires dispatch submission.
+        assert result.exit_code == 2
         assert "Dispatch plan" in result.output
+        assert "PLAN ONLY" in result.output
         # at least one of the minimal-template datasets should be listed
         assert "gl_journal_lines" in result.output or "fusion_catalog" in result.output
 
@@ -157,7 +158,25 @@ class TestRun:
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "incremental", "--datasets", "gl_journal_lines",
         ])
-        assert result.exit_code == 0
+        # Same exit-code-2 contract as test_dispatch_plan_dry_run — see comment above.
+        assert result.exit_code == 2
+
+    def test_inline_without_orchestrator_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`run --inline` must NOT silently succeed when orchestrator.run is missing.
+
+        Until P1.5 lands, the orchestrator subpackage has no run() function. The CLI
+        must surface this explicitly (exit code 2 + message pointing at the dim/gold
+        module import path) rather than returning 0 like a no-op.
+        """
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--inline"])
+        assert result.exit_code == 2
+        assert "P1.5" in result.output
+        # The message should point users at the modules they CAN use today
+        assert "dim_supplier" in result.output
 
 
 class TestStatus:
@@ -167,7 +186,67 @@ class TestStatus:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         # Ensure pyspark import fails — patch SparkSession import
-        import sys as _sys
         # If pyspark is importable, the test path differs; we only assert exit 0 either way.
         result = CliRunner().invoke(cli.main, ["status"])
         assert result.exit_code == 0
+
+    def test_reads_configured_bronze_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5b — ``status()`` must read ``fusion_bundle_state`` from the
+        tenant's ``aidp.bronzeSchema`` (not the hardcoded ``'bronze'``).
+
+        The scaffolded template (``examples/minimal_gl_only.yaml``) uses
+        ``apiVersion`` and already has a full ``aidp:`` block with all
+        four keys defaulted. We parse the YAML and *mutate* the existing
+        ``aidp`` mapping in-place, then dump it back — a string-replace
+        would either no-op (the template uses camelCase ``apiVersion``,
+        not ``api_version``) or produce duplicate ``aidp:`` blocks where
+        PyYAML would keep the later default one.
+
+        After the mutation we sanity-check the parsed fixture before
+        invoking ``status`` so a future template rename doesn't silently
+        make the assertion vacuous.
+        """
+        import sys
+
+        import yaml
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+        # The scaffolded template MUST have the aidp block — pin that
+        # contract so a template rename surfaces here, not as a confusing
+        # status-test failure.
+        assert isinstance(bundle.get("aidp"), dict), (
+            "scaffolded template must already carry an `aidp:` block; "
+            "if the template shape changes, this test (and the "
+            "TablePaths.from_bundle contract) needs updating."
+        )
+
+        # Mutate the existing aidp mapping in place.
+        bundle["aidp"]["catalog"]      = "my_lake"
+        bundle["aidp"]["bronzeSchema"] = "raw"
+        bundle["aidp"]["silverSchema"] = "clean"
+        bundle["aidp"]["goldSchema"]   = "marts"
+
+        bundle_path.write_text(
+            yaml.safe_dump(bundle, sort_keys=False), encoding="utf-8"
+        )
+
+        # Sanity: round-trip the YAML and verify the mutation actually took.
+        reread = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+        assert reread["aidp"]["catalog"]      == "my_lake"
+        assert reread["aidp"]["bronzeSchema"] == "raw"
+
+        # Force the fallback-print path (no pyspark).
+        monkeypatch.setitem(sys.modules, "pyspark", None)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", None)
+
+        result = CliRunner().invoke(cli.main, ["status"])
+        assert result.exit_code == 0
+        assert "my_lake.raw.fusion_bundle_state" in result.output
+        # Critically, the pre-P1.5b hardcoded shape must NOT appear.
+        assert "my_lake.bronze.fusion_bundle_state" not in result.output

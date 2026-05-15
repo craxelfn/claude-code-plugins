@@ -20,9 +20,7 @@ notebook entry point is ``orchestrator.run(bundle_path, mode, datasets)``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 import yaml
 from rich.console import Console
@@ -76,9 +74,13 @@ def status(
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
     bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
-    aidp = bundle.get("aidp", {})
-    catalog = aidp.get("catalog", "fusion_catalog")
-    state_table = f"{catalog}.bronze.fusion_bundle_state"
+    # Resolve the state-table path through TablePaths so a tenant's
+    # ``aidp.bronzeSchema`` config flows through correctly (P1.5b — the
+    # pre-refactor code hardcoded 'bronze' as the schema regardless of
+    # bundle.yaml.aidp.bronzeSchema).
+    from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+    paths = TablePaths.from_bundle(bundle)
+    state_table = paths.bronze("fusion_bundle_state")
 
     try:
         from pyspark.sql import SparkSession  # type: ignore[import-not-found]
@@ -151,13 +153,18 @@ def _run_inline(
     fn = getattr(orchestrator, "run", None)
     if fn is None:
         console.print(
-            "[yellow]orchestrator.run() not implemented yet[/yellow] — "
-            "the inline path expects an AIDP notebook to import "
-            "[cyan]oracle_ai_data_platform_fusion_bundle.orchestrator[/cyan] "
-            "and call its run(bundle_data, mode, dataset_ids) entry point."
+            "[red]orchestrator.run() is not implemented yet (BACKLOG P1.5).[/red]\n"
+            "The Phase 2 silver/gold modules are importable as a Python package "
+            "([cyan]oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier[/cyan], "
+            "[cyan]...dimensions.dim_calendar[/cyan], "
+            "[cyan]...transforms.gold.supplier_spend[/cyan]), but the CLI's "
+            "inline run path is not wired to them yet — that's P1.5's deliverable.\n"
+            "\nWorkaround for now: from inside an AIDP notebook session, import the "
+            "modules directly and call their build(spark, ...) functions in dependency "
+            "order: dim_calendar → dim_supplier → supplier_spend."
         )
         console.print(f"\nWould have run: mode={mode}, datasets={dataset_ids}")
-        return 0
+        return 2
     fn(bundle_data, mode=mode, dataset_ids=dataset_ids)
     return 0
 
@@ -172,9 +179,9 @@ def _run_via_aidp_dispatch(
 ) -> int:
     """Submit one AIDP REST job per dataset.
 
-    The bundle ships ``notebooks/run_orchestrator.ipynb`` (TODO) which is
-    the per-dataset entry point. Until that notebook is published, this
-    command prints the dispatch plan so the user can run it manually.
+    Phase 2 will ship ``notebooks/run_orchestrator.ipynb`` as the per-dataset
+    entry point. Until then, this command prints the dispatch plan so the
+    user can run it manually inside an AIDP notebook session.
     """
     console.print(
         f"[bold]Dispatch plan[/bold] (env=[cyan]{env_name}[/cyan], mode=[cyan]{mode}[/cyan]):"
@@ -190,11 +197,13 @@ def _run_via_aidp_dispatch(
         )
     console.print(table)
     console.print(
-        "\n[yellow]NOTE:[/yellow] dispatch submission is wired only when "
-        "[cyan]notebooks/run_orchestrator.ipynb[/cyan] exists in the workspace. "
-        "Today, run those commands manually inside an AIDP notebook session."
+        "\n[red]PLAN ONLY — no work performed.[/red] Phase 2 will wire dispatch "
+        "submission via [cyan]notebooks/run_orchestrator.ipynb[/cyan] (BACKLOG P1.5). "
+        "Until then, run the printed commands manually inside an AIDP notebook session, "
+        "OR import the silver/gold modules directly from a notebook (see CHANGELOG)."
     )
-    return 0
+    # Exit non-zero so CI / scripts don't mistake the plan-print for a real run.
+    return 2
 
 
 __all__ = ["run", "status"]
