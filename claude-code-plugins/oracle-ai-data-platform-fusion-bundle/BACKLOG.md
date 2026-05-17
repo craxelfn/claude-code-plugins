@@ -626,11 +626,12 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 ## Theme: Test coverage
 
-### `[ ]` P2.4 — Add `make test` target so pytest works regardless of shell PATH
+### `[x]` P2.4 — Add `make test` target so pytest works regardless of shell PATH (shipped 2026-05-17)
 **Why**: This recon session: `pytest` not on PATH → confusing failure. `python -m pytest` works regardless of activation state.
 **Size**: XS
 **Depends on**: nothing
 **Accept**: `Makefile` (or `tasks.py`) has `test` target running `python -m pytest tests/unit -q`. README's quick-start mentions `make test`.
+**Done**: `Makefile` ships with `PYTHON ?= python` override + `test` (acceptance: `tests/unit -q`) + `test-all` (full `tests/`, live still env-gated) targets. README Quickstart §1a now shows `pip install -e '.[test]' && make test`. CONTRIBUTING.md:15 flipped from unquoted `.[dev]` (silently zsh-broken since macOS Catalina) to quoted `'.[dev,test]'`, picking up `pytest` deps that the `[dev]` extra lacked. Smoke-verified on zsh: 496 unit tests pass via both `make test` (activated venv) and `make test PYTHON=.venv/bin/python` (override, no activation).
 
 ### `[ ]` P2.5 — Live test for `dashboard validate`
 **Why**: Read-only probe, easy to test, currently no live coverage.
@@ -1048,7 +1049,7 @@ If you're picking from the top, here's the suggested first 10 sessions:
 | 1 | P0.1 — CHANGELOG date stamp | P0 | XS | 30 sec; instant credibility |
 | 2 | P0.3 — STATUS+BACKLOG git decision | P0 | XS | 1 min; clears repo state |
 | 3 | P0.4 + P0.5 — README phase callouts | P0 | XS | 15 min; stops misleading users |
-| 4 | P2.4 — `make test` target | P2 | XS | 15 min; fixes today's pytest pain |
+| ~~4~~ | ~~P2.4 — `make test` target~~ | ~~P2~~ | ~~XS~~ | shipped 2026-05-17 |
 | 5 | P0.6 — README references STATUS/BACKLOG | P0 | XS | 5 min; closes P0 |
 | 6 | P1.1 — `dim_supplier` | P1 | S | 2-4h; smallest dim, prototyped |
 | 7 | P1.2 — `gold.supplier_spend` | P1 | S | 2-4h; productize TC8 SQL |

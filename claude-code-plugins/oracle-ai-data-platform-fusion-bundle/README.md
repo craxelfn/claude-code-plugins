@@ -31,6 +31,10 @@
 # 1. Install the CLI on your laptop (development install from local source)
 pip install -e .
 
+# 1a. (optional, for contributors) install test deps + run the unit suite
+pip install -e '.[test]'
+make test
+
 # 2. Scaffold a bundle in your repo
 mkdir my-fusion-lake && cd my-fusion-lake
 aidp-fusion-bundle init
