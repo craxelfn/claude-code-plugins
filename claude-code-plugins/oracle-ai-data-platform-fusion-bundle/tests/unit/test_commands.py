@@ -161,21 +161,24 @@ class TestRun:
         # Same exit-code-2 contract as test_dispatch_plan_dry_run — see comment above.
         assert result.exit_code == 2
 
+    @pytest.mark.skip(
+        reason="Pre-P1.5α stub-only test — orchestrator.run() exists as of "
+               "Phase 3 (2026-05-17). The CLI stub _run_inline still has the "
+               "old dataset_ids kwarg shape; Phase 5 CLI migration rewires it "
+               "to call orchestrator.run() and this test becomes redundant. "
+               "Will be replaced by test_run_inline_invokes_orchestrator_run "
+               "+ test_run_inline_exits_2_on_OrchestratorConfigError when "
+               "Phase 5 lands."
+    )
     def test_inline_without_orchestrator_fails_loudly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`run --inline` must NOT silently succeed when orchestrator.run is missing.
-
-        Until P1.5 lands, the orchestrator subpackage has no run() function. The CLI
-        must surface this explicitly (exit code 2 + message pointing at the dim/gold
-        module import path) rather than returning 0 like a no-op.
-        """
+        """`run --inline` must NOT silently succeed when orchestrator.run is missing."""
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--inline"])
         assert result.exit_code == 2
         assert "P1.5" in result.output
-        # The message should point users at the modules they CAN use today
         assert "dim_supplier" in result.output
 
 

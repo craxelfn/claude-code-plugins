@@ -107,7 +107,13 @@ class DatasetSpec(BaseModel):
 class DimensionsSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    build: list[str] = Field(default_factory=lambda: ["dim_account", "dim_calendar", "dim_org"])
+    build: list[str] = Field(
+        default_factory=lambda: ["dim_supplier", "dim_account", "dim_calendar", "dim_org"]
+    )
+    """Default includes ``dim_supplier`` (§6 Q1 fix — was previously missing,
+    silently dropping a shipped dim from clean-checkout runs). ``dim_org`` is
+    retained but resolves through ``KNOWN_DEFERRED_DIMS`` to
+    ``RunStep(status='deferred')`` instead of crashing."""
 
 
 class GoldSpec(BaseModel):
