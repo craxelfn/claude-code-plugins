@@ -45,6 +45,7 @@ from .registry import (
     DeferredSpec,
     GoldMartSpec,
     SilverDimSpec,
+    _VALID_LAYERS,
     _layer_for_spec,
     _resolve_bronze,
     _resolve_dim,
@@ -122,7 +123,30 @@ def resolve_plan(
     for mart_name in bundle.gold.marts:
         all_specs[mart_name] = _resolve_mart(mart_name)
 
-    # 2. Determine which names are "in plan" given the filters.
+    # 1a. Validate filter inputs BEFORE applying them. Without this guard, a
+    #     typoed --datasets / --layers name silently produces an empty plan
+    #     and the run exits 0 — an operator would believe a scoped refresh
+    #     ran while no table changed. P1.5α-fix12 (post-α blocking bug).
+    if datasets is not None:
+        unknown_datasets = sorted(set(datasets) - set(all_specs))
+        if unknown_datasets:
+            raise MissingDependencyError(
+                f"--datasets contains name(s) not in the bundle plan: "
+                f"{unknown_datasets}. "
+                f"Available names from bundle.yaml: {sorted(all_specs)}. "
+                f"--datasets is a filter over the bundle's declared "
+                f"datasets / dimensions / marts; to add a new name, edit "
+                f"bundle.yaml first."
+            )
+    if layers is not None:
+        unknown_layers = sorted(set(layers) - _VALID_LAYERS)
+        if unknown_layers:
+            raise MissingDependencyError(
+                f"--layers contains unknown layer(s): {unknown_layers}. "
+                f"Valid layers: {sorted(_VALID_LAYERS)}."
+            )
+
+    # 2. Determine which names are "in plan" given the (now-validated) filters.
     def _matches_filter(name: str, spec: Spec) -> bool:
         if datasets is not None and name not in datasets:
             return False

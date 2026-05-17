@@ -314,6 +314,85 @@ gold:
         assert isinstance(dim_org_spec, registry.DeferredSpec)
         assert dim_org_spec.layer == "silver"
 
+    def test_typoed_datasets_filter_raises_missing_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """P1.5α-fix12 — silent-empty-plan guardrail.
+
+        A typoed ``--datasets`` value (here ``ap_invoies``, a real typo of
+        ``ap_invoices``) must hard-fail with MissingDependencyError —
+        not silently produce an empty plan + exit 0, which would let an
+        operator believe a scoped refresh ran while no table changed.
+
+        The error message must name the unknown filter value AND list the
+        available bundle names so the operator can self-correct.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path))
+
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(
+                bundle, ["ap_invoies"], None, paths=paths,
+            )
+        msg = str(exc_info.value)
+        # Typoed name surfaced
+        assert "ap_invoies" in msg, (
+            f"error must name the unknown --datasets value; got: {msg!r}"
+        )
+        # Available names listed for self-correction (at least one real bundle
+        # name appears — e.g., the actual ap_invoices is in _MIN_BUNDLE)
+        assert "ap_invoices" in msg, (
+            f"error must list available bundle names for self-correction; "
+            f"got: {msg!r}"
+        )
+
+    def test_typoed_datasets_filter_with_mixed_valid_and_invalid(
+        self, tmp_path: Path,
+    ) -> None:
+        """Mixed valid/invalid --datasets list: presence of even one valid
+        name does NOT excuse the invalid one. All unknown names are listed.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path))
+
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(
+                bundle,
+                ["dim_supplier", "bogus_name_1", "bogus_name_2"],
+                None,
+                paths=paths,
+            )
+        msg = str(exc_info.value)
+        assert "bogus_name_1" in msg and "bogus_name_2" in msg, (
+            f"all unknown filter names must surface; got: {msg!r}"
+        )
+
+    def test_typoed_layers_filter_raises_missing_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """P1.5α-fix12 — same guardrail for the layers= filter.
+
+        A typoed ``--layers`` value (here ``gols``, typo of ``gold``) must
+        hard-fail with MissingDependencyError naming the offender and
+        listing the valid layer enum.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path))
+
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(
+                bundle, None, ["gols"], paths=paths,
+            )
+        msg = str(exc_info.value)
+        assert "gols" in msg, (
+            f"error must name the unknown --layers value; got: {msg!r}"
+        )
+        # Valid layer enum surfaced for self-correction
+        for valid in ("bronze", "silver", "gold"):
+            assert valid in msg, (
+                f"error must list valid layers; missing {valid!r} in: {msg!r}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # run() — dry_run + empty bundle + credential preflight ordering

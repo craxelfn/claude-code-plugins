@@ -450,6 +450,20 @@ Treat anything that matches the grep set the same way the TC26 redaction handled
 - BACKLOG P1.5α-fix2 / fix3 / fix4 / fix6 entries flipped from `[~]` → `[x]` in the same commit (one-line headers update each).
 **Cross-ref**: TC26 redaction commits `7889e64` (Phase 6 redacted) + `35aa5ec` (live evidence redacted) for the sanitization-scan pattern.
 
+### `[x]` P1.5α-fix12 — Validate `--datasets` / `--layers` filter inputs against bundle plan (post-α blocking bug, shipped 2026-05-17)
+**Why**: `resolve_plan` at `orchestrator/__init__.py:126-135` filtered names already in `all_specs` via `_matches_filter` — but requested `datasets=` names absent from the bundle plan were never validated or rejected. Impact: `aidp-fusion-bundle run --inline --datasets ap_invoies` (typo of `ap_invoices`) returned an empty plan and exited 0 via `RunSummary.empty(...)` — an operator could believe a scoped refresh ran while no table changed. This violated PLAN_P1.5_orchestrator.md (typoed filter names hard-fail) and `commands/run.py:78-84` (CLI docstring promises `MissingDependencyError` for unknown names).
+**Done**:
+- ✅ `resolve_plan` validates `set(datasets) - set(all_specs)` BEFORE the existing `_matches_filter` loop; raises `MissingDependencyError` listing the unknown name(s) + available bundle names (`__init__.py` step 1a).
+- ✅ Same guardrail for `layers=`: `set(layers) - _VALID_LAYERS` → `MissingDependencyError` listing offenders + valid layer enum (`{"bronze", "silver", "gold"}`).
+- ✅ `_VALID_LAYERS` imported from `.registry` (already exported at `registry.py:51, 293`); no new symbol introduced.
+- ✅ `TestResolvePlan.test_typoed_datasets_filter_raises_missing_dependency` — `datasets=["ap_invoies"]` → `MissingDependencyError` with the typo + available names listed.
+- ✅ `TestResolvePlan.test_typoed_datasets_filter_with_mixed_valid_and_invalid` — `["dim_supplier", "bogus_name_1", "bogus_name_2"]` → both unknown names surface (presence of a valid name doesn't excuse invalids).
+- ✅ `TestResolvePlan.test_typoed_layers_filter_raises_missing_dependency` — `layers=["gols"]` → `MissingDependencyError` with the typo + valid layer enum.
+- ✅ `TestRun.test_run_inline_typoed_datasets_exits_2_no_traceback` (CLI integration) — `aidp-fusion-bundle run --inline --mode seed --datasets ap_invoies` exits 2, output contains `"ap_invoies"`, no traceback (the OrchestratorConfigError marker catch works for this case).
+- ✅ Existing `test_datasets_filter_targets_specific_names` + `test_layer_filter_creates_extra_deps` unchanged — happy-path filter behavior is preserved.
+**Audit-trail status**: no DECISION-doc dependency. `errors.py` doesn't reference any working-note file; the fix is a pure validation tightening. Flips directly to `[x]` (no P1.5α-fix11 gate).
+**Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; PLAN_P1.5_orchestrator.md typoed-filter contract; `commands/run.py:78-84` CLI docstring.
+
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
 

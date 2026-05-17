@@ -299,6 +299,46 @@ class TestRun:
         # Parse-time rejection — orchestrator never invoked
         mock_run.assert_not_called()
 
+    def test_run_inline_typoed_datasets_exits_2_no_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P1.5α-fix12 — end-to-end coverage: a typoed --datasets value
+        reaches the orchestrator (Click's Choice doesn't validate it since
+        --datasets is a free-form CSV), resolve_plan raises
+        MissingDependencyError, the CLI's OrchestratorConfigError catch
+        surfaces it as exit 2 with the typo named, no traceback.
+
+        This is the load-bearing operator-UX test: without the fix in
+        resolve_plan, the run would exit 0 with an empty RunSummary and
+        the operator would believe a scoped refresh ran.
+        """
+        monkeypatch.chdir(tmp_path)
+        # Stub env vars referenced by the minimal template — load_bundle must
+        # succeed for the test to exercise resolve_plan (the actual fix site).
+        # Real values not needed: the run halts at resolve_plan well before
+        # any BICC call.
+        monkeypatch.setenv("FUSION_BICC_BASE_URL", "https://stub.example.com")
+        monkeypatch.setenv("FUSION_BICC_USER", "stub-user")
+        monkeypatch.setenv("FUSION_BICC_PASSWORD", "stub-pw")
+        monkeypatch.setenv("FUSION_BICC_EXTERNAL_STORAGE", "stub_external_storage")
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(cli.main, [
+            "run", "--mode", "seed", "--inline",
+            "--datasets", "ap_invoies",  # typo of ap_invoices
+        ])
+        assert result.exit_code == 2, (
+            f"typoed --datasets must hard-fail exit 2 (NOT exit 0 with empty "
+            f"plan); got exit_code={result.exit_code}, output={result.output!r}"
+        )
+        assert "ap_invoies" in result.output, (
+            f"error output must name the offending --datasets value; "
+            f"got: {result.output!r}"
+        )
+        assert "Traceback (most recent call last)" not in result.output, (
+            "MissingDependencyError must be caught via OrchestratorConfigError "
+            "marker and surfaced cleanly — no traceback leak"
+        )
+
 
 class TestMigrateBundle:
     """`migrate-bundle --from X --to Y` — scaffolded for Option L (§4.4d).
