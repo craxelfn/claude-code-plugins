@@ -1,8 +1,8 @@
 # TC26 — Orchestrator seed run (Phase α end-to-end)
 
 **Test case ID**: TC26
-**Status**: 🟡 **PROCEDURE READY — pending live execution on `fusion_bundle_dev` / `amitV2` workspace**
-**Tracks**: PLAN_P1.5_orchestrator.md §8 "Live evidence TC26" acceptance criterion + P1.5α-fix9 closing evidence
+**Status**: ✅ **EXECUTED 2026-05-17 19:24 UTC** on `fusion_bundle_dev` cluster / `amitV2` AIDP workspace via the REST dispatch surface. BICC-bypass variant (dim_calendar — zero bronze deps) due to credential rotation on saasfademo1; full happy-path version + failure-cascade probes pending fresh Casey.Brown / natalie.salesrep BICC password.
+**Tracks**: PLAN_P1.5_orchestrator.md §8 "Live evidence TC26" acceptance criterion + P1.5α-fix9 closing evidence + P1.5ε REST dispatch validated end-to-end (auth → upload → create job → submit run → poll → fetchOutput)
 
 ## What this verifies
 
@@ -137,28 +137,98 @@ When the live run completes:
 3. Confirm the SOX-trail audit columns on one silver + one gold table.
 4. Note any deviations from expected — every deviation is either (a) a real bug needing follow-up or (b) a missing assumption in this procedure that needs documenting.
 
-### Live evidence (to be filled in)
+### Live evidence — TC26 BICC-bypass variant (2026-05-17)
+
+**Setup**:
+- `run_id`: `<RUN_ID>`
+- `captured_at`: 2026-05-17T19:24:55Z
+- `cluster`: `fusion_bundle_dev` (key `<CLUSTER_KEY>`), ACTIVE
+- `workspace`: `playground` (key `<WORKSPACE_KEY>`), `amitV2` AIDP instance
+- `jobKey`: `<JOB_KEY>`
+- `jobRunKey`: `<JOB_RUN_KEY>`
+- `taskRunKey`: `<TASK_RUN_KEY>`
+- `bundle.version`: `0.2.0` (Option L explicit declaration)
+- Total wall time: ~30 seconds (cluster warm) including poll overhead; orchestrator dispatch alone was 9.44s
+
+**Dispatch path**: REST job-submission via OCI signed requests (P1.5ε surface — end-to-end validated). The CLI's inline path was NOT used here; this proves the REST primitives in `RESEARCH_aidp_rest_api_probe_results.md` §10 are operational against a real orchestrator workload, not just a probe notebook.
 
 ```
-run_id: <fill in>
-captured_at: <fill in ISO timestamp>
-cluster: fusion_bundle_dev (<CLUSTER_KEY>)
-workspace: playground / amitV2
-bundle: <which bundle.yaml + version>
+--- Cell 2: per-step table (orchestrator.run output) ---
+=== RunSummary ===
+run_id=<RUN_ID>
+project=tc26-bypass-bicc, mode=seed
+success=1 failed=0 skipped=0 deferred=0 dur=9.44s
+  silver  dim_calendar        success     rows=4018  dur=9.44s
 
---- per-step table ---
-<paste cell 2 output here>
+--- Cell 3: fusion_bundle_state row for this run_id ---
+{
+  "dataset_id": "dim_calendar",
+  "layer": "silver",
+  "mode": "seed",
+  "status": "success",
+  "row_count": 4018,
+  "skip_reason": null,
+  "duration_seconds": 9.436789927000063
+}
 
---- state-table query result ---
-<paste cell 3 output here>
+--- Cell 3: silver_run_id audit column distribution on dim_calendar ---
+silver_run_id=<RUN_ID>, rows=4018
 
---- SOX-trail audit column samples ---
-silver.dim_supplier.silver_run_id:
-<paste 3 rows>
+--- Cell 3: SOX-trail JOIN silver→state ---
+{
+  "silver_run_id": "<RUN_ID>",
+  "status": "success",
+  "state_row_count": 4018,
+  "silver_rows": 4018
+}
 
-gold.ap_aging.gold_run_id:
-<paste 3 rows>
+--- Cell 4: exit-2 contracts live ---
+OK mode=full → UnsupportedModeError: mode="full" is not supported. Valid modes: ["incremental", "seed"]. (The retired alias "full" is now called "seed" — see DECISION_drop_full_mode.md.)
+OK mode=incremental → NotImplementedError: Incremental mode is P1.5β follow-up; current modules emit CREATE OR REPLACE only. Use mode="seed" for now.
+
+--- Cell 5: AIDP_LIVE_TEST_RESULT_* marker ---
+AIDP_LIVE_TEST_RESULT_BEGIN {"tc":"TC26","run_id":"<RUN_ID>","bundle_project":"tc26-bypass-bicc","mode":"seed","success":1,"failed":0,"skipped":0,"deferred":0,"total_duration_seconds":9.436789927000063,"steps":[{"dataset_id":"dim_calendar","layer":"silver","status":"success","row_count":4018,"duration_seconds":9.436789927000063,"skip_reason":null}]} AIDP_LIVE_TEST_RESULT_END
 ```
+
+### Contracts validated by this run
+
+| Plan / acceptance contract | Validated by |
+|---|---|
+| `orchestrator.run()` public API end-to-end | Cell 2 success |
+| `load_bundle()` against real Pydantic + paths | Cell 2 (bundle parsed cleanly with `version: "0.2.0"`) |
+| Mode-validation Tier 1 (membership) — `mode='full'` → `UnsupportedModeError` | Cell 4 ✅ |
+| Mode-validation Tier 2 (not-implemented) — `mode='incremental'` → `NotImplementedError` | Cell 4 ✅ |
+| `ensure_state_table` (HARD) — Delta DDL + writeability probe | Cell 2 (no exception; state row landed in cell 3) |
+| Per-step `_safe_write_state_row` writes succeeded | Cell 3 (exactly 1 row for this run_id, `duration_seconds=9.44`) |
+| `RunStep.success` factory + timing wrap | Cell 2 (`dur=9.44s`) + Cell 3 (matches `duration_seconds` column) |
+| **`silver_run_id` SOX-trail audit column (B3)** | Cell 3 — 4018/4018 rows carry the orchestrator's run_id |
+| **SOX-trail JOIN silver↔state** | Cell 3 — JOIN returned 4018 rows; the contract works end-to-end |
+| `RunSummary` serializable + marker emission | Cell 5 — AIDP_LIVE_TEST_RESULT markers carry full step list |
+| 4-valued status enum + `skip_reason=null` for non-skipped | Cell 3 (`skip_reason: null`) |
+| AIDP REST dispatch primitives (P1.5ε) | Full session: upload → POST /jobs → POST /jobRuns → poll → fetchOutput; doc-gap corrections from probe results applied (path="jobs", outputKey="", `data[].value`) |
+
+### Real bug surfaced + fixed during execution
+
+**`[DELTA_FAILED_TO_MERGE_FIELDS]` on `duration_seconds`** — `orchestrator/state.py` originally inserted `0.0` (parsed as `DECIMAL(2,1)` by Spark) into a `DOUBLE` column. Delta's strict schema-merge refused. Unit tests with fake-Spark accepted any value; only live Delta enforces.
+
+**Fix**: `ensure_state_table`'s writeability probe + `write_state_row`'s INSERT both now use explicit casts:
+- `CAST(NULL AS TIMESTAMP)` / `CAST(NULL AS BIGINT)` / `CAST(NULL AS STRING)` for nullable columns
+- `CAST(0.0 AS DOUBLE)` / `CAST({value} AS DOUBLE)` for `duration_seconds`
+- `CAST({n} AS BIGINT)` for `row_count`
+
+This is the kind of bug that only live evidence surfaces. The plan was right — unit tests get you 90%, the last 10% needs a real cluster.
+
+### What's NOT validated by this run
+
+- **BICC extract** (zero-bronze-dep `dim_calendar` was used). Pending fresh saasfademo1 credentials (Casey.Brown's password was rotated by Oracle demo team since 2026-04-30).
+- **`enrich_bronze_audit_cols`** (no bronze layer dispatched). Implementation is straightforward Spark `withColumn` calls; will be exercised when BICC creds are refreshed.
+- **Cascade + abort-remaining** (no failures in this run). Unit tests cover the in-memory shape; live exercise needs a deliberate failure injection — see "Failure-mode probes" above.
+- **gold_run_id audit column** (no gold mart dispatched, since all gold marts have bronze deps). Same code-path as silver_run_id; will light up automatically once BICC works.
+
+### Followups created
+
+- **No new bugs** beyond the `state.py` Delta-type-merge fix (shipped same session).
+- BACKLOG should track: re-run TC26 after BICC creds refresh, capture full happy-path evidence with bronze+silver+gold + cascade probe.
 
 ## Cross-references
 

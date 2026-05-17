@@ -94,14 +94,21 @@ def ensure_state_table(spark: "SparkSession", paths: TablePaths) -> None:
     table_path = _state_table_path(paths)
     spark.sql(_ddl(table_path))
     # Writeability probe — INSERT + DELETE sentinel.
+    # Live-evidence fix (2026-05-17): every VALUES literal needs an explicit
+    # CAST. Delta's strict type-merging refuses to coerce DECIMAL(2,1) → DOUBLE
+    # on the `0.0` literal, and NULL needs a typed CAST for the nullable
+    # columns. Unit tests with fake-Spark didn't catch this because they
+    # accept any value; only the real Delta writer enforces the schema.
     spark.sql(
         f"""
         INSERT INTO {table_path}
           (run_id, dataset_id, layer, mode, last_watermark, last_run_at,
            status, row_count, error_message, skip_reason, duration_seconds)
         VALUES
-          ('__ensure_probe__', '__probe__', 'bronze', 'seed', NULL,
-           current_timestamp(), 'probe', NULL, NULL, NULL, 0.0)
+          ('__ensure_probe__', '__probe__', 'bronze', 'seed',
+           CAST(NULL AS TIMESTAMP), current_timestamp(), 'probe',
+           CAST(NULL AS BIGINT), CAST(NULL AS STRING), CAST(NULL AS STRING),
+           CAST(0.0 AS DOUBLE))
         """
     )
     spark.sql(
@@ -125,18 +132,29 @@ def write_state_row(
     # escaping; we use a single-quote-doubled escape consistent with
     # Delta's SQL parser.
 
+    # Live-evidence fix (2026-05-17): every NULL value needs a typed CAST
+    # because Delta's schema-merge refuses bare NULL → BIGINT/STRING
+    # promotion. Same fix as ensure_state_table's writeability probe.
     def _q(s: str | None) -> str:
-        """Quote a string literal for Spark SQL — None → 'NULL', otherwise
-        single-quote-doubled."""
+        """Quote a string literal — None → typed CAST(NULL AS STRING)."""
         if s is None:
-            return "NULL"
+            return "CAST(NULL AS STRING)"
         escaped = s.replace("'", "''")
         return f"'{escaped}'"
 
     def _ts(t: "datetime | None") -> str:
         if t is None:
-            return "NULL"
+            return "CAST(NULL AS TIMESTAMP)"
         return f"TIMESTAMP '{t.isoformat(sep=' ')}'"
+
+    def _bigint(n: int | None) -> str:
+        if n is None:
+            return "CAST(NULL AS BIGINT)"
+        return f"CAST({n} AS BIGINT)"
+
+    def _double(d: float) -> str:
+        # Bare `0.0` is DECIMAL(2,1); needs explicit DOUBLE cast for Delta.
+        return f"CAST({d} AS DOUBLE)"
 
     spark.sql(
         f"""
@@ -151,10 +169,10 @@ def write_state_row(
            {_ts(step.watermark_used)},
            current_timestamp(),
            {_q(step.status)},
-           {step.row_count if step.row_count is not None else 'NULL'},
+           {_bigint(step.row_count)},
            {_q(step.error_message)},
            {_q(step.skip_reason)},
-           {step.duration_seconds})
+           {_double(step.duration_seconds)})
         """
     )
 
