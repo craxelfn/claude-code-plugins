@@ -125,9 +125,20 @@ def build_supplier_spend_sql(
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
 AS
+WITH invoices AS (
+  SELECT
+    CAST(inv.ApInvoicesVendorId AS BIGINT)                         AS vendor_id,
+    UPPER(CAST(inv.{currency_col} AS STRING))                      AS currency_code,
+    inv.ApInvoicesApprovalStatus,
+    inv.ApInvoicesInvoiceAmount,
+    inv.ApInvoicesAmountPaid,
+    CAST(inv.ApInvoicesInvoiceDate AS DATE)                        AS invoice_date
+  FROM {bronze_invoices} inv
+  WHERE inv.ApInvoicesVendorId IS NOT NULL
+)
 SELECT
-  CAST(inv.ApInvoicesVendorId AS BIGINT)                           AS vendor_id,
-  UPPER(CAST(inv.{currency_col} AS STRING))                        AS currency_code,
+  inv.vendor_id                                                    AS vendor_id,
+  inv.currency_code                                                AS currency_code,
   ds.supplier_number                                               AS supplier_number,
   ds.supplier_name                                                 AS supplier_name,
   ds.business_relationship                                         AS business_relationship,
@@ -137,16 +148,15 @@ SELECT
                                                                        AS total_invoice_amount,
   ROUND(SUM(COALESCE(CAST(inv.ApInvoicesAmountPaid    AS DECIMAL(20, 2)), 0)), 2)
                                                                        AS total_paid,
-  MAX(CAST(inv.ApInvoicesInvoiceDate AS DATE))                     AS last_invoice_date,
+  MAX(inv.invoice_date)                                            AS last_invoice_date,
   current_timestamp()                                              AS gold_built_at,
   {run_id_sql}                                                     AS gold_run_id
-FROM {bronze_invoices} inv
+FROM invoices inv
 LEFT JOIN {silver_dim} ds
-  ON ds.vendor_id = CAST(inv.ApInvoicesVendorId AS BIGINT)
-WHERE inv.ApInvoicesVendorId IS NOT NULL
+  ON ds.vendor_id = inv.vendor_id
 GROUP BY
-  CAST(inv.ApInvoicesVendorId AS BIGINT),
-  UPPER(CAST(inv.{currency_col} AS STRING)),
+  inv.vendor_id,
+  inv.currency_code,
   ds.supplier_number,
   ds.supplier_name,
   ds.business_relationship,

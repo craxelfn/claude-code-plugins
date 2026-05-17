@@ -270,6 +270,23 @@ def build_gl_balance_sql(
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
 AS
+WITH balances AS (
+  SELECT
+    b.BalanceLedgerId,
+    b.BalanceCodeCombinationId,
+    b.BalancePeriodYear,
+    b.BalancePeriodNum,
+    b.BalancePeriodName,
+    b.BalanceCurrencyCode,
+    b.BalanceActualFlag,
+    b.BalanceTranslatedFlag,
+    CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 2))                AS begin_balance_dr,
+    CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 2))                AS begin_balance_cr,
+    CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 2))                AS period_net_dr,
+    CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 2))                AS period_net_cr
+  FROM {bronze_balances} b
+  {where_clauses}
+)
 SELECT
   CAST(b.BalanceLedgerId            AS BIGINT)                     AS ledger_id,
   CAST(b.BalanceCodeCombinationId   AS BIGINT)                     AS account_id,
@@ -281,23 +298,22 @@ SELECT
   b.BalanceCurrencyCode                                            AS currency_code,
   b.BalanceActualFlag                                              AS actual_flag,
   b.BalanceTranslatedFlag                                          AS translated_flag,
-  CAST(b.BalanceBeginBalanceDr      AS DECIMAL(28, 2))             AS begin_balance_dr,
-  CAST(b.BalanceBeginBalanceCr      AS DECIMAL(28, 2))             AS begin_balance_cr,
-  CAST(b.BalancePeriodNetDr         AS DECIMAL(28, 2))             AS period_net_dr,
-  CAST(b.BalancePeriodNetCr         AS DECIMAL(28, 2))             AS period_net_cr,
+  b.begin_balance_dr                                               AS begin_balance_dr,
+  b.begin_balance_cr                                               AS begin_balance_cr,
+  b.period_net_dr                                                  AS period_net_dr,
+  b.period_net_cr                                                  AS period_net_cr,
   ROUND(
-      COALESCE(CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 2)), 0)
-    - COALESCE(CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 2)), 0)
-    + COALESCE(CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 2)), 0)
-    - COALESCE(CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 2)), 0),
+      COALESCE(b.begin_balance_dr, 0)
+    - COALESCE(b.begin_balance_cr, 0)
+    + COALESCE(b.period_net_dr,    0)
+    - COALESCE(b.period_net_cr,    0),
     2
   )                                                                AS closing_balance,
   current_timestamp()                                              AS gold_built_at,
   {run_id_sql}                                                     AS gold_run_id
-FROM {bronze_balances} b
+FROM balances b
 LEFT JOIN {silver_dim}  da
   ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)
-{where_clauses}
 """
 
 

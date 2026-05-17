@@ -51,18 +51,31 @@ class TestSqlBuilder:
         An INNER JOIN would silently drop balances whose CCID isn't in
         ``dim_account`` — under-reporting the balance sheet for any account
         the dim doesn't contain (recently-added segments, summary accounts).
+
+        P2.18 refactor split: bronze ``gl_period_balances`` lives inside the
+        ``balances`` CTE, and the outer SELECT joins ``balances`` to
+        ``dim_account`` with the fact (CTE) on the LEFT side.
         """
         sql = build_gl_balance_sql()
         assert "LEFT JOIN" in sql, (
             "gl_balance MUST use LEFT JOIN — INNER JOIN drops balances for "
             "accounts missing from the dim, under-reporting the balance sheet"
         )
-        # bronze.gl_period_balances LEFT JOIN silver.dim_account (fact on left)
+        # Bronze gl_period_balances is the source of the CTE
         assert re.search(
-            r"FROM\s+\S*gl_period_balances\s+\w+\s+LEFT\s+JOIN\s+\S*dim_account",
+            r"FROM\s+\S*gl_period_balances\s+\w+",
             sql,
             flags=re.IGNORECASE,
-        ), "gl_period_balances must be the LEFT (preserved) side of the join"
+        ), "gl_period_balances must be referenced (now inside the balances CTE)"
+        # Outer SELECT: balances LEFT JOIN dim_account, CTE on the LEFT (preserved)
+        assert re.search(
+            r"FROM\s+balances\s+\w+\s+LEFT\s+JOIN\s+\S*dim_account",
+            sql,
+            flags=re.IGNORECASE,
+        ), (
+            "the balances CTE must be the LEFT (preserved) side of the dim join — "
+            "every balance row must reach the output regardless of dim membership"
+        )
 
     def test_grain_uses_fact_account_id(self) -> None:
         """The grain MUST be the fact's CCID, not the dim's account_id.
@@ -181,26 +194,35 @@ class TestSqlBuilder:
                    + COALESCE(period_net_dr,0) - COALESCE(period_net_cr,0).
 
         Standard Fusion accounting form (signed; account-type sign-flip is a
-        consumer concern). Wrapped in ROUND(..., 2). Each cast is wrapped in
+        consumer concern). Wrapped in ROUND(..., 2). Each term is wrapped in
         COALESCE(..., 0) to prevent NULL propagation when the source has any
         NULL component (verified live 2026-05-09: ~20% of sample rows had at
         least one NULL component).
+
+        P2.18 refactor: the four DECIMAL(28, 2) casts are hoisted into the
+        ``balances`` CTE (one cast per row, not two). The outer SELECT's
+        ``closing_balance`` formula references the CTE columns
+        ``b.begin_balance_dr``, etc. The ``COALESCE(..., 0)`` wrap stays on
+        each term — the cast hoist must NOT eliminate the COALESCE, or NULL
+        propagation re-emerges.
         """
         sql = build_gl_balance_sql()
-        # Approximate match — whitespace-tolerant
+        # Whitespace-tolerant match on the new (post-P2.18) shape
         formula_pattern = (
             r"ROUND\(\s*"
-            r"COALESCE\(\s*CAST\(b\.BalanceBeginBalanceDr\s+AS\s+DECIMAL\(28,\s*2\)\),\s*0\s*\)\s*"
-            r"-\s*COALESCE\(\s*CAST\(b\.BalanceBeginBalanceCr\s+AS\s+DECIMAL\(28,\s*2\)\),\s*0\s*\)\s*"
-            r"\+\s*COALESCE\(\s*CAST\(b\.BalancePeriodNetDr\s+AS\s+DECIMAL\(28,\s*2\)\),\s*0\s*\)\s*"
-            r"-\s*COALESCE\(\s*CAST\(b\.BalancePeriodNetCr\s+AS\s+DECIMAL\(28,\s*2\)\),\s*0\s*\),\s*"
+            r"COALESCE\(\s*b\.begin_balance_dr,\s*0\s*\)\s*"
+            r"-\s*COALESCE\(\s*b\.begin_balance_cr,\s*0\s*\)\s*"
+            r"\+\s*COALESCE\(\s*b\.period_net_dr,\s*0\s*\)\s*"
+            r"-\s*COALESCE\(\s*b\.period_net_cr,\s*0\s*\),\s*"
             r"2\s*\)\s+AS\s+closing_balance"
         )
         assert re.search(formula_pattern, sql), (
-            "closing_balance must be ROUND(COALESCE(begin_dr,0) - COALESCE(begin_cr,0) "
-            "+ COALESCE(period_net_dr,0) - COALESCE(period_net_cr,0), 2) — "
-            "without COALESCE, NULL propagation nullifies closing_balance whenever "
-            "any source component is NULL"
+            "closing_balance must be ROUND(COALESCE(b.begin_balance_dr, 0) - "
+            "COALESCE(b.begin_balance_cr, 0) + COALESCE(b.period_net_dr, 0) - "
+            "COALESCE(b.period_net_cr, 0), 2) — without COALESCE on every term, "
+            "NULL propagation nullifies closing_balance whenever any source "
+            "component is NULL. The cast hoist into the CTE must NOT drop the "
+            "outer COALESCE — these are separate invariants."
         )
 
     def test_surfaced_amount_columns_not_coalesced(self) -> None:

@@ -54,34 +54,61 @@ class TestSqlBuilder:
         The mart consumes a CFO dashboard. An INNER JOIN would silently drop
         invoices whose vendor isn't in dim_supplier — understating spend.
         We require a LEFT JOIN with the invoice table on the left.
+
+        P2.19 refactor split: bronze ``ap_invoices`` lives inside the
+        ``invoices`` CTE, and the outer SELECT joins ``invoices`` to
+        ``dim_supplier`` with the fact (CTE) on the LEFT side.
         """
         sql = build_supplier_spend_sql()
         assert "LEFT JOIN" in sql, (
             "supplier_spend MUST use LEFT JOIN — INNER JOIN drops invoices for "
             "vendors missing from the dim, understating spend"
         )
-        # And it must be `bronze.ap_invoices LEFT JOIN silver.dim_supplier`,
-        # not the other way around — the invoice side must be the preserved (left) side.
+        # Bronze ap_invoices is the source of the CTE
         assert re.search(
-            r"FROM\s+\S*ap_invoices\s+\w+\s+LEFT\s+JOIN\s+\S*dim_supplier",
+            r"FROM\s+\S*ap_invoices\s+\w+",
             sql,
             flags=re.IGNORECASE,
-        ), "ap_invoices must be the LEFT (preserved) side of the join"
+        ), "ap_invoices must be referenced (now inside the invoices CTE)"
+        # Outer SELECT: invoices LEFT JOIN dim_supplier, CTE on the LEFT (preserved)
+        assert re.search(
+            r"FROM\s+invoices\s+\w+\s+LEFT\s+JOIN\s+\S*dim_supplier",
+            sql,
+            flags=re.IGNORECASE,
+        ), (
+            "the invoices CTE must be the LEFT (preserved) side of the dim join — "
+            "every invoice dollar must reach the output regardless of dim membership"
+        )
 
     def test_grouping_uses_invoice_vendor_id(self) -> None:
         """The grain MUST be the invoice's claim of vendor, not the dim's.
 
         Grouping on `ds.vendor_id` would lose the invoice rows that didn't
-        match the dim (NULL vendor_id collapse). Grouping on
-        `CAST(inv.ApInvoicesVendorId AS BIGINT)` preserves them and produces
-        a stable per-vendor grain regardless of dim membership.
+        match the dim (NULL vendor_id collapse). The CTE projects
+        `CAST(inv.ApInvoicesVendorId AS BIGINT) AS vendor_id` once; outer
+        SELECT, JOIN, and GROUP BY all reference `inv.vendor_id`. The
+        invariant is preserved because the CTE alias `inv` is the invoice
+        side — `inv.vendor_id` is the invoice's vendor claim.
         """
         sql = build_supplier_spend_sql()
-        # The GROUP BY must include the invoice's vendor_id expression
+        # The invoices CTE projects the BIGINT vendor_id from the invoice side
         assert re.search(
-            r"GROUP BY[\s\S]*CAST\(inv\.ApInvoicesVendorId\s+AS\s+BIGINT\)",
+            r"CAST\(inv\.ApInvoicesVendorId\s+AS\s+BIGINT\)\s+AS\s+vendor_id",
             sql,
-        ), "GROUP BY must use CAST(inv.ApInvoicesVendorId AS BIGINT) as the vendor_id key"
+        ), (
+            "the invoices CTE must project CAST(inv.ApInvoicesVendorId AS BIGINT) "
+            "AS vendor_id — invoice-side vendor id, not dim-side"
+        )
+        # The GROUP BY must include the CTE's invoice-side vendor_id
+        group_by_clause = sql[sql.upper().rindex("GROUP BY"):]
+        assert re.search(
+            r"\binv\.vendor_id\b",
+            group_by_clause,
+        ), (
+            "GROUP BY must reference inv.vendor_id (invoice CTE side) — "
+            "grouping on ds.vendor_id would collapse unmatched invoices into a "
+            "single NULL bucket"
+        )
 
     def test_select_vendor_id_from_invoice_side(self) -> None:
         """`vendor_id` in the output is the invoice's claim — not `ds.vendor_id`."""
@@ -224,13 +251,30 @@ class TestCurrencyInGrain:
     def test_currency_code_in_group_by(self) -> None:
         """Without GROUP BY currency, amounts would still aggregate across
         currencies even if the column is projected. Both must be present.
+
+        P2.19 refactor: the ``UPPER(CAST(...))`` derivation lives in the
+        ``invoices`` CTE; outer SELECT and GROUP BY reference
+        ``inv.currency_code``. Currency-in-grain is the invariant —
+        GROUP BY must contain a currency-discriminating column.
         """
         sql = build_supplier_spend_sql()
+        # The CTE projects the UPPER+CAST derivation exactly once
+        assert re.search(
+            r"UPPER\(\s*CAST\(\s*inv\.ApInvoicesInvoiceCurrencyCode\s+AS\s+STRING\s*\)\s*\)\s+AS\s+currency_code",
+            sql,
+        ), (
+            "the invoices CTE must project UPPER(CAST(inv.{currency_col} AS STRING)) "
+            "AS currency_code — single derivation, used by both projection and GROUP BY"
+        )
+        # GROUP BY references the CTE's currency_code column
         group_by_clause = sql[sql.upper().rindex("GROUP BY"):]
         assert re.search(
-            r"UPPER\(\s*CAST\(\s*inv\.ApInvoicesInvoiceCurrencyCode\s+AS\s+STRING\s*\)\s*\)",
+            r"\binv\.currency_code\b",
             group_by_clause,
-        ), "currency_code expression must appear in GROUP BY clause"
+        ), (
+            "GROUP BY must reference inv.currency_code — without it, amounts "
+            "would sum across currencies (meaningless on multi-currency tenants)"
+        )
 
     def test_currency_col_override_threads_through(self) -> None:
         """Tenants with an aliased currency column (e.g.
