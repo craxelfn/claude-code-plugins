@@ -4,7 +4,7 @@ Schema and per-step write logic for the state table that records every
 orchestrator step's outcome. Single source of truth for the table's DDL +
 the canonical INSERT shape.
 
-Two-layer failure semantics (DECISION_state_table_failure_semantics.md):
+Two-layer failure semantics:
   - ``ensure_state_table`` is HARD — failure halts the run before any
     module dispatch (high-probability structural problems like catalog
     typo, missing schema, DDL grant misconfig).
@@ -44,9 +44,7 @@ def _state_table_path(paths: TablePaths) -> str:
 
 
 def _ddl(table_path: str) -> str:
-    """Mirrors §3.2 of PLAN_P1.5_orchestrator.md.
-
-    Append-only. Each orchestrator step writes exactly one row.
+    """Append-only. Each orchestrator step writes exactly one row.
     ``skip_reason`` is the structured B1.1 discriminator (nullable for
     non-skipped rows).
     """

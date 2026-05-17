@@ -152,7 +152,7 @@
 ### `[~]` P1.8 — `transforms/gold/gl_balance.py` (commit pending; live `TC23_gl_balance_results.md`)
 **Why**: Period balances by account × period — core CFO dashboard mart.
 **Size**: S → **delivered S+** (added BOOTSTRAP Step 7 + COALESCE fix from live finding)
-**Depends on**: P1.3 (`dim_account`) ✅; P1.4 (`dim_calendar`) ✅ — but **dim_calendar dep was nominal**, not used in the SQL (grain mismatch: daily dim vs period fact; period context comes from fact's `period_year`/`period_num` directly). See [`PLAN_P1.8_gl_balance.md`](PLAN_P1.8_gl_balance.md) §2.5 for the deviation rationale.
+**Depends on**: P1.3 (`dim_account`) ✅; P1.4 (`dim_calendar`) ✅ — but **dim_calendar dep was nominal**, not used in the SQL (grain mismatch: daily dim vs period fact; period context comes from fact's `period_year`/`period_num` directly). See the dim_calendar grain-mismatch note in the live evidence TCs for the deviation rationale.
 **Accept**:
 - ✅ `transforms/gold/gl_balance.py` follows `supplier_spend.py` pattern (constants → SQL builder → Spark wrapper)
 - ✅ Writes `fusion_catalog.gold.gl_balance` Delta — 10,184,102 rows / 22 cols landed live (`actual_flag='A'` only; encumbrance + budget deferred to v0.3)
@@ -205,7 +205,7 @@
 **Source rules**: CLAUDE.md §"What varies per tenant: Tenant-declared policy → bundle.yaml". CONTRIBUTING.md §"Module checklist" + §"Wiring".
 
 ### `[x]` P1.5α-fix1 — PLAN §4.4 review corrections (closed 2026-05-15)
-**Why**: Read-through of `PLAN_P1.5_orchestrator.md` §4.4 (the `_execute_node` + run-loop pseudocode) surfaced two correctness bugs in the as-drafted code. Both reflected in the plan BEFORE α implementation starts. Single trackable item so the corrections don't get lost between drafting and committing.
+**Why**: Read-through of the §4.4 (the `_execute_node` + run-loop pseudocode) surfaced two correctness bugs in the as-drafted code. Both reflected in the plan BEFORE α implementation starts. Single trackable item so the corrections don't get lost between drafting and committing.
 
 **Bug 1 — BICC double-pull on bronze count** (PLAN line 525). `[FIXED in plan 2026-05-15]`
 - **Problem**: bronze branch did `df.write...saveAsTable(target); return RunStep.success(..., row_count=df.count())`. `df` is the lazy `extract_pvo()` (`reader.load()`) wrapped with audit columns — calling `.count()` after the write actions the plan a SECOND time, triggering a second BICC HTTP fetch against Fusion. BICC extracts are not idempotent (each call opens a new `_extract_ts` window), so the count could differ from what was just written, and every bronze extract doubles Fusion load on the customer's tenant.
@@ -227,23 +227,20 @@
 **Accept** (all met 2026-05-15):
 - ✅ Bug 1: PLAN §4.4 + acceptance criteria reflect target-table counting.
 - ✅ Bug 2: PLAN §4.4 pseudocode rewritten per Option C; §4.7 prose stays correct as-written ("`_execute_node` caught the exception"); two new tests added to acceptance criteria.
-- ✅ Both bugs traceable from PLAN_P1.5 back to this BACKLOG entry for audit.
+- ✅ Both bugs traceable from the canonical PLAN back to this BACKLOG entry for audit.
 
-### `[~]` P1.5α-fix2 — Drop `--mode full` from CLI surface (impl shipped 2026-05-17; awaiting P1.5α-fix11 for `[x]`)
-**Why**: `cli.py:112` used to accept `--mode full` via `click.Choice(["full","incremental","seed"])`. The orchestrator's `Literal["seed","incremental"]` is a type-hint, not runtime-enforced — so `--mode full` would reach `orchestrator.run(...)` unchallenged, pass the `if mode == "incremental"` guard (because `"full" != "incremental"`), and land rows in `fusion_bundle_state` with `mode="full"` — a value outside the documented enum. Worst kind of bug: no exception, no log, silent state-table contract pollution. Decision rationale, alternatives considered, and hypotheticals are in [`DECISION_drop_full_mode.md`](DECISION_drop_full_mode.md).
+### `[x]` P1.5α-fix2 — Drop `--mode full` from CLI surface (shipped 2026-05-17)
+**Why**: `cli.py:112` used to accept `--mode full` via `click.Choice(["full","incremental","seed"])`. The orchestrator's `Literal["seed","incremental"]` is a type-hint, not runtime-enforced — so `--mode full` would reach `orchestrator.run(...)` unchallenged, pass the `if mode == "incremental"` guard (because `"full" != "incremental"`), and land rows in `fusion_bundle_state` with `mode="full"` — a value outside the documented enum. Worst kind of bug: no exception, no log, silent state-table contract pollution.
 **Done** (Option A surface + Option D defense-in-depth):
 - ✅ `cli.py:113`: `Choice(["seed", "incremental"])`, default `"seed"`, help text mentions the retired alias.
 - ✅ `commands/run.py`: default `"seed"`; type-hint `Literal["seed","incremental"]`.
-- ✅ `orchestrator/__init__.py:433-440`: `_VALID_MODES = frozenset({"seed","incremental"})`; entry-point validation raises `UnsupportedModeError` with retired-alias hint pointing at `DECISION_drop_full_mode.md` (validation runs BEFORE `load_bundle` — zero filesystem / Spark / state side effects on bad mode).
+- ✅ `orchestrator/__init__.py:433-440`: `_VALID_MODES = frozenset({"seed","incremental"})`; entry-point validation raises `UnsupportedModeError` with retired-alias hint (validation runs BEFORE `load_bundle` — zero filesystem / Spark / state side effects on bad mode).
 - ✅ `orchestrator/errors.py:53`: `UnsupportedModeError(OrchestratorConfigError, ValueError)` — multi-inherits `ValueError` so legacy callers that catch `ValueError` still trap mode errors (P1.5α-fix6 marker-pattern back-compat).
 - ✅ `test_run_cli_rejects_mode_full_at_parse_time` (`test_commands.py:278`): Click parses `--mode full`, exit code 2, `orchestrator.run` patched and `assert_not_called()` confirms parse-time rejection — orchestrator never invoked.
 - ✅ `test_mode_full_raises_before_any_io` (`test_orchestrator_run.py:126`): `pytest.raises(UnsupportedModeError, match="full")` + `"retired" in str(exc)` (breadcrumb preservation) + `isinstance(exc, ValueError)` (marker-pattern contract) + `load_bundle` NOT called.
-- 🟡 `DECISION_drop_full_mode.md` remains untracked locally; tracked-in-git status deferred to a follow-up housekeeping commit covering the untracked DECISION/DESIGN/RESEARCH cluster together.
 
-**Remaining gate for `[x]` flip**: P1.5α-fix11 (housekeeping commit for the 7 untracked working-note files). `orchestrator/__init__.py:439` emits an error message that names `DECISION_drop_full_mode.md` by filename; until that file is tracked in git, the audit trail is incomplete for any operator following the breadcrumb.
-
-### `[~]` P1.5α-fix3 — State-table failure semantics: hard `ensure`, soft per-step write (impl + tests shipped 2026-05-17; awaiting P1.5α-fix11 for `[x]`)
-**Why**: Read-through of `PLAN_P1.5_orchestrator.md` surfaced a direct contradiction between §4.4 (after Option C was applied for the cascade bug, state writes propagate uncaught) and §4.7 line 767 ("State-table write failure: log + continue"). Both can't be right. The deeper question is whether `fusion_bundle_state` is observability (logs-like; may fail without consequence) or data contract (rows read by future runs and must be reliable). Answer: **both** — Phase α uses it mostly for `status()` human-readable output, but Phase β reads `last_watermark` from it to drive incremental `MERGE INTO`. So pure "log + continue" misses the watermark concern; pure "halt always" kills 45-min bronze re-extracts on 2-second network blips. Decision rationale, four options analyzed, and the chosen split contract are in [`DECISION_state_table_failure_semantics.md`](DECISION_state_table_failure_semantics.md).
+### `[x]` P1.5α-fix3 — State-table failure semantics: hard `ensure`, soft per-step write (shipped 2026-05-17)
+**Why**: Read-through of the canonical PLAN surfaced a direct contradiction between §4.4 (after Option C was applied for the cascade bug, state writes propagate uncaught) and §4.7 line 767 ("State-table write failure: log + continue"). Both can't be right. The deeper question is whether `fusion_bundle_state` is observability (logs-like; may fail without consequence) or data contract (rows read by future runs and must be reliable). Answer: **both** — Phase α uses it mostly for `status()` human-readable output, but Phase β reads `last_watermark` from it to drive incremental `MERGE INTO`. So pure "log + continue" misses the watermark concern; pure "halt always" kills 45-min bronze re-extracts on 2-second network blips.
 **Approach** (Option 4 — hard `ensure`, soft per-step write):
 - **Layer 1 (hard)**: `state.ensure_state_table(spark, paths)` at orchestrator start (§4.4 step 5). Creates the table if absent AND probes writeability (INSERT a sentinel row + DELETE; catches "create succeeded but write denied" on tenants with split DDL/DML grants). On any failure: raises uncaught — halts BEFORE any module dispatch so no bronze extract burns Fusion-side load against a structurally inaccessible state table.
 - **Layer 2 (soft)**: `_safe_write_state_row(spark, paths, step, console)` in `orchestrator/runtime.py`. Wraps `state.write_state_row` in try/except. On exception: logs WARN with `dataset_id`, `layer`, `status`, `repr(exc)`; returns `False`; does NOT raise. Caller continues. Cascade decisions in the run loop are made from in-memory `step.status`, never from whether the row landed — so state-write failures never affect in-run correctness.
@@ -269,10 +266,8 @@
 - ✅ `TestStateWriteFailureSemantics.test_ensure_state_table_failure_halts_run_before_dispatch` — `PermissionError` from `ensure_state_table` propagates; `_execute_node` patched + `assert_not_called()` confirms zero dispatch attempts.
 - ✅ `TestRunCascadeAndAbort.test_failed_bronze_cascades_to_skipped_silver_and_gold` updated with `wraps=`-style patches that count both wrapper invocations and underlying `state.write_state_row` calls — both equal `len(steps)`, proving the run loop persists every step through the SOFT wrapper.
 
-**Remaining gate for `[x]` flip**: P1.5α-fix11 (housekeeping commit for the 7 untracked working-note files). `state.py:7` and `runtime.py` `_safe_write_state_row` docstring both reference `DECISION_state_table_failure_semantics.md` by filename; until that file is tracked in git, the audit trail is incomplete for any contributor following the breadcrumb.
-
-### `[~]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (impl + tests shipped 2026-05-17; awaiting P1.5α-fix11 + live evidence for `[x]`)
-**Why**: `PLAN_P1.5_orchestrator.md` §4.2 advertises `layers=["gold"]` as the iterating-on-gold-SQL workflow ("only rebuild gold without re-extracting bronze"). §4.7 simultaneously says any consumer whose dependency is filtered out of the current run hard-fails with `MissingDependencyError`. The two contradict: running `orchestrator.run(layers=["gold"])` would crash on every gold mart's bronze prerequisite. Decision rationale, four options analyzed, industry-pattern alignment, and the chosen split are in [`DECISION_layer_filter_semantics.md`](DECISION_layer_filter_semantics.md).
+### `[~]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (impl + tests shipped 2026-05-17; awaiting live evidence for `[x]`)
+**Why**: the §4.2 advertises `layers=["gold"]` as the iterating-on-gold-SQL workflow ("only rebuild gold without re-extracting bronze"). §4.7 simultaneously says any consumer whose dependency is filtered out of the current run hard-fails with `MissingDependencyError`. The two contradict: running `orchestrator.run(layers=["gold"])` would crash on every gold mart's bronze prerequisite.
 **Approach** (Option 4 — distinguish intra-plan from extra-plan dependencies):
 - **Intra-plan** deps (both consumer and provider in current plan): standard topo-sort + cascade-on-failure as today.
 - **Extra-plan** deps (provider filtered out by `datasets=`/`layers=`): preflight via `spark.catalog.tableExists(...)` BEFORE any module dispatch. Missing → `PrerequisiteError` with redirect message naming what's missing and how to fix it.
@@ -301,12 +296,11 @@
 - ✅ `TestResolvePlan.test_inplan_consumer_with_unknown_dependency_raises_missing_dependency` — registry-inconsistency guardrail (Branch B of `_check_dep_exists_or_raise` at `__init__.py:168`). Patches `GOLD_MARTS["supplier_spend"]` with `depends_on_bronze=("nonexistent_pvo",)`; asserts `MissingDependencyError` names the missing dep AND is NOT a `PrerequisiteError` (load-bearing — bad reference must NOT leak to disk-state-checking).
 - ✅ `TestResolvePlan.test_typo_in_dim_raises_missing_dependency` — Branch A coverage (bundle.yaml typo → unknown REQUESTED name). Distinct contract from Branch B above; both branches keep their own test.
 
-**Remaining gates for `[x]` flip**:
-1. **P1.5α-fix11** (housekeeping commit for the 7 untracked working-note files). `orchestrator/errors.py` docstrings for `MissingDependencyError` + `PrerequisiteError` reference `DECISION_layer_filter_semantics.md` by name; until that file is tracked in git the audit trail is incomplete.
-2. **Live evidence**: `aidp-fusion-bundle run --inline --mode seed --layers gold` against `fusion_bundle_dev` (after a full seed run materialized bronze/silver) producing a RunSummary with only gold marts dispatched. Blocked on BICC credential refresh — same blocker as TC26 full happy-path.
+**Remaining gate for `[x]` flip**:
+- **Live evidence**: `aidp-fusion-bundle run --inline --mode seed --layers gold` against `fusion_bundle_dev` (after a full seed run materialized bronze/silver) producing a RunSummary with only gold marts dispatched. Blocked on BICC credential refresh — same blocker as TC26 full happy-path.
 
 ### `[x]` P1.5α-fix5 — Plan-doc nomenclature: `password_ref` → `password` (closed 2026-05-15)
-**Why**: Two spots in `PLAN_P1.5_orchestrator.md` still referred to `fusion.password_ref` even though the Pydantic schema field is `fusion.password` (`scripts/.../schema/bundle.py:73`) and §4.4's pseudocode + §4.9's resolver helper already use `bundle.fusion.password`:
+**Why**: Two spots in the canonical PLAN still referred to `fusion.password_ref` even though the Pydantic schema field is `fusion.password` (`scripts/.../schema/bundle.py:73`) and §4.4's pseudocode + §4.9's resolver helper already use `bundle.fusion.password`:
 - Line 147 — §3.3 bundle-config table row.
 - Line 903 — §6 open-question "How does the orchestrator obtain BICC credentials?" answer.
 `password_ref` was likely an early draft name from before the unified-sigil pattern (one `str` field accepting literal / `${vault:OCID}` / `${env:VAR}` via `_resolve_password()`) was adopted. The stale references would have misled implementers — `bundle.fusion.password_ref` raises `AttributeError`, but since the references were in prose tables and not in code, the bug stayed dormant.
@@ -316,11 +310,11 @@
 **Size**: XS — two single-paragraph edits. ~5 min.
 **Depends on**: nothing.
 **Accept**:
-- ✅ `grep password_ref PLAN_P1.5_orchestrator.md` returns only the explanatory "there is no separate `password_ref` field" sentences (deliberate).
+- ✅ `grep password_ref` against the canonical PLAN returns only the explanatory "there is no separate `password_ref` field" sentences (deliberate).
 - ✅ Line 147 + line 903 align with §4.4 pseudocode (`bundle.fusion.password`) and §4.9 resolver semantics.
 
 ### `[x]` P1.5α-fix6 — CLI exit-2 contract via `OrchestratorConfigError` marker (shipped 2026-05-17)
-**Why**: `PLAN_P1.5_orchestrator.md` §4.5 `_run_inline` pseudocode caught only `NotImplementedError`, but the exit-code table said exit-2 covers "config error, NotImplementedError, or unsupported execution path." After P1.5α-fix2 (mode-validation `ValueError`), §4.4a (`BundleLoadError`), and P1.5α-fix4 (`MissingDependencyError` + `PrerequisiteError`) landed, the catch list became dangerously incomplete — any of those four raising would propagate as a raw Python traceback to the user instead of a clean exit-2 with a redacted message.
+**Why**: the §4.5 `_run_inline` pseudocode caught only `NotImplementedError`, but the exit-code table said exit-2 covers "config error, NotImplementedError, or unsupported execution path." After P1.5α-fix2 (mode-validation `ValueError`), §4.4a (`BundleLoadError`), and P1.5α-fix4 (`MissingDependencyError` + `PrerequisiteError`) landed, the catch list became dangerously incomplete — any of those four raising would propagate as a raw Python traceback to the user instead of a clean exit-2 with a redacted message.
 **Approach** — marker base class pattern (preferred over flat enumeration):
 - Define `OrchestratorConfigError(Exception)` in `orchestrator/runtime.py` as a marker for "user-facing config / pre-dispatch error; CLI prints `str(exc)` and exits 2 without traceback."
 - All existing user-facing config errors inherit from it:
@@ -359,7 +353,7 @@
 - ✅ `test_every_public_error_class_inherits_marker` — self-maintaining lint that loops `errors.__all__` and asserts each non-marker class has `OrchestratorConfigError` in MRO. New error classes added to `__all__` are automatically subject to the contract.
 
 ### `[~]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (plan applied 2026-05-15)
-**Why**: `PLAN_P1.5_orchestrator.md` §4.5 `_run_inline` pseudocode had three coupled bugs the reviewer caught:
+**Why**: the §4.5 `_run_inline` pseudocode had three coupled bugs the reviewer caught:
 1. **`bundle_path` not threaded.** Pseudocode signature `_run_inline(bundle_data, mode, dataset_ids)` took the parsed YAML *dict*, but `orchestrator.run(bundle_path=...)` (§4.2 public API) needs the *Path*. The orchestrator re-reads the YAML internally because `_render_env_vars` (§4.4a) must run on raw text BEFORE Pydantic validation. Passing a parsed dict would skip env-var rendering entirely.
 2. **Default `datasets=` is over-restrictive bronze-only.** `commands/run.py:47` calls `_resolve_datasets(bundle_data, datasets)` which, when `--datasets` is omitted, returns the full list of enabled `datasets[*].id` from bundle.yaml — those are BICC PVO names (`ap_invoices`, `gl_period_balances`, etc.), all bronze. Silver dim names (`dim_supplier`, `dim_account`) and gold mart names (`supplier_spend`, `ap_aging`) are NOT in `bundle.datasets[]`. Passing that list as `datasets=` to the orchestrator filters silver + gold out. **Worst-kind-of-bug**: `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) returns exit 0, RunSummary shows 11 bronze success rows, customer thinks everything materialized — silver + gold never dispatched.
 3. **`--datasets foo,bar` should pass raw to the orchestrator** for cross-layer registry classification, not get pre-resolved. `--datasets ap_aging` (gold mart name) and `--datasets dim_supplier` (silver dim name) must work — the orchestrator's `resolve_plan` (per P1.5α-fix4) classifies user-named identifiers across all three registries.
@@ -400,7 +394,7 @@
 3. Update existing column-list assertion tests to include the new column.
 4. Add `test_<module>_emits_layer_run_id_when_set` + `test_<module>_emits_null_layer_run_id_when_unset` per-module.
 **Size**: M — ~60 LOC of code + ~12 new tests + ~6 existing-test edits. ~1h total.
-**Depends on**: PLAN_P1.5_orchestrator.md §3.1 / §3.5a / §4.4 (B3) — landed in plan, awaiting implementation in the same commit as `orchestrator/__init__.py`.
+**Depends on**: §3.1 / §3.5a / §4.4 (B3) — landed in plan, awaiting implementation in the same commit as `orchestrator/__init__.py`.
 **Accept**:
 - Every shipped silver/gold module's `build()` accepts `run_id` kwarg without TypeError.
 - `build_<mart>_sql(run_id="abc")` SQL contains `'abc' AS <layer>_run_id`.
@@ -429,35 +423,22 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 - Two new tests: (a) two `RunContext` instances in the same process produce independent WARN counts; (b) long-lived process with three sequential `RunContext`s + literal passwords emits exactly 3 WARNs total (one per context).
 **Cross-ref**: PLAN §4.9 (`_LITERAL_WARN_EMITTED` definition + autouse fixture); R3 (the WARN-once requirement that motivated the flag).
 
-### `[ ]` P1.5α-fix11 — Track DECISION / DESIGN / RESEARCH working notes (audit-trail gate, 2026-05-17)
-**Why**: Seven working-note files at the repo root are referenced from tracked code/docs but remain untracked locally per the "don't commit decision docs" rule applied during P1.5α implementation. This leaves the audit trail incomplete — a reader following any in-code reference hits a missing file. **Until this lands, P1.5α-fix2 / fix3 / fix4 stay flipped at `[~]` (partial), not `[x]`.** (P1.5α-fix6 is independent — `errors.py` has zero DECISION-doc references, so fix6 shipped directly at `[x]`.)
+### `[x]` P1.5α-fix11 — Scrub references to local-only working notes (shipped 2026-05-17)
+**Why**: PLAN / DECISION / DESIGN / RESEARCH / BOOTSTRAP files at the repo root were originally written as committable working notes. The team chose to keep them local-only (moved to `dev/`, gitignored) — they contain step-level identifiers and internal commentary not suitable for the public repo. That left tracked code/docs with ~40 references to filenames that don't exist in the public repo — broken cross-links for any contributor browsing the source.
 
-**Files** (all at repo root; `git status` shows them as untracked):
-- `DECISION_drop_full_mode.md` (referenced from `orchestrator/__init__.py:439` error message — operator who hits `UnsupportedModeError` sees this filename in the message)
-- `DECISION_state_table_failure_semantics.md` (referenced from `state.py:7` module docstring + `runtime.py` `_safe_write_state_row` docstring)
-- `DECISION_layer_filter_semantics.md` (referenced from `orchestrator/__init__.py:475` run-loop comment + `runtime.py:327` `_preflight_external_deps` docstring — NOT `errors.py`; the docstrings on `MissingDependencyError` / `PrerequisiteError` describe their semantics but don't name a decision doc)
-- `DESIGN_extraction_philosophy.md` (referenced from PLAN_P1.5_orchestrator.md)
-- `DESIGN_orchestrator_evolution.md` (referenced from BACKLOG P1.Xb, P3.10, P3.11)
-- `RESEARCH_aidp_rest_api.md` + `RESEARCH_aidp_rest_api_probe_results.md` (referenced from BACKLOG P1.5ε, `tests/live/TC26_orchestrator_seed_run.md`)
-
-**Pre-commit sanitization** (per the same guard that surfaced the TC26 scrub): scan each file with the same grep set used in commits `7889e64` + `35aa5ec`:
-- OCIDs (`ocid1\.datalake|ocid1\.[a-z]+\.oc1\.[a-z]+\.amaaaaa`), workspace/cluster/job/jobRun/taskRun UUIDs, run_id UUIDs that map to a specific live execution.
-- Internal-only commentary or hot takes that shouldn't be public-repo content.
-- Stale references to deleted/renamed files (broken cross-links).
-
-Treat anything that matches the grep set the same way the TC26 redaction handled it — replace with placeholder like `<AIDP_ID>` / `<WORKSPACE_KEY>` / `<RUN_ID>`. Keep the surrounding narrative.
-
-**Size**: S — sanitization scan per file (~10 min each = ~70 min) + single atomic commit. ~1.5h.
-**Depends on**: nothing.
-**Accept**:
-- All 7 files tracked in git on `oussama-dev`.
-- `git log -p` for the housekeeping commit contains zero hits for the OCID / workspace-key / cluster-key / job-key / run-id patterns (same grep set used in the TC26 scrub).
-- Each reference site from tracked code/docs (`grep -rn "DECISION_\|DESIGN_\|RESEARCH_" scripts/ tests/ PLAN_*.md BACKLOG.md`) resolves to a tracked file.
-- BACKLOG P1.5α-fix2 / fix3 / fix4 entries flipped from `[~]` → `[x]` in the same commit (one-line headers update each). (fix6 was independent and shipped directly at `[x]` in commit P1.5α-fix6 close-out.)
-**Cross-ref**: TC26 redaction commits `7889e64` (Phase 6 redacted) + `35aa5ec` (live evidence redacted) for the sanitization-scan pattern.
+**Done**:
+- ✅ All public-facing references to local-only working-note files scrubbed from tracked code, docstrings, test prose, live-evidence docs, and BACKLOG entries.
+- ✅ Operator-facing error messages (e.g. the retired-mode hint in `UnsupportedModeError`) no longer cite local-only filenames; the substantive hints stay.
+- ✅ Production docstrings (`state.py`, `runtime.py`, `__init__.py`) keep their inline contract descriptions but drop citation filenames.
+- ✅ `commands/run.py` REST-stub message rewritten to describe the status without citing internal-only research notes.
+- ✅ Live-evidence docs under `tests/live/` (TC22/TC23/TC26) updated to describe the internal bootstrap / research procedure without filename links.
+- ✅ BACKLOG entries' Why/Done blocks dropped citation filenames; the substantive rationale stays inline in each entry.
+- ✅ `dev/` was added to `.gitignore` in a prior step; the local-only files live there.
+- ✅ Post-scrub verification: the canonical `git grep -nE '<file-pattern set>' -- scripts/ tests/ BACKLOG.md CLAUDE.md CONTRIBUTING.md README.md` returns 0 hits.
+- ✅ BACKLOG fix2 + fix3 entries flipped from `[~]` → `[x]` in the same commit (audit-trail gate closed by reference scrub). fix4 stays `[~]` (live-evidence gate still open). fix6 was independent and shipped at `[x]` in its own close-out.
 
 ### `[x]` P1.5α-fix12 — Validate `--datasets` / `--layers` filter inputs against bundle plan (post-α blocking bug, shipped 2026-05-17)
-**Why**: `resolve_plan` at `orchestrator/__init__.py:126-135` filtered names already in `all_specs` via `_matches_filter` — but requested `datasets=` names absent from the bundle plan were never validated or rejected. Impact: `aidp-fusion-bundle run --inline --datasets ap_invoies` (typo of `ap_invoices`) returned an empty plan and exited 0 via `RunSummary.empty(...)` — an operator could believe a scoped refresh ran while no table changed. This violated PLAN_P1.5_orchestrator.md (typoed filter names hard-fail) and `commands/run.py:78-84` (CLI docstring promises `MissingDependencyError` for unknown names).
+**Why**: `resolve_plan` at `orchestrator/__init__.py:126-135` filtered names already in `all_specs` via `_matches_filter` — but requested `datasets=` names absent from the bundle plan were never validated or rejected. Impact: `aidp-fusion-bundle run --inline --datasets ap_invoies` (typo of `ap_invoices`) returned an empty plan and exited 0 via `RunSummary.empty(...)` — an operator could believe a scoped refresh ran while no table changed. This violated the canonical PLAN (typoed filter names hard-fail) and `commands/run.py:78-84` (CLI docstring promises `MissingDependencyError` for unknown names).
 **Done**:
 - ✅ `resolve_plan` validates `set(datasets) - set(all_specs)` BEFORE the existing `_matches_filter` loop; raises `MissingDependencyError` listing the unknown name(s) + available bundle names (`__init__.py` step 1a).
 - ✅ Same guardrail for `layers=`: `set(layers) - _VALID_LAYERS` → `MissingDependencyError` listing offenders + valid layer enum (`{"bronze", "silver", "gold"}`).
@@ -468,7 +449,7 @@ Treat anything that matches the grep set the same way the TC26 redaction handled
 - ✅ `TestRun.test_run_inline_typoed_datasets_exits_2_no_traceback` (CLI integration) — `aidp-fusion-bundle run --inline --mode seed --datasets ap_invoies` exits 2, output contains `"ap_invoies"`, no traceback (the OrchestratorConfigError marker catch works for this case).
 - ✅ Existing `test_datasets_filter_targets_specific_names` + `test_layer_filter_creates_extra_deps` unchanged — happy-path filter behavior is preserved.
 **Audit-trail status**: no DECISION-doc dependency. `errors.py` doesn't reference any working-note file; the fix is a pure validation tightening. Flips directly to `[x]` (no P1.5α-fix11 gate).
-**Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; PLAN_P1.5_orchestrator.md typoed-filter contract; `commands/run.py:78-84` CLI docstring.
+**Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; the typoed-filter contract; `commands/run.py:78-84` CLI docstring.
 
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
@@ -488,7 +469,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 ### `[ ]` P1.5ε — Laptop-terminal REST dispatch (formerly P3.13 advocacy; REST API shipped 2026-04-30)
 
-**Status (2026-05-17)**: **Empirical probe complete end-to-end against `amitV2` / `playground` / `fusion_bundle_dev`.** All four phases of the §11 retry checklist pass (auth, upload, job submission, fetchOutput). Auth model CONFIRMED as OCI request signing — the §395 "load-bearing prerequisite" is satisfied. All implementer-facing schema corrections live in [`RESEARCH_aidp_rest_api_probe_results.md`](RESEARCH_aidp_rest_api_probe_results.md) — read that file as the source of truth for client code, NOT the `Schema facts` block below (some of which has been empirically falsified — see notes inline). Implementable now; gated only on P1.5α shipping the orchestrator notebook.
+**Status (2026-05-17)**: **Empirical probe complete end-to-end against `amitV2` / `playground` / `fusion_bundle_dev`.** All four phases of the §11 retry checklist pass (auth, upload, job submission, fetchOutput). Auth model CONFIRMED as OCI request signing — the §395 "load-bearing prerequisite" is satisfied. All implementer-facing schema corrections live in the internal REST-probe notes — read those notes as the source of truth for client code, NOT the `Schema facts` block below (some of which has been empirically falsified — see notes inline). Implementable now; gated only on P1.5α shipping the orchestrator notebook.
 
 **Why**: Surface 3 of the three execution surfaces for `aidp-fusion-bundle run` — a bare laptop terminal, no Claude Code, no notebook session (CI / cron / scripts) — was thought to be blocked upstream. As of the 2026-04-30 `aiwap` REST release (https://docs.oracle.com/en/cloud/paas/ai-data-platform/aiwap/rest-endpoints.html, OpenAPI at `aiwap/swagger.json`), it's implementable. Public model is the **Workflow `jobs`/`jobRuns` job-submission pattern**, not a kernel-execute channel (the `sessions` endpoints carry metadata only — no public `/execute`). The three customer journeys for `aidp-fusion-bundle run` become:
 1. ✅ From inside an AIDP notebook session: `--inline` works (P1.5α).
@@ -515,7 +496,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 **Size**: S–M (~½ to 1 day, down from M). Auth empirical work is DONE (probe doc); lion's share is now just the `aidp_rest` client wrapper.
 **Depends on**: P1.5α shipped (notebook + orchestrator exist). The empirical-probe prerequisite is **satisfied** (see Status note above).
 **Accept**:
-- ~~Empirical evidence file `tests/live/TC28_rest_auth_probe.md` showing a signed request to AIDP returning 200 (not 401/403).~~ **Satisfied 2026-05-17** — evidence captured in [`RESEARCH_aidp_rest_api_probe_results.md`](RESEARCH_aidp_rest_api_probe_results.md) §10.
+- ~~Empirical evidence file `tests/live/TC28_rest_auth_probe.md` showing a signed request to AIDP returning 200 (not 401/403).~~ **Satisfied 2026-05-17** — evidence captured in the internal REST-probe notes §10.
 - `aidp-fusion-bundle run --mode seed` (no `--inline`) against `fusion_bundle_dev` from a laptop terminal returns exit code 0 and prints the RunSummary. Live evidence at `tests/live/TC29_rest_dispatch.md`.
 - Unit tests cover the four `aidp_rest` primitives with `responses`-mocked HTTP. Use the response shapes from probe doc §10 as fixture data (not the speculative shapes from this entry's pre-2026-05-17 schema-facts block).
 - `_run_via_aidp_dispatch()` error message removed (function does real work now).
@@ -523,7 +504,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 **File upstream issue if blocked**: if OCI signing turns out NOT to be the right scheme, OR if `datalake-tenant-id` is required on `/notebook/api/contents` and the origin is non-discoverable, file an issue with the AIDP team to get the auth-and-headers spec published in the `aiwap` doc tree (current gap: `swagger.json` has empty `securityDefinitions`).
 
-### `[ ]` P1.Xb — Schema preflight before `CREATE OR REPLACE TABLE` *(DESIGN_orchestrator_evolution.md item A — elevate to ship-with-α candidate)*
+### `[ ]` P1.Xb — Schema preflight before `CREATE OR REPLACE TABLE` *(orchestrator-evolution design item A — elevate to ship-with-α candidate)*
 **Why**: Today each mart module validates its own kwargs and (in ap_aging's case) hard-gates on the currency column. But required bronze / silver column existence isn't checked uniformly — a missing column failures inside Spark with a cryptic `UNRESOLVED_COLUMN` analysis error. A unified preflight that runs before `spark.sql(CREATE OR REPLACE)` gives customers a clear, actionable error. Single biggest "Fusion release breaks us" insurance policy — DESIGN doc §2 argues for elevating to α-mandatory.
 **Size**: S — one helper (`preflight_required_columns(spark, table, required_cols) → None | raise`), invoked from each mart's `build()` after kwarg validation and before SQL execution. Per-mart required-column lists tied to the post-detect kwargs (e.g. `ap_aging` requires `ApInvoicesVendorId`, `ApInvoicesInvoiceDate`, `ApInvoicesInvoiceAmount`, `ApInvoicesAmountPaid`, the detected currency col, and the detected/configured cancelled + terms-date cols).
 **Accept**: every shipped mart's `build()` raises a `MartPreflightError` (or similar) listing the missing column(s) by name when bronze/silver schema doesn't match expectations; unit-tested via the same fake-Spark stub pattern used for `detect_*_params` tests; ap_aging's existing currency-presence hard-gate is folded into this preflight so the contract is uniform.
@@ -743,7 +724,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 ### `[x]` P2.18 — Hoist decimal casts in `gl_balance` into a CTE (shipped 2026-05-17)
 **Why**: `transforms/gold/gl_balance.py:262-272` cast the same four `decimal(38,30)` amount columns to `DECIMAL(28, 2)` twice each — once in the surfaced projection (`begin_balance_dr`, `begin_balance_cr`, `period_net_dr`, `period_net_cr`) and again inside the `closing_balance` formula's `COALESCE(CAST(...))` wrappers. Catalyst doesn't reliably CSE across `CAST` boundaries on high-precision decimals; at 11M rows this is measurable CPU. `ap_aging` already got this right via the `open_invoices` CTE (`ap_aging.py:431-445`) — cast once, outer SELECT operates on cast values.
-**Done**: `build_gl_balance_sql` emits a `WITH balances AS (...)` CTE that performs each `CAST(... AS DECIMAL(28, 2))` exactly once (audit verified: 1/1/1/1); outer SELECT projects the four amount columns from the CTE without re-casting (`b.begin_balance_dr AS begin_balance_dr`, etc.); `closing_balance` is `ROUND(COALESCE(b.begin_balance_dr, 0) - COALESCE(b.begin_balance_cr, 0) + COALESCE(b.period_net_dr, 0) - COALESCE(b.period_net_cr, 0), 2)` — the `COALESCE(..., 0)` NULL-safety wrap stays on every term. LEFT JOIN preserved-fact-side maintained: `FROM balances b LEFT JOIN {silver_dim} da`. `tests/unit/test_gl_balance.py` 41 tests green; 2 tests updated to assert the new CTE shape (`test_uses_left_join_not_inner` split into "FROM gl_period_balances exists" + "FROM balances LEFT JOIN dim_account"; `test_closing_balance_formula` references CTE columns) while still enforcing the original invariants. See `PLAN_P2.18_P2.19_gold_cte_hoists.md` for the assertion-family taxonomy.
+**Done**: `build_gl_balance_sql` emits a `WITH balances AS (...)` CTE that performs each `CAST(... AS DECIMAL(28, 2))` exactly once (audit verified: 1/1/1/1); outer SELECT projects the four amount columns from the CTE without re-casting (`b.begin_balance_dr AS begin_balance_dr`, etc.); `closing_balance` is `ROUND(COALESCE(b.begin_balance_dr, 0) - COALESCE(b.begin_balance_cr, 0) + COALESCE(b.period_net_dr, 0) - COALESCE(b.period_net_cr, 0), 2)` — the `COALESCE(..., 0)` NULL-safety wrap stays on every term. LEFT JOIN preserved-fact-side maintained: `FROM balances b LEFT JOIN {silver_dim} da`. `tests/unit/test_gl_balance.py` 41 tests green; 2 tests updated to assert the new CTE shape (`test_uses_left_join_not_inner` split into "FROM gl_period_balances exists" + "FROM balances LEFT JOIN dim_account"; `test_closing_balance_formula` references CTE columns) while still enforcing the original invariants.
 
 ### `[x]` P2.19 — Project `currency_code` once in `supplier_spend` CTE (shipped 2026-05-17)
 **Why**: `transforms/gold/supplier_spend.py:105, 122-123` emitted `UPPER(CAST(inv.{currency_col} AS STRING))` in both the SELECT projection and the GROUP BY — same expression twice. Spark usually CSEs this but with `UPPER(CAST(...))` chains it sometimes doesn't, and it prevents the shuffle from using a precomputed partition column. `ap_aging` already projects `currency_code` once in its `open_invoices` CTE.
@@ -787,7 +768,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 ## Theme: Security hardening
 
 ### `[ ]` P2.23 — Secret-handling hardening before first non-`saasfademo1` customer
-**Why**: P1.5α ships `SecretStr` wrapping (`_resolve_password()` in `orchestrator/runtime.py` — see `PLAN_P1.5_orchestrator.md` §4.9) so resolved credentials don't leak through `repr`/`str`/`debug` accidents. But the schema-level footgun is still open: `schema/bundle.py:73` declares `password: str` and accepts a literal value equally with `${vault:OCID}` / `${env:VAR}` — Pydantic does not reject `password: hunter2`. In dev phase this is acceptable (1 user, both example bundles use the sigil, demo-pod creds, `_resolve_password()` logs a WARN on literals). At first non-`saasfademo1` customer onboarding, this becomes a real "creds in git history" risk and must be closed before the customer's `bundle.yaml` lands in a repo. Four hardening items, each cheap individually, sized together because they share the secret-resolution code path.
+**Why**: P1.5α ships `SecretStr` wrapping (`_resolve_password()` in `orchestrator/runtime.py` — see the §4.9) so resolved credentials don't leak through `repr`/`str`/`debug` accidents. But the schema-level footgun is still open: `schema/bundle.py:73` declares `password: str` and accepts a literal value equally with `${vault:OCID}` / `${env:VAR}` — Pydantic does not reject `password: hunter2`. In dev phase this is acceptable (1 user, both example bundles use the sigil, demo-pod creds, `_resolve_password()` logs a WARN on literals). At first non-`saasfademo1` customer onboarding, this becomes a real "creds in git history" risk and must be closed before the customer's `bundle.yaml` lands in a repo. Four hardening items, each cheap individually, sized together because they share the secret-resolution code path.
 **Size**: M — schema-validator + preflight + env-var gating + lint, ~3-4h plus tests.
 **Depends on**: P1.5α shipped (this builds on `_resolve_password()` + `SecretStr` plumbing). Triggered by P3.7 (first non-`saasfademo1` customer) — must land **before** that customer's bundle is committed anywhere.
 **Items**:
@@ -821,8 +802,8 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 **Depends on**: P1.13 (need the marts to share); AIDP-side Delta Sharing provisioning
 **Accept**: bundle.yaml `delta_sharing: { enabled: true, recipients: [...] }` block; CLI emits share-recipient config.
 
-### `[ ]` P3.10 — Orchestrator parallel execution *(DESIGN_orchestrator_evolution.md item E)*
-**Why**: P1.5α explicitly chose sequential execution (`PLAN_P1.5_orchestrator.md` §7). Rationale at the time: saasfademo1 seed run finishes in <2 min and parallelism complicates failure-mode semantics. Trigger to revisit: any tenant where the seed run exceeds ~5 min wall-clock, OR where multiple bronze extracts could run concurrently against independent PVOs. The orchestrator's DAG already encodes dependencies (`depends_on_bronze`, `depends_on_silver`) — parallelism is a scheduler swap, not a re-architecture (e.g. `concurrent.futures` thread pool driving `graphlib.TopologicalSorter`'s ready-set).
+### `[ ]` P3.10 — Orchestrator parallel execution *(orchestrator-evolution design item E)*
+**Why**: P1.5α explicitly chose sequential execution (the §7). Rationale at the time: saasfademo1 seed run finishes in <2 min and parallelism complicates failure-mode semantics. Trigger to revisit: any tenant where the seed run exceeds ~5 min wall-clock, OR where multiple bronze extracts could run concurrently against independent PVOs. The orchestrator's DAG already encodes dependencies (`depends_on_bronze`, `depends_on_silver`) — parallelism is a scheduler swap, not a re-architecture (e.g. `concurrent.futures` thread pool driving `graphlib.TopologicalSorter`'s ready-set).
 **Size**: M — swap the topo executor for a ready-set scheduler; preserve fail-fast semantics; bounded worker count (config knob, default 4).
 **Depends on**: P1.5α shipped; live evidence on at least one tenant where sequential runtime is the bottleneck.
 **Accept**:
@@ -831,8 +812,8 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - Fail-fast preserved: a failed step still skips dependents and halts new dispatches.
 - Live evidence: TC<N> showing wall-clock reduction on a tenant with ≥4 enabled datasets.
 
-### `[ ]` P3.11 — Orchestrator step-level retries *(DESIGN_orchestrator_evolution.md item S)*
-**Why**: P1.5α explicitly chose fail-fast (`PLAN_P1.5_orchestrator.md` §7) — re-run the CLI if a step fails. Trigger to revisit: transient BICC failures (rate-limit 429s, network blips, OAC connection timeouts) observed in real customer runs. Distinct from P2.1 (BICC API-key bootstrap exp backoff, one-shot at install time) — this is per-step retry at run time. Should be scoped to *transient* errors only (network, rate-limit), not data-correctness errors (schema mismatch, NULL currency hard-gate); the orchestrator must classify before retrying or it will mask real bugs.
+### `[ ]` P3.11 — Orchestrator step-level retries *(orchestrator-evolution design item S)*
+**Why**: P1.5α explicitly chose fail-fast (the §7) — re-run the CLI if a step fails. Trigger to revisit: transient BICC failures (rate-limit 429s, network blips, OAC connection timeouts) observed in real customer runs. Distinct from P2.1 (BICC API-key bootstrap exp backoff, one-shot at install time) — this is per-step retry at run time. Should be scoped to *transient* errors only (network, rate-limit), not data-correctness errors (schema mismatch, NULL currency hard-gate); the orchestrator must classify before retrying or it will mask real bugs.
 **Size**: M — retry policy (max attempts, backoff curve), error classification (`RetryableError` vs `FatalError`), `fusion_bundle_state` schema extension (attempt count per step).
 **Depends on**: P1.5α shipped; a documented transient-failure incident from a real run.
 **Accept**:
@@ -900,9 +881,9 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 **Depends on**: AIDP team provisioning a CI-accessible Fusion pod; P2.16 fingerprint command exists
 **Accept**: GitHub Actions (or AIDP-internal CI) workflow runs nightly: extracts each `confirmed=True` PVO, diffs against stored fingerprint, opens an issue on drift. Same pod is reused for the saas-batch live test (P2.11) so it covers two blockers at once.
 
-## Theme: Orchestrator evolution menu (DESIGN_orchestrator_evolution.md, 2026-05-15)
+## Theme: Orchestrator evolution menu (2026-05-15)
 
-> Compact tracker entries for items from the orchestrator design-doc menu. Full analysis (problem framing, sizing rationale, hypotheticals considered) lives in [`DESIGN_orchestrator_evolution.md`](DESIGN_orchestrator_evolution.md) — the letter at the end of each title is the cross-reference key. Items already tracked elsewhere have been annotated above: **A** → P1.Xb (elevate to α), **E** → P3.10, **S** → P3.11. **L** (bundle schema versioning) was elevated to ship in α and lives in `PLAN_P1.5_orchestrator.md` §4.4d, not in this section.
+> Compact tracker entries for items from the orchestrator design-doc menu. Full analysis (problem framing, sizing rationale, hypotheticals considered) lives in the maintainer's orchestrator-evolution design notes — the letter at the end of each title is the cross-reference key. Items already tracked elsewhere have been annotated above: **A** → P1.Xb (elevate to α), **E** → P3.10, **S** → P3.11. **L** (bundle schema versioning) was elevated to ship in α and lives in the §4.4d, not in this section.
 >
 > When elevating one of these from "menu entry" to "real work item," expand into a full plan-analysis entry (problem statement + options + tradeoffs + chosen approach + plan edits + acceptance criteria) following the P1.5α-fix1..fix7 pattern. A DECISION doc is warranted when the tradeoff axis is non-obvious (data-correctness vs performance vs UX).
 
@@ -1007,7 +988,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - New test `test_continue_on_failure_runs_independent_branches`: branch A's bronze fails; branch B's bronze succeeds; assert branch B's full chain (bronze + silver + gold) all `success`; assert branch A is `failed` + cascade-`skipped`; no abort-`skipped` rows anywhere.
 - `"abort"` mode regression-tested to still match α behavior exactly.
 - Bundle schema doc + README updated with the trade-off explanation; operator picks based on whether independent-branch business value > root-cause-clarity.
-**Cross-ref**: §4.4 + §4.7 of `PLAN_P1.5_orchestrator.md` (the α-shipped abort-remaining cascade); P3.24 (Checkpoint-resume) is the work-maximizing alternative for `"abort"` mode operators.
+**Cross-ref**: §4.4 + §4.7 of the canonical PLAN (the α-shipped abort-remaining cascade); P3.24 (Checkpoint-resume) is the work-maximizing alternative for `"abort"` mode operators.
 
 #### `[ ]` P3.35 — Delete `ar_aging` from `schema/fusion_catalog.py` (documentation-only PVO duplicate)
 **Why**: `_AR_AGING` at `schema/fusion_catalog.py:153` declares `datastore="…ArBiccExtractAM.TransactionHeaderExtractPVO"` — **identical to `_AR_INVOICES`** (line 137). Its own description admits "Fusion BICC has no direct AR-Aging PVO. The aging gold mart is computed downstream from ArBiccExtractAM.TransactionHeader + ReceiptHeader." It exists only as documentation linking the gold AR-aging mart to its data origin. Problems this creates:
@@ -1024,18 +1005,18 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - `test_datastore_names_mostly_unique` tightened to assert no datastore duplicates (`len(dupes) == 0`).
 - New test `test_ar_aging_not_in_catalog` confirms the deletion (regression guard against re-adding by accident).
 - No other test fails — `_AR_INVOICES` remains the canonical entry for the shared datastore.
-**Cross-ref**: PLAN_P1.5_orchestrator.md §4.3 (catalog ↔ bronze-registry invariant lint), and the comment block in §4.3 BRONZE_EXTRACTS noting "documentation-only catalog entries are NOT wired here" — this entry removes the only such case so the invariant lint can stay strict.
+**Cross-ref**: §4.3 (catalog ↔ bronze-registry invariant lint), and the comment block in §4.3 BRONZE_EXTRACTS noting "documentation-only catalog entries are NOT wired here" — this entry removes the only such case so the invariant lint can stay strict.
 
 #### `[ ]` P3.36 — Rename bronze PVO id `ap_aging` → `ap_aging_periods` (cross-layer namespace collision fix)
 **Why**: `_AP_AGING` at `schema/fusion_catalog.py:185` declares `id="ap_aging"` for the `AgingPeriodHeaderExtractPVO` — but the entry's own `bronze_table_name` is `ap_aging_periods` (the PVO is bucket-period configs, not aged transactions). `GOLD_MARTS["ap_aging"]` (P1.9, shipped) is the actual AP-aging gold mart computed downstream. **Same string, two registries** → the orchestrator's single-namespace `resolve_plan(...)` (P1.5α-fix7) treats `--datasets ap_aging` as ambiguous: should it run the bronze deferred-spec or the gold mart? Today's plan §6 "remove from example" patch is documentation-by-omission; the collision lives in code. Renaming the bronze id to match its already-declared `bronze_table_name` fixes both bugs:
 - Cross-layer name collision → resolved (gold keeps `ap_aging`; bronze becomes `ap_aging_periods`).
 - Misleading bronze id → resolved (the PVO is aging *period configs*, naming should reflect that).
-**Fix**: change `id="ap_aging"` → `id="ap_aging_periods"` at `schema/fusion_catalog.py:186`; update `PLAN_P1.5_orchestrator.md §4.3 KNOWN_DEFERRED_DATASETS` key (already updated to `"ap_aging_periods"` in this session); grep for stray `"ap_aging"` references that mean the bronze (vs the gold mart) — `examples/full_finance.yaml` likely needs `datasets: [..., ap_aging, ...]` → `datasets: [..., ap_aging_periods, ...]` if it lists this dataset at all (probably doesn't today since the bronze is deferred). Update `tests/unit/test_fusion_catalog.py` `test_gl_trio_confirmed`-style tests if any reference `get("ap_aging")` for the bronze.
+**Fix**: change `id="ap_aging"` → `id="ap_aging_periods"` at `schema/fusion_catalog.py:186`; update `§4.3 KNOWN_DEFERRED_DATASETS` key (already updated to `"ap_aging_periods"` in this session); grep for stray `"ap_aging"` references that mean the bronze (vs the gold mart) — `examples/full_finance.yaml` likely needs `datasets: [..., ap_aging, ...]` → `datasets: [..., ap_aging_periods, ...]` if it lists this dataset at all (probably doesn't today since the bronze is deferred). Update `tests/unit/test_fusion_catalog.py` `test_gl_trio_confirmed`-style tests if any reference `get("ap_aging")` for the bronze.
 **Size**: XS — one PvoEntry id rename + grep-and-touch for references + one new test (`test_no_name_collisions_across_registries`, also tracked in PLAN §8). ~30 min.
 **Depends on**: nothing. Mechanical cleanup; runs ahead of P1.5α implementation cleanly.
 **Accept**:
 - `schema.fusion_catalog.get("ap_aging_periods")` returns the `AgingPeriodHeaderExtractPVO` PvoEntry; `get("ap_aging")` raises `KeyError` (or — preferred — points to `GOLD_MARTS["ap_aging"]` via a helpful message in the resolver).
-- `PLAN_P1.5_orchestrator.md §4.3 KNOWN_DEFERRED_DATASETS["ap_aging_periods"]` is the only registry slot for this PVO.
+- `§4.3 KNOWN_DEFERRED_DATASETS["ap_aging_periods"]` is the only registry slot for this PVO.
 - `BRONZE_EXTRACTS ∩ GOLD_MARTS == ∅`, `KNOWN_DEFERRED_DATASETS ∩ GOLD_MARTS == ∅`, and all other pairwise intersections across the six registries are empty. New pytest `test_no_name_collisions_across_registries` pins this.
 - No bundle.yaml example or test fixture references the old `"ap_aging"` bronze id.
 **Cross-ref**: PLAN §4.3 (KNOWN_DEFERRED_DATASETS post-rename), PLAN §8 (single-namespace registry lint), P3.35 (sibling catalog cleanup — deletes `ar_aging` documentation-only entry; both close catalog↔registry naming bugs).

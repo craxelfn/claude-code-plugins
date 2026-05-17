@@ -324,7 +324,7 @@ class ExternalDep:
     """An extra-plan dependency — a dataset/dim/mart that was filtered out
     of the current run's plan (via ``--datasets`` or ``--layers``) but is
     required by an in-plan consumer. The preflight asserts it exists on
-    disk before any module dispatch (DECISION_layer_filter_semantics.md).
+    disk before any module dispatch.
     """
 
     dataset_id: str
@@ -590,11 +590,10 @@ def _safe_write_state_row(
     """Best-effort per-step state-row write. Logs WARN via the stdlib
     logger and returns False on any exception; does NOT raise.
 
-    Per DECISION_state_table_failure_semantics.md the per-step write is
-    SOFT (transient persistence flakes shouldn't kill a 45-minute medallion
-    run); the structural ``ensure_state_table`` check at run start is HARD.
-    Cascade decisions read in-memory ``step.status``, decoupled from
-    whether this write succeeded.
+    The per-step write is SOFT (transient persistence flakes shouldn't
+    kill a 45-minute medallion run); the structural ``ensure_state_table``
+    check at run start is HARD. Cascade decisions read in-memory
+    ``step.status``, decoupled from whether this write succeeded.
     """
     from . import state
 

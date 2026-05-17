@@ -13,8 +13,8 @@ Post-P1.5α (Phase 5) wiring:
   * ``run`` without ``--inline`` is the laptop-terminal REST dispatch
     path. Today it prints a "what would happen" message and exits 2;
     BACKLOG P1.5ε wires it to `dispatch/aidp_rest.py` (the empirical
-    probe already validated the schema — see
-    RESEARCH_aidp_rest_api_probe_results.md).
+    probe already validated the schema; remaining work is just the
+    client wrapper).
 
   * ``status`` reads ``fusion_bundle_state`` with one-row-per-dataset
     semantics (``ROW_NUMBER() OVER (PARTITION BY dataset_id ORDER BY
@@ -143,9 +143,9 @@ def _run_via_aidp_dispatch(
 
     Today this is a stub — BACKLOG P1.5ε wires it to
     `dispatch/aidp_rest.py` (the empirical probe already validated
-    every step: create_job + jobRuns + poll + fetchOutput; see
-    RESEARCH_aidp_rest_api_probe_results.md). The exit-2 message
-    points operators at the available execution surfaces.
+    every step: create_job + jobRuns + poll + fetchOutput). The
+    exit-2 message points operators at the available execution
+    surfaces.
     """
     console.print(
         f"[yellow]REST dispatch is not wired in P1.5α (tracked as BACKLOG P1.5ε).[/yellow]\n"
@@ -155,9 +155,8 @@ def _run_via_aidp_dispatch(
         f"      [cyan]aidp-fusion-bundle run --inline --mode {mode}[/cyan]\n"
         f"  - Via Claude Code MCP (BACKLOG P1.5δ — may be cancelled after P1.5ε):\n"
         f"      [cyan]/aidp-fusion-bundle run[/cyan]\n"
-        f"  - From a laptop terminal via REST (BACKLOG P1.5ε — unblocked, empirically validated):\n"
-        f"      OCI-signed POST to /jobs + /jobRuns; see\n"
-        f"      [cyan]RESEARCH_aidp_rest_api_probe_results.md[/cyan]."
+        f"  - From a laptop terminal via REST (BACKLOG P1.5ε — unblocked,\n"
+        f"    empirically validated; client wrapper still to ship)."
     )
     if datasets:
         console.print(f"\nWould have run: mode={mode}, datasets={datasets}")

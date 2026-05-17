@@ -4,8 +4,8 @@
 
 ## Test setup
 
-* **Cluster**: `fusion_bundle_dev` (id `838d3aff-1f5a-4aec-a020-57fd9ad27b58`) in workspace `f95a83f8-9bd1-4259-a45f-ea1c3a5a7516`
-* **Source**: `bronze.gl_coa` (PVO `FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO`), 63,464 rows / 64 cols, extracted via the BOOTSTRAP_fusion_catalog.py Step 5
+* **Cluster**: `fusion_bundle_dev` (id `<CLUSTER_KEY>`) in workspace `<WORKSPACE_KEY>`
+* **Source**: `bronze.gl_coa` (PVO `FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO`), 63,464 rows / 64 cols, extracted via the internal bootstrap script (Step 5)
 * **SQL**: inlined from `dimensions/dim_account.py`, default parameters
 
 ## Counts

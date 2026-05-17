@@ -610,7 +610,7 @@ def build(
 
     All other knobs are forwarded to :func:`build_ap_aging_sql` unchanged.
 
-    Path resolution ordering (CRITICAL — see PLAN_P1.5b §4.2):
+    Path resolution ordering (CRITICAL):
 
     1. ``paths`` / sentinel kwargs resolve ``bronze_table`` and ``silver_dim``
        (cheap; pure string assembly).
@@ -675,9 +675,9 @@ def build(
             gate_threshold=real_mode_gate_threshold,
         )
 
-    # gold_table resolution MUST happen after due_date_mode is concrete —
-    # see PLAN_P1.5b §4.2. Resolving earlier under the 'auto' sentinel
-    # would silently pick the proxy table for high-coverage tenants.
+    # gold_table resolution MUST happen after due_date_mode is concrete.
+    # Resolving earlier under the 'auto' sentinel would silently pick the
+    # proxy table for high-coverage tenants.
     if gold_table is None:
         gold_table = _default_target(due_date_mode, paths=paths)
 

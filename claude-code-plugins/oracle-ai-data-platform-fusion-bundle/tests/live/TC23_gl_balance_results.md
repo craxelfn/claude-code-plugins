@@ -4,9 +4,9 @@
 
 ## Test setup
 
-* **Cluster**: `fusion_bundle_dev` (id `838d3aff-1f5a-4aec-a020-57fd9ad27b58`) in workspace `f95a83f8-9bd1-4259-a45f-ea1c3a5a7516`
+* **Cluster**: `fusion_bundle_dev` (id `<CLUSTER_KEY>`) in workspace `<WORKSPACE_KEY>`
 * **Sources**:
-  * `bronze.gl_period_balances` (PVO `FscmTopModelAM.FinExtractAM.GlBiccExtractAM.BalanceExtractPVO`) — 11,211,211 rows / 36 cols, extracted via BOOTSTRAP_fusion_catalog.py Step 7 (`schema='Financial'`, ~17 min, no L2 encoder bug fired)
+  * `bronze.gl_period_balances` (PVO `FscmTopModelAM.FinExtractAM.GlBiccExtractAM.BalanceExtractPVO`) — 11,211,211 rows / 36 cols, extracted via the internal bootstrap script (Step 7) (`schema='Financial'`, ~17 min, no L2 encoder bug fired)
   * `silver.dim_account` (P1.3 lineage; rebuilt defensively in this TC) — 63,464 rows
 * **SQL**: inlined from `transforms/gold/gl_balance.py`, default parameters
 * **Runner**: [`TC_gl_balance_runner.py`](../../TC_gl_balance_runner.py)
@@ -179,9 +179,7 @@ These are real Vision-style multi-segment CoA balances across multiple ledgers (
 
 ## Cross-references
 
-* Plan: [`PLAN_P1.8_gl_balance.md`](../../PLAN_P1.8_gl_balance.md)
 * Module: [`scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/gl_balance.py`](../../scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/gl_balance.py)
 * Unit tests: [`tests/unit/test_gl_balance.py`](../unit/test_gl_balance.py)
-* BOOTSTRAP Step 7: [`BOOTSTRAP_fusion_catalog.py`](../../BOOTSTRAP_fusion_catalog.py)
 * Limit registry: [`LIMITS.md`](../../LIMITS.md) §L2 (encoder bug — did not fire here)
 * Pattern sibling: [`tests/live/TC22_dim_account_results.md`](TC22_dim_account_results.md)

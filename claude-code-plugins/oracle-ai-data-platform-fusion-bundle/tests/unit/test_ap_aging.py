@@ -6,8 +6,7 @@ target the SQL string output of the pure builder. The Spark wrapper
 aren't unit-tested directly (they delegate to ``spark.table`` / ``spark.sql``);
 they're exercised by TC24 live evidence on ``fusion_bundle_dev``.
 
-These tests lock in the invariants from
-``PLAN_P1.9_ap_aging.md`` after the reviewer rounds:
+These tests lock in the invariants from the reviewer rounds:
 
 1. **Currency in grain** — ``currency_code`` is a key column, not a slicer
    (gl_balance precedent + the per-pod fork TC23 documented).
@@ -740,7 +739,7 @@ class TestPathsThreading:
     Tests D/E pin concrete-mode pure-SQL targets.
     Tests F/G use a fake-Spark stub to exercise the critical ordering
     invariant — gold_table must be resolved AFTER the auto-router resolves
-    due_date_mode (PLAN_P1.5b §4.2). Without this ordering, a tenant with
+    due_date_mode. Without this ordering, a tenant with
     100% due-date coverage would silently land at the proxy mart's path.
     """
 

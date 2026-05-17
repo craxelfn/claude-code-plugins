@@ -2,7 +2,7 @@
 
 **Test case ID**: TC26
 **Status**: ✅ **EXECUTED 2026-05-17 19:24 UTC** on `fusion_bundle_dev` cluster / `amitV2` AIDP workspace via the REST dispatch surface. BICC-bypass variant (dim_calendar — zero bronze deps) due to credential rotation on saasfademo1; full happy-path version + failure-cascade probes pending fresh Casey.Brown / natalie.salesrep BICC password.
-**Tracks**: PLAN_P1.5_orchestrator.md §8 "Live evidence TC26" acceptance criterion + P1.5α-fix9 closing evidence + P1.5ε REST dispatch validated end-to-end (auth → upload → create job → submit run → poll → fetchOutput)
+**Tracks**: the §8 "Live evidence TC26" acceptance criterion + P1.5α-fix9 closing evidence + P1.5ε REST dispatch validated end-to-end (auth → upload → create job → submit run → poll → fetchOutput)
 
 ## What this verifies
 
@@ -29,7 +29,7 @@ cd <plugin-checkout>
 .venv/bin/python -m pytest tests/unit -q
 # Expected: 482 passed, 0 skipped
 
-# 2. AIDP workspace identifiers (from RESEARCH_aidp_rest_api_probe_results.md §1)
+# 2. AIDP workspace identifiers (workspace identifiers — placeholders below; supply via env vars or local config)
 export AIDP_HOST="https://datalake.us-ashburn-1.oci.oraclecloud.com"
 export AIDP_ID="<AIDP_ID>"                     # ocid1.datalake.oc1.<region>.<tenancy-specific>
 export AIDP_WORKSPACE_KEY="<WORKSPACE_KEY>"    # UUID, e.g. playground workspace
@@ -57,7 +57,7 @@ oci raw-request --target-uri \
 
 ### Path B — Via REST dispatch from a laptop (BACKLOG P1.5ε; empirically validated, not wired in α)
 
-`commands/run.py::_run_via_aidp_dispatch` is a stub today (Phase 5). The REST-dispatch primitives have been empirically validated end-to-end against the same workspace (`RESEARCH_aidp_rest_api_probe_results.md` §10) — `POST /jobs` → `POST /jobRuns` → poll → `fetchOutput` returned the test summary. When P1.5ε ships, this same notebook ships through that channel without modification.
+`commands/run.py::_run_via_aidp_dispatch` is a stub today (Phase 5). The REST-dispatch primitives have been empirically validated end-to-end against the same workspace (the internal REST-probe notes) — `POST /jobs` → `POST /jobRuns` → poll → `fetchOutput` returned the test summary. When P1.5ε ships, this same notebook ships through that channel without modification.
 
 ## Expected outputs
 
@@ -150,7 +150,7 @@ When the live run completes:
 - `bundle.version`: `0.2.0` (Option L explicit declaration)
 - Total wall time: ~30 seconds (cluster warm) including poll overhead; orchestrator dispatch alone was 9.44s
 
-**Dispatch path**: REST job-submission via OCI signed requests (P1.5ε surface — end-to-end validated). The CLI's inline path was NOT used here; this proves the REST primitives in `RESEARCH_aidp_rest_api_probe_results.md` §10 are operational against a real orchestrator workload, not just a probe notebook.
+**Dispatch path**: REST job-submission via OCI signed requests (P1.5ε surface — end-to-end validated). The CLI's inline path was NOT used here; this proves the REST primitives in the internal REST-probe notes are operational against a real orchestrator workload, not just a probe notebook.
 
 ```
 --- Cell 2: per-step table (orchestrator.run output) ---
@@ -183,7 +183,7 @@ silver_run_id=<RUN_ID>, rows=4018
 }
 
 --- Cell 4: exit-2 contracts live ---
-OK mode=full → UnsupportedModeError: mode="full" is not supported. Valid modes: ["incremental", "seed"]. (The retired alias "full" is now called "seed" — see DECISION_drop_full_mode.md.)
+OK mode=full → UnsupportedModeError: mode="full" is not supported. Valid modes: ["incremental", "seed"]. (The retired alias "full" is now called "seed".)
 OK mode=incremental → NotImplementedError: Incremental mode is P1.5β follow-up; current modules emit CREATE OR REPLACE only. Use mode="seed" for now.
 
 --- Cell 5: AIDP_LIVE_TEST_RESULT_* marker ---
@@ -232,8 +232,5 @@ This is the kind of bug that only live evidence surfaces. The plan was right —
 
 ## Cross-references
 
-- `PLAN_P1.5_orchestrator.md` §5 step 9 (Live run + TC26)
-- `PLAN_P1.5_orchestrator.md` §8 acceptance criteria
-- `RESEARCH_aidp_rest_api_probe_results.md` — workspace/cluster identifiers + REST dispatch evidence
 - Commits: `9e15d79` (P0) → `c6f4ace` (Phase 2) → `f113fb2` (Phase 3) → `2df8cc3` (Phase 4) → `7f57d38` (Phase 5)
 - Prior live TCs: TC23 (gl_balance 10.18M rows), TC24 (ap_aging 132 rows), TC8 (supplier_spend) — TC26 reproduces these numbers through the orchestrator instead of by-hand `build()` calls.

@@ -1,6 +1,5 @@
 """Bundle orchestrator: DAG, state, run loop. Public surface = ``run()``.
 
-See ``PLAN_P1.5_orchestrator.md`` §4.4 for the canonical step ordering.
 This module owns:
   - ``run()`` — the public entry point.
   - ``resolve_plan()`` — classifies bundle names into (in-plan, extra-plan)
@@ -459,8 +458,7 @@ def run(
         raise UnsupportedModeError(
             f"mode={mode!r} is not supported. Valid modes: "
             f"{sorted(_VALID_MODES)}. "
-            f"(The retired alias 'full' is now called 'seed' — "
-            f"see DECISION_drop_full_mode.md.)"
+            f"(The retired alias 'full' is now called 'seed'.)"
         )
     if mode == "incremental":
         raise NotImplementedError(
@@ -472,7 +470,7 @@ def run(
     bundle, paths = load_bundle(bundle_path)
 
     # 2. Resolve which datasets / dims / marts are in scope + classify
-    #    extra-plan deps for the preflight (§4.7 + DECISION_layer_filter_semantics).
+    #    extra-plan deps for the preflight.
     plan, extra_deps = resolve_plan(bundle, datasets, layers, paths=paths)
     if not plan:
         return RunSummary.empty(bundle.project, mode)

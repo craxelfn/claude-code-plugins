@@ -127,8 +127,8 @@ class TestModeValidation:
         """`mode='full'` must raise UnsupportedModeError BEFORE load_bundle
         touches the filesystem (the load-bearing reorder assertion).
 
-        The message must include the retired-alias hint — it's the operator's
-        only on-screen breadcrumb to DECISION_drop_full_mode.md. And the
+        The message must include the retired-alias hint — that's the
+        operator's on-screen breadcrumb explaining the rename. And the
         error must also be a ValueError for back-compat with callers that
         catch ValueError (the P1.5α-fix6 marker pattern's multi-inheritance
         contract).
@@ -140,7 +140,7 @@ class TestModeValidation:
         # Retired-alias hint must survive future message rewrites
         assert "retired" in str(exc_info.value), (
             "UnsupportedModeError message must mention 'retired' so the "
-            "operator has an on-screen breadcrumb to DECISION_drop_full_mode.md. "
+            "operator sees an on-screen breadcrumb for the rename. "
             "Don't strip the hint when rewriting the error format."
         )
         # P1.5α-fix6 marker pattern: multi-inherits ValueError for back-compat
@@ -463,7 +463,7 @@ gold:
 
 
 # ---------------------------------------------------------------------------
-# Layer-filter preflight (P1.5α-fix4 — DECISION_layer_filter_semantics.md)
+# Layer-filter preflight (P1.5α-fix4)
 # ---------------------------------------------------------------------------
 
 
@@ -724,7 +724,7 @@ gold:
 
 
 # ---------------------------------------------------------------------------
-# State-table failure semantics (P1.5α-fix3 — DECISION_state_table_failure_semantics.md)
+# State-table failure semantics (P1.5α-fix3)
 # ---------------------------------------------------------------------------
 
 
