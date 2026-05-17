@@ -139,47 +139,187 @@ class TestBootstrap:
 
 
 class TestRun:
-    def test_dispatch_plan_dry_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dispatch_without_inline_points_to_rest_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-P1.5ε: `run` without `--inline` exits 2 with a stub message
+        listing the three execution surfaces (inline / MCP / REST). The
+        REST path is BACKLOG P1.5ε — empirically validated, not yet
+        wired into the CLI. Will become 0 once P1.5ε ships."""
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        result = CliRunner().invoke(cli.main, ["run", "--mode", "incremental"])
-        # Exit code 2 = "PLAN ONLY, no work performed". The plan IS still printed,
-        # but the command intentionally fails so CI doesn't mistake the dry-run for
-        # a real pipeline execution. Will become 0 once P1.5 wires dispatch submission.
+        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
         assert result.exit_code == 2
-        assert "Dispatch plan" in result.output
-        assert "PLAN ONLY" in result.output
-        # at least one of the minimal-template datasets should be listed
-        assert "gl_journal_lines" in result.output or "fusion_catalog" in result.output
+        # Stub message points operators at the three execution surfaces.
+        assert "REST dispatch" in result.output or "P1.5ε" in result.output
+        assert "--inline" in result.output
 
-    def test_dataset_filter(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dataset_filter_with_rest_stub(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The `--datasets` filter is parsed by the CLI and threaded through
+        to the REST-dispatch stub (today exits 2; tomorrow P1.5ε wires it
+        to actual job submission)."""
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "incremental", "--datasets", "gl_journal_lines",
+            "run", "--mode", "seed", "--datasets", "gl_journal_lines",
         ])
-        # Same exit-code-2 contract as test_dispatch_plan_dry_run — see comment above.
         assert result.exit_code == 2
 
-    @pytest.mark.skip(
-        reason="Pre-P1.5α stub-only test — orchestrator.run() exists as of "
-               "Phase 3 (2026-05-17). The CLI stub _run_inline still has the "
-               "old dataset_ids kwarg shape; Phase 5 CLI migration rewires it "
-               "to call orchestrator.run() and this test becomes redundant. "
-               "Will be replaced by test_run_inline_invokes_orchestrator_run "
-               "+ test_run_inline_exits_2_on_OrchestratorConfigError when "
-               "Phase 5 lands."
-    )
-    def test_inline_without_orchestrator_fails_loudly(
+    def test_run_inline_invokes_orchestrator_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`run --inline` must NOT silently succeed when orchestrator.run is missing."""
+        """`run --inline` calls orchestrator.run(bundle_path=..., mode=..., datasets=...)
+        with the correct kwarg shape and exits 0 on a clean RunSummary.
+
+        Replaces the pre-P1.5α stub-only test (which was marked skip
+        in Phase 3). Mocks `orchestrator.run` to return a synthetic
+        empty RunSummary so we don't need Spark.
+        """
+        from unittest.mock import MagicMock, patch
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--inline"])
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import RunSummary
+        fake_summary = RunSummary.empty("minimal", "seed")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            return_value=fake_summary,
+        ) as mock_run:
+            result = CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed", "--inline"],
+            )
+        assert result.exit_code == 0, f"expected exit 0, got {result.exit_code}: {result.output}"
+        # Assert the call shape — Path object, mode kwarg, datasets=None default
+        assert mock_run.called
+        call_kwargs = mock_run.call_args.kwargs
+        assert isinstance(call_kwargs["bundle_path"], Path)
+        assert call_kwargs["mode"] == "seed"
+        assert call_kwargs["datasets"] is None
+
+    def test_run_inline_passes_datasets_csv_as_raw_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--datasets "a,b,c"` is parsed by the CLI into ["a","b","c"]
+        (whitespace trimmed, empty segments dropped) and threaded as a
+        raw list — NOT pre-resolved against bundle.datasets[] (P1.5α-fix7).
+        """
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import RunSummary
+        fake_summary = RunSummary.empty("minimal", "seed")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            return_value=fake_summary,
+        ) as mock_run:
+            CliRunner().invoke(cli.main, [
+                "run", "--mode", "seed", "--inline",
+                "--datasets", " ap_aging , dim_supplier ,,",
+            ])
+        # Whitespace trimmed; empty segments dropped
+        assert mock_run.call_args.kwargs["datasets"] == ["ap_aging", "dim_supplier"]
+
+    @pytest.mark.parametrize("exc_cls,msg_fragment", [
+        ("BundleLoadError", "test bundle load failure"),
+        ("UnsupportedModeError", "mode='full' is not supported"),
+        ("MissingDependencyError", "Unknown dim 'dim_typo'"),
+        ("CredentialResolutionError", "Env var 'FOO' is not set"),
+    ])
+    def test_run_inline_exits_2_on_orchestrator_config_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        exc_cls: str, msg_fragment: str,
+    ) -> None:
+        """Every OrchestratorConfigError subclass surfaces as exit 2 with the
+        message printed verbatim — no Python traceback."""
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import errors
+        ExceptionCls = getattr(errors, exc_cls)
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            side_effect=ExceptionCls(msg_fragment),
+        ):
+            result = CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed", "--inline"],
+            )
+        assert result.exit_code == 2, f"expected exit 2, got {result.exit_code}"
+        assert msg_fragment in result.output
+        # The load-bearing assertion: NO Python traceback leaked through.
+        assert "Traceback (most recent call last)" not in result.output
+
+    def test_run_inline_exits_2_on_not_implemented(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`NotImplementedError` (e.g. mode='incremental') is caught alongside
+        OrchestratorConfigError."""
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            side_effect=NotImplementedError("Incremental mode is P1.5β"),
+        ):
+            result = CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed", "--inline"],
+            )
         assert result.exit_code == 2
-        assert "P1.5" in result.output
-        assert "dim_supplier" in result.output
+        assert "P1.5β" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_cli_rejects_mode_full_at_parse_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`--mode full` is rejected by Click's Choice BEFORE the orchestrator
+        is touched (P1.5α-fix2 Option A surface defense)."""
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(cli.main, ["run", "--mode", "full", "--inline"])
+        assert result.exit_code == 2
+        # Click's standard error format
+        assert "'full' is not one of" in result.output or "Invalid value" in result.output
+
+
+class TestMigrateBundle:
+    """`migrate-bundle --from X --to Y` — scaffolded for Option L (§4.4d).
+
+    Today only v0.2.0 exists; any non-no-op invocation exits 2 with a
+    "no migration path" message. Blocker-2 fix: this is a top-level CLI
+    verb that returns exit codes directly (not via NotImplementedError,
+    which only `_run_inline` catches).
+    """
+
+    def test_same_version_is_noop_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(
+            cli.main, ["migrate-bundle", "--from", "0.2.0", "--to", "0.2.0"],
+        )
+        assert result.exit_code == 0
+        assert "already at version" in result.output
+
+    def test_unknown_migration_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(
+            cli.main, ["migrate-bundle", "--from", "0.1.0", "--to", "0.2.0"],
+        )
+        assert result.exit_code == 2
+        assert "No migration path" in result.output
+        # Critical: NOT a Python traceback. Blocker-2 fix.
+        assert "Traceback" not in result.output
 
 
 class TestStatus:
@@ -253,3 +393,31 @@ class TestStatus:
         assert "my_lake.raw.fusion_bundle_state" in result.output
         # Critically, the pre-P1.5b hardcoded shape must NOT appear.
         assert "my_lake.bronze.fusion_bundle_state" not in result.output
+
+    def test_query_uses_latest_per_dataset_and_includes_skip_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Should-fix-5: status query is ROW_NUMBER() OVER (PARTITION BY
+        dataset_id ORDER BY last_run_at DESC) — one row per dataset — and
+        includes the skip_reason column for cascade-vs-abort discrimination.
+
+        Asserts on the SQL the fallback-print emits (the pyspark-unavailable
+        path) since that's the surface the unit tests can reach without
+        Spark.
+        """
+        import sys
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        monkeypatch.setitem(sys.modules, "pyspark", None)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", None)
+
+        result = CliRunner().invoke(cli.main, ["status"])
+        assert result.exit_code == 0
+        # Window function + partition-by-dataset assertion (the load-bearing
+        # behavior — pre-fix the query returned every historical row).
+        assert "ROW_NUMBER()" in result.output
+        assert "PARTITION BY dataset_id" in result.output
+        assert "ORDER BY last_run_at DESC" in result.output
+        assert "WHERE rn = 1" in result.output
+        # The new column makes cascade vs aborted visible to dashboards.
+        assert "skip_reason" in result.output
