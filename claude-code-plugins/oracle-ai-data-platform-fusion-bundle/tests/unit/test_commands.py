@@ -279,13 +279,25 @@ class TestRun:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """`--mode full` is rejected by Click's Choice BEFORE the orchestrator
-        is touched (P1.5α-fix2 Option A surface defense)."""
+        is touched (P1.5α-fix2 Option A surface defense).
+
+        Parse-time rejection is load-bearing — if a typo'd mode reached
+        ``_run_inline``, the orchestrator's entry guard (Option D
+        defense-in-depth) would catch it with a richer message, but Click's
+        parser is the cheap front-line filter. The patched ``orchestrator.run``
+        confirms the front line works — the orchestrator is never invoked.
+        """
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        result = CliRunner().invoke(cli.main, ["run", "--mode", "full", "--inline"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+        ) as mock_run:
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "full", "--inline"])
         assert result.exit_code == 2
         # Click's standard error format
         assert "'full' is not one of" in result.output or "Invalid value" in result.output
+        # Parse-time rejection — orchestrator never invoked
+        mock_run.assert_not_called()
 
 
 class TestMigrateBundle:

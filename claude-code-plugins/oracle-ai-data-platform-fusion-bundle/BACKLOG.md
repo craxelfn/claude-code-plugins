@@ -229,23 +229,20 @@
 - ✅ Bug 2: PLAN §4.4 pseudocode rewritten per Option C; §4.7 prose stays correct as-written ("`_execute_node` caught the exception"); two new tests added to acceptance criteria.
 - ✅ Both bugs traceable from PLAN_P1.5 back to this BACKLOG entry for audit.
 
-### `[ ]` P1.5α-fix2 — Drop `--mode full` from CLI surface (decision recorded 2026-05-15)
-**Why**: `cli.py:112` accepts `--mode full` via `click.Choice(["full","incremental","seed"])`. The orchestrator's `Literal["seed","incremental"]` is a type-hint, not runtime-enforced — so `--mode full` reaches `orchestrator.run(...)` unchallenged, passes the `if mode == "incremental"` guard (because `"full" != "incremental"`), and lands rows in `fusion_bundle_state` with `mode="full"` — a value outside the documented enum. Worst kind of bug: no exception, no log, silent state-table contract pollution. Decision rationale, alternatives considered, and hypotheticals are in [`DECISION_drop_full_mode.md`](DECISION_drop_full_mode.md) — read that before implementing.
-**Approach**: Option A (surface) + Option D (defense-in-depth), as recorded in the decision doc:
-- `cli.py:112`: `Choice(["seed", "incremental"])`, default `"seed"`. Update `--help` text.
-- `commands/run.py:30-35`: default `"seed"`; type-hint `Literal["seed","incremental"]`.
-- `orchestrator/__init__.py` `run(...)`: add `_VALID_MODES = frozenset({"seed","incremental"})` + entry-point `if mode not in _VALID_MODES: raise ValueError(...)` with retired-alias hint mentioning `"full" → "seed"`. Catches non-CLI callers (MCP via P1.5δ, REST via P1.5ε, notebook, tests).
-- `BACKLOG.md:117`: fix stale `Literal["full","incremental","seed"]` in the original P1.5 entry.
-- `PLAN_P1.5_orchestrator.md` §4.2: already correct as-drafted; no plan edit needed.
-**Size**: XS — 4 one-line edits + 2 unit tests. ~20 min.
-**Depends on**: nothing.
-**Accept**:
-- `test_run_rejects_full_mode_at_cli_layer` — click parses `--mode full`, exits 2, stderr contains "Invalid value for '--mode'" and `'full'`.
-- `test_orchestrator_rejects_unsupported_mode` — `orchestrator.run("bundle.yaml", mode="full")` raises `ValueError` with `"full"` and "retired" in message.
-- BACKLOG line 117 fixed.
-- DECISION_drop_full_mode.md is checked in (already present, untracked — needs a separate commit decision).
+### `[~]` P1.5α-fix2 — Drop `--mode full` from CLI surface (impl shipped 2026-05-17; awaiting P1.5α-fix11 for `[x]`)
+**Why**: `cli.py:112` used to accept `--mode full` via `click.Choice(["full","incremental","seed"])`. The orchestrator's `Literal["seed","incremental"]` is a type-hint, not runtime-enforced — so `--mode full` would reach `orchestrator.run(...)` unchallenged, pass the `if mode == "incremental"` guard (because `"full" != "incremental"`), and land rows in `fusion_bundle_state` with `mode="full"` — a value outside the documented enum. Worst kind of bug: no exception, no log, silent state-table contract pollution. Decision rationale, alternatives considered, and hypotheticals are in [`DECISION_drop_full_mode.md`](DECISION_drop_full_mode.md).
+**Done** (Option A surface + Option D defense-in-depth):
+- ✅ `cli.py:113`: `Choice(["seed", "incremental"])`, default `"seed"`, help text mentions the retired alias.
+- ✅ `commands/run.py`: default `"seed"`; type-hint `Literal["seed","incremental"]`.
+- ✅ `orchestrator/__init__.py:433-440`: `_VALID_MODES = frozenset({"seed","incremental"})`; entry-point validation raises `UnsupportedModeError` with retired-alias hint pointing at `DECISION_drop_full_mode.md` (validation runs BEFORE `load_bundle` — zero filesystem / Spark / state side effects on bad mode).
+- ✅ `orchestrator/errors.py:53`: `UnsupportedModeError(OrchestratorConfigError, ValueError)` — multi-inherits `ValueError` so legacy callers that catch `ValueError` still trap mode errors (P1.5α-fix6 marker-pattern back-compat).
+- ✅ `test_run_cli_rejects_mode_full_at_parse_time` (`test_commands.py:278`): Click parses `--mode full`, exit code 2, `orchestrator.run` patched and `assert_not_called()` confirms parse-time rejection — orchestrator never invoked.
+- ✅ `test_mode_full_raises_before_any_io` (`test_orchestrator_run.py:126`): `pytest.raises(UnsupportedModeError, match="full")` + `"retired" in str(exc)` (breadcrumb preservation) + `isinstance(exc, ValueError)` (marker-pattern contract) + `load_bundle` NOT called.
+- 🟡 `DECISION_drop_full_mode.md` remains untracked locally; tracked-in-git status deferred to a follow-up housekeeping commit covering the untracked DECISION/DESIGN/RESEARCH cluster together.
 
-### `[ ]` P1.5α-fix3 — State-table failure semantics: hard `ensure`, soft per-step write (decision recorded 2026-05-15)
+**Remaining gate for `[x]` flip**: P1.5α-fix11 (housekeeping commit for the 7 untracked working-note files). `orchestrator/__init__.py:439` emits an error message that names `DECISION_drop_full_mode.md` by filename; until that file is tracked in git, the audit trail is incomplete for any operator following the breadcrumb.
+
+### `[~]` P1.5α-fix3 — State-table failure semantics: hard `ensure`, soft per-step write (impl + tests shipped 2026-05-17; awaiting P1.5α-fix11 for `[x]`)
 **Why**: Read-through of `PLAN_P1.5_orchestrator.md` surfaced a direct contradiction between §4.4 (after Option C was applied for the cascade bug, state writes propagate uncaught) and §4.7 line 767 ("State-table write failure: log + continue"). Both can't be right. The deeper question is whether `fusion_bundle_state` is observability (logs-like; may fail without consequence) or data contract (rows read by future runs and must be reliable). Answer: **both** — Phase α uses it mostly for `status()` human-readable output, but Phase β reads `last_watermark` from it to drive incremental `MERGE INTO`. So pure "log + continue" misses the watermark concern; pure "halt always" kills 45-min bronze re-extracts on 2-second network blips. Decision rationale, four options analyzed, and the chosen split contract are in [`DECISION_state_table_failure_semantics.md`](DECISION_state_table_failure_semantics.md).
 **Approach** (Option 4 — hard `ensure`, soft per-step write):
 - **Layer 1 (hard)**: `state.ensure_state_table(spark, paths)` at orchestrator start (§4.4 step 5). Creates the table if absent AND probes writeability (INSERT a sentinel row + DELETE; catches "create succeeded but write denied" on tenants with split DDL/DML grants). On any failure: raises uncaught — halts BEFORE any module dispatch so no bronze extract burns Fusion-side load against a structurally inaccessible state table.
@@ -260,16 +257,21 @@
 - **Updated** `test_failed_bronze_cascades_to_skipped_silver_and_gold` (the Option C cascade test) to assert calls go through `_safe_write_state_row`, with `state.write_state_row` underneath called 3 times when all writes succeed.
 **Size**: S — ~10 LOC of wrapper code + 4 plan edits + 2 unit test changes + 1 unit test update. ~45 min. Plan edits already applied.
 **Depends on**: P1.5α-fix1 (Option C cascade refactor, already applied to plan). The split contract builds on Option C's cascade decoupling — cascades use in-memory state, so soft per-step writes don't affect cascade correctness.
-**Accept**:
+**Done**:
 - ✅ PLAN §4.4 run loop calls `_safe_write_state_row(...)`, not `state.write_state_row(...)` directly.
 - ✅ PLAN §4.4 `_execute_node` boundary comment describes the soft-vs-hard split.
 - ✅ PLAN §4.7 line 767 makes the `ensure`-passed precondition explicit and links to DECISION doc.
 - ✅ PLAN §4.1 file layout lists `_safe_write_state_row` under `runtime.py`.
 - ✅ PLAN acceptance criteria has the two new tests + updated cascade test.
-- [ ] DECISION_state_table_failure_semantics.md committed (currently untracked locally).
-- [ ] Implementation lands the wrapper + the writeability probe in `ensure_state_table`.
+- ✅ `state.ensure_state_table` writeability probe (INSERT sentinel + DELETE) shipped at `state.py:77-116`.
+- ✅ `_safe_write_state_row` SOFT wrapper shipped at `runtime.py:585-612` — try `state.write_state_row` / except `Exception` → `logger.warning(...)` with the 4 required fields + `return False`.
+- ✅ `TestStateWriteFailureSemantics.test_state_write_failure_logged_and_continues` (`test_orchestrator_run.py`) — flaky `state.write_state_row` on the 2nd call surfaces 1 WARN with all 4 fields; loop completes; wrapper attempted every step's write; in-memory `RunStep` sequence intact.
+- ✅ `TestStateWriteFailureSemantics.test_ensure_state_table_failure_halts_run_before_dispatch` — `PermissionError` from `ensure_state_table` propagates; `_execute_node` patched + `assert_not_called()` confirms zero dispatch attempts.
+- ✅ `TestRunCascadeAndAbort.test_failed_bronze_cascades_to_skipped_silver_and_gold` updated with `wraps=`-style patches that count both wrapper invocations and underlying `state.write_state_row` calls — both equal `len(steps)`, proving the run loop persists every step through the SOFT wrapper.
 
-### `[ ]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (decision recorded 2026-05-15)
+**Remaining gate for `[x]` flip**: P1.5α-fix11 (housekeeping commit for the 7 untracked working-note files). `state.py:7` and `runtime.py` `_safe_write_state_row` docstring both reference `DECISION_state_table_failure_semantics.md` by filename; until that file is tracked in git, the audit trail is incomplete for any contributor following the breadcrumb.
+
+### `[~]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (impl + tests shipped 2026-05-17; awaiting P1.5α-fix11 + live evidence for `[x]`)
 **Why**: `PLAN_P1.5_orchestrator.md` §4.2 advertises `layers=["gold"]` as the iterating-on-gold-SQL workflow ("only rebuild gold without re-extracting bronze"). §4.7 simultaneously says any consumer whose dependency is filtered out of the current run hard-fails with `MissingDependencyError`. The two contradict: running `orchestrator.run(layers=["gold"])` would crash on every gold mart's bronze prerequisite. Decision rationale, four options analyzed, industry-pattern alignment, and the chosen split are in [`DECISION_layer_filter_semantics.md`](DECISION_layer_filter_semantics.md).
 **Approach** (Option 4 — distinguish intra-plan from extra-plan dependencies):
 - **Intra-plan** deps (both consumer and provider in current plan): standard topo-sort + cascade-on-failure as today.
@@ -291,12 +293,17 @@
 **Staleness — out of scope (deferred)**: extra-plan deps that exist on disk but are stale (e.g. bronze last run 3 weeks ago) are NOT detected by `tableExists()`. Tracked as a follow-up (potential P1.X): read `fusion_bundle_state.last_run_at` per extra-plan dep, emit WARN if older than configurable `max_dep_age_days` threshold. Default behavior: no failure, operator visibility only. Rationale for deferral: depends on state-table contract being live-verified (P1.5α-fix3); threshold belongs in bundle.yaml as policy.
 **Size**: M — ~30 LOC of `resolve_plan` logic + ~15 LOC of `_preflight_external_deps` + 6 unit tests across two files + the plan edits already applied. ~1h.
 **Depends on**: P1.5α-fix1 (Option C cascade refactor) for the cascade-correctness foundation; P1.5α-fix3 (state-table split contract) for the dispatch-order pattern (`ensure_state_table` → `_preflight_external_deps` → loop). Nothing else.
-**Accept**:
+**Done**:
 - ✅ PLAN §4.2, §4.4, §4.7, §4.1, §5, acceptance criteria all updated (2026-05-15).
-- [ ] DECISION_layer_filter_semantics.md committed (currently untracked locally).
-- [ ] Implementation: `ExternalDep` + two error classes + `resolve_plan` + `_preflight_external_deps` shipped.
-- [ ] Three unit tests pass: `test_layers_gold_with_prereqs_present_dispatches_only_gold`, `test_layers_gold_with_missing_prereq_raises_prerequisite_error`, `test_unknown_dataset_in_dependencies_raises_missing_dependency_error`.
-- [ ] Live evidence: TC26 runs `aidp-fusion-bundle run --inline --mode seed --layers gold` against `fusion_bundle_dev` (after a full seed run materialized bronze/silver) and produces a RunSummary with only gold marts dispatched, zero bronze/silver work.
+- ✅ Implementation: `ExternalDep` dataclass + `MissingDependencyError(OrchestratorConfigError)` + `PrerequisiteError(OrchestratorConfigError)` + `resolve_plan` + `_preflight_external_deps` shipped in commits `c6f4ace` (Phase 2) + `f113fb2` (Phase 3). Run-loop dispatch order is `ensure_state_table` → `_preflight_external_deps` → loop (`orchestrator/__init__.py:469-475`).
+- ✅ `TestLayerFilterPreflight.test_layers_gold_with_prereqs_present_dispatches_only_gold` — full run with `layers=['gold']`, fake catalog pre-seeded with all extra-plan dep table paths → preflight passes silently → only 3 gold marts dispatch; bronze + silver builders never invoked.
+- ✅ `TestLayerFilterPreflight.test_layers_gold_with_missing_prereq_raises_prerequisite_error` — same setup with empty fake catalog → `PrerequisiteError` raised with missing-table list + `--datasets`/`--layers` redirect hint; `_execute_node` patched and `assert_not_called()`.
+- ✅ `TestResolvePlan.test_inplan_consumer_with_unknown_dependency_raises_missing_dependency` — registry-inconsistency guardrail (Branch B of `_check_dep_exists_or_raise` at `__init__.py:168`). Patches `GOLD_MARTS["supplier_spend"]` with `depends_on_bronze=("nonexistent_pvo",)`; asserts `MissingDependencyError` names the missing dep AND is NOT a `PrerequisiteError` (load-bearing — bad reference must NOT leak to disk-state-checking).
+- ✅ `TestResolvePlan.test_typo_in_dim_raises_missing_dependency` — Branch A coverage (bundle.yaml typo → unknown REQUESTED name). Distinct contract from Branch B above; both branches keep their own test.
+
+**Remaining gates for `[x]` flip**:
+1. **P1.5α-fix11** (housekeeping commit for the 7 untracked working-note files). `orchestrator/errors.py` docstrings for `MissingDependencyError` + `PrerequisiteError` reference `DECISION_layer_filter_semantics.md` by name; until that file is tracked in git the audit trail is incomplete.
+2. **Live evidence**: `aidp-fusion-bundle run --inline --mode seed --layers gold` against `fusion_bundle_dev` (after a full seed run materialized bronze/silver) producing a RunSummary with only gold marts dispatched. Blocked on BICC credential refresh — same blocker as TC26 full happy-path.
 
 ### `[x]` P1.5α-fix5 — Plan-doc nomenclature: `password_ref` → `password` (closed 2026-05-15)
 **Why**: Two spots in `PLAN_P1.5_orchestrator.md` still referred to `fusion.password_ref` even though the Pydantic schema field is `fusion.password` (`scripts/.../schema/bundle.py:73`) and §4.4's pseudocode + §4.9's resolver helper already use `bundle.fusion.password`:
@@ -415,6 +422,33 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 - The autouse `_reset_literal_warn_flag` fixture in `tests/unit/conftest.py` is removed (each test instantiates its own `RunContext`).
 - Two new tests: (a) two `RunContext` instances in the same process produce independent WARN counts; (b) long-lived process with three sequential `RunContext`s + literal passwords emits exactly 3 WARNs total (one per context).
 **Cross-ref**: PLAN §4.9 (`_LITERAL_WARN_EMITTED` definition + autouse fixture); R3 (the WARN-once requirement that motivated the flag).
+
+### `[ ]` P1.5α-fix11 — Track DECISION / DESIGN / RESEARCH working notes (audit-trail gate, 2026-05-17)
+**Why**: Seven working-note files at the repo root are referenced from tracked code/docs but remain untracked locally per the "don't commit decision docs" rule applied during P1.5α implementation. This leaves the audit trail incomplete — a reader following any in-code reference hits a missing file. **Until this lands, P1.5α-fix2 / fix3 / fix4 / fix6 stay flipped at `[~]` (partial), not `[x]`.**
+
+**Files** (all at repo root; `git status` shows them as untracked):
+- `DECISION_drop_full_mode.md` (referenced from `orchestrator/__init__.py:439` error message — operator who hits `UnsupportedModeError` sees this filename in the message)
+- `DECISION_state_table_failure_semantics.md` (referenced from `state.py:7` module docstring + `runtime.py` `_safe_write_state_row` docstring)
+- `DECISION_layer_filter_semantics.md` (referenced from `orchestrator/errors.py` docstrings for `MissingDependencyError` / `PrerequisiteError`)
+- `DESIGN_extraction_philosophy.md` (referenced from PLAN_P1.5_orchestrator.md)
+- `DESIGN_orchestrator_evolution.md` (referenced from BACKLOG P1.Xb, P3.10, P3.11)
+- `RESEARCH_aidp_rest_api.md` + `RESEARCH_aidp_rest_api_probe_results.md` (referenced from BACKLOG P1.5ε, `tests/live/TC26_orchestrator_seed_run.md`)
+
+**Pre-commit sanitization** (per the same guard that surfaced the TC26 scrub): scan each file with the same grep set used in commits `7889e64` + `35aa5ec`:
+- OCIDs (`ocid1\.datalake|ocid1\.[a-z]+\.oc1\.[a-z]+\.amaaaaa`), workspace/cluster/job/jobRun/taskRun UUIDs, run_id UUIDs that map to a specific live execution.
+- Internal-only commentary or hot takes that shouldn't be public-repo content.
+- Stale references to deleted/renamed files (broken cross-links).
+
+Treat anything that matches the grep set the same way the TC26 redaction handled it — replace with placeholder like `<AIDP_ID>` / `<WORKSPACE_KEY>` / `<RUN_ID>`. Keep the surrounding narrative.
+
+**Size**: S — sanitization scan per file (~10 min each = ~70 min) + single atomic commit. ~1.5h.
+**Depends on**: nothing.
+**Accept**:
+- All 7 files tracked in git on `oussama-dev`.
+- `git log -p` for the housekeeping commit contains zero hits for the OCID / workspace-key / cluster-key / job-key / run-id patterns (same grep set used in the TC26 scrub).
+- Each reference site from tracked code/docs (`grep -rn "DECISION_\|DESIGN_\|RESEARCH_" scripts/ tests/ PLAN_*.md BACKLOG.md`) resolves to a tracked file.
+- BACKLOG P1.5α-fix2 / fix3 / fix4 / fix6 entries flipped from `[~]` → `[x]` in the same commit (one-line headers update each).
+**Cross-ref**: TC26 redaction commits `7889e64` (Phase 6 redacted) + `35aa5ec` (live evidence redacted) for the sanitization-scan pattern.
 
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
@@ -687,17 +721,13 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 ## Theme: Medallion performance — quick wins (round-6 perf audit, 2026-05-11)
 
-### `[ ]` P2.18 — Hoist decimal casts in `gl_balance` into a CTE
-**Why**: `transforms/gold/gl_balance.py:262-272` casts the same four `decimal(38,30)` amount columns to `DECIMAL(28, 2)` twice each — once in the surfaced projection (`begin_balance_dr`, `begin_balance_cr`, `period_net_dr`, `period_net_cr`) and again inside the `closing_balance` formula's `COALESCE(CAST(...))` wrappers. Catalyst doesn't reliably CSE across `CAST` boundaries on high-precision decimals; at 11M rows this is measurable CPU. `ap_aging` already gets this right via the `open_invoices` CTE (`ap_aging.py:431-445`) — cast once, outer SELECT operates on cast values.
-**Size**: XS — one CTE refactor + existing unit tests should pass unmodified (output column shape is the contract).
-**Depends on**: nothing.
-**Accept**: `build_gl_balance_sql` emits a `WITH balances AS (SELECT cast-once)` CTE; outer SELECT references `b.begin_balance_dr` etc. instead of `CAST(b.BalanceBeginBalanceDr AS DECIMAL(28,2))`; existing `test_gl_balance.py` 24+ tests pass without changes.
+### `[x]` P2.18 — Hoist decimal casts in `gl_balance` into a CTE (shipped 2026-05-17)
+**Why**: `transforms/gold/gl_balance.py:262-272` cast the same four `decimal(38,30)` amount columns to `DECIMAL(28, 2)` twice each — once in the surfaced projection (`begin_balance_dr`, `begin_balance_cr`, `period_net_dr`, `period_net_cr`) and again inside the `closing_balance` formula's `COALESCE(CAST(...))` wrappers. Catalyst doesn't reliably CSE across `CAST` boundaries on high-precision decimals; at 11M rows this is measurable CPU. `ap_aging` already got this right via the `open_invoices` CTE (`ap_aging.py:431-445`) — cast once, outer SELECT operates on cast values.
+**Done**: `build_gl_balance_sql` emits a `WITH balances AS (...)` CTE that performs each `CAST(... AS DECIMAL(28, 2))` exactly once (audit verified: 1/1/1/1); outer SELECT projects the four amount columns from the CTE without re-casting (`b.begin_balance_dr AS begin_balance_dr`, etc.); `closing_balance` is `ROUND(COALESCE(b.begin_balance_dr, 0) - COALESCE(b.begin_balance_cr, 0) + COALESCE(b.period_net_dr, 0) - COALESCE(b.period_net_cr, 0), 2)` — the `COALESCE(..., 0)` NULL-safety wrap stays on every term. LEFT JOIN preserved-fact-side maintained: `FROM balances b LEFT JOIN {silver_dim} da`. `tests/unit/test_gl_balance.py` 41 tests green; 2 tests updated to assert the new CTE shape (`test_uses_left_join_not_inner` split into "FROM gl_period_balances exists" + "FROM balances LEFT JOIN dim_account"; `test_closing_balance_formula` references CTE columns) while still enforcing the original invariants. See `PLAN_P2.18_P2.19_gold_cte_hoists.md` for the assertion-family taxonomy.
 
-### `[ ]` P2.19 — Project `currency_code` once in `supplier_spend` CTE
-**Why**: `transforms/gold/supplier_spend.py:105, 122-123` emits `UPPER(CAST(inv.{currency_col} AS STRING))` in both the SELECT projection and the GROUP BY — same expression twice. Spark usually CSEs this but with `UPPER(CAST(...))` chains it sometimes doesn't, and it prevents the shuffle from using a precomputed partition column. `ap_aging` already projects `currency_code` once in its `open_invoices` CTE; mirror the pattern.
-**Size**: XS — one CTE refactor.
-**Depends on**: nothing.
-**Accept**: `build_supplier_spend_sql` emits a CTE that projects `UPPER(CAST(inv.{currency_col} AS STRING)) AS currency_code` once; outer SELECT and GROUP BY reference `inv.currency_code` (or alias); existing `test_supplier_spend.py` tests pass with no output-shape change.
+### `[x]` P2.19 — Project `currency_code` once in `supplier_spend` CTE (shipped 2026-05-17)
+**Why**: `transforms/gold/supplier_spend.py:105, 122-123` emitted `UPPER(CAST(inv.{currency_col} AS STRING))` in both the SELECT projection and the GROUP BY — same expression twice. Spark usually CSEs this but with `UPPER(CAST(...))` chains it sometimes doesn't, and it prevents the shuffle from using a precomputed partition column. `ap_aging` already projects `currency_code` once in its `open_invoices` CTE.
+**Done**: `build_supplier_spend_sql` emits a `WITH invoices AS (...)` CTE that projects `UPPER(CAST(inv.{currency_col} AS STRING)) AS currency_code` exactly once AND `CAST(inv.ApInvoicesVendorId AS BIGINT) AS vendor_id` exactly once (audit verified). Outer SELECT, JOIN ON, and GROUP BY all reference `inv.currency_code` and `inv.vendor_id`. NULL-safe amount aggregation preserved: `SUM(COALESCE(CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(20, 2)), 0))` and same for `AmountPaid` (amount casts intentionally kept inline because they only run inside `SUM(COALESCE(CAST(...)))` — pulling them into the CTE wouldn't save work). LEFT JOIN preserved-fact-side maintained: `FROM invoices inv LEFT JOIN {silver_dim} ds`. `WHERE inv.ApInvoicesVendorId IS NOT NULL` moved into CTE body (vendor-id presence filter preserved). `tests/unit/test_supplier_spend.py` 33 tests green; 3 tests updated to assert the new CTE shape (`test_uses_left_join_not_inner` split; `test_grouping_uses_invoice_vendor_id` verifies CTE projection + `inv.vendor_id` in GROUP BY; `test_currency_code_in_group_by` verifies CTE UPPER+CAST + `inv.currency_code` in GROUP BY) while still enforcing the original invariants.
 
 ### `[ ]` P2.20 — Single-pass `ap_aging` build (cache filtered bronze)
 **Why**: `ap_aging.build()` with `due_date_mode='auto'` runs `_measure_due_date_coverage()` (`transforms/gold/ap_aging.py:608-619`) — one full scan of `bronze.ap_invoices` with the open-invoice WHERE clause — then `build_ap_aging_sql()` re-scans the same filtered bronze for materialization. 50k rows on demo is nothing; on a tenant with 10M+ open invoices that's 2× the IO with identical filter predicates. Two viable fixes: (1) cache the filtered DataFrame between the two queries; (2) compute coverage as a windowed column inside the materialization, abort/rerun as proxy if below threshold (single scan, but couples concerns). Recommend (1) unless live evidence shows the cache size is prohibitive.
