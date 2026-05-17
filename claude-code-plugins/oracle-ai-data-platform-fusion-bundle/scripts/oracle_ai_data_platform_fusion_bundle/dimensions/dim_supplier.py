@@ -48,11 +48,29 @@ SOURCE_BRONZE_TABLE: Final[str] = DEFAULT_PATHS.bronze("erp_suppliers")
 TARGET_SILVER_TABLE: Final[str] = DEFAULT_PATHS.silver("dim_supplier")
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the layer-specific run_id audit column (§3.5a, B3).
+
+    When the orchestrator threads its run_id, emit a single-quoted literal
+    (UUID4 — safe per the catalog identifier regex). When None (standalone
+    notebook / unit-test invocation), emit NULL. The column lets gold rows
+    join back to ``fusion_bundle_state.run_id`` for SOX trail.
+    """
+    if run_id is None:
+        return "NULL"
+    # UUID4s are alphanumeric+hyphens only (safe for SQL literal interpolation).
+    # Defensive single-quote-doubling in case a non-orchestrator caller passes
+    # something unusual.
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_dim_supplier_sql(
     *,
     paths:        TablePaths | None = None,
     bronze_table: str | None = None,
     silver_table: str | None = None,
+    run_id:       str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_supplier``.
 
@@ -67,6 +85,11 @@ def build_dim_supplier_sql(
     kwargs win, else ``paths.bronze("erp_suppliers")`` / ``paths.silver("dim_supplier")``
     when ``paths`` is set, else ``DEFAULT_PATHS`` (matches the pre-P1.5b
     ``Final[str]`` constant values byte-for-byte).
+
+    ``run_id`` (§3.5a B3) — when set by the orchestrator, embedded as the
+    ``silver_run_id`` audit column literal so silver rows join back to
+    ``fusion_bundle_state.run_id`` for SOX trail. When None (standalone),
+    the column is NULL.
     """
     if paths is None:
         paths = DEFAULT_PATHS
@@ -74,6 +97,7 @@ def build_dim_supplier_sql(
         bronze_table = paths.bronze("erp_suppliers")
     if silver_table is None:
         silver_table = paths.silver("dim_supplier")
+    run_id_sql = _run_id_audit_sql(run_id)
     return f"""\
 CREATE OR REPLACE TABLE {silver_table}
 USING DELTA
@@ -97,7 +121,8 @@ SELECT
   CAST(LASTUPDATEDATE    AS TIMESTAMP)                             AS last_update_date,
   _extract_ts                                                      AS bronze_extract_ts,
   _source_pvo                                                      AS bronze_source_pvo,
-  current_timestamp()                                              AS silver_built_at
+  current_timestamp()                                              AS silver_built_at,
+  {run_id_sql}                                                     AS silver_run_id
 FROM (
   SELECT
     *,
@@ -115,6 +140,7 @@ def build(
     paths:        TablePaths | None = None,
     bronze_table: str | None = None,
     silver_table: str | None = None,
+    run_id:       str | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_supplier`` from ``bronze.erp_suppliers``.
 
@@ -123,7 +149,9 @@ def build(
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver
     table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
-    Explicit per-table kwargs win over ``paths``.
+    Explicit per-table kwargs win over ``paths``. ``run_id`` (§3.5a B3)
+    threads the orchestrator's run identifier into the ``silver_run_id``
+    audit column; None when called standalone.
     """
     if paths is None:
         paths = DEFAULT_PATHS
@@ -131,7 +159,11 @@ def build(
         bronze_table = paths.bronze("erp_suppliers")
     if silver_table is None:
         silver_table = paths.silver("dim_supplier")
-    spark.sql(build_dim_supplier_sql(bronze_table=bronze_table, silver_table=silver_table))
+    spark.sql(build_dim_supplier_sql(
+        bronze_table=bronze_table,
+        silver_table=silver_table,
+        run_id=run_id,
+    ))
     return spark.table(silver_table)
 
 

@@ -79,6 +79,14 @@ KNOWN_CURRENCY_COL_ALIASES: Final[tuple[str, ...]] = (
 )
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the gold_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_supplier_spend_sql(
     *,
     paths:           TablePaths | None = None,
@@ -86,6 +94,7 @@ def build_supplier_spend_sql(
     silver_dim:      str | None = None,
     gold_table:      str | None = None,
     currency_col:    str = DEFAULT_CURRENCY_COL,
+    run_id:          str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.supplier_spend``.
 
@@ -111,6 +120,7 @@ def build_supplier_spend_sql(
         silver_dim = paths.silver("dim_supplier")
     if gold_table is None:
         gold_table = paths.gold("supplier_spend")
+    run_id_sql = _run_id_audit_sql(run_id)
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
@@ -128,7 +138,8 @@ SELECT
   ROUND(SUM(COALESCE(CAST(inv.ApInvoicesAmountPaid    AS DECIMAL(20, 2)), 0)), 2)
                                                                        AS total_paid,
   MAX(CAST(inv.ApInvoicesInvoiceDate AS DATE))                     AS last_invoice_date,
-  current_timestamp()                                              AS gold_built_at
+  current_timestamp()                                              AS gold_built_at,
+  {run_id_sql}                                                     AS gold_run_id
 FROM {bronze_invoices} inv
 LEFT JOIN {silver_dim} ds
   ON ds.vendor_id = CAST(inv.ApInvoicesVendorId AS BIGINT)
@@ -173,6 +184,7 @@ def build(
     silver_dim:      str | None = None,
     gold_table:      str | None = None,
     currency_col:    str = DEFAULT_CURRENCY_COL,
+    run_id:          str | None = None,
 ) -> DataFrame:
     """Materialize ``gold.supplier_spend``; returns a DataFrame backed by it.
 
@@ -220,6 +232,7 @@ def build(
         silver_dim=silver_dim,
         gold_table=gold_table,
         currency_col=currency_col,
+        run_id=run_id,
     )
     spark.sql(sql)
     return spark.table(gold_table)

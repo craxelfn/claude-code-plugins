@@ -183,6 +183,14 @@ def _validate_segment_map(
         seen_aliases.add(alias)
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the silver_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_dim_account_sql(
     *,
     paths:        TablePaths | None = None,
@@ -190,6 +198,7 @@ def build_dim_account_sql(
     silver_table: str | None = None,
     n_segments: int = MAX_FUSION_SEGMENTS,
     semantic_segment_map: Mapping[int, str] | None = None,
+    run_id:       str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_account``.
 
@@ -227,6 +236,7 @@ def build_dim_account_sql(
     code_combination = _code_combination_concat(n_segments)
     semantic_lines = _semantic_alias_lines(semantic_segment_map, n_segments)
     semantic_block = f"{semantic_lines},\n" if semantic_lines else ""
+    run_id_sql = _run_id_audit_sql(run_id)
 
     return f"""\
 CREATE OR REPLACE TABLE {silver_table}
@@ -247,7 +257,8 @@ SELECT
   CodeCombinationEndDateActive                                     AS end_date_active,
   _extract_ts                                                      AS bronze_extract_ts,
   _source_pvo                                                      AS bronze_source_pvo,
-  current_timestamp()                                              AS silver_built_at
+  current_timestamp()                                              AS silver_built_at,
+  {run_id_sql}                                                     AS silver_run_id
 FROM (
   SELECT
     *,
@@ -303,6 +314,7 @@ def build(
     silver_table: str | None = None,
     n_segments: int = MAX_FUSION_SEGMENTS,
     semantic_segment_map: Mapping[int, str] | None = None,
+    run_id:       str | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_account`` from ``bronze.gl_coa``.
 
@@ -330,6 +342,7 @@ def build(
             silver_table=silver_table,
             n_segments=n_segments,
             semantic_segment_map=semantic_segment_map,
+            run_id=run_id,
         )
     )
     return spark.table(silver_table)

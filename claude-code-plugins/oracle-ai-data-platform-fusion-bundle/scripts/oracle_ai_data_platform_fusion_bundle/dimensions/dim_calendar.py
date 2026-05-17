@@ -45,6 +45,14 @@ DEFAULT_END_DATE:   Final[str]  = "2030-12-31"
 DEFAULT_FISCAL_START_MONTH: Final[int] = 1   # calendar year = fiscal year
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the silver_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_dim_calendar_sql(
     *,
     paths:      TablePaths | None = None,
@@ -52,6 +60,7 @@ def build_dim_calendar_sql(
     end_date:   str = DEFAULT_END_DATE,
     fiscal_start_month: int = DEFAULT_FISCAL_START_MONTH,
     silver_table: str | None = None,
+    run_id:     str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_calendar``.
 
@@ -80,6 +89,7 @@ def build_dim_calendar_sql(
     # under standard SQL semantics. We still emit the same expression for
     # consistency; the math holds.
     fy_advance = 0 if fiscal_start_month == 1 else 1
+    run_id_sql = _run_id_audit_sql(run_id)
 
     return f"""\
 CREATE OR REPLACE TABLE {silver_table}
@@ -124,7 +134,8 @@ SELECT
        END) / 3.0
     ) AS INT
   )                                                                 AS fiscal_quarter,
-  current_timestamp()                                               AS silver_built_at
+  current_timestamp()                                               AS silver_built_at,
+  {run_id_sql}                                                      AS silver_run_id
 FROM dates
 """
 
@@ -137,12 +148,15 @@ def build(
     end_date:   str = DEFAULT_END_DATE,
     fiscal_start_month: int = DEFAULT_FISCAL_START_MONTH,
     silver_table: str | None = None,
+    run_id:     str | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_calendar``; returns a DataFrame backed by it.
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the silver table
     identifier from the tenant's ``bundle.yaml.aidp.*`` config. Explicit
-    ``silver_table=`` wins over ``paths``.
+    ``silver_table=`` wins over ``paths``. ``run_id`` (§3.5a B3) threads
+    the orchestrator's run identifier into the ``silver_run_id`` audit
+    column.
     """
     if paths is None:
         paths = DEFAULT_PATHS
@@ -153,6 +167,7 @@ def build(
         end_date=end_date,
         fiscal_start_month=fiscal_start_month,
         silver_table=silver_table,
+        run_id=run_id,
     )
     spark.sql(sql)
     return spark.table(silver_table)

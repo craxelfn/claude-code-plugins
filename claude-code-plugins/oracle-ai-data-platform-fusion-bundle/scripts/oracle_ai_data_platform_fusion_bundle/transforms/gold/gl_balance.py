@@ -184,6 +184,14 @@ def _segment_select_lines(coa_segment_map: Mapping[int, str]) -> str:
     )
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the gold_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_gl_balance_sql(
     *,
     paths:           TablePaths | None = None,
@@ -192,6 +200,7 @@ def build_gl_balance_sql(
     gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
+    run_id:          str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.gl_balance``.
 
@@ -255,6 +264,7 @@ def build_gl_balance_sql(
     _validate_coa_segment_map(coa_segment_map)
     segment_select_block = _segment_select_lines(coa_segment_map)
     segment_select_block = f"{segment_select_block}\n" if segment_select_block else ""
+    run_id_sql = _run_id_audit_sql(run_id)
 
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
@@ -282,7 +292,8 @@ SELECT
     - COALESCE(CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 2)), 0),
     2
   )                                                                AS closing_balance,
-  current_timestamp()                                              AS gold_built_at
+  current_timestamp()                                              AS gold_built_at,
+  {run_id_sql}                                                     AS gold_run_id
 FROM {bronze_balances} b
 LEFT JOIN {silver_dim}  da
   ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)
@@ -299,6 +310,7 @@ def build(
     gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
+    run_id:          str | None = None,
 ) -> DataFrame:
     """Materialize ``gold.gl_balance``; returns a DataFrame backed by it.
 
@@ -328,6 +340,7 @@ def build(
         gold_table=gold_table,
         actual_flag_filter=actual_flag_filter,
         coa_segment_map=coa_segment_map,
+        run_id=run_id,
     )
     spark.sql(sql)
     return spark.table(gold_table)
