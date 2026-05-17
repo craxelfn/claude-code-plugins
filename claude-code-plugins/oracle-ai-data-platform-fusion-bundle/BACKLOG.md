@@ -454,7 +454,9 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 **Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; the typoed-filter contract; `commands/run.py:78-84` CLI docstring.
 
 ### `[ ]` P1.5α-fix13 — Wire `--layers` through the CLI (post-α blocking — P1.5α-fix4 live-evidence gate, 2026-05-17)
-**Why**: `orchestrator.run(...)` accepts `layers=` (`orchestrator/__init__.py:102, 440`), `resolve_plan` validates `--layers` typos via P1.5α-fix12 (`__init__.py:140-146`), `runtime.py:325` cites `--datasets / --layers` in its `PrerequisiteError` redirect, and `test_orchestrator_run.py:375, 594` exercise `--layers` end-to-end. But `cli.py:117-132` only declares `--datasets` — the path `cli.py → commands/run.py:40-97 → orchestrator.run(...)` hardcodes `layers=None`. Today the only way to do a "rebuild gold from existing bronze+silver" run is to import `orchestrator.run` from Python, defeating the "CLI is the contract" principle (CLAUDE.md). This is exactly why P1.5α-fix4's `[x]` flip is stuck (see entry §"Remaining gate"): the live-evidence command `aidp-fusion-bundle run --inline --mode seed --layers gold` invokes a flag that doesn't exist.
+**Why**: `orchestrator.run(...)` accepts `layers=` (`orchestrator/__init__.py:102, 421, 440`), `resolve_plan` validates `--layers` typos via P1.5α-fix12 (`__init__.py:140-146`), `runtime.py:325` cites `--datasets / --layers` in its `PrerequisiteError` redirect, and `test_orchestrator_run.py:375, 594` exercise `--layers` end-to-end. But `cli.py:111-132` declares only `--mode` / `--datasets` / `--inline` — and `commands/run.py:117-121` calls `orchestrator.run(..., datasets=datasets)` with no `layers=` parameter at all. The path `cli.py → commands/run.py → orchestrator.run(...)` hardcodes `layers=None` end-to-end. Today the only way to do a "rebuild gold from existing bronze+silver" run is to import `orchestrator.run` from Python, defeating the "CLI is the contract" principle (CLAUDE.md).
+
+**Repro**: `aidp-fusion-bundle run --inline --mode seed --layers gold` → `Error: No such option: --layers` (Click rejects unknown options before reaching `commands/run.py`). This is exactly why P1.5α-fix4's `[x]` flip is stuck (see that entry's §"Remaining gate"): the live-evidence command invokes a flag that doesn't exist.
 **Size**: XS — one Click option + thread the value through two call sites + one unit test. ~30 min.
 **Depends on**: P1.5α-fix12 (filter-input validation already lives in `resolve_plan`, so the new flag inherits the typo-guard for free).
 **Accept**:
@@ -471,13 +473,22 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 - **(A) Declared but filtered out**: operator declared the upstream in bundle.yaml, then excluded it for this run via `--datasets`/`--layers`. Legitimate `ExternalDep` — preflight against the on-disk Delta table is the correct contract (P1.5α-fix4's design intent at BACKLOG:271-273).
 - **(B) Never declared at all**: operator forgot to declare the upstream in bundle.yaml. Today this becomes an `ExternalDep` and silently passes preflight whenever a stale Delta table happens to exist on disk — gold rebuilds from undeclared, possibly-weeks-old bronze with **no warning**.
 
-Concrete failure mode:
+Concrete failure modes (live-confirmed by reviewer):
+
 ```yaml
-datasets: []                    # operator forgot to declare bronze
+# Bundle A — minimal misconfig
+datasets: []
+dimensions:
+  build: []
 gold:
-  marts: [ap_aging]             # depends on ap_invoices bronze
+  marts: [supplier_spend]   # depends on ap_invoices (bronze) + dim_supplier (silver)
 ```
-No filter applied. Operator's intent: "I forgot bronze, please refuse." Actual behavior: `ap_invoices` lands in `extra_deps`, `_preflight_external_deps` checks `tableExists(...)`, preflight passes if a previous run's bronze Delta exists — gold rebuilds from stale undeclared data. This is distinct from the deferred staleness concern at P1.5α-fix4 §"Staleness — out of scope" (BACKLOG:288), which covers declared-but-old bronze. fix14 closes the upstream gate; the staleness watermark is a separate follow-up.
+`resolve_plan` returns plan `['supplier_spend']` with `extra_deps=[ap_invoices, dim_supplier]`. Two paths from here, both broken:
+
+- **Stale tables on disk**: `_preflight_external_deps` passes via `tableExists(...)`, gold rebuilds from undeclared, possibly-weeks-old data. **Zero warnings, zero auditability.** Operator's intent — "I forgot to declare upstream, please refuse" — is silently inverted into "use whatever's lying around".
+- **Tables missing on disk**: `PrerequisiteError` fires with redirect message "*include layer(s) ['bronze'] in --layers, OR run with --datasets ap_invoices first*" (`runtime.py:325`). But following that hint loops: `aidp-fusion-bundle run --inline --datasets ap_invoices` hits P1.5α-fix12's typo-guard at `__init__.py:129` and exits 2 with `--datasets contains name(s) not in the bundle plan: ['ap_invoices']`. The error message tells the operator to do something fix12 then explicitly rejects. Embarrassing UX loop — the two contracts contradict each other when the upstream is undeclared.
+
+This is distinct from the deferred staleness concern at P1.5α-fix4 §"Staleness — out of scope" (BACKLOG:288), which covers declared-but-old bronze. fix14 closes the upstream-declaration gate; the staleness watermark is a separate follow-up.
 
 **Approach**: In `resolve_plan`, before `_add_extra(...)` at `__init__.py:213, 218, 222`, check `if dep_name not in all_specs:` → `raise MissingDependencyError(...)`. Message names the consumer, the missing upstream, and tells the operator to declare it in `bundle.datasets` / `bundle.dimensions.build`. The existing `_check_dep_exists_or_raise` (lines 191-205) covers a different contract (registry consistency — "is this name knowable to the orchestrator?"); fix14 covers the bundle-declaration contract ("did the operator opt in?"). Both must pass.
 
@@ -489,7 +500,37 @@ No filter applied. Operator's intent: "I forgot bronze, please refuse." Actual b
 - `TestResolvePlan.test_undeclared_bronze_upstream_raises_missing_dependency` — `bundle.gold.marts=["ap_aging"]` + `bundle.datasets=[]` + no filter → `MissingDependencyError` naming `ap_invoices` AND the bundle section to add it to. Distinct from existing `test_typoed_datasets_filter_raises_missing_dependency` (P1.5α-fix12 — covers filter-input typos, not bundle-omission).
 - `TestResolvePlan.test_declared_bronze_filtered_out_becomes_external_dep` — `bundle.datasets=[ap_invoices]` + `bundle.gold.marts=[ap_aging]` + `layers=["gold"]` → `ExternalDep("ap_invoices", "bronze", "ap_aging")` in the plan; no error. Locks in case (A) preservation.
 - `TestResolvePlan.test_multiple_undeclared_upstreams_accumulated_in_one_error` — gold mart declares two bronze deps; neither in `bundle.datasets` → single `MissingDependencyError` names both. Operator shouldn't have to fix-rerun-fix-rerun.
-**Cross-ref**: reviewer-flagged latent bug at `orchestrator/__init__.py:207-222`; P1.5α-fix4 §"Approach" (BACKLOG:271-273) — design intent of "extra-plan = filtered out", which fix14 enforces; P1.5α-fix4 §"Staleness" (BACKLOG:288) — separate deferred concern (declared-but-old, not undeclared).
+**Cross-ref**: reviewer-flagged latent bug at `orchestrator/__init__.py:207-222`; P1.5α-fix4 §"Approach" (BACKLOG:271-273) — design intent of "extra-plan = filtered out", which fix14 enforces; P1.5α-fix4 §"Staleness" (BACKLOG:288) — separate deferred concern (declared-but-old, not undeclared); P1.5α-fix12 (`__init__.py:129`) — the typo-guard that closes the embarrassing loop in this entry's "Tables missing on disk" failure mode once fix14 declines the offending bundle upfront.
+
+### `[ ]` P1.5α-fix15 — Honor (or remove) `DatasetSpec.enabled` (post-α latent-correctness bug, 2026-05-17)
+**Why**: `schema/bundle.py:104` declares `enabled: bool = True` on `DatasetSpec` — implying operators can opt a single bronze extract out of a run by setting `enabled: false`. But `orchestrator/__init__.py:118` builds `all_specs` by iterating `bundle.datasets` with **no `enabled` check**: every declared dataset becomes part of `in_plan_names` regardless. The field is dead weight that silently advertises a feature the orchestrator doesn't implement.
+
+**Repro**:
+```yaml
+datasets:
+  - id: ap_invoices
+    enabled: false              # operator's intent: skip this bronze for now
+gold:
+  marts: [supplier_spend]
+```
+`resolve_plan(bundle, datasets=None, layers=None)` → plan still contains `ap_invoices`, BICC extract runs, bronze table is rebuilt. The operator's opt-out is silently ignored. Worse, there's no signal that the field was even read — no WARN, no validation error.
+
+**Two acceptable resolutions** (pick one; defer to operator-experience):
+
+(A) **Honor it**: in the `for ds in bundle.datasets` loop at `__init__.py:118`, skip entries where `ds.enabled is False`. Same treatment for `DimensionsSpec`/`GoldSpec` if/when they grow an `enabled` shape (they don't today — `dimensions.build` and `gold.marts` are `list[str]`, no per-entry knobs). Add a parametrized test in `test_orchestrator_run.py` confirming the disabled dataset never appears in the resolved plan. Operator gets a clean per-dataset opt-out without rewriting `--datasets` CSVs.
+
+(B) **Remove it**: drop `enabled` from `DatasetSpec`. Add a `validate_legacy_enabled_field` model_validator that catches old bundles using the field and raises with a migration message ("use `--datasets <ids>` to scope a single run; bundle.yaml is the durable declaration of *what exists*, the CLI flag is the per-run filter"). Cleaner separation of "declared" vs "runnable today" — bundle.yaml stays declarative.
+
+**Recommendation**: (A). The cost is ~3 LOC; the alternative requires a deprecation cycle and customer migrations for a feature that's already part of the schema contract. Honoring matches operator intuition (set it in YAML, it stays disabled across runs without remembering a CLI flag every time).
+
+**Size**: XS — ~5 LOC orchestrator + 1 schema-validator test + 2 plan-resolution tests. ~30 min.
+**Depends on**: P1.5α-fix14 (the all_specs construction loop is where both fixes intersect; fix14 lands first to establish the all_specs / in_plan_names contract cleanly).
+**Accept (Option A)**:
+- `orchestrator/__init__.py:118` loop becomes `for ds in bundle.datasets: if ds.enabled: all_specs[ds.id] = _resolve_bronze(ds.id)`. Disabled datasets never enter `all_specs`, so downstream consumers that depend on them trigger fix14's `MissingDependencyError` ("declared upstream `ap_invoices` is disabled — re-enable it or remove `supplier_spend` from `bundle.gold.marts`").
+- New test `TestResolvePlan.test_disabled_dataset_excluded_from_plan` — bundle with one `enabled: true` and one `enabled: false` dataset → plan contains only the enabled id; the disabled id is absent from both `plan` and `extra_deps`.
+- New test `TestResolvePlan.test_disabled_dataset_with_dependent_consumer_raises` — `ap_invoices.enabled: false` + `gold.marts: [supplier_spend]` (which depends on `ap_invoices`) → `MissingDependencyError`. Wording differentiates from "never declared" — names the disabled status explicitly so the operator knows to flip the flag, not add a new datasets entry.
+- `test_bundle_schema.py` gets a round-trip test confirming `enabled: false` parses cleanly and the field survives a re-serialize.
+**Cross-ref**: reviewer-flagged dead-field bug at `orchestrator/__init__.py:118` + `schema/bundle.py:104`; P1.5α-fix14 (shares the `all_specs` construction site).
 
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
@@ -663,6 +704,32 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 **Accept**: `tests/unit/test_oac_rest_client.py` adds parametrized test covering `aidp_fusion_jdbc` vs `aidp_fusion_jdbc_v2` vs `aidp_fusion_jdbc_dev` with mocked OAC response; only exact `aidp_fusion_jdbc` matches.
 
 ## Theme: Test coverage
+
+### `[ ]` P2.4a — `make test` default interpreter prefers `.venv/bin/python` when present (follow-up to P2.4, 2026-05-17)
+**Why**: P2.4 shipped `Makefile` with `PYTHON ?= python` (`Makefile:6`). On macOS the default `python` is Homebrew's `/opt/homebrew/opt/python@3.13/libexec/bin/python` — a bare interpreter with no project dependencies. A fresh contributor cloning the repo and running `make test` (per `README.md:34` and `CONTRIBUTING.md:25`'s "canonical entry point" framing) hits `ModuleNotFoundError: No module named 'oracle_ai_data_platform_fusion_bundle'` unless they remembered to activate a venv first. The smoke test in this checkout reproduced exactly that: `make test` failed under bare Homebrew python; `make test PYTHON=.venv/bin/python` passed (496 tests).
+
+**Repro**: `git clean -fdx && python -m venv .venv && .venv/bin/pip install -e '.[test]' && make test` (no `source .venv/bin/activate`). Result: `ModuleNotFoundError`. Documented "canonical" path doesn't actually work without an extra activation step the docs don't mandate.
+
+**Two acceptable resolutions**:
+
+(A) **Auto-detect a project-local venv** in the Makefile. Conditional default:
+```makefile
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
+```
+Pros: `make test` "just works" from a fresh checkout after `pip install -e '.[test]'` regardless of activation. Matches the implicit contract of CONTRIBUTING.md's quick-start (which doesn't mention activation). Cons: a contributor with a non-`.venv`-named venv (e.g. `.env`, `venv`, conda) still has to override `PYTHON=` — same friction as today, but the docs now match. Mitigation: a single sentence in CONTRIBUTING.md naming the convention.
+
+(B) **Update the docs to require activation**. README + CONTRIBUTING grow an explicit `source .venv/bin/activate` step before `make test`. Pros: zero Makefile change; convention is documented. Cons: more onboarding ceremony; the "canonical command works regardless of activation" framing in CONTRIBUTING.md:25 is then false (the whole point of P2.4) and would need to be rewritten.
+
+**Recommendation**: (A). P2.4's headline benefit was "works regardless of shell PATH" — (A) extends that promise to "works regardless of shell activation state too", which is what contributors actually want. The conditional is 1 LOC and falls back to the current behavior if `.venv/bin/python` is missing.
+
+**Size**: XS — 1 LOC Makefile + 1 sentence CONTRIBUTING.md ("we look for `.venv/bin/python` first; override with `make test PYTHON=…` for any other venv layout"). ~10 min.
+**Depends on**: nothing.
+**Accept (Option A)**:
+- `Makefile:6` becomes `PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)`.
+- CONTRIBUTING.md "Quick start" §"`make test` is the canonical entry point" sentence gains a one-line note: "we look for `.venv/bin/python` first; override with `make test PYTHON=...` for non-standard venv paths".
+- Smoke-verified on macOS zsh in two modes: (i) fresh clone + `python -m venv .venv && .venv/bin/pip install -e '.[test]' && make test` → 496 tests pass without activation; (ii) no `.venv/` dir + venv activated globally → falls through to bare `python`, uses the activated interpreter, still passes.
+- Override path still works: `make test PYTHON=/some/other/path/python` overrides the conditional.
+**Cross-ref**: P2.4 (BACKLOG:629 — the shipped Makefile); `Makefile:6` (current default); `README.md:34` + `CONTRIBUTING.md:25` (where the canonical-command framing lives that this fix backfills).
 
 ### `[x]` P2.4 — Add `make test` target so pytest works regardless of shell PATH (shipped 2026-05-17)
 **Why**: This recon session: `pytest` not on PATH → confusing failure. `python -m pytest` works regardless of activation state.
