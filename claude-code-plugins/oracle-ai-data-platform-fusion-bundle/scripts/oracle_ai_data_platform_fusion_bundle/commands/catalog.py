@@ -14,7 +14,18 @@ import requests
 from rich.console import Console
 from rich.table import Table
 
+from ..config.paths import DEFAULT_PATHS
 from ..schema.fusion_catalog import CATALOG, PvoEntry, PvoKind
+
+# Display markers for the three PvoKind values. Should-fix-4 (2026-05-17):
+# SAAS_BATCH distinct from ExtractPVO + OTBI so operators see at a glance
+# which entries the orchestrator will route through KNOWN_DEFERRED_DATASETS
+# vs BRONZE_EXTRACTS vs refuse outright.
+_KIND_MARKERS: dict[PvoKind, str] = {
+    PvoKind.EXTRACT_PVO: "ExtractPVO",
+    PvoKind.OTBI:        "[red]OTBI[/red]",
+    PvoKind.SAAS_BATCH:  "[yellow]SaasBatch[/yellow]",
+}
 
 
 def list_catalog(*, console: Console | None = None) -> int:
@@ -29,15 +40,16 @@ def list_catalog(*, console: Console | None = None) -> int:
     table.add_column("✓", justify="center")
 
     for entry in sorted(CATALOG.values(), key=lambda e: (e.schema, e.id)):
-        kind_marker = (
-            "[red]OTBI[/red]" if entry.kind is PvoKind.OTBI else "ExtractPVO"
-        )
+        kind_marker = _KIND_MARKERS[entry.kind]
         confirmed = "[green]ok[/green]" if entry.confirmed else "[yellow]?[/yellow]"
+        # Render the default-tenant 3-part name so the display matches what
+        # most customers see; tenants with overridden aidp.catalog /
+        # bronzeSchema get a different prefix, but the bare name is the same.
         table.add_row(
             entry.id,
             entry.datastore,
             entry.schema,
-            entry.bronze_table,
+            DEFAULT_PATHS.bronze(entry.bronze_table_name),
             kind_marker,
             confirmed,
         )
@@ -103,7 +115,22 @@ def probe_catalog(
     table.add_column("datastore", overflow="fold")
     table.add_column("status")
     missing: list[PvoEntry] = []
+    skipped_count = 0
     for entry in sorted(CATALOG.values(), key=lambda e: e.id):
+        # Should-fix-4 (2026-05-17): skip non-EXTRACT_PVO kinds. SAAS_BATCH
+        # entries (e.g. hcm_worker_assignments) use a REST endpoint, not
+        # BICC's /biacm/rest/meta/datastores — probing them would always
+        # surface as MISSING with a misleading "not in BICC catalog"
+        # message. OTBI entries are documentation-skip per the existing
+        # refuse-by-default contract.
+        if entry.kind != PvoKind.EXTRACT_PVO:
+            table.add_row(
+                entry.id,
+                entry.datastore,
+                f"[dim]SKIPPED kind={entry.kind.value}[/dim]",
+            )
+            skipped_count += 1
+            continue
         live = entry.datastore in live_datastores
         if live:
             table.add_row(entry.id, entry.datastore, "[green]LIVE[/green]")
@@ -119,7 +146,11 @@ def probe_catalog(
         for e in missing:
             console.print(f"  - {e.id}: {e.datastore}")
         return 1
-    console.print(f"\n[green]all {len(CATALOG)} entries reconcile against {pod}.[/green]")
+    extract_count = len(CATALOG) - skipped_count
+    console.print(
+        f"\n[green]all {extract_count} EXTRACT_PVO entries reconcile against {pod}[/green]"
+        + (f" ({skipped_count} non-BICC entries skipped)" if skipped_count else "")
+    )
     return 0
 
 

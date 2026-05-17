@@ -23,7 +23,10 @@ from oracle_ai_data_platform_fusion_bundle.schema.fusion_catalog import get
 
 class TestConstants:
     def test_source_bronze_table_matches_catalog(self) -> None:
-        assert SOURCE_BRONZE_TABLE == get("gl_coa").bronze_table
+        # Post §4.8a (2026-05-17): catalog declares only the bare table name;
+        # the 3-part path is composed via DEFAULT_PATHS.bronze(name).
+        from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS
+        assert SOURCE_BRONZE_TABLE == DEFAULT_PATHS.bronze(get("gl_coa").bronze_table_name)
 
     def test_target_silver_table_three_part(self) -> None:
         assert TARGET_SILVER_TABLE == "fusion_catalog.silver.dim_account"
