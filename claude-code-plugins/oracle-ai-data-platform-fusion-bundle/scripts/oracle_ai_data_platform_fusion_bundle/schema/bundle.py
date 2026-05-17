@@ -202,6 +202,16 @@ class Bundle(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     api_version: Literal["aidp-fusion-bundle/v1"] = Field(alias="apiVersion")
+    version: Literal["0.2.0"] = "0.2.0"
+    """Bundle schema version (Option L — pay now or carry un-versioned bundles forever).
+
+    Default `"0.2.0"` so existing bundles continue to load implicitly. When a
+    breaking schema change ships in v0.3, this Literal widens to
+    `Literal["0.2.0", "0.3.0"]` and a migration helper rewrites v0.2 → v0.3 in
+    place via `aidp-fusion-bundle migrate-bundle`. `load_bundle()` re-raises
+    version-specific Pydantic `ValidationError`s as `BundleVersionMismatchError`
+    with a migration hint so operators see a remediation-specific message.
+    """
     project: str
     variables: dict[str, str] = Field(default_factory=dict)
     fusion: FusionConn
