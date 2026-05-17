@@ -319,7 +319,7 @@
 - ✅ `grep password_ref PLAN_P1.5_orchestrator.md` returns only the explanatory "there is no separate `password_ref` field" sentences (deliberate).
 - ✅ Line 147 + line 903 align with §4.4 pseudocode (`bundle.fusion.password`) and §4.9 resolver semantics.
 
-### `[~]` P1.5α-fix6 — CLI exit-2 contract via `OrchestratorConfigError` marker (closed in plan 2026-05-15)
+### `[x]` P1.5α-fix6 — CLI exit-2 contract via `OrchestratorConfigError` marker (shipped 2026-05-17)
 **Why**: `PLAN_P1.5_orchestrator.md` §4.5 `_run_inline` pseudocode caught only `NotImplementedError`, but the exit-code table said exit-2 covers "config error, NotImplementedError, or unsupported execution path." After P1.5α-fix2 (mode-validation `ValueError`), §4.4a (`BundleLoadError`), and P1.5α-fix4 (`MissingDependencyError` + `PrerequisiteError`) landed, the catch list became dangerously incomplete — any of those four raising would propagate as a raw Python traceback to the user instead of a clean exit-2 with a redacted message.
 **Approach** — marker base class pattern (preferred over flat enumeration):
 - Define `OrchestratorConfigError(Exception)` in `orchestrator/runtime.py` as a marker for "user-facing config / pre-dispatch error; CLI prints `str(exc)` and exits 2 without traceback."
@@ -346,11 +346,17 @@
 - P1.5α-fix4's `MissingDependencyError` and `PrerequisiteError`: both inherit from `OrchestratorConfigError`.
 **Size**: XS — ~10 LOC (marker class + 4 inheritance edits) + 1 lint test + 1 parametrized test in `test_commands.py`. ~30 min.
 **Depends on**: P1.5α-fix2 (UnsupportedModeError implementation), P1.5α-fix4 (MissingDependencyError + PrerequisiteError implementations). Plan ordering: this fix's plan edits land first (now); the four subclass `(OrchestratorConfigError, ...)` lines land in code when fix2 + fix4 are implemented.
-**Accept**:
+**Done**:
 - ✅ Plan edits applied (above).
-- [ ] DECISION doc — not needed; small enough that the BACKLOG entry + plan comments are the contract.
-- [ ] Implementation: marker class shipped; four subclasses use multiple inheritance (where applicable) for back-compat.
-- [ ] Tests: 5-case parametrized exit-2 test + bug-propagates counter-test + marker-subclass lint.
+- ✅ DECISION doc — not needed; small enough that the BACKLOG entry + plan comments are the contract. `errors.py` contains zero `DECISION_` / `DESIGN_` / `RESEARCH_` filename references (verified by `grep -n "DECISION\|DESIGN\|RESEARCH" scripts/.../orchestrator/errors.py` → no output). Fix6 has no audit-trail dependency on P1.5α-fix11.
+- ✅ Implementation shipped in commit `c6f4ace` (Phase 2 — marker class hierarchy in `errors.py:17-93`) + `7f57d38` (Phase 5 — CLI catch at `commands/run.py:123`).
+- ✅ Marker class + 6 concrete subclasses (`BundleLoadError`, `BundleVersionMismatchError(BundleLoadError)`, `UnsupportedModeError(OrchestratorConfigError, ValueError)`, `MissingDependencyError`, `PrerequisiteError`, `CredentialResolutionError`) all inherit `OrchestratorConfigError` directly or transitively.
+- ✅ `_run_inline` catches `(OrchestratorConfigError, NotImplementedError)` — single catch site, new error classes just inherit and the CLI never changes.
+- ✅ 5-case parametrized exit-2 test (`test_run_inline_exits_2_on_orchestrator_config_error`) covers `BundleLoadError` / `UnsupportedModeError` / `MissingDependencyError` / `CredentialResolutionError` / `PrerequisiteError` — each raised from a patched `orchestrator.run`, exit 2 + message printed + no traceback.
+- ✅ `test_run_inline_exits_2_on_not_implemented` — `NotImplementedError` case (the explicit second leg of the CLI catch).
+- ✅ `test_run_inline_propagates_non_config_bugs_with_traceback` — counter-test: bare `RuntimeError` from `orchestrator.run` does NOT silently exit 2; it propagates via `result.exception` so the operator gets a real traceback. Guards against future `except Exception` broadening.
+- ✅ `TestExceptionHierarchy.test_subclass_of_orchestrator_config_error` (`test_orchestrator_runtime.py`) parametrized over 6 cases (`BundleLoadError`, `BundleVersionMismatchError`, `MissingDependencyError`, `CredentialResolutionError`, `PrerequisiteError`, `UnsupportedModeError`) — every direct subclass asserted via `issubclass(cls, OrchestratorConfigError)`.
+- ✅ `test_every_public_error_class_inherits_marker` — self-maintaining lint that loops `errors.__all__` and asserts each non-marker class has `OrchestratorConfigError` in MRO. New error classes added to `__all__` are automatically subject to the contract.
 
 ### `[~]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (plan applied 2026-05-15)
 **Why**: `PLAN_P1.5_orchestrator.md` §4.5 `_run_inline` pseudocode had three coupled bugs the reviewer caught:
@@ -424,12 +430,12 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 **Cross-ref**: PLAN §4.9 (`_LITERAL_WARN_EMITTED` definition + autouse fixture); R3 (the WARN-once requirement that motivated the flag).
 
 ### `[ ]` P1.5α-fix11 — Track DECISION / DESIGN / RESEARCH working notes (audit-trail gate, 2026-05-17)
-**Why**: Seven working-note files at the repo root are referenced from tracked code/docs but remain untracked locally per the "don't commit decision docs" rule applied during P1.5α implementation. This leaves the audit trail incomplete — a reader following any in-code reference hits a missing file. **Until this lands, P1.5α-fix2 / fix3 / fix4 / fix6 stay flipped at `[~]` (partial), not `[x]`.**
+**Why**: Seven working-note files at the repo root are referenced from tracked code/docs but remain untracked locally per the "don't commit decision docs" rule applied during P1.5α implementation. This leaves the audit trail incomplete — a reader following any in-code reference hits a missing file. **Until this lands, P1.5α-fix2 / fix3 / fix4 stay flipped at `[~]` (partial), not `[x]`.** (P1.5α-fix6 is independent — `errors.py` has zero DECISION-doc references, so fix6 shipped directly at `[x]`.)
 
 **Files** (all at repo root; `git status` shows them as untracked):
 - `DECISION_drop_full_mode.md` (referenced from `orchestrator/__init__.py:439` error message — operator who hits `UnsupportedModeError` sees this filename in the message)
 - `DECISION_state_table_failure_semantics.md` (referenced from `state.py:7` module docstring + `runtime.py` `_safe_write_state_row` docstring)
-- `DECISION_layer_filter_semantics.md` (referenced from `orchestrator/errors.py` docstrings for `MissingDependencyError` / `PrerequisiteError`)
+- `DECISION_layer_filter_semantics.md` (referenced from `orchestrator/__init__.py:475` run-loop comment + `runtime.py:327` `_preflight_external_deps` docstring — NOT `errors.py`; the docstrings on `MissingDependencyError` / `PrerequisiteError` describe their semantics but don't name a decision doc)
 - `DESIGN_extraction_philosophy.md` (referenced from PLAN_P1.5_orchestrator.md)
 - `DESIGN_orchestrator_evolution.md` (referenced from BACKLOG P1.Xb, P3.10, P3.11)
 - `RESEARCH_aidp_rest_api.md` + `RESEARCH_aidp_rest_api_probe_results.md` (referenced from BACKLOG P1.5ε, `tests/live/TC26_orchestrator_seed_run.md`)
@@ -447,7 +453,7 @@ Treat anything that matches the grep set the same way the TC26 redaction handled
 - All 7 files tracked in git on `oussama-dev`.
 - `git log -p` for the housekeeping commit contains zero hits for the OCID / workspace-key / cluster-key / job-key / run-id patterns (same grep set used in the TC26 scrub).
 - Each reference site from tracked code/docs (`grep -rn "DECISION_\|DESIGN_\|RESEARCH_" scripts/ tests/ PLAN_*.md BACKLOG.md`) resolves to a tracked file.
-- BACKLOG P1.5α-fix2 / fix3 / fix4 / fix6 entries flipped from `[~]` → `[x]` in the same commit (one-line headers update each).
+- BACKLOG P1.5α-fix2 / fix3 / fix4 entries flipped from `[~]` → `[x]` in the same commit (one-line headers update each). (fix6 was independent and shipped directly at `[x]` in commit P1.5α-fix6 close-out.)
 **Cross-ref**: TC26 redaction commits `7889e64` (Phase 6 redacted) + `35aa5ec` (live evidence redacted) for the sanitization-scan pattern.
 
 ### `[x]` P1.5α-fix12 — Validate `--datasets` / `--layers` filter inputs against bundle plan (post-α blocking bug, shipped 2026-05-17)

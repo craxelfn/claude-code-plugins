@@ -229,6 +229,7 @@ class TestRun:
         ("UnsupportedModeError", "mode='full' is not supported"),
         ("MissingDependencyError", "Unknown dim 'dim_typo'"),
         ("CredentialResolutionError", "Env var 'FOO' is not set"),
+        ("PrerequisiteError", "Extra-plan dependencies missing on disk"),
     ])
     def test_run_inline_exits_2_on_orchestrator_config_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -298,6 +299,48 @@ class TestRun:
         assert "'full' is not one of" in result.output or "Invalid value" in result.output
         # Parse-time rejection — orchestrator never invoked
         mock_run.assert_not_called()
+
+    def test_run_inline_propagates_non_config_bugs_with_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P1.5α-fix6 counter-test: the OrchestratorConfigError marker is a
+        positive filter — only its subclasses surface as exit-2-with-
+        friendly-message. A bare ``RuntimeError`` / ``KeyError`` /
+        ``AssertionError`` (real orchestrator bugs, not user-facing config
+        errors) must propagate with a Python exception so the operator
+        can triage.
+
+        Guards against a future contributor broadening the CLI catch
+        clause to ``except Exception`` for "robustness", which would
+        silently absorb real bugs as friendly exit-2 messages — hostile
+        UX, hidden defects.
+        """
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            side_effect=RuntimeError("simulated orchestrator bug"),
+        ):
+            result = CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed", "--inline"],
+            )
+
+        # Bug must NOT silently become exit 2 — that would mask real defects.
+        assert result.exit_code != 2, (
+            f"non-OrchestratorConfigError must propagate as a bug, NOT exit 2. "
+            f"Got exit_code={result.exit_code}, output={result.output!r}"
+        )
+        # Click surfaces the uncaught exception via result.exception.
+        assert result.exception is not None, (
+            "Click must surface the uncaught exception via result.exception"
+        )
+        assert isinstance(result.exception, RuntimeError), (
+            f"the propagated exception must be the original RuntimeError; "
+            f"got {type(result.exception).__name__}"
+        )
+        assert "simulated orchestrator bug" in str(result.exception)
 
     def test_run_inline_typoed_datasets_exits_2_no_traceback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
