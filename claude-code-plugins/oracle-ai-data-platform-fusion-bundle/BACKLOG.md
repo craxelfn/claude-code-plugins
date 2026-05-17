@@ -352,7 +352,7 @@
 - ✅ `TestExceptionHierarchy.test_subclass_of_orchestrator_config_error` (`test_orchestrator_runtime.py`) parametrized over 6 cases (`BundleLoadError`, `BundleVersionMismatchError`, `MissingDependencyError`, `CredentialResolutionError`, `PrerequisiteError`, `UnsupportedModeError`) — every direct subclass asserted via `issubclass(cls, OrchestratorConfigError)`.
 - ✅ `test_every_public_error_class_inherits_marker` — self-maintaining lint that loops `errors.__all__` and asserts each non-marker class has `OrchestratorConfigError` in MRO. New error classes added to `__all__` are automatically subject to the contract.
 
-### `[~]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (plan applied 2026-05-15)
+### `[~]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (impl + tests shipped 2026-05-17; awaiting live evidence for `[x]`)
 **Why**: the §4.5 `_run_inline` pseudocode had three coupled bugs the reviewer caught:
 1. **`bundle_path` not threaded.** Pseudocode signature `_run_inline(bundle_data, mode, dataset_ids)` took the parsed YAML *dict*, but `orchestrator.run(bundle_path=...)` (§4.2 public API) needs the *Path*. The orchestrator re-reads the YAML internally because `_render_env_vars` (§4.4a) must run on raw text BEFORE Pydantic validation. Passing a parsed dict would skip env-var rendering entirely.
 2. **Default `datasets=` is over-restrictive bronze-only.** `commands/run.py:47` calls `_resolve_datasets(bundle_data, datasets)` which, when `--datasets` is omitted, returns the full list of enabled `datasets[*].id` from bundle.yaml — those are BICC PVO names (`ap_invoices`, `gl_period_balances`, etc.), all bronze. Silver dim names (`dim_supplier`, `dim_account`) and gold mart names (`supplier_spend`, `ap_aging`) are NOT in `bundle.datasets[]`. Passing that list as `datasets=` to the orchestrator filters silver + gold out. **Worst-kind-of-bug**: `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) returns exit 0, RunSummary shows 11 bronze success rows, customer thinks everything materialized — silver + gold never dispatched.
@@ -365,20 +365,19 @@
 **Plan edits applied 2026-05-15**:
 - ✅ §4.5: pseudocode rewritten with new `_run_inline` signature; CLI flow (`commands/run.py:run` body) added showing the inline CSV split, conditional `dataset_filter` construction, removed `_resolve_datasets` call.
 - ✅ Acceptance criteria: new "CLI wires `bundle_path` and `datasets` correctly" item with two test specs (`test_default_inline_passes_bundle_path_and_datasets_none` + `test_inline_passes_datasets_csv_split_raw` with whitespace + empty-segment cases).
-**Implementation TODOs** (when α lands):
-- `commands/run.py:30-56`: change signature, remove `_resolve_datasets` call, inline CSV split, remove `if not requested_ids: return 1` branch.
-- `commands/run.py`: delete the now-unused `_resolve_datasets` function.
-- `_run_via_aidp_dispatch` signature also takes `Path` + `list[str] | None` consistently.
-- Two new tests in `test_commands.py` per spec above.
-**Size**: XS — ~10 LOC of CLI edits + 2 unit tests + dead-code removal. ~30 min.
-**Depends on**: P1.5α-fix2 (mode validation moved to orchestrator boundary — so the CLI doesn't need to validate mode), P1.5α-fix4 (`resolve_plan` does cross-layer classification + raises `MissingDependencyError`), P1.5α-fix6 (`OrchestratorConfigError` marker — for clean exit-2 on typo'd dataset names).
-**Accept**:
-- ✅ PLAN §4.5 pseudocode + acceptance criteria updated.
-- [ ] Implementation: `commands/run.py` rewritten per the spec; `_resolve_datasets` deleted; dead branch removed.
-- [ ] Tests: `test_default_inline_passes_bundle_path_and_datasets_none` + `test_inline_passes_datasets_csv_split_raw` (with whitespace/empty-segment subtests) pass.
-- [ ] Live evidence (TC26): `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) on `fusion_bundle_dev` produces a RunSummary with all 11 bronze + 3 silver + 3 gold success rows (the actual bug Bug 2 would have hidden — silver/gold rows MUST be present).
+**Done**:
+- ✅ PLAN §4.5 pseudocode + acceptance criteria updated (2026-05-15).
+- ✅ `commands/run.py:85-88`: inline CSV split with whitespace trim + empty-segment drop. `_resolve_datasets` helper deleted; dead-code `if not requested_ids: return 1` branch removed.
+- ✅ `_run_inline(bundle_path: Path, mode: str, datasets: list[str] | None, console)` — new signature threads `Path` (not parsed dict) so `_render_env_vars` runs on raw YAML text before Pydantic validation, per §4.4a.
+- ✅ `_run_via_aidp_dispatch` signature also takes `bundle_path: Path` + `datasets: list[str] | None` consistently.
+- ✅ `datasets=None` is the documented no-filter sentinel; raw user-typed list passes through to `orchestrator.run` unchanged (cross-layer registry classification happens in `resolve_plan`, per P1.5α-fix4 / P1.5α-fix12).
+- ✅ `TestRun.test_run_inline_invokes_orchestrator_run` (`test_commands.py:170`) — verifies the call shape: `bundle_path` is a `Path`, `mode="seed"`, `datasets=None` when `--datasets` is omitted. Covers the BACKLOG-spec contract `test_default_inline_passes_bundle_path_and_datasets_none` under the shipped name.
+- ✅ `TestRun.test_run_inline_passes_datasets_csv_as_raw_list` (`test_commands.py:202`) — verifies `--datasets " ap_aging , dim_supplier ,,"` parses to `["ap_aging", "dim_supplier"]` (whitespace trimmed, empty segments dropped) and threads as a raw list. Covers the BACKLOG-spec contract `test_inline_passes_datasets_csv_split_raw` under the shipped name.
 
-### `[ ]` P1.5α-fix9 — Module retrofit: `run_id` kwarg + `<layer>_run_id` audit column (Blocker-4 fix, 2026-05-17)
+**Remaining gate for `[x]` flip**:
+- **Live evidence (TC26)**: `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) on `fusion_bundle_dev` produces a RunSummary with all 11 bronze + 3 silver + 3 gold success rows (the actual bug Bug 2 would have hidden — silver/gold rows MUST be present). Blocked on BICC credential refresh — same blocker as fix4's live-evidence gate.
+
+### `[~]` P1.5α-fix9 — Module retrofit: `run_id` kwarg + `<layer>_run_id` audit column (impl + tests shipped 2026-05-17 in commit `2df8cc3`; awaiting live evidence for `[x]`)
 **Why**: PLAN §3.1 widens every silver/gold `build()` signature to accept `run_id: str | None = None`, and §3.5a adds `silver_run_id` / `gold_run_id` audit columns. PLAN §4.4 `_execute_node` calls `node.builder(spark, paths=paths, run_id=run_id)` — but the six shipped modules' live signatures don't accept `run_id` today. Without this retrofit, the first silver/gold dispatch in P1.5α will TypeError on `unexpected keyword argument 'run_id'`. The old §8 "Modules untouched" acceptance criterion has been replaced (in-plan) by an explicit Module-retrofit criterion — this entry tracks the mechanical work.
 **Files touched** (6 modules + their tests):
 - `scripts/.../dimensions/dim_supplier.py` (build + SQL builder + `SOURCE_BRONZE_TABLE` consumers)
@@ -395,14 +394,17 @@
 4. Add `test_<module>_emits_layer_run_id_when_set` + `test_<module>_emits_null_layer_run_id_when_unset` per-module.
 **Size**: M — ~60 LOC of code + ~12 new tests + ~6 existing-test edits. ~1h total.
 **Depends on**: §3.1 / §3.5a / §4.4 (B3) — landed in plan, awaiting implementation in the same commit as `orchestrator/__init__.py`.
-**Accept**:
-- Every shipped silver/gold module's `build()` accepts `run_id` kwarg without TypeError.
-- `build_<mart>_sql(run_id="abc")` SQL contains `'abc' AS <layer>_run_id`.
-- `build_<mart>_sql()` SQL contains `NULL AS <layer>_run_id`.
-- All existing column-list expectation tests updated to include the new column; no other test regresses.
-- CLAUDE.md "Audit columns are non-negotiable" rule (already widened in B3 commit) is satisfied — silver tables carry `silver_run_id`, gold tables carry `gold_run_id`.
-- Live TC26 query: `SELECT silver_run_id, gold_run_id FROM silver.dim_supplier UNION ... FROM gold.ap_aging` returns non-NULL run_ids matching `fusion_bundle_state.run_id` for every row.
-**Cross-ref**: PLAN §3.1 (signatures), §3.5a (audit-col contract), §4.4 (dispatch threading), §8 module-retrofit acceptance criterion (supersedes "Modules untouched").
+**Done**:
+- ✅ All 6 shipped silver/gold modules (`dim_supplier`, `dim_account`, `dim_calendar`, `supplier_spend`, `gl_balance`, `ap_aging`) accept `run_id: str | None = None` on both `build()` and `build_<mart>_sql()` without TypeError. Per-module `_run_id_audit_sql(run_id)` helper emits `'<run_id>' AS <layer>_run_id` when set, `NULL AS <layer>_run_id` when not.
+- ✅ `tests/unit/test_module_run_id_audit.py` — dedicated test file with 18+ tests covering: `test_with_run_id_embeds_literal` (6 modules) + `test_without_run_id_emits_null` (6 modules) + `test_build_signature_has_run_id` (per module). Plus `test_uuid_run_id_embeds_safely` (parametrized) and `test_quote_in_run_id_is_escaped` — SQL-injection-safety guards via run_id.
+- ✅ All existing column-list expectation tests in `test_<module>.py` updated to include the new audit column; no other test regresses (496/496 unit tests pass).
+- ✅ CLAUDE.md `"Audit columns are non-negotiable"` rule satisfied — bronze (`_extract_ts` etc.), silver (`silver_run_id`), gold (`gold_run_id`) all listed.
+- ✅ SOX-trail JOIN silver↔state validated live for `dim_calendar` (4018 rows) in TC26 redacted commits `7889e64` + `35aa5ec`.
+
+**Remaining gate for `[x]` flip**:
+- **Live evidence**: `SELECT silver_run_id, gold_run_id FROM silver.dim_supplier UNION ... FROM gold.ap_aging` returns non-NULL run_ids matching `fusion_bundle_state.run_id` for every row across **all 6 shipped modules** (TC26 captured `dim_calendar` only; the rest are blocked on BICC credential refresh — same blocker as fix4 + fix7).
+
+**Cross-ref**: §3.1 (signatures), §3.5a (audit-col contract), §4.4 (dispatch threading), §8 module-retrofit acceptance criterion (supersedes "Modules untouched"). Shipped in commit `2df8cc3` (P1.5α Phase 4 — module retrofit).
 
 ### `[ ]` P1.5α-fix10 — Move `_LITERAL_WARN_EMITTED` flag out of module-level state (Blocker-1.3 follow-up, 2026-05-17)
 **Why**: `_resolve_password` in `orchestrator/runtime.py` uses a module-level `bool` flag to ensure the literal-password WARN fires exactly once per run. This is correct for α (one process, one orchestrator run), but it's brittle for two future scenarios:
