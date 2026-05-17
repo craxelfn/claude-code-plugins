@@ -1,4 +1,6 @@
 apiVersion: aidp-fusion-bundle/v1
+version: "0.2.0"           # Option L — explicit schema version (§4.4d).
+                           # Default if omitted is "0.2.0"; required when v0.3 ships.
 project: cecl-finance-lake
 variables:
   team: cecl
@@ -36,9 +38,6 @@ datasets:
   - id: ar_receipts
     mode: incremental
     schedule: "0 2 * * *"
-  - id: ar_aging
-    mode: full
-    schedule: "0 4 1 * *"
   # AP
   - id: ap_invoices
     mode: incremental
@@ -46,9 +45,6 @@ datasets:
   - id: ap_payments
     mode: incremental
     schedule: "0 2 * * *"
-  - id: ap_aging
-    mode: full
-    schedule: "0 4 1 * *"
   # PO (✅ confirmed PVO from pdf2)
   - id: po_orders
     mode: incremental

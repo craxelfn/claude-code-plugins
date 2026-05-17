@@ -184,6 +184,14 @@ def _segment_select_lines(coa_segment_map: Mapping[int, str]) -> str:
     )
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the gold_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_gl_balance_sql(
     *,
     paths:           TablePaths | None = None,
@@ -192,6 +200,7 @@ def build_gl_balance_sql(
     gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
+    run_id:          str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for ``gold.gl_balance``.
 
@@ -255,11 +264,29 @@ def build_gl_balance_sql(
     _validate_coa_segment_map(coa_segment_map)
     segment_select_block = _segment_select_lines(coa_segment_map)
     segment_select_block = f"{segment_select_block}\n" if segment_select_block else ""
+    run_id_sql = _run_id_audit_sql(run_id)
 
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
 USING DELTA
 AS
+WITH balances AS (
+  SELECT
+    b.BalanceLedgerId,
+    b.BalanceCodeCombinationId,
+    b.BalancePeriodYear,
+    b.BalancePeriodNum,
+    b.BalancePeriodName,
+    b.BalanceCurrencyCode,
+    b.BalanceActualFlag,
+    b.BalanceTranslatedFlag,
+    CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 2))                AS begin_balance_dr,
+    CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 2))                AS begin_balance_cr,
+    CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 2))                AS period_net_dr,
+    CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 2))                AS period_net_cr
+  FROM {bronze_balances} b
+  {where_clauses}
+)
 SELECT
   CAST(b.BalanceLedgerId            AS BIGINT)                     AS ledger_id,
   CAST(b.BalanceCodeCombinationId   AS BIGINT)                     AS account_id,
@@ -271,22 +298,22 @@ SELECT
   b.BalanceCurrencyCode                                            AS currency_code,
   b.BalanceActualFlag                                              AS actual_flag,
   b.BalanceTranslatedFlag                                          AS translated_flag,
-  CAST(b.BalanceBeginBalanceDr      AS DECIMAL(28, 2))             AS begin_balance_dr,
-  CAST(b.BalanceBeginBalanceCr      AS DECIMAL(28, 2))             AS begin_balance_cr,
-  CAST(b.BalancePeriodNetDr         AS DECIMAL(28, 2))             AS period_net_dr,
-  CAST(b.BalancePeriodNetCr         AS DECIMAL(28, 2))             AS period_net_cr,
+  b.begin_balance_dr                                               AS begin_balance_dr,
+  b.begin_balance_cr                                               AS begin_balance_cr,
+  b.period_net_dr                                                  AS period_net_dr,
+  b.period_net_cr                                                  AS period_net_cr,
   ROUND(
-      COALESCE(CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 2)), 0)
-    - COALESCE(CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 2)), 0)
-    + COALESCE(CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 2)), 0)
-    - COALESCE(CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 2)), 0),
+      COALESCE(b.begin_balance_dr, 0)
+    - COALESCE(b.begin_balance_cr, 0)
+    + COALESCE(b.period_net_dr,    0)
+    - COALESCE(b.period_net_cr,    0),
     2
   )                                                                AS closing_balance,
-  current_timestamp()                                              AS gold_built_at
-FROM {bronze_balances} b
+  current_timestamp()                                              AS gold_built_at,
+  {run_id_sql}                                                     AS gold_run_id
+FROM balances b
 LEFT JOIN {silver_dim}  da
   ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)
-{where_clauses}
 """
 
 
@@ -299,6 +326,7 @@ def build(
     gold_table:      str | None = None,
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
+    run_id:          str | None = None,
 ) -> DataFrame:
     """Materialize ``gold.gl_balance``; returns a DataFrame backed by it.
 
@@ -328,6 +356,7 @@ def build(
         gold_table=gold_table,
         actual_flag_filter=actual_flag_filter,
         coa_segment_map=coa_segment_map,
+        run_id=run_id,
     )
     spark.sql(sql)
     return spark.table(gold_table)

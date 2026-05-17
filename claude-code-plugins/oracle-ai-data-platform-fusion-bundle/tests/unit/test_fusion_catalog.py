@@ -75,27 +75,64 @@ class TestCatalog:
                 f"{gl_id} datastore {e.datastore!r} should end with {expected_suffix}"
             )
 
-    def test_all_bronze_tables_under_fusion_catalog(self) -> None:
+    def test_all_bronze_table_names_are_bare_identifiers(self) -> None:
+        # Replaces test_all_bronze_tables_under_fusion_catalog (2026-05-17 — §4.8a Option A
+        # migration). bronze_table_name is the single segment; the catalog + bronze_schema
+        # come from bundle.yaml.aidp.*. Dots/hyphens rejected.
+        import re
+        ident_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
         for entry in CATALOG.values():
-            assert entry.bronze_table.startswith("fusion_catalog.bronze."), (
-                f"{entry.id} bronze_table={entry.bronze_table!r} doesn't follow "
-                "fusion_catalog.bronze.* convention"
+            assert ident_re.match(entry.bronze_table_name), (
+                f"{entry.id} bronze_table_name={entry.bronze_table_name!r} is not a single "
+                "SQL identifier — must match ^[A-Za-z_][A-Za-z0-9_]*$"
             )
+            assert "." not in entry.bronze_table_name, (
+                f"{entry.id}: bronze_table_name must not contain a dot "
+                "(catalog/schema prefix lives in TablePaths, not the catalog)"
+            )
+
+    def test_ar_aging_not_in_catalog(self) -> None:
+        # Regression guard for P3.35 (2026-05-17): _AR_AGING was deleted as a
+        # documentation-only duplicate of ar_invoices's datastore. Re-adding it
+        # would resurrect the cross-layer collision against GOLD_MARTS["ar_aging"].
+        assert "ar_aging" not in CATALOG, (
+            "ar_aging was removed from catalog (P3.35); gold ar_aging mart "
+            "references ar_invoices + ar_receipts directly."
+        )
+
+    def test_ap_aging_periods_in_catalog(self) -> None:
+        # P3.36 (2026-05-17): _AP_AGING.id renamed to "ap_aging_periods" to
+        # disambiguate from the gold ap_aging mart and align with bronze_table_name.
+        assert "ap_aging_periods" in CATALOG, "ap_aging_periods missing after P3.36 rename"
+        assert "ap_aging" not in CATALOG, "ap_aging bronze id removed by P3.36 rename"
+        entry = CATALOG["ap_aging_periods"]
+        assert entry.datastore == "FscmTopModelAM.FinExtractAM.ApBiccExtractAM.AgingPeriodHeaderExtractPVO"
+        assert entry.bronze_table_name == "ap_aging_periods"
+
+    def test_hcm_worker_assignments_kind_is_saas_batch(self) -> None:
+        # R2 (2026-05-17): hcm_worker_assignments uses a saas-batch REST extractor,
+        # NOT BICC. The kind tag steers the orchestrator to KNOWN_DEFERRED_DATASETS
+        # (vs BRONZE_EXTRACTS) until a concrete saas-batch extractor ships.
+        entry = get("hcm_worker_assignments")
+        assert entry.kind == PvoKind.SAAS_BATCH, (
+            f"hcm_worker_assignments.kind should be SAAS_BATCH "
+            f"(not BICC-extractable); got {entry.kind}"
+        )
 
     def test_unique_ids(self) -> None:
         ids = [e.id for e in CATALOG.values()]
         assert len(ids) == len(set(ids)), "duplicate ids in CATALOG"
 
-    def test_datastore_names_mostly_unique(self) -> None:
-        # Most datastore names are unique. The exception is `ar_aging` which uses the same
-        # TransactionHeaderExtractPVO as `ar_invoices` (Fusion has no direct AR-Aging PVO; the
-        # gold AR-aging mart is computed downstream from invoices + receipts). Allow up to 1
-        # duplicate, document any others.
+    def test_datastore_names_unique(self) -> None:
+        # Tightened from "mostly unique" after P3.35 deleted the _AR_AGING
+        # documentation-only duplicate of ar_invoices's datastore. Strict
+        # uniqueness now — if a future entry needs to share a datastore,
+        # justify it explicitly here.
         datastores = [e.datastore for e in CATALOG.values()]
         from collections import Counter
         counts = Counter(datastores)
         dupes = {ds: n for ds, n in counts.items() if n > 1}
-        assert len(dupes) <= 1, f"unexpected duplicate datastore names: {dupes}"
+        assert not dupes, f"duplicate datastore names: {dupes}"
 
 
 class TestExtractColumnsDefault:

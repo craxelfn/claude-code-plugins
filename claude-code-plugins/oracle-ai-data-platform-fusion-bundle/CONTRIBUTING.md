@@ -11,8 +11,8 @@
 git clone https://github.com/ahmedawan-oracle/claude-code-plugins
 cd claude-code-plugins/claude-code-plugins/oracle-ai-data-platform-fusion-bundle
 
-# Editable install
-pip install -e .[dev]
+# Editable install (quoted extras — zsh treats `.[dev,test]` as a glob otherwise)
+pip install -e '.[dev,test]'
 
 # Run the test suite
 make test   # or: pytest -x -q

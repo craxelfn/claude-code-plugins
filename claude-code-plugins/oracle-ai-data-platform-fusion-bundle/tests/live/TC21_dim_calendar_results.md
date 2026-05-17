@@ -4,7 +4,7 @@
 
 ## Test setup
 
-* **Cluster**: `fusion_bundle_dev` (id `838d3aff-1f5a-4aec-a020-57fd9ad27b58`) in workspace `f95a83f8-9bd1-4259-a45f-ea1c3a5a7516`
+* **Cluster**: `fusion_bundle_dev` (id `<CLUSTER_KEY>`) in workspace `<WORKSPACE_KEY>`
 * **SQL**: inlined from `dimensions/dim_calendar.py` with default parameters (range 2020-01-01 → 2030-12-31, fiscal_start_month=1)
 * **Source**: none — generated via Spark's `sequence(DATE, DATE, INTERVAL 1 DAY)` + `EXPLODE`
 

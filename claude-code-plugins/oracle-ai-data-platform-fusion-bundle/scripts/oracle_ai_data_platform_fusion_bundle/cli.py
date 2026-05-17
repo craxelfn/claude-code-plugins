@@ -109,11 +109,14 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
 
 
 @main.command()
-@click.option("--mode", type=click.Choice(["full", "incremental", "seed"]), default="incremental",
-              help="seed = first-time full extract; incremental = delta since watermark.")
-@click.option("--datasets", default=None, help="Comma-separated dataset ids to run (default: all enabled in bundle.yaml).")
+@click.option(
+    "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
+    help="seed = rebuild from bronze every run; incremental = delta-merge "
+         "(P1.5β, not implemented today). The retired alias 'full' is now 'seed'."
+)
+@click.option("--datasets", default=None, help="Comma-separated dataset/dim/mart names to filter (default: all in bundle.yaml).")
 @click.option("--inline", is_flag=True,
-              help="Run the orchestrator in-process (only inside an AIDP notebook).")
+              help="Run the orchestrator in-process (architectural primary — needs Spark + checkpointer + vault from an AIDP notebook session).")
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, inline: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
@@ -125,6 +128,27 @@ def run(ctx: click.Context, mode: str, datasets: str | None, inline: bool) -> No
         mode=mode,
         datasets=datasets,
         inline=inline,
+        console=console,
+    ))
+
+
+@main.command("migrate-bundle")
+@click.option("--from", "from_version", required=True, help="Source schema version (e.g. 0.1.0).")
+@click.option("--to", "to_version", required=True, help="Target schema version (e.g. 0.2.0).")
+@click.pass_context
+def migrate_bundle(ctx: click.Context, from_version: str, to_version: str) -> None:
+    """Migrate bundle.yaml from one schema version to another (Option L, §4.4d).
+
+    Scaffolded in P1.5α — today only v0.2.0 exists, so any non-no-op
+    invocation exits 2 with a "no migration path" message. The verb is
+    here so when v0.3 ships with a breaking schema change, callers
+    don't have to update their scripts.
+    """
+    from .commands.migrate_bundle import migrate_bundle as migrate_impl
+    sys.exit(migrate_impl(
+        bundle_path=ctx.obj["bundle_path"],
+        from_version=from_version,
+        to_version=to_version,
         console=console,
     ))
 

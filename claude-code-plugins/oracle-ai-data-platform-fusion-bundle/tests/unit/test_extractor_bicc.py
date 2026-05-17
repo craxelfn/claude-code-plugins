@@ -77,7 +77,7 @@ class TestOtbiRefusal:
             id="some_otbi_thing",
             datastore="OtbiAnalyticsThing",
             schema="Financial",
-            bronze_table="fusion_catalog.bronze.some_otbi",
+            bronze_table_name="some_otbi",
             description="OTBI reporting (NOT for bulk).",
             kind=PvoKind.OTBI,
         )

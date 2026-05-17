@@ -349,6 +349,14 @@ def _bucket_case(
     )
 
 
+def _run_id_audit_sql(run_id: str | None) -> str:
+    """SQL fragment for the gold_run_id audit column (§3.5a, B3)."""
+    if run_id is None:
+        return "NULL"
+    escaped = run_id.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def build_ap_aging_sql(
     *,
     paths:        TablePaths | None = None,
@@ -363,6 +371,7 @@ def build_ap_aging_sql(
     cancelled_col:  str | None = "ApInvoicesCancelledDate",
     cancelled_kind: str        = CANCELLED_KIND_DATE,
     currency_col:   str        = "ApInvoicesInvoiceCurrencyCode",
+    run_id:         str | None = None,
 ) -> str:
     """Return the CREATE-OR-REPLACE Delta SQL for the AP aging mart.
 
@@ -440,6 +449,7 @@ def build_ap_aging_sql(
         )
 
     bucket_case = _bucket_case(days_expr, null_invoice_date_policy)
+    run_id_sql = _run_id_audit_sql(run_id)
 
     return f"""\
 CREATE OR REPLACE TABLE {gold_table}
@@ -477,7 +487,8 @@ SELECT
   {due_date_source_proj}{net30_fallback_count_proj}MIN(o.invoice_date)                                                      AS oldest_invoice_date,
   MAX({days_expr})                                                         AS {max_days_alias},
   CAST({as_of_date_expr} AS DATE)                                          AS as_of_date,
-  current_timestamp()                                                      AS gold_built_at
+  current_timestamp()                                                      AS gold_built_at,
+  {run_id_sql}                                                             AS gold_run_id
 FROM open_invoices o
 LEFT JOIN {silver_dim} ds
   ON ds.vendor_id = o.vendor_id
@@ -571,6 +582,7 @@ def build(
     cancelled_col:  str | None = "ApInvoicesCancelledDate",
     cancelled_kind: str        = CANCELLED_KIND_DATE,
     currency_col:   str        = "ApInvoicesInvoiceCurrencyCode",
+    run_id:         str | None = None,
 ) -> DataFrame:
     """Materialize the AP aging mart; returns a DataFrame backed by the gold table.
 
@@ -598,7 +610,7 @@ def build(
 
     All other knobs are forwarded to :func:`build_ap_aging_sql` unchanged.
 
-    Path resolution ordering (CRITICAL — see PLAN_P1.5b §4.2):
+    Path resolution ordering (CRITICAL):
 
     1. ``paths`` / sentinel kwargs resolve ``bronze_table`` and ``silver_dim``
        (cheap; pure string assembly).
@@ -663,9 +675,9 @@ def build(
             gate_threshold=real_mode_gate_threshold,
         )
 
-    # gold_table resolution MUST happen after due_date_mode is concrete —
-    # see PLAN_P1.5b §4.2. Resolving earlier under the 'auto' sentinel
-    # would silently pick the proxy table for high-coverage tenants.
+    # gold_table resolution MUST happen after due_date_mode is concrete.
+    # Resolving earlier under the 'auto' sentinel would silently pick the
+    # proxy table for high-coverage tenants.
     if gold_table is None:
         gold_table = _default_target(due_date_mode, paths=paths)
 
@@ -681,6 +693,7 @@ def build(
         cancelled_col=cancelled_col,
         cancelled_kind=cancelled_kind,
         currency_col=currency_col,
+        run_id=run_id,
     )
     spark.sql(sql)
     return spark.table(gold_table)

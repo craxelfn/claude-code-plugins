@@ -53,6 +53,10 @@ oac/bundle-*.bar
 # Private working notes & environment-specific scripts — kept locally only.
 # These contain hardcoded cluster IDs, vault OCIDs, internal pod URLs, and
 # step-level details that must NEVER be pushed to a public branch.
+# Canonical home: dev/ (all PLAN/DECISION/DESIGN/RESEARCH/BOOTSTRAP files
+# moved there 2026-05-17). The patterns below remain as a safety net for
+# any new working notes accidentally created at the repo root.
+dev/
 PLAN_*.md
 BLOCKER_*.md
 LIMITS.md

@@ -98,7 +98,7 @@ The BACKLOG entry for P3.7 should be marked accordingly when next touched.
 
 ## Live bootstrap on dedicated cluster (2026-05-07 evening)
 
-A dedicated cluster `fusion_bundle_dev` (id `838d3aff-1f5a-4aec-a020-57fd9ad27b58`) was provisioned in workspace `f95a83f8-9bd1-4259-a45f-ea1c3a5a7516`. The tpcds workspace from TC1 is gone. Bootstrap notebook:
+A dedicated cluster `fusion_bundle_dev` (id `<CLUSTER_KEY>`) was provisioned in workspace `<WORKSPACE_KEY>`. The tpcds workspace from TC1 is gone. Bootstrap notebook:
 1. Created `fusion_catalog` (INTERNAL) + `bronze`/`silver`/`gold` schemas
 2. Resolved BICC password via `aidputils.secrets.get(name="fusion_bicc_password", key="password")` — AIDP's documented Credential Store API ([Oracle AIDP Workbench docs — Credential Store](https://docs.oracle.com/pls/topic/lookup?ctx=en/cloud/paas/ai-data-platform/aidwn&id=AIDUG-GUID-2EB8F6D9-702E-4427-96B7-288DC4C19C3C)).
 3. Pivoted from etap-dev5 → eseb-test pod after Casey.Brown creds rotated; used `natalie.salesrep` instead. Required a different External Storage profile name (`fusion_bicc_external_storage_natalie`).

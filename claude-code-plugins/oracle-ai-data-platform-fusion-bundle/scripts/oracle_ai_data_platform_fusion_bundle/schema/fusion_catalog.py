@@ -18,6 +18,7 @@ during ``aidp-fusion-bundle catalog probe`` — Fusion releases vary.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
@@ -25,10 +26,19 @@ from typing import Final
 
 class PvoKind(Enum):
     EXTRACT_PVO = "ExtractPVO"
-    """Dedicated bulk-extract PVO. Optimized; pdf1 Pro Tip recommends."""
+    """Dedicated bulk-extract PVO. Optimized; pdf1 Pro Tip recommends. Wired into BRONZE_EXTRACTS."""
 
     OTBI = "OTBI"
     """OTBI reporting PVO. NOT recommended for bulk extraction; orchestrator refuses by default."""
+
+    SAAS_BATCH = "SaasBatch"
+    """saas-batch REST extractor (NOT BICC). v2 deliverable; orchestrator defers via KNOWN_DEFERRED_DATASETS until a concrete extractor ships (BACKLOG P2.11)."""
+
+
+# Single-segment SQL-identifier regex — matches paths.py's _SQL_IDENTIFIER_RE.
+# bronze_table_name must be a bare identifier so TablePaths.bronze() can
+# compose the 3-part name via {catalog}.{bronze_schema}.{bronze_table_name}.
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -44,8 +54,18 @@ class PvoEntry:
     schema: str
     """BICC offering schema. Common values: ``Financial``, ``ERP``, ``HCM``, ``SCM``."""
 
-    bronze_table: str
-    """Three-part name: ``{catalog}.{bronze_schema}.{table}``."""
+    bronze_table_name: str
+    """Single-segment table name (the ``{table}`` part only).
+
+    The catalog and bronze schema come from the tenant's ``bundle.yaml`` via
+    ``TablePaths.bronze(self.bronze_table_name)`` — never hardcode the prefix
+    here. Decouples the catalog-declared table name from the tenant's
+    catalog/schema configuration. Validated as a single SQL identifier
+    (``^[A-Za-z_][A-Za-z0-9_]*$``) at construction; dots/hyphens are rejected.
+
+    May differ from ``id``: e.g. ``gl_journal_lines`` (id) →
+    ``gl_journal_headers`` (table name, matching the PVO's actual grain).
+    """
 
     description: str
     kind: PvoKind = PvoKind.EXTRACT_PVO
@@ -57,6 +77,19 @@ class PvoEntry:
 
     extract_columns: list[str] = field(default_factory=list)
     """Optional column projection (pdf1 Pro Tip: prune to what you need; default = all)."""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bronze_table_name, str):
+            raise TypeError(
+                f"bronze_table_name must be a string; got {type(self.bronze_table_name).__name__} "
+                f"({self.bronze_table_name!r})"
+            )
+        if not _SQL_IDENTIFIER_RE.match(self.bronze_table_name):
+            raise ValueError(
+                f"bronze_table_name={self.bronze_table_name!r} is not a valid single SQL identifier — "
+                f"must match ^[A-Za-z_][A-Za-z0-9_]*$. The catalog and bronze schema come from "
+                f"bundle.yaml.aidp.*; only the bare table name lives here."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +105,7 @@ _SUPPLIER_EXTRACT = PvoEntry(
     # tests/live/TC1_TC7_results.md and feedback_pdf1_pvo_names_abbreviated.md.
     datastore="FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.erp_suppliers",
+    bronze_table_name="erp_suppliers",
     description="Supplier master — live-validated 2026-04-30 against saasfademo1 (229 rows).",
     confirmed=True,
 )
@@ -83,7 +116,7 @@ _PRC_EXTRACT_PO = PvoEntry(
     # full path required.
     datastore="FscmTopModelAM.PrcExtractAM.PoBiccExtractAM.PurchasingDocumentHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.po_orders",
+    bronze_table_name="po_orders",
     description="Purchase order headers — verified live 2026-04-30 against saasfademo1 BICC catalog.",
     confirmed=True,
 )
@@ -93,7 +126,7 @@ _ITEM_EXTRACT = PvoEntry(
     # Verified live 2026-04-30 — pdf2's bare `ItemExtractPVO` was abbreviated; full AM-hierarchy required.
     datastore="FscmTopModelAM.ScmExtractAM.EgpBiccExtractAM.ItemExtractPVO",
     schema="SCM",
-    bronze_table="fusion_catalog.bronze.scm_items",
+    bronze_table_name="scm_items",
     description="Item master — verified live 2026-04-30 against saasfademo1 BICC catalog.",
     confirmed=True,
     incremental_capable=True,
@@ -106,7 +139,7 @@ _GL_JOURNAL_LINES = PvoEntry(
     id="gl_journal_lines",
     datastore="FscmTopModelAM.FinExtractAM.GlBiccExtractAM.JournalHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.gl_journal_headers",
+    bronze_table_name="gl_journal_headers",
     description="GL journal headers — verified-live PVO name. (Use JournalLineExtractPVO under FinGlJrnlEntriesAM for line-level granularity.)",
     confirmed=True,
 )
@@ -115,7 +148,7 @@ _GL_PERIOD_BALANCES = PvoEntry(
     id="gl_period_balances",
     datastore="FscmTopModelAM.FinExtractAM.GlBiccExtractAM.BalanceExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.gl_period_balances",
+    bronze_table_name="gl_period_balances",
     description="GL period balances — verified-live PVO name (monthly snapshot).",
     incremental_capable=False,
     confirmed=True,
@@ -125,7 +158,7 @@ _GL_COA = PvoEntry(
     id="gl_coa",
     datastore="FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.gl_coa",
+    bronze_table_name="gl_coa",
     description="Chart of accounts (code combinations) — verified-live PVO name. Source for dim_account.",
     incremental_capable=False,
     confirmed=True,
@@ -136,7 +169,7 @@ _AR_INVOICES = PvoEntry(
     # Note: in Fusion AR, "invoices" are stored as AR Transactions.
     datastore="FscmTopModelAM.FinExtractAM.ArBiccExtractAM.TransactionHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.ar_invoices",
+    bronze_table_name="ar_invoices",
     description="AR invoices (Fusion AR Transaction Headers) — verified-live PVO name.",
     confirmed=True,
 )
@@ -145,21 +178,8 @@ _AR_RECEIPTS = PvoEntry(
     id="ar_receipts",
     datastore="FscmTopModelAM.FinExtractAM.ArBiccExtractAM.ReceiptHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.ar_receipts",
+    bronze_table_name="ar_receipts",
     description="AR receipts — verified-live PVO name.",
-    confirmed=True,
-)
-
-_AR_AGING = PvoEntry(
-    id="ar_aging",
-    # Fusion BICC has no direct "AR Aging" PVO. The aging gold mart is computed
-    # downstream from ArBiccExtractAM.TransactionHeader + ReceiptHeader. The
-    # IexBiccExtractAM.AgingBucketsExtractPVO is just the bucket-config, not aged data.
-    datastore="FscmTopModelAM.FinExtractAM.ArBiccExtractAM.TransactionHeaderExtractPVO",
-    schema="Financial",
-    bronze_table="fusion_catalog.bronze.ar_aging",
-    description="AR aging — Fusion has no direct AR-Aging PVO; the gold supplier_spend-style mart is computed from ar_invoices + ar_receipts downstream.",
-    incremental_capable=False,
     confirmed=True,
 )
 
@@ -168,7 +188,7 @@ _AP_INVOICES = PvoEntry(
     # Verified live 2026-04-30 (49,985 rows extracted in TC8).
     datastore="FscmTopModelAM.FinExtractAM.ApBiccExtractAM.InvoiceHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.ap_invoices",
+    bronze_table_name="ap_invoices",
     description="AP invoices — live-validated 2026-04-30 (49,985 rows from saasfademo1).",
     confirmed=True,
 )
@@ -177,18 +197,21 @@ _AP_PAYMENTS = PvoEntry(
     id="ap_payments",
     datastore="FscmTopModelAM.FinExtractAM.ApBiccExtractAM.PaymentHistoryDistributionExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.ap_payments",
+    bronze_table_name="ap_payments",
     description="AP payments (Payment History Distribution) — verified-live PVO name.",
     confirmed=True,
 )
 
-_AP_AGING = PvoEntry(
-    id="ap_aging",
-    # Same as AR — no direct aged-transactions PVO. AgingPeriodHeader is just config.
-    # AP aging is computed downstream from ap_invoices + ap_payments + AgingPeriodHeaderExtractPVO buckets.
+_AP_AGING_PERIODS = PvoEntry(
+    id="ap_aging_periods",
+    # Renamed from "ap_aging" 2026-05-17 to disambiguate from the gold ap_aging
+    # mart (cross-layer name collision). The PVO is bucket-period configs
+    # (AgingPeriodHeaderExtractPVO), not aged transactions; the new name
+    # accurately reflects the content. AP aging is computed downstream from
+    # ap_invoices + ap_payments + these AgingPeriodHeader buckets.
     datastore="FscmTopModelAM.FinExtractAM.ApBiccExtractAM.AgingPeriodHeaderExtractPVO",
     schema="Financial",
-    bronze_table="fusion_catalog.bronze.ap_aging_periods",
+    bronze_table_name="ap_aging_periods",
     description="AP aging period definitions — bucket configs only; aging gold mart computed downstream from ap_invoices + ap_payments.",
     incremental_capable=False,
     confirmed=True,
@@ -198,18 +221,22 @@ _PO_RECEIPTS = PvoEntry(
     id="po_receipts",
     datastore="FscmTopModelAM.ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO",
     schema="SCM",
-    bronze_table="fusion_catalog.bronze.po_receipts",
+    bronze_table_name="po_receipts",
     description="PO receipts (Receiving Receipt Transactions) — verified-live PVO name. Note: lives under ScmExtractAM (not PrcExtractAM); schema is SCM.",
     confirmed=True,
 )
 
-# v2 deliverable — uses saas-batch REST path, NOT BICC:
+# v2 deliverable — uses saas-batch REST path, NOT BICC. The kind=SAAS_BATCH
+# tag marks this entry as NOT wired into BRONZE_EXTRACTS today; the orchestrator
+# routes it through KNOWN_DEFERRED_DATASETS until a concrete saas-batch
+# extractor ships (BACKLOG P2.11).
 _HCM_WORKER_ASSIGNMENTS = PvoEntry(
     id="hcm_worker_assignments",
     datastore="workerAssignmentExtracts",  # confirmed in pdf2 p4 (saas-batch)
     schema="HCM",
-    bronze_table="fusion_catalog.bronze.hcm_worker_assignments",
+    bronze_table_name="hcm_worker_assignments",
     description="HCM worker assignments — saas-batch REST extractor (pdf2 p4). v2 deliverable.",
+    kind=PvoKind.SAAS_BATCH,
     confirmed=True,
 )
 
@@ -227,10 +254,9 @@ CATALOG: Final[dict[str, PvoEntry]] = {
         _GL_COA,
         _AR_INVOICES,
         _AR_RECEIPTS,
-        _AR_AGING,
         _AP_INVOICES,
         _AP_PAYMENTS,
-        _AP_AGING,
+        _AP_AGING_PERIODS,
         _PO_RECEIPTS,
     )
 }
