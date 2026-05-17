@@ -453,6 +453,44 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 **Audit-trail status**: no DECISION-doc dependency. `errors.py` doesn't reference any working-note file; the fix is a pure validation tightening. Flips directly to `[x]` (no P1.5α-fix11 gate).
 **Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; the typoed-filter contract; `commands/run.py:78-84` CLI docstring.
 
+### `[ ]` P1.5α-fix13 — Wire `--layers` through the CLI (post-α blocking — P1.5α-fix4 live-evidence gate, 2026-05-17)
+**Why**: `orchestrator.run(...)` accepts `layers=` (`orchestrator/__init__.py:102, 440`), `resolve_plan` validates `--layers` typos via P1.5α-fix12 (`__init__.py:140-146`), `runtime.py:325` cites `--datasets / --layers` in its `PrerequisiteError` redirect, and `test_orchestrator_run.py:375, 594` exercise `--layers` end-to-end. But `cli.py:117-132` only declares `--datasets` — the path `cli.py → commands/run.py:40-97 → orchestrator.run(...)` hardcodes `layers=None`. Today the only way to do a "rebuild gold from existing bronze+silver" run is to import `orchestrator.run` from Python, defeating the "CLI is the contract" principle (CLAUDE.md). This is exactly why P1.5α-fix4's `[x]` flip is stuck (see entry §"Remaining gate"): the live-evidence command `aidp-fusion-bundle run --inline --mode seed --layers gold` invokes a flag that doesn't exist.
+**Size**: XS — one Click option + thread the value through two call sites + one unit test. ~30 min.
+**Depends on**: P1.5α-fix12 (filter-input validation already lives in `resolve_plan`, so the new flag inherits the typo-guard for free).
+**Accept**:
+- `cli.py:117` gains `@click.option("--layers", default=None, help="Comma-separated layer names to filter (bronze, silver, gold). Mutually compatible with --datasets — both apply.")`. Type signature mirrors `--datasets` (CSV → `list[str] | None`).
+- `commands/run.py:run(...)` accepts `layers: str | None = None`, parses the same way as `datasets` (CSV split + strip, empty → `None`), and threads to `_run_inline(...)` / `_run_via_aidp_dispatch(...)`.
+- `_run_inline` passes `layers=layer_filter` to `orchestrator.run(...)`. No new validation in the CLI layer — `resolve_plan` already handles typos via `MissingDependencyError`.
+- New test `TestRun.test_run_inline_with_layers_filter_passes_through` in `test_commands.py` (or `test_orchestrator_run.py`): `runner.invoke(["run", "--inline", "--mode", "seed", "--layers", "gold"])` reaches `orchestrator.run` with `layers=["gold"]` — assert via `mock.patch` on `orchestrator.run`.
+- Existing `--datasets` tests unchanged.
+- Live evidence — once shipped, run the P1.5α-fix4 gate command against `fusion_bundle_dev`: `aidp-fusion-bundle run --inline --mode seed --layers gold` produces a RunSummary with only gold marts dispatched. That single live run closes both fix4 and fix13 simultaneously.
+**Cross-ref**: P1.5α-fix4 §"Remaining gate" (BACKLOG:299-300); P1.5α-fix12 (the typo-guard fix13 inherits); `cli.py:117`; `commands/run.py:40-97`; `orchestrator/__init__.py:102, 440`.
+
+### `[ ]` P1.5α-fix14 — `resolve_plan` rejects undeclared upstreams (post-α latent-correctness bug, 2026-05-17)
+**Why**: `resolve_plan` treats every upstream not in `in_plan_names` as an `ExternalDep` to be preflighted on disk (`orchestrator/__init__.py:207-222`) — but `in_plan_names` is derived from `all_specs`, which only contains names declared in `bundle.{datasets, dimensions.build, gold.marts}`. The implementation conflates two scenarios:
+- **(A) Declared but filtered out**: operator declared the upstream in bundle.yaml, then excluded it for this run via `--datasets`/`--layers`. Legitimate `ExternalDep` — preflight against the on-disk Delta table is the correct contract (P1.5α-fix4's design intent at BACKLOG:271-273).
+- **(B) Never declared at all**: operator forgot to declare the upstream in bundle.yaml. Today this becomes an `ExternalDep` and silently passes preflight whenever a stale Delta table happens to exist on disk — gold rebuilds from undeclared, possibly-weeks-old bronze with **no warning**.
+
+Concrete failure mode:
+```yaml
+datasets: []                    # operator forgot to declare bronze
+gold:
+  marts: [ap_aging]             # depends on ap_invoices bronze
+```
+No filter applied. Operator's intent: "I forgot bronze, please refuse." Actual behavior: `ap_invoices` lands in `extra_deps`, `_preflight_external_deps` checks `tableExists(...)`, preflight passes if a previous run's bronze Delta exists — gold rebuilds from stale undeclared data. This is distinct from the deferred staleness concern at P1.5α-fix4 §"Staleness — out of scope" (BACKLOG:288), which covers declared-but-old bronze. fix14 closes the upstream gate; the staleness watermark is a separate follow-up.
+
+**Approach**: In `resolve_plan`, before `_add_extra(...)` at `__init__.py:213, 218, 222`, check `if dep_name not in all_specs:` → `raise MissingDependencyError(...)`. Message names the consumer, the missing upstream, and tells the operator to declare it in `bundle.datasets` / `bundle.dimensions.build`. The existing `_check_dep_exists_or_raise` (lines 191-205) covers a different contract (registry consistency — "is this name knowable to the orchestrator?"); fix14 covers the bundle-declaration contract ("did the operator opt in?"). Both must pass.
+
+**Size**: S — ~10 LOC of conditional in `resolve_plan` + 2 unit tests + message-shape decision (single error vs. accumulated list of all undeclared deps). ~1h.
+**Depends on**: P1.5α-fix13 (need `--layers` wired to construct the test scenario for case A — declared-but-filtered — at the CLI layer); P1.5α-fix4 (the `ExternalDep` plumbing).
+**Accept**:
+- New branch in `resolve_plan` (`__init__.py:207-222`): for each consumer's upstream, if `dep_name not in all_specs`, raise `MissingDependencyError` with message naming consumer, upstream layer, upstream name, and the remediation (which bundle.yaml section to add it to). Accumulate across all consumers if multiple are missing — one error listing every offender beats N separate raises.
+- Existing `ExternalDep` path preserved for the legitimate case: `dep_name in all_specs and dep_name not in in_plan_names`.
+- `TestResolvePlan.test_undeclared_bronze_upstream_raises_missing_dependency` — `bundle.gold.marts=["ap_aging"]` + `bundle.datasets=[]` + no filter → `MissingDependencyError` naming `ap_invoices` AND the bundle section to add it to. Distinct from existing `test_typoed_datasets_filter_raises_missing_dependency` (P1.5α-fix12 — covers filter-input typos, not bundle-omission).
+- `TestResolvePlan.test_declared_bronze_filtered_out_becomes_external_dep` — `bundle.datasets=[ap_invoices]` + `bundle.gold.marts=[ap_aging]` + `layers=["gold"]` → `ExternalDep("ap_invoices", "bronze", "ap_aging")` in the plan; no error. Locks in case (A) preservation.
+- `TestResolvePlan.test_multiple_undeclared_upstreams_accumulated_in_one_error` — gold mart declares two bronze deps; neither in `bundle.datasets` → single `MissingDependencyError` names both. Operator shouldn't have to fix-rerun-fix-rerun.
+**Cross-ref**: reviewer-flagged latent bug at `orchestrator/__init__.py:207-222`; P1.5α-fix4 §"Approach" (BACKLOG:271-273) — design intent of "extra-plan = filtered out", which fix14 enforces; P1.5α-fix4 §"Staleness" (BACKLOG:288) — separate deferred concern (declared-but-old, not undeclared).
+
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
 
