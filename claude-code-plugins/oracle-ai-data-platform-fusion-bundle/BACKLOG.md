@@ -453,7 +453,24 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 **Audit-trail status**: no DECISION-doc dependency. `errors.py` doesn't reference any working-note file; the fix is a pure validation tightening. Flips directly to `[x]` (no P1.5α-fix11 gate).
 **Cross-ref**: reviewer-flagged blocking bug at `__init__.py:126-135`; the typoed-filter contract; `commands/run.py:78-84` CLI docstring.
 
-### `[ ]` P1.5α-fix13 — Wire `--layers` through the CLI (post-α blocking — P1.5α-fix4 live-evidence gate, 2026-05-17)
+### `[x]` P1.5α-fix13 — Wire `--layers` through the CLI (shipped 2026-05-21)
+
+**Done**:
+- ✅ `cli.py:117` gains `@click.option("--layers", default=None, …)` mirroring `--datasets`.
+- ✅ `cli.py:121` callback signature accepts `layers: str | None` and threads to `commands/run.py::run`.
+- ✅ `commands/run.py::run` accepts `layers` parameter, parses CSV the same shape as `datasets`, threads to both `_run_inline` and `_run_via_aidp_dispatch`.
+- ✅ `_run_inline` passes `layers=layers` to `orchestrator.run(...)`. `_run_via_aidp_dispatch` plumbs the parameter through its (stub) signature so future P1.5ε wiring inherits it.
+- ✅ 2 new tests in `tests/unit/test_commands.py::TestRun`:
+  - `test_run_inline_with_layers_filter_passes_through` — `--inline --layers gold` reaches `orchestrator.run` with `layers=["gold"]`, `datasets=None`.
+  - `test_run_inline_with_layers_and_datasets_combined` — both filters mutually compatible (`--layers bronze, silver --datasets ap_invoices` → both reach the orchestrator).
+- ✅ No new validation in the CLI layer — `resolve_plan` already handles unknown layer names via `MissingDependencyError` (P1.5α-fix12).
+
+**Cross-ref**: closes the P1.5α-fix4 live-evidence gate (a `--layers gold` run against `fusion_bundle_dev` is now command-line addressable; one live dispatch closes both fix4 and fix13).
+
+---
+
+**Original spec follows (preserved for the rationale):**
+
 **Why**: `orchestrator.run(...)` accepts `layers=` (`orchestrator/__init__.py:102, 421, 440`), `resolve_plan` validates `--layers` typos via P1.5α-fix12 (`__init__.py:140-146`), `runtime.py:325` cites `--datasets / --layers` in its `PrerequisiteError` redirect, and `test_orchestrator_run.py:375, 594` exercise `--layers` end-to-end. But `cli.py:111-132` declares only `--mode` / `--datasets` / `--inline` — and `commands/run.py:117-121` calls `orchestrator.run(..., datasets=datasets)` with no `layers=` parameter at all. The path `cli.py → commands/run.py → orchestrator.run(...)` hardcodes `layers=None` end-to-end. Today the only way to do a "rebuild gold from existing bronze+silver" run is to import `orchestrator.run` from Python, defeating the "CLI is the contract" principle (CLAUDE.md).
 
 **Repro**: `aidp-fusion-bundle run --inline --mode seed --layers gold` → `Error: No such option: --layers` (Click rejects unknown options before reaching `commands/run.py`). This is exactly why P1.5α-fix4's `[x]` flip is stuck (see that entry's §"Remaining gate"): the live-evidence command invokes a flag that doesn't exist.
@@ -524,7 +541,29 @@ This is distinct from the deferred staleness concern at P1.5α-fix4 §"Staleness
 - `TestResolvePlan.test_multiple_undeclared_upstreams_accumulated_in_one_error` — gold mart declares two bronze deps; neither in `bundle.datasets` → single `MissingDependencyError` names both. Operator shouldn't have to fix-rerun-fix-rerun.
 **Cross-ref**: reviewer-flagged latent bug at `orchestrator/__init__.py:207-222`; P1.5α-fix4 §"Approach" (BACKLOG:271-273) — design intent of "extra-plan = filtered out", which fix14 enforces; P1.5α-fix4 §"Staleness" (BACKLOG:288) — separate deferred concern (declared-but-old, not undeclared); P1.5α-fix12 (`__init__.py:129`) — the typo-guard that closes the embarrassing loop in this entry's "Tables missing on disk" failure mode once fix14 declines the offending bundle upfront.
 
-### `[ ]` P1.5α-fix15 — Honor (or remove) `DatasetSpec.enabled` (post-α latent-correctness bug, 2026-05-17)
+### `[x]` P1.5α-fix15 — Honor `DatasetSpec.enabled` + disabled-specific error wording (shipped 2026-05-21)
+
+**Done** (Option A: honor the flag; grew beyond the original ~3 LOC to ~25 LOC across two error builders + 4-axis `undeclared_deps` tuple after plan-review rounds caught misleading-remediation gaps):
+
+- ✅ `orchestrator/__init__.py:117-129` skips disabled datasets from `all_specs` and tracks their ids in a sibling `disabled_datasets: set[str]`.
+- ✅ `undeclared_deps` widened to a 4-axis tuple `(consumer, consumer_layer, dep_layer, dep_name)` — the consumer's layer (derived via `_layer_for_spec(all_specs[consumer])`) is required for the disabled-state error wording to name the correct `bundle.yaml` section.
+- ✅ **fix14's consumer-upstream error builder** (the consolidated raise at `__init__.py:280-305`) gets a two-branch `if dep_name in disabled_datasets:` check. Disabled branch emits: `"bronze 'ap_invoices' is disabled in bundle.datasets (required by 'supplier_spend') — set enabled: true or remove 'supplier_spend' from bundle.gold.marts"`. Plain undeclared branch (existing fix14 wording) is preserved for truly-missing names.
+- ✅ **fix12's `--datasets` filter validator** (`__init__.py:131-170`) gets a parallel `disabled_in_filter` vs `truly_unknown` split. Disabled filter ids get their own message: `"--datasets references disabled name(s): ['ap_invoices']. Either set `enabled: true` in bundle.datasets, or remove them from --datasets."`
+- ✅ 4 new `TestResolvePlan` tests in `tests/unit/test_orchestrator_run.py` covering all three disabled-state surfaces:
+  - `test_disabled_dataset_excluded_from_plan` — happy path (disabled dataset absent from plan + extra_deps)
+  - `test_disabled_dataset_with_gold_consumer_raises_disabled_specific_error` — gold-consumer wording (`bundle.gold.marts`); rejects misleading `"add it to bundle.datasets"`
+  - `test_disabled_dataset_with_silver_consumer_raises_disabled_specific_error` — silver-consumer wording (`bundle.dimensions.build`); rejects wrong section `bundle.gold.marts` (reviewer catch — locks the `consumer_layer` derivation contract)
+  - `test_datasets_filter_with_disabled_id_raises_disabled_specific_error` — filter-input wording; rejects generic `"not in the bundle plan"`
+- ✅ 1 schema round-trip test in `tests/unit/test_bundle_schema.py::test_dataset_enabled_false_roundtrips_cleanly` — confirms `enabled: false` parses cleanly AND survives `model_dump → model_validate`. Without this, a silent schema regression would break fix15's honor-check at `resolve_plan`.
+- ✅ All 5 disabled-state tests use **fully-explicit minimal YAML** (every `bundle.*` section listed, with empty `[]` where there's no consumer) — suppresses `DimensionsSpec.build` + `GoldSpec.marts` defaults that would otherwise inject undeclared upstreams and pollute error-message assertions for reasons unrelated to the disabled-state contract.
+- ✅ Full unit suite green: **510 passed** (was 503 post-fix14, +7 regression tests).
+
+**Cross-ref**: depends on P1.5α-fix14 (shares the `all_specs` construction site; fix14's error builder is the integration point for the disabled-specific wording branch). Reviewer caught two UX traps before code landed: (i) consumer-upstream needed `consumer_layer` axis so silver consumers get pointed at `bundle.dimensions.build` not `bundle.gold.marts`; (ii) filter-input path needed its own disabled-specific branch in fix12's validator — without it, `--datasets disabled-name` would dead-end with the misleading "edit bundle.yaml" message even though the entry IS in the bundle.
+
+---
+
+**Original spec follows (preserved for the rationale + reviewer-flagged dead-field bug):**
+
 **Why**: `schema/bundle.py:104` declares `enabled: bool = True` on `DatasetSpec` — implying operators can opt a single bronze extract out of a run by setting `enabled: false`. But `orchestrator/__init__.py:118` builds `all_specs` by iterating `bundle.datasets` with **no `enabled` check**: every declared dataset becomes part of `in_plan_names` regardless. The field is dead weight that silently advertises a feature the orchestrator doesn't implement.
 
 **Repro**:

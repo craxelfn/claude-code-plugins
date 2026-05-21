@@ -114,8 +114,19 @@ def resolve_plan(
             OR an in-plan node depends on a name that doesn't exist anywhere.
     """
     # 1. Resolve every bundle name into a spec (raises MissingDependencyError on typo).
+    # P1.5α-fix15: honor DatasetSpec.enabled=false — disabled entries are
+    # excluded from all_specs (so downstream consumers see them as "not in
+    # the bundle plan"). The id is tracked separately in `disabled_datasets`
+    # so the error builders below can emit disabled-specific remediation
+    # ("set enabled: true") instead of the misleading generic message
+    # ("add it to bundle.datasets" — which is wrong because the entry IS
+    # already there, just disabled).
     all_specs: dict[str, Spec] = {}
+    disabled_datasets: set[str] = set()
     for ds in bundle.datasets:
+        if not ds.enabled:
+            disabled_datasets.add(ds.id)
+            continue
         all_specs[ds.id] = _resolve_bronze(ds.id)
     for dim_name in bundle.dimensions.build:
         all_specs[dim_name] = _resolve_dim(dim_name)
@@ -129,14 +140,33 @@ def resolve_plan(
     if datasets is not None:
         unknown_datasets = sorted(set(datasets) - set(all_specs))
         if unknown_datasets:
-            raise MissingDependencyError(
-                f"--datasets contains name(s) not in the bundle plan: "
-                f"{unknown_datasets}. "
-                f"Available names from bundle.yaml: {sorted(all_specs)}. "
-                f"--datasets is a filter over the bundle's declared "
-                f"datasets / dimensions / marts; to add a new name, edit "
-                f"bundle.yaml first."
-            )
+            # P1.5α-fix15: distinguish disabled-in-bundle from never-declared,
+            # so the operator doesn't add a duplicate entry. Two distinct
+            # remediations — "set enabled: true" vs "edit bundle.yaml first".
+            disabled_in_filter = [
+                d for d in unknown_datasets if d in disabled_datasets
+            ]
+            truly_unknown = [
+                d for d in unknown_datasets if d not in disabled_datasets
+            ]
+            msg_parts: list[str] = []
+            if disabled_in_filter:
+                msg_parts.append(
+                    f"--datasets references disabled name(s): "
+                    f"{disabled_in_filter}. "
+                    f"Either set `enabled: true` in bundle.datasets for "
+                    f"those entries, or remove them from --datasets."
+                )
+            if truly_unknown:
+                msg_parts.append(
+                    f"--datasets contains name(s) not in the bundle plan: "
+                    f"{truly_unknown}. "
+                    f"Available names from bundle.yaml: {sorted(all_specs)}. "
+                    f"--datasets is a filter over the bundle's declared "
+                    f"datasets / dimensions / marts; to add a new name, edit "
+                    f"bundle.yaml first."
+                )
+            raise MissingDependencyError("\n".join(msg_parts))
     if layers is not None:
         unknown_layers = sorted(set(layers) - _VALID_LAYERS)
         if unknown_layers:
@@ -217,18 +247,24 @@ def resolve_plan(
     # all_specs still contains it — so case (A) (declared-but-filtered) keeps
     # the ExternalDep path correctly. Case (B) (never declared at all) is the
     # one this check catches.
-    undeclared_deps: list[tuple[str, str, str]] = []  # (consumer, dep_layer, dep_name)
+    # P1.5α-fix15: tuple widened with consumer_layer (4-axis instead of 3-axis)
+    # so the error builder below can name the correct bundle.yaml section to
+    # remove the consumer from. Derived via _layer_for_spec(all_specs[consumer]) —
+    # consumer is always in_plan_names, so always in all_specs.
+    undeclared_deps: list[tuple[str, str, str, str]] = []
+    # (consumer, consumer_layer, dep_layer, dep_name)
 
     def _is_declared(dep_name: str) -> bool:
         return dep_name in all_specs
 
     for name in in_plan_names:
         spec = all_specs[name]
+        consumer_layer = _layer_for_spec(spec)
         if isinstance(spec, SilverDimSpec):
             for b in spec.depends_on_bronze:
                 _check_dep_exists_or_raise(b, "bronze", name)
                 if not _is_declared(b):
-                    undeclared_deps.append((name, "bronze", b))
+                    undeclared_deps.append((name, consumer_layer, "bronze", b))
                     continue
                 if b not in in_plan_names:
                     _add_extra(b, "bronze", name)
@@ -236,14 +272,14 @@ def resolve_plan(
             for b in spec.depends_on_bronze:
                 _check_dep_exists_or_raise(b, "bronze", name)
                 if not _is_declared(b):
-                    undeclared_deps.append((name, "bronze", b))
+                    undeclared_deps.append((name, consumer_layer, "bronze", b))
                     continue
                 if b not in in_plan_names:
                     _add_extra(b, "bronze", name)
             for s in spec.depends_on_silver:
                 _check_dep_exists_or_raise(s, "silver", name)
                 if not _is_declared(s):
-                    undeclared_deps.append((name, "silver", s))
+                    undeclared_deps.append((name, consumer_layer, "silver", s))
                     continue
                 if s not in in_plan_names:
                     _add_extra(s, "silver", name)
@@ -251,8 +287,15 @@ def resolve_plan(
 
     if undeclared_deps:
         # Consolidated error: one raise listing every undeclared upstream + which
-        # bundle.yaml section to add it to. Matches the per-layer remediation
+        # bundle.yaml section to act on. Matches the per-layer remediation
         # established by P1.5α-fix12 (--datasets typo guard).
+        #
+        # P1.5α-fix15: two wording branches — disabled-specific (the upstream
+        # IS in bundle.datasets, just disabled — tell the operator to flip the
+        # flag) vs generic undeclared (truly missing — tell the operator to
+        # add a new entry). The generic message would mislead the operator
+        # into adding a duplicate entry; the disabled-specific message points
+        # at the actual fix.
         _BUNDLE_SECTION = {
             "bronze": "bundle.datasets",
             "silver": "bundle.dimensions.build",
@@ -264,11 +307,18 @@ def resolve_plan(
             f"dependencies (which would silently rebuild from stale "
             f"on-disk tables or trigger a misleading PrerequisiteError):"
         ]
-        for consumer, dep_layer, dep_name in undeclared_deps:
-            lines.append(
-                f"  • {dep_layer} {dep_name!r} (required by {consumer!r}) — "
-                f"add it to {_BUNDLE_SECTION[dep_layer]}"
-            )
+        for consumer, consumer_layer, dep_layer, dep_name in undeclared_deps:
+            if dep_name in disabled_datasets:
+                lines.append(
+                    f"  • {dep_layer} {dep_name!r} is disabled in bundle.datasets "
+                    f"(required by {consumer!r}) — set `enabled: true` "
+                    f"or remove {consumer!r} from {_BUNDLE_SECTION[consumer_layer]}"
+                )
+            else:
+                lines.append(
+                    f"  • {dep_layer} {dep_name!r} (required by {consumer!r}) — "
+                    f"add it to {_BUNDLE_SECTION[dep_layer]}"
+                )
         raise MissingDependencyError("\n".join(lines))
 
     # 4. Topo-sort the in-plan names.
