@@ -70,6 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 # Re-export errors module-level so __init__ acts as the public face
 from .errors import (  # noqa: E402  (re-export at module level)
+    BronzeSchemaProbeError,
     BundleLoadError,
     BundleVersionMismatchError,
     CredentialResolutionError,
@@ -272,27 +273,37 @@ def _execute_node(
             # Credential resolution at dispatch (preflight already verified
             # resolvability; this call should always succeed).
             resolved = _resolve_password(bundle.fusion.password)
-            df = extractors.bicc.extract_pvo(
-                spark,
-                pvo,
-                fusion_service_url=bundle.fusion.service_url,
-                username=bundle.fusion.username,
-                password=resolved.get_secret_value(),  # SOLE unwrap site
-                fusion_external_storage=bundle.fusion.external_storage,
-            )
-            df = enrich_bronze_audit_cols(
-                df,
-                source_pvo=pvo.datastore,
-                run_id=run_id,
-                watermark=None,  # Phase β fills this for incremental
-            )
-            # overwriteSchema=true matches CLAUDE.md's "CREATE OR REPLACE for
-            # seed mode" invariant — lets a re-run converge even when the prior
-            # table has stale audit-column metadata (caught by TC26 live probe
-            # with run_id=023482f5: Delta merged _watermark_used into itself).
-            df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
-            # Count the materialized table, not the BICC plan (would re-extract).
-            row_count = spark.table(target).count()
+
+            def _do_bronze() -> int:
+                df = extractors.bicc.extract_pvo(
+                    spark,
+                    pvo,
+                    fusion_service_url=bundle.fusion.service_url,
+                    username=bundle.fusion.username,
+                    password=resolved.get_secret_value(),  # SOLE unwrap site
+                    fusion_external_storage=bundle.fusion.external_storage,
+                )
+                df = enrich_bronze_audit_cols(
+                    df,
+                    source_pvo=pvo.datastore,
+                    run_id=run_id,
+                    watermark=None,  # Phase β fills this for incremental
+                )
+                # overwriteSchema=true matches CLAUDE.md's "CREATE OR REPLACE for
+                # seed mode" invariant — lets a re-run converge even when the prior
+                # table has stale audit-column metadata (caught by TC26 live probe
+                # with run_id=023482f5: Delta merged _watermark_used into itself).
+                df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
+                # Count the materialized table, not the BICC plan (would re-extract).
+                return spark.table(target).count()
+
+            # P1.5α-fix20: transient infra hiccups (OCI Object Storage 5xx,
+            # Spark executor loss, BICC connection reset) shouldn't waste a
+            # multi-PVO pipeline. Permanent bugs (schema-not-found, auth, Delta
+            # merge errors) skip retry entirely and fail fast — preserves the
+            # cascade-vs-abort contract by NOT masking real bugs.
+            from .retry import run_with_retry
+            row_count = run_with_retry(_do_bronze, dataset_id=node.dataset_id)
             return RunStep.success(
                 node, run_id, mode,
                 row_count=row_count,
@@ -300,8 +311,12 @@ def _execute_node(
             )
 
         if isinstance(node, (SilverDimSpec, GoldMartSpec)):
+            from .retry import run_with_retry
             # B3: thread run_id for the silver_run_id/gold_run_id audit column.
-            df = node.builder(spark, paths=paths, run_id=run_id)
+            df = run_with_retry(
+                lambda: node.builder(spark, paths=paths, run_id=run_id),
+                dataset_id=node.dataset_id,
+            )
             return RunStep.success(
                 node, run_id, mode,
                 row_count=df.count(),
@@ -500,6 +515,14 @@ def run(
     # 5.5. HARD — extra-plan deps exist on disk.
     _preflight_external_deps(spark, extra_deps)
 
+    # 5.6. HARD — every bronze PVO probes cleanly (schema name + PVO existence
+    #     + BICC credential at reader layer). Catches the most common class of
+    #     "fails 20min into the run" bug in ~1-2s per PVO without writing any
+    #     data. See P1.5α-fix17 / orchestrator/preflight.py for the motivation.
+    from .preflight import preflight_bronze_schemas
+    preflight_bronze_schemas(spark, bundle, plan,
+                             resolved_password=_resolve_password(bundle.fusion.password).get_secret_value())
+
     # 6. Execute plan.
     run_id = _new_run_id()
     started_at = _utc_now()
@@ -541,4 +564,5 @@ __all__ = [
     "MissingDependencyError",
     "PrerequisiteError",
     "CredentialResolutionError",
+    "BronzeSchemaProbeError",
 ]

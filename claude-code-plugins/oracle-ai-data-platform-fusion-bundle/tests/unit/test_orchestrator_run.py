@@ -660,6 +660,7 @@ gold:
         from oracle_ai_data_platform_fusion_bundle.orchestrator import runtime as runtime_mod
 
         with patch("oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo", side_effect=fake_extract), \
+             patch("oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas"), \
              patch("oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols", side_effect=fake_enrich), \
              patch("oracle_ai_data_platform_fusion_bundle.orchestrator.state.write_state_row") as mock_write_state_row, \
              patch(
@@ -789,6 +790,8 @@ gold:
         ), patch(
             "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
             side_effect=fake_extract,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
         ), patch(
             "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
             side_effect=fake_enrich,

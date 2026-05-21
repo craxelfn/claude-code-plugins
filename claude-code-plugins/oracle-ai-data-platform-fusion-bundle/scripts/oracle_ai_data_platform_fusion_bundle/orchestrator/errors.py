@@ -81,6 +81,27 @@ class CredentialResolutionError(OrchestratorConfigError):
     """
 
 
+class BronzeSchemaProbeError(OrchestratorConfigError):
+    """At least one bronze PVO's BICC schema/PVO-name probe failed before
+    any data write. Surfaced at exit-2 via the §4.4 step-5.6 preflight, NOT
+    as per-step ``failed`` rows at first bronze dispatch. Catches:
+
+    - ``DATA_ACCESS_LAYER_0031: Schema X not found`` — catalog declares a
+      BICC offering schema that doesn't exist on this tenant (P1.5α-fix17
+      origin story: ``schema="SCM"`` on saasfademo1).
+    - PVO renamed / removed since the catalog was confirmed.
+    - BICC server unreachable / credential rejected at the BICC reader layer.
+
+    Message lists every offending PVO + the underlying short error so the
+    operator can fix the catalog or the bundle without re-dispatching a long
+    run. ``failures`` carries structured detail for programmatic callers.
+    """
+
+    def __init__(self, message: str, failures: list[dict] | None = None) -> None:
+        super().__init__(message)
+        self.failures = failures or []
+
+
 __all__ = [
     "OrchestratorConfigError",
     "BundleLoadError",
@@ -89,4 +110,5 @@ __all__ = [
     "MissingDependencyError",
     "PrerequisiteError",
     "CredentialResolutionError",
+    "BronzeSchemaProbeError",
 ]

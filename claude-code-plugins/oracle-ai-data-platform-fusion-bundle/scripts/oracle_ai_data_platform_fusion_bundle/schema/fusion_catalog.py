@@ -125,7 +125,11 @@ _ITEM_EXTRACT = PvoEntry(
     id="scm_items",
     # Verified live 2026-04-30 — pdf2's bare `ItemExtractPVO` was abbreviated; full AM-hierarchy required.
     datastore="FscmTopModelAM.ScmExtractAM.EgpBiccExtractAM.ItemExtractPVO",
-    schema="SCM",
+    # NB: BICC offering schema is "Financial" on saasfademo1 (P1.5α-fix18, 2026-05-21).
+    # The PVO lives under ScmExtractAM in the AM hierarchy, but the BICC offering
+    # publishes it under "Financial" on this tenant. Other tenants may publish
+    # ScmExtractAM PVOs under a separate "SCM" offering — treat as tenant-dependent.
+    schema="Financial",
     bronze_table_name="scm_items",
     description="Item master — verified live 2026-04-30 against saasfademo1 BICC catalog.",
     confirmed=True,
@@ -220,9 +224,13 @@ _AP_AGING_PERIODS = PvoEntry(
 _PO_RECEIPTS = PvoEntry(
     id="po_receipts",
     datastore="FscmTopModelAM.ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO",
-    schema="SCM",
+    # NB: BICC offering schema is "Financial" on saasfademo1 (P1.5α-fix18, 2026-05-21 —
+    # 564,752 rows / 459 cols extracted successfully). Originally declared schema="SCM"
+    # by AM-hierarchy heuristic; live TC26 surfaced DATA_ACCESS_LAYER_0031 because
+    # BICC on this tenant only publishes a "Financial" offering. Tenant-dependent.
+    schema="Financial",
     bronze_table_name="po_receipts",
-    description="PO receipts (Receiving Receipt Transactions) — verified-live PVO name. Note: lives under ScmExtractAM (not PrcExtractAM); schema is SCM.",
+    description="PO receipts (Receiving Receipt Transactions) — verified-live PVO name. Lives under ScmExtractAM in the AM hierarchy; BICC offering schema is tenant-dependent (see schema field comment).",
     confirmed=True,
 )
 
