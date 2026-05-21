@@ -130,7 +130,12 @@ def is_transient(exc: BaseException) -> bool:
                 candidates.append(str(jmsg))
             jcls = java_exc.getClass().getName()
             candidates.append(jcls)
-        except BaseException:  # noqa: BLE001 — defensive; never let classifier raise
+        except Exception:
+            # Defensive: introspection of the Py4J wrapper can fail in weird
+            # ways. We still want the classifier to return — fall back to the
+            # Python-side ``str(exc)`` candidates already collected. NOT
+            # ``except BaseException`` — KeyboardInterrupt during introspection
+            # must propagate so the user can actually Ctrl-C.
             pass
 
     blob = "\n".join(candidates)
@@ -209,7 +214,14 @@ def run_with_retry(
     for attempt in range(1, max_retries + 2):  # 1, 2, ..., max_retries+1
         try:
             return fn()
-        except BaseException as exc:  # noqa: BLE001 — Py4J inherits from base
+        except (KeyboardInterrupt, SystemExit):
+            # Operator Ctrl-C / sys.exit() must propagate IMMEDIATELY. Without
+            # this re-raise, ``except Exception`` widened to ``except BaseException``
+            # would catch the interrupt and either retry (transient classifier
+            # may match e.g. "Interrupted") or treat it as a permanent failure
+            # — both wrong. The user wants the process to stop.
+            raise
+        except Exception as exc:
             last_exc = exc
             if not is_transient(exc):
                 _LOG.debug(

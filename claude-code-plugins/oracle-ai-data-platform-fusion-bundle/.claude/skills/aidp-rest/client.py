@@ -332,14 +332,25 @@ class AidpRestClient:
 
         ``output_key`` must be `""` (empty string) for notebook tasks — `"main"`
         returns a misleading 404 citing the taskRunKey.
+
+        Raises:
+            AidpRestError: HTTP failure (404/500/etc). Callers MUST NOT treat
+                an empty return as success — a job that finished SUCCESS but
+                whose output we can't fetch is an evidence-capture failure,
+                not a soft pass. Returns ``""`` ONLY when the API responded
+                200 but ``data[0].value`` is genuinely empty (notebook printed
+                nothing) — operator can then assert presence-of-marker
+                explicitly downstream.
         """
         r = self._request(
             "POST", f"{self.base}/taskRuns/{task_run_key}/actions/fetchOutput",
             json_body={"outputKey": output_key},
         )
         if r.status_code != 200:
-            self._log("fetch_output_warn", status=r.status_code, body=r.text[:300])
-            return ""
+            raise AidpRestError(
+                f"fetch_output({task_run_key}, outputKey={output_key!r}): "
+                f"HTTP {r.status_code} body={r.text[:300]}"
+            )
         out = r.json()
         data_arr = out.get("data") or []
         if not data_arr:

@@ -194,3 +194,43 @@ def test_preflight_makes_no_writes(stub_spark, stub_bundle):
     # The MagicMock will track every method call. Anything write-shaped would fail the run.
     write_calls = [c for c in df.mock_calls if "write" in str(c) or "saveAsTable" in str(c)]
     assert not write_calls, f"preflight wrote data: {write_calls}"
+
+
+def test_keyboard_interrupt_propagates_not_caught(stub_spark, stub_bundle):
+    """Reviewer catch: operator Ctrl-C during ``df.schema`` must propagate,
+    not be swallowed as a probe failure that keeps probing the rest of the
+    plan. Same for SystemExit. Originally caught by ``except BaseException``
+    which is wrong — narrowed to ``except Exception`` + explicit re-raise
+    of KeyboardInterrupt / SystemExit.
+    """
+    df_kb = _stub_df(success=False, exc=KeyboardInterrupt())
+    df_se = _stub_df(success=False, exc=SystemExit())
+    df_ok = _stub_df(success=True)
+
+    # KeyboardInterrupt → must propagate
+    plan = [
+        BronzeExtractSpec("erp_suppliers", "erp_suppliers"),
+        BronzeExtractSpec("ap_invoices", "ap_invoices"),  # would be probed if KB was swallowed
+    ]
+    with patch(
+        "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight."
+        "extractors.bicc.extract_pvo",
+        side_effect=[df_kb, df_ok],
+    ) as extract:
+        with pytest.raises(KeyboardInterrupt):
+            preflight_bronze_schemas(stub_spark, stub_bundle, plan, resolved_password="pw")
+    # Critically: only ONE extract was attempted — preflight stopped, didn't loop.
+    assert extract.call_count == 1, (
+        "KeyboardInterrupt must stop the probe loop; getting >1 extract calls "
+        "means BaseException was caught and we kept probing"
+    )
+
+    # SystemExit → must propagate too
+    with patch(
+        "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight."
+        "extractors.bicc.extract_pvo",
+        side_effect=[df_se, df_ok],
+    ) as extract:
+        with pytest.raises(SystemExit):
+            preflight_bronze_schemas(stub_spark, stub_bundle, plan, resolved_password="pw")
+    assert extract.call_count == 1

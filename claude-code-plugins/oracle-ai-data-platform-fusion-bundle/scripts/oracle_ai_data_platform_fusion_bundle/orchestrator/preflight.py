@@ -112,7 +112,13 @@ def preflight_bronze_schemas(
             # return here means BICC accepted the (schema, datastore, creds)
             # tuple and the reader's metadata roundtrip completed.
             _ = df.schema
-        except BaseException as exc:  # noqa: BLE001 — Py4JJavaError is a base type variant
+        except (KeyboardInterrupt, SystemExit):
+            # Operator Ctrl-C / sys.exit() must propagate immediately. Without
+            # this re-raise an ``except Exception`` widened to ``except BaseException``
+            # would silently swallow these as "schema probe failed" and keep
+            # probing the rest of the plan.
+            raise
+        except Exception as exc:
             failures.append({
                 "dataset_id": node.dataset_id,
                 "pvo_id": node.pvo_id,

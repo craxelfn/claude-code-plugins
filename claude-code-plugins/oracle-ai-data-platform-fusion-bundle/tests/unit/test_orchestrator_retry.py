@@ -228,6 +228,34 @@ class TestRunWithRetry:
         assert result == "ok"
         assert sleep.call_args_list == [((0.001,),), ((0.001,),)]
 
+    def test_keyboard_interrupt_propagates_not_retried(self) -> None:
+        """Reviewer catch: operator Ctrl-C must propagate IMMEDIATELY, not be
+        treated as a transient (retried) or permanent (counted toward failed-
+        step bookkeeping). Originally caught by ``except BaseException`` which
+        is wrong — narrowed to ``except Exception`` + explicit re-raise of
+        ``KeyboardInterrupt`` / ``SystemExit``.
+        """
+        sleep = MagicMock()
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            run_with_retry(fn, dataset_id="gl_journal_lines", sleep=sleep)
+        assert len(attempts) == 1, "KeyboardInterrupt must stop on first occurrence — not retry"
+        sleep.assert_not_called()
+
+    def test_system_exit_propagates_not_retried(self) -> None:
+        """Same as Ctrl-C: ``sys.exit()`` must stop the retry loop."""
+        sleep = MagicMock()
+        fn = MagicMock(side_effect=SystemExit(1))
+        with pytest.raises(SystemExit):
+            run_with_retry(fn, dataset_id="ap_invoices", sleep=sleep)
+        assert fn.call_count == 1
+        sleep.assert_not_called()
+
     def test_silver_gold_count_must_be_inside_retried_callable(self) -> None:
         """Reviewer catch (fix17-20-skills PR): silver/gold's ``df.count()``
         MUST be inside the ``run_with_retry`` callable, not after it.

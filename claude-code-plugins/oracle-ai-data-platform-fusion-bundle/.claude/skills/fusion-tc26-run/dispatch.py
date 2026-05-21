@@ -357,7 +357,17 @@ def main() -> int:
         print(f"task status={ts.get('status')}  stateMessage={ts.get('stateMessage')}",
               file=sys.stderr)
 
-    nb_str = client.fetch_output(task_run_key)
+    try:
+        nb_str = client.fetch_output(task_run_key)
+    except AidpRestError as e:
+        # AIDP job ran (terminal status known) but evidence fetch failed. Don't
+        # quietly exit 0 — this is an evidence-capture failure that CI/operator
+        # must see. Reviewer catch: success-without-evidence is worse than a
+        # clean failure because it masks the gap.
+        print(f"FATAL: fetchOutput failed despite terminal status {result.status}: {e}",
+              file=sys.stderr)
+        return 2
+
     executed_path = workdir / f"run_tc26_{args.scope}.executed.ipynb"
     executed_path.write_text(nb_str)
     _log("executed_notebook_saved", path=str(executed_path))
@@ -396,6 +406,19 @@ def main() -> int:
             print("\n=== CELL ERRORS ===")
             for err in errors:
                 print(f"cell {err['cell_index']}: {err['ename']}: {err['evalue']}")
+
+    # Reviewer catch (success-without-evidence): if the AIDP job reported
+    # SUCCESS but we couldn't parse the AIDP_LIVE_TEST_RESULT marker, treat
+    # as a failure. "Job succeeded but no marker" is an evidence-capture gap
+    # that CI must see — it usually means the notebook crashed AFTER the
+    # orchestrator's marker emit but before AIDP wrote the run-output, OR
+    # the notebook never reached the marker emit at all.
+    if result.status == "SUCCESS" and marker is None:
+        print("FATAL: AIDP job reported SUCCESS but no AIDP_LIVE_TEST_RESULT "
+              "marker found in executed notebook — evidence capture failed. "
+              "Inspect the saved notebook for the actual run state.",
+              file=sys.stderr)
+        return 2
 
     return 0 if result.status == "SUCCESS" else 2
 
