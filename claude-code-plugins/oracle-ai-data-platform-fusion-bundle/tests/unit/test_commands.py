@@ -585,3 +585,68 @@ class TestStatus:
         assert "WHERE rn = 1" in result.output
         # The new column makes cascade vs aborted visible to dashboards.
         assert "skip_reason" in result.output
+
+
+# ---------------------------------------------------------------------------
+# P1.5α-fix19 — CLI rendering contract: _render_summary prints the
+# recommendations footer when present, omits the header when empty.
+# ---------------------------------------------------------------------------
+
+
+class TestRenderRecommendations:
+    def _build_summary(self, recommendations: tuple[str, ...]):
+        """Build a minimal RunSummary fixture with the given recommendations."""
+        from datetime import datetime, UTC
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import (
+            RunStep, RunSummary,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
+            BronzeExtractSpec,
+        )
+        # Minimal one-step summary so _render_summary's main table branch runs
+        spec = BronzeExtractSpec("erp_suppliers", "erp_suppliers")
+        step = RunStep.success(spec, "rid", "seed", row_count=10, duration_seconds=1.0)
+        now = datetime.now(UTC)
+        return RunSummary(
+            run_id="rid", started_at=now, finished_at=now,
+            bundle_project="test", mode="seed", steps=(step,),
+            recommendations=recommendations,
+        )
+
+    def test_render_summary_prints_recommendations_footer(self) -> None:
+        """When summary.recommendations is non-empty, _render_summary prints
+        the header AND each recommendation line."""
+        import io
+        from rich.console import Console
+        from oracle_ai_data_platform_fusion_bundle.commands.run import _render_summary
+
+        summary = self._build_summary((
+            "consider adding schemaOverrides.po_receipts: Financial to bundle.yaml",
+        ))
+        buf = io.StringIO()
+        console = Console(file=buf, force_terminal=False, no_color=True, width=200)
+        _render_summary(console, summary)
+        output = buf.getvalue()
+        # Header + recommendation text both appear
+        assert "Recommendations" in output, (
+            f"recommendations header must be printed; got:\n{output}"
+        )
+        assert "schemaOverrides.po_receipts: Financial" in output, (
+            f"recommendation text must be printed verbatim; got:\n{output}"
+        )
+
+    def test_render_summary_omits_footer_when_recommendations_empty(self) -> None:
+        """Clean runs with no auto-corrections must NOT print the recommendations
+        header — avoid noise on the happy path."""
+        import io
+        from rich.console import Console
+        from oracle_ai_data_platform_fusion_bundle.commands.run import _render_summary
+
+        summary = self._build_summary(())  # empty tuple
+        buf = io.StringIO()
+        console = Console(file=buf, force_terminal=False, no_color=True, width=200)
+        _render_summary(console, summary)
+        output = buf.getvalue()
+        assert "Recommendations" not in output, (
+            f"recommendations header must NOT be printed on clean runs; got:\n{output}"
+        )

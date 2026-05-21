@@ -81,6 +81,26 @@ class CredentialResolutionError(OrchestratorConfigError):
     """
 
 
+class DiscoveryProbeError(OrchestratorConfigError):
+    """The ``/biacm/rest/meta/datastores`` probe itself failed — HTTP 5xx,
+    auth, network. Used by ``orchestrator/discovery.py`` so preflight can
+    decide whether to surface this directly OR fall back to the original
+    schema-not-found classification (P1.5α-fix19).
+
+    DISTINCT from :class:`BronzeSchemaProbeError` (which is the
+    ``inferSchema``-on-a-PVO failure). Different remediation:
+
+    - BronzeSchemaProbeError → fix bundle.yaml / catalog
+    - DiscoveryProbeError    → retry / check network / check creds
+
+    Today's preflight catches this internally and surfaces it as a
+    *modifier* on BronzeSchemaProbeError (so the operator sees BOTH "the
+    original schema is wrong AND we tried to auto-discover but the BICC
+    probe also failed"). The dedicated class keeps the two failure modes
+    distinguishable for programmatic callers.
+    """
+
+
 class BronzeSchemaProbeError(OrchestratorConfigError):
     """At least one bronze PVO's BICC schema/PVO-name probe failed before
     any data write. Surfaced at exit-2 via the §4.4 step-5.6 preflight, NOT
@@ -107,6 +127,7 @@ __all__ = [
     "BundleLoadError",
     "BundleVersionMismatchError",
     "UnsupportedModeError",
+    "DiscoveryProbeError",
     "MissingDependencyError",
     "PrerequisiteError",
     "CredentialResolutionError",

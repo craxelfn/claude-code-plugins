@@ -351,6 +351,8 @@ def _execute_node(
     bundle: Bundle,
     run_id: str,
     mode: str,
+    *,
+    effective_schemas: dict[str, str],
 ) -> RunStep:
     """Dispatch a single plan node and return a ``RunStep``.
 
@@ -363,6 +365,12 @@ def _execute_node(
     permission denied, builder raised) are caught and surfaced as
     ``RunStep.failed``. Orchestrator-internal logic errors (unknown spec
     type) propagate uncaught as ``TypeError`` — those are real bugs.
+
+    P1.5α-fix19: ``effective_schemas`` is the per-PVO resolved BICC
+    offering schema (override / catalog / discovered). Threaded in from
+    ``preflight_bronze_schemas`` so the real bronze dispatch uses the
+    SAME schema preflight validated. Without this, overrides + auto-
+    discovery would be cosmetic-only.
     """
     t0 = perf_counter()
     try:
@@ -372,6 +380,12 @@ def _execute_node(
             # Credential resolution at dispatch (preflight already verified
             # resolvability; this call should always succeed).
             resolved = _resolve_password(bundle.fusion.password)
+            # P1.5α-fix19: preflight resolved schema via override → catalog →
+            # auto-discovery. Use the SAME value here — without this, override
+            # + auto-discovery would be cosmetic (preflight passes, real run
+            # crashes with DATA_ACCESS_LAYER_0031 on the same PVO). KeyError
+            # if dataset_id missing = orchestrator bug, fail loudly.
+            effective_schema = effective_schemas[node.dataset_id]
 
             def _do_bronze() -> int:
                 df = extractors.bicc.extract_pvo(
@@ -381,6 +395,7 @@ def _execute_node(
                     username=bundle.fusion.username,
                     password=resolved.get_secret_value(),  # SOLE unwrap site
                     fusion_external_storage=bundle.fusion.external_storage,
+                    schema=effective_schema,  # P1.5α-fix19 dispatch contract
                 )
                 df = enrich_bronze_audit_cols(
                     df,
@@ -628,9 +643,18 @@ def run(
     #     + BICC credential at reader layer). Catches the most common class of
     #     "fails 20min into the run" bug in ~1-2s per PVO without writing any
     #     data. See P1.5α-fix17 / orchestrator/preflight.py for the motivation.
+    #
+    # P1.5α-fix19: preflight now returns PreflightResult carrying both
+    # recommendations (operator-facing footer copy) AND effective_schemas
+    # (dataset_id → resolved schema). The orchestrator threads
+    # effective_schemas into _execute_node so the REAL bronze dispatch
+    # uses the same schema preflight validated. Without this threading,
+    # overrides + auto-discovery would be cosmetic-only.
     from .preflight import preflight_bronze_schemas
-    preflight_bronze_schemas(spark, bundle, plan,
-                             resolved_password=_resolve_password(bundle.fusion.password).get_secret_value())
+    preflight_result = preflight_bronze_schemas(
+        spark, bundle, plan,
+        resolved_password=_resolve_password(bundle.fusion.password).get_secret_value(),
+    )
 
     # 6. Execute plan.
     run_id = _new_run_id()
@@ -638,7 +662,10 @@ def run(
     steps: list[RunStep] = []
 
     for node in plan:
-        step = _execute_node(node, spark, paths, bundle, run_id, mode)
+        step = _execute_node(
+            node, spark, paths, bundle, run_id, mode,
+            effective_schemas=preflight_result.effective_schemas,
+        )
         steps.append(step)
         _safe_write_state_row(spark, paths, step)
         if step.status == "failed":
@@ -656,6 +683,9 @@ def run(
         bundle_project=bundle.project,
         mode=mode,
         steps=tuple(steps),
+        # P1.5α-fix19: thread the preflight recommendations into the
+        # operator-facing summary so the CLI renders them in the footer.
+        recommendations=preflight_result.recommendations,
     )
 
 
