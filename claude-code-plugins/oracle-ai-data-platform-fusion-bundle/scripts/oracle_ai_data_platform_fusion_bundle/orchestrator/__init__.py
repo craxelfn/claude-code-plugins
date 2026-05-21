@@ -205,23 +205,72 @@ def resolve_plan(
                     f"but that name is not in SILVER_DIMS or KNOWN_DEFERRED_DIMS."
                 )
 
+    # P1.5α-fix14: undeclared upstreams must raise, not silently become ExternalDeps.
+    # Collect across the whole consumer-loop so one error names every offender —
+    # the operator who forgot N upstreams shouldn't have to fix-rerun N times.
+    # Distinct from `_check_dep_exists_or_raise` above: that's a registry-consistency
+    # check (orchestrator bug if it fires). This check is bundle-declaration —
+    # "did the operator opt in via bundle.yaml?" Both must pass.
+    #
+    # The dep is "declared" iff dep_name appears in all_specs (which is built
+    # from bundle.{datasets, dimensions.build, gold.marts}). If the operator
+    # declared the upstream and just filtered it out via --datasets/--layers,
+    # all_specs still contains it — so case (A) (declared-but-filtered) keeps
+    # the ExternalDep path correctly. Case (B) (never declared at all) is the
+    # one this check catches.
+    undeclared_deps: list[tuple[str, str, str]] = []  # (consumer, dep_layer, dep_name)
+
+    def _is_declared(dep_name: str) -> bool:
+        return dep_name in all_specs
+
     for name in in_plan_names:
         spec = all_specs[name]
         if isinstance(spec, SilverDimSpec):
             for b in spec.depends_on_bronze:
                 _check_dep_exists_or_raise(b, "bronze", name)
+                if not _is_declared(b):
+                    undeclared_deps.append((name, "bronze", b))
+                    continue
                 if b not in in_plan_names:
                     _add_extra(b, "bronze", name)
         elif isinstance(spec, GoldMartSpec):
             for b in spec.depends_on_bronze:
                 _check_dep_exists_or_raise(b, "bronze", name)
+                if not _is_declared(b):
+                    undeclared_deps.append((name, "bronze", b))
+                    continue
                 if b not in in_plan_names:
                     _add_extra(b, "bronze", name)
             for s in spec.depends_on_silver:
                 _check_dep_exists_or_raise(s, "silver", name)
+                if not _is_declared(s):
+                    undeclared_deps.append((name, "silver", s))
+                    continue
                 if s not in in_plan_names:
                     _add_extra(s, "silver", name)
         # BronzeExtractSpec + DeferredSpec — no upstream dispatch deps
+
+    if undeclared_deps:
+        # Consolidated error: one raise listing every undeclared upstream + which
+        # bundle.yaml section to add it to. Matches the per-layer remediation
+        # established by P1.5α-fix12 (--datasets typo guard).
+        _BUNDLE_SECTION = {
+            "bronze": "bundle.datasets",
+            "silver": "bundle.dimensions.build",
+            "gold":   "bundle.gold.marts",
+        }
+        lines = [
+            f"bundle.yaml is missing {len(undeclared_deps)} upstream "
+            f"declaration(s) — refusing to run with undeclared "
+            f"dependencies (which would silently rebuild from stale "
+            f"on-disk tables or trigger a misleading PrerequisiteError):"
+        ]
+        for consumer, dep_layer, dep_name in undeclared_deps:
+            lines.append(
+                f"  • {dep_layer} {dep_name!r} (required by {consumer!r}) — "
+                f"add it to {_BUNDLE_SECTION[dep_layer]}"
+            )
+        raise MissingDependencyError("\n".join(lines))
 
     # 4. Topo-sort the in-plan names.
     ts: TopologicalSorter[str] = TopologicalSorter()

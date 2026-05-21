@@ -393,6 +393,246 @@ gold:
                 f"error must list valid layers; missing {valid!r} in: {msg!r}"
             )
 
+    # ----------------------------------------------------------------------
+    # P1.5α-fix14 — undeclared upstreams must raise, not silently become
+    # ExternalDeps. The check distinguishes:
+    #   (A) declared-but-filtered  → legitimate ExternalDep (case A preserved)
+    #   (B) never declared at all  → MissingDependencyError naming the
+    #       offender(s) + which bundle.yaml section to add to
+    # ----------------------------------------------------------------------
+
+    def test_undeclared_bronze_upstream_raises_missing_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """Bundle declares a gold mart whose bronze upstream is missing from
+        ``bundle.datasets`` → ``MissingDependencyError`` naming the consumer,
+        the upstream name, AND ``bundle.datasets`` as the section to add it to.
+
+        Distinct from ``test_typoed_datasets_filter_raises_missing_dependency``
+        (P1.5α-fix12 — covers filter-input typos, not bundle omission) and
+        from ``test_inplan_consumer_with_unknown_dependency_raises_missing_dependency``
+        (P1.5α-fix14 fires on a name that IS in the registry but missing from
+        the bundle — registry vs bundle-declaration are orthogonal contracts).
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix14-undeclared-bronze
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets: []
+dimensions:
+  build: []
+gold:
+  marts: [ap_aging]
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Names the gold consumer
+        assert "ap_aging" in msg, f"error must name consumer; got {msg!r}"
+        # Names the bronze upstream that ap_aging depends on (ap_invoices)
+        assert "ap_invoices" in msg, (
+            f"error must name the undeclared bronze upstream; got {msg!r}"
+        )
+        # Remediation: tells operator WHERE in bundle.yaml to add it
+        assert "bundle.datasets" in msg, (
+            f"error must point at the bundle.yaml section to fix; got {msg!r}"
+        )
+
+    def test_declared_bronze_filtered_out_becomes_external_dep(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression for case (A): operator DECLARED the upstream in
+        bundle.yaml then filtered it out via --layers/--datasets. This is the
+        legitimate ExternalDep path — fix14 must NOT break it.
+
+        Bundle declares ap_invoices + ap_aging + a stub silver dim, then we
+        filter to --layers=['gold']. ap_invoices stays declared but gets
+        filtered out of in_plan_names → becomes a legitimate ExternalDep,
+        no error raised.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix14-declared-but-filtered
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: ap_invoices
+    mode: full
+dimensions:
+  build: [dim_supplier, dim_calendar]
+gold:
+  marts: [ap_aging]
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        # --layers=['gold'] filters bronze + silver out. ap_invoices is
+        # declared (case A) — must become an ExternalDep, NOT raise.
+        plan, extra_deps = orchestrator.resolve_plan(
+            bundle, None, ["gold"], paths=paths,
+        )
+        plan_names = {s.dataset_id for s in plan}
+        assert plan_names == {"ap_aging"}, (
+            f"only gold mart should be in plan; got {plan_names}"
+        )
+        dep_keys = {(d.dataset_id, d.layer) for d in extra_deps}
+        assert ("ap_invoices", "bronze") in dep_keys, (
+            f"declared-but-filtered ap_invoices must become ExternalDep; "
+            f"got {dep_keys}"
+        )
+
+    def test_multiple_undeclared_upstreams_accumulated_in_one_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Operator who forgot multiple upstreams shouldn't have to
+        fix-rerun-fix-rerun. Single MissingDependencyError lists every
+        offender. Validates the accumulate-vs-fail-fast decision documented
+        in plan.md.
+
+        Bundle: supplier_spend depends on bronze ap_invoices + silver
+        dim_supplier; declare NEITHER bronze nor silver → one error names
+        BOTH undeclared upstreams.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix14-multi-undeclared
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets: []
+dimensions:
+  build: []
+gold:
+  marts: [supplier_spend]
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Both undeclared upstreams must appear in the SAME error message
+        assert "ap_invoices" in msg, (
+            f"first undeclared upstream must be named; got {msg!r}"
+        )
+        assert "dim_supplier" in msg, (
+            f"second undeclared upstream must be named; got {msg!r}"
+        )
+        # Each line carries the right remediation section
+        assert "bundle.datasets" in msg
+        assert "bundle.dimensions.build" in msg
+
+    def test_undeclared_bronze_upstream_for_silver_dim_raises_missing_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """Reviewer catch #2: ``test_undeclared_bronze_upstream_raises_missing_dependency``
+        covers a GoldMartSpec.depends_on_bronze miss, but ``resolve_plan`` walks
+        ``SilverDimSpec.depends_on_bronze`` at ``__init__.py:227`` SEPARATELY.
+        Without this test, a future refactor that breaks ONLY the
+        SilverDim → bronze branch could let ``dim_supplier``'s undeclared
+        ``erp_suppliers`` upstream silently coerce into an ``ExternalDep``
+        while the gold-side tests still pass.
+
+        Bundle: declare ``dim_supplier`` in ``dimensions.build``, omit its
+        bronze upstream ``erp_suppliers`` from ``datasets``. No gold marts —
+        isolates the silver branch.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix14-undeclared-bronze-for-silver-dim
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets: []
+dimensions:
+  build: [dim_supplier]
+gold:
+  marts: []
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Names the silver consumer
+        assert "dim_supplier" in msg, (
+            f"error must name the silver consumer; got {msg!r}"
+        )
+        # Names the undeclared BRONZE upstream the silver depends on
+        assert "erp_suppliers" in msg, (
+            f"error must name the undeclared bronze upstream of the silver dim; got {msg!r}"
+        )
+        # Remediation: bronze section, not silver/gold
+        assert "bundle.datasets" in msg, (
+            f"error must point at bundle.datasets (the bronze section); got {msg!r}"
+        )
+
+    def test_undeclared_silver_upstream_raises_missing_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        """Reviewer catch: the bug is symmetric across SilverDimSpec.depends_on_bronze
+        AND GoldMartSpec.depends_on_silver — without this test, an
+        implementation could plug the bronze hole at line 213/218 but leave
+        the silver path at line 222 still silently coercing dim_supplier into
+        an ExternalDep against a stale Delta table.
+
+        Bundle declares bronze deps (so the bronze undeclared check does NOT
+        fire — isolating the silver-only failure), but omits the silver dim
+        the gold mart depends on. supplier_spend depends on bronze
+        ap_invoices + bronze erp_suppliers + silver dim_supplier; declare
+        the bronzes but NOT the silver.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix14-undeclared-silver
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: ap_invoices
+    mode: full
+  - id: erp_suppliers
+    mode: full
+dimensions:
+  build: []
+gold:
+  marts: [supplier_spend]
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Names the gold consumer
+        assert "supplier_spend" in msg, f"error must name consumer; got {msg!r}"
+        # Names the undeclared SILVER upstream
+        assert "dim_supplier" in msg, (
+            f"error must name the undeclared silver upstream; got {msg!r}"
+        )
+        # Remediation: tells operator WHERE in bundle.yaml to add it
+        assert "bundle.dimensions.build" in msg, (
+            f"error must point at the silver section of bundle.yaml; got {msg!r}"
+        )
+        # Bronze deps are declared — so the message should NOT also flag them
+        # (this verifies the check only fires on truly undeclared, not on
+        # the entire dependency set).
+        assert "bundle.datasets" not in msg, (
+            f"declared bronze deps must not appear in the error; got {msg!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # run() — dry_run + empty bundle + credential preflight ordering
