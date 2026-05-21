@@ -1309,3 +1309,192 @@ gold:
                 )
         # Load-bearing assertion: zero dispatch attempts
         mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# P1.5α-fix19 — PreflightResult propagation + dispatch-contract threading.
+# These tests prove the resolved schema (override / catalog / discovered)
+# flows ALL the way through to the real bronze extract_pvo call — not just
+# preflight. Without these, the override + auto-discovery features would be
+# cosmetic-only (preflight passes, real run still crashes with the same
+# DATA_ACCESS_LAYER_0031).
+# ---------------------------------------------------------------------------
+
+
+class TestFix19PreflightThreading:
+    def test_run_threads_preflight_recommendations_into_run_summary(
+        self, tmp_path: Path,
+    ) -> None:
+        """PreflightResult.recommendations → RunSummary.recommendations.
+        Propagation contract — without this, a refactor could drop the
+        recommendations silently (preflight emits them, RunSummary never
+        carries them, CLI never renders them).
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight import (
+            PreflightResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
+
+        # Cover every bronze in _MIN_BUNDLE's plan so the dispatch lookup
+        # never raises KeyError on effective_schemas[node.dataset_id].
+        effective_schemas = {
+            "erp_suppliers": fusion_catalog.get("erp_suppliers").schema,
+            "ap_invoices": fusion_catalog.get("ap_invoices").schema,
+            "gl_coa": fusion_catalog.get("gl_coa").schema,
+            "gl_period_balances": fusion_catalog.get("gl_period_balances").schema,
+        }
+        stub_result = PreflightResult(
+            recommendations=("recommendation A", "recommendation B"),
+            effective_schemas=effective_schemas,
+        )
+
+        fake_spark = _FakeSpark()
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+            return_value=stub_result,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
+            return_value=_FakeDataFrame(10),
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
+            side_effect=lambda df, **kw: df,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.state.write_state_row",
+        ), patch.dict(
+            registry.SILVER_DIMS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(5), v.depends_on_bronze) for k, v in registry.SILVER_DIMS.items()},
+        ), patch.dict(
+            registry.GOLD_MARTS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(3), v.depends_on_bronze, v.depends_on_silver) for k, v in registry.GOLD_MARTS.items()},
+        ):
+            summary = orchestrator.run(
+                _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+            )
+
+        # Exact match — tuple type, order preserved
+        assert summary.recommendations == ("recommendation A", "recommendation B")
+
+    def test_override_value_used_at_bronze_dispatch_not_just_preflight(
+        self, tmp_path: Path,
+    ) -> None:
+        """fix19 dispatch contract — the resolved schema must flow to the
+        real extract_pvo call, not just preflight. Without this, override is
+        cosmetic theatre."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight import (
+            PreflightResult,
+        )
+
+        # Preflight (mocked) returns the override values for every bronze
+        effective_schemas = {
+            "erp_suppliers": "OVERRIDE_ERP",
+            "ap_invoices": "OVERRIDE_AP",
+            "gl_coa": "OVERRIDE_COA",
+            "gl_period_balances": "OVERRIDE_GLPB",
+        }
+        stub_result = PreflightResult(
+            recommendations=(),
+            effective_schemas=effective_schemas,
+        )
+
+        # Capture extract_pvo's schema kwarg per call
+        recorded_schemas: dict[str, str] = {}
+
+        def recording_extract(spark, pvo, **kwargs):
+            recorded_schemas[pvo.id] = kwargs.get("schema")
+            return _FakeDataFrame(10)
+
+        fake_spark = _FakeSpark()
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+            return_value=stub_result,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
+            side_effect=recording_extract,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
+            side_effect=lambda df, **kw: df,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.state.write_state_row",
+        ), patch.dict(
+            registry.SILVER_DIMS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(5), v.depends_on_bronze) for k, v in registry.SILVER_DIMS.items()},
+        ), patch.dict(
+            registry.GOLD_MARTS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(3), v.depends_on_bronze, v.depends_on_silver) for k, v in registry.GOLD_MARTS.items()},
+        ):
+            orchestrator.run(
+                _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+            )
+
+        # Every bronze got the override value, NOT the catalog default
+        assert recorded_schemas["erp_suppliers"] == "OVERRIDE_ERP", (
+            f"override schema must reach real bronze dispatch; "
+            f"got {recorded_schemas.get('erp_suppliers')!r}"
+        )
+        assert recorded_schemas["ap_invoices"] == "OVERRIDE_AP"
+        assert recorded_schemas["gl_coa"] == "OVERRIDE_COA"
+        assert recorded_schemas["gl_period_balances"] == "OVERRIDE_GLPB"
+
+    def test_auto_discovered_schema_used_at_bronze_dispatch_not_just_preflight(
+        self, tmp_path: Path,
+    ) -> None:
+        """Same as the override test but the resolved schema came from
+        auto-discovery rather than override. Both paths must flow to the
+        real BICC pull."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight import (
+            PreflightResult,
+        )
+
+        # Simulate preflight ran auto-discovery and resolved every bronze
+        # to a "DiscoveredXxx" schema (not the catalog default).
+        effective_schemas = {
+            "erp_suppliers": "DiscoveredERP",
+            "ap_invoices": "DiscoveredAP",
+            "gl_coa": "DiscoveredCOA",
+            "gl_period_balances": "DiscoveredGLPB",
+        }
+        stub_result = PreflightResult(
+            recommendations=(
+                "consider adding schemaOverrides.erp_suppliers: DiscoveredERP to bundle.yaml",
+            ),
+            effective_schemas=effective_schemas,
+        )
+
+        recorded_schemas: dict[str, str] = {}
+
+        def recording_extract(spark, pvo, **kwargs):
+            recorded_schemas[pvo.id] = kwargs.get("schema")
+            return _FakeDataFrame(10)
+
+        fake_spark = _FakeSpark()
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+            return_value=stub_result,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
+            side_effect=recording_extract,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
+            side_effect=lambda df, **kw: df,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.state.write_state_row",
+        ), patch.dict(
+            registry.SILVER_DIMS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(5), v.depends_on_bronze) for k, v in registry.SILVER_DIMS.items()},
+        ), patch.dict(
+            registry.GOLD_MARTS,
+            {k: type(v)(v.dataset_id, lambda *a, **k: _FakeDataFrame(3), v.depends_on_bronze, v.depends_on_silver) for k, v in registry.GOLD_MARTS.items()},
+        ):
+            summary = orchestrator.run(
+                _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+            )
+
+        # Discovered schemas reach real dispatch (NOT the catalog defaults)
+        assert recorded_schemas["erp_suppliers"] == "DiscoveredERP"
+        assert recorded_schemas["ap_invoices"] == "DiscoveredAP"
+        assert recorded_schemas["gl_coa"] == "DiscoveredCOA"
+        assert recorded_schemas["gl_period_balances"] == "DiscoveredGLPB"
+        # AND the recommendation made it through to the summary footer
+        assert summary.recommendations == (
+            "consider adding schemaOverrides.erp_suppliers: DiscoveredERP to bundle.yaml",
+        )

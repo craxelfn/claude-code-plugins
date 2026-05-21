@@ -268,6 +268,18 @@ def _render_summary(console: Console, summary) -> None:
         f"total {summary.total_duration_seconds:.2f}s"
     )
 
+    # P1.5α-fix19: recommendations footer — auto-correction by preflight
+    # emits one entry per PVO whose schema diverged from the catalog.
+    # Operator should add these to bundle.fusion.schemaOverrides to skip
+    # the discovery probe + WARN on subsequent runs.
+    if summary.recommendations:
+        console.print(
+            f"\n[bold yellow]Recommendations[/bold yellow] "
+            f"(auto-corrected this run):"
+        )
+        for rec in summary.recommendations:
+            console.print(f"  [dim]•[/dim] {rec}")
+
 
 def status(
     bundle_path: Path,

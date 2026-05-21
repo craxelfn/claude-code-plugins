@@ -261,6 +261,13 @@ class RunSummary:
     plan: tuple[object, ...] | None = None
     prereqs: tuple[object, ...] | None = None
 
+    # P1.5α-fix19: operator-actionable strings emitted by preflight
+    # auto-discovery. Each entry is a recommendation the CLI renders in
+    # the summary footer (e.g. "consider adding schemaOverrides.po_receipts:
+    # Financial to bundle.yaml to stabilize across runs"). Empty on a clean
+    # run with no auto-corrections.
+    recommendations: tuple[str, ...] = ()
+
     # Counter properties — sum to len(steps).
 
     @property

@@ -617,7 +617,42 @@ gold:
 
 **Cross-ref**: fix17 (preflight that surfaced this); fix19 (auto-discovery to remove the need for tenant-by-tenant catalog edits).
 
-### `[ ]` P1.5α-fix19 — Auto-discover BICC offering schema + bundle-level `schemaOverrides` (follow-up to fix17)
+### `[x]` P1.5α-fix19 — Auto-discover BICC offering schema + bundle-level `schemaOverrides` (shipped 2026-05-21)
+
+**Done** (3-tier resolution shipped end-to-end with dispatch-contract threading; plan went through 4 reviewer rounds before code landed):
+
+- ✅ `FusionConn.schema_overrides: dict[str, str]` (alias `schemaOverrides`). Keyed by `dataset_id` (customer-facing bundle id), NOT `pvo_id`. Default `{}` — no change for existing bundles.
+- ✅ `RunSummary.recommendations: tuple[str, ...]` — threaded from preflight to CLI footer.
+- ✅ New `orchestrator/discovery.py` — `discover_pvo_schemas()` hits `/biacm/rest/meta/datastores`, returns `dict[datastore, set[schema]]`. Walker carries schema context via `ancestor_schemas` stack; pairs datastore names with their nearest enclosing schema attribute. Orphan datastores silently skipped to avoid polluting the unique-match count.
+- ✅ New `DiscoveryProbeError(OrchestratorConfigError)` — distinct from `BronzeSchemaProbeError`. Discovery-probe HTTP/network failures surface as a modifier on the bronze-schema error.
+- ✅ New `PreflightResult(recommendations, effective_schemas)` dataclass. **Dispatch-contract threading** (reviewer round-2 catch): `effective_schemas` threaded into `_execute_node` via keyword-only param; bronze branch passes `schema=effective_schemas[node.dataset_id]` to `extract_pvo`. Without this, override + auto-discovery would have been cosmetic theatre — preflight passes, real dispatch ignores it and crashes with the same error.
+- ✅ 3-tier resolution in `preflight_bronze_schemas` (evaluated per PVO, override wins per CLAUDE.md doctrine):
+  1. Override (`bundle.fusion.schema_overrides.get(node.dataset_id, …)`) → skip discovery entirely
+  2. Catalog default (`pvo.schema`) — fix17's existing path
+  3. Auto-discovery on `DATA_ACCESS_LAYER_0031` — call `discover_pvo_schemas` (memoized per-run); unique → retry + WARN + recommendation; multiple → raise with candidate list; none → raise with PVO-renamed hint
+- ✅ Override-failure short-circuit: explicit operator override that fails surfaces directly — never triggers discovery cascading (doctrine: operator typos must be visible).
+- ✅ Memoization via closure-scoped `_get_discovery()` cache: N PVOs trip the schema-not-found path → exactly 1 BICC probe call.
+- ✅ 5 new `BronzeSchemaProbeError` message branches: `override_failed`, `discovery_ambiguous`, `discovery_not_found`, `discovered_schema_failed`, `schema_infer_then_discovery_failed`. Each names `bundle.fusion.schemaOverrides` as the operator-actionable section.
+- ✅ CLI footer in `commands/run.py::_render_summary` renders recommendations after the per-step table; omitted on clean runs.
+- ✅ **18 new unit tests** (plan said 16; +2 for basic `PreflightResult` shape + renderer negative-case):
+  - 4 discovery (walker against anonymized fixture, orphan skip, inline-schema form, HTTP error)
+  - 8 preflight tiers (PreflightResult shape, override skips probe, override-failure no discovery, unique auto-correct with WARN+recommendation+dispatch value, ambiguous candidates, not-found hint, probe-failure fallback, memoization)
+  - 1 schema round-trip (`schemaOverrides` parses + survives re-serialize)
+  - 3 propagation + dispatch contract (recommendations land in RunSummary; override values reach `extract_pvo(schema=)`; discovered values reach `extract_pvo(schema=)`)
+  - 2 CLI renderer (footer present when recommendations non-empty, omitted when empty)
+- ✅ Existing fix17 preflight tests updated: stub bundle fixture sets `schema_overrides = {}` (MagicMock auto-truthy would have hijacked every test through the override-tier branch); schema-not-found test mocks `discover_pvo_schemas={}` to route through the new `discovery_not_found` stage.
+- ✅ Full unit suite green: **566 passed** (zero existing-test regressions).
+
+**Cross-ref**: builds on P1.5α-fix17 (preflight infrastructure). Replaces the per-tenant catalog-edit pattern P1.5α-fix18 had to do for saasfademo1. Doctrine ref: CLAUDE.md "What varies per tenant — policy vs discovery" — schema name is canonically a discovery problem. Plan-review rounds caught: silver-test coverage gap (round 1), test fixture-hygiene with schema defaults (round 2), suite count math (round 3), the dispatch-threading blocking flaw (round 3), `dataset_id`-vs-`pvo_id` keying (round 4), residual `pvo_id` user-facing references (round 5).
+
+**Live-evidence acceptance** (separate operator dispatch, not part of this PR): saasfademo1 re-dispatch with `schema/fusion_catalog.py` reverted to `schema="SCM"` for `po_receipts`/`scm_items` + NO `schemaOverrides` in bundle → auto-discovery picks `"Financial"` cleanly, footer carries recommendations.
+
+---
+
+### `[x]` P1.5α-fix19 — (was) Auto-discover BICC offering schema + bundle-level `schemaOverrides` (follow-up to fix17)
+
+**Original spec follows (preserved for the rationale + 3-tier design):**
+
 **Why**: Today's flow forces every new customer to **edit the plugin's source** when their tenant's BICC offering structure diverges from the shipped catalog. That violates the CLAUDE.md doctrine — BICC offering schema names are *data-shape discovery*, not *tenant-declared policy*. Customers don't know upfront whether their tenant publishes `po_receipts` under `"Financial"`, `"SCM"`, or `"Supply Chain Management"` — it depends on BICC subscription packages. The plugin must auto-correct or, when it can't, give the customer an in-bundle override that doesn't require touching plugin source.
 
 The fix17 preflight already detects the failure mode cleanly and fails loud. fix19 turns "fail loud" into "self-correct (warn-once) OR escalate to an explicit override". Mirrors the existing detection pattern used by `dim_supplier`'s column-dialect probe (`KNOWN_*_ALIASES`) and matches CLAUDE.md's stated rule: *"Explicit `kwarg=` always wins over detection."*

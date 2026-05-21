@@ -132,6 +132,55 @@ class TestBundleSchema:
             "resolve_plan stops working"
         )
 
+    def test_fusion_schema_overrides_roundtrips_cleanly(self) -> None:
+        """P1.5α-fix19: `schemaOverrides` on FusionConn must parse cleanly AND
+        survive a re-serialize. The orchestrator's preflight reads this field
+        as the tier-1 override source; a silent schema regression would break
+        the override path without anyone noticing.
+        """
+        data = {
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "project": "test-fix19-roundtrip",
+            "fusion": {
+                "serviceUrl": "https://x",
+                "username": "u",
+                "password": "p",
+                "externalStorage": "s",
+                "schemaOverrides": {
+                    "po_receipts": "Financial",
+                    "scm_items": "SCM",
+                },
+            },
+            "datasets": [{"id": "gl_journal_lines"}],
+        }
+        bundle = Bundle.model_validate(data)
+        assert bundle.fusion.schema_overrides == {
+            "po_receipts": "Financial",
+            "scm_items": "SCM",
+        }
+
+        # Default (omitted) → {}
+        data_no_override = {
+            **data,
+            "fusion": {k: v for k, v in data["fusion"].items() if k != "schemaOverrides"},
+        }
+        bundle_default = Bundle.model_validate(data_no_override)
+        assert bundle_default.fusion.schema_overrides == {}, (
+            "omitting schemaOverrides must default to {} so existing bundles parse"
+        )
+
+        # Round-trip: re-serialize + re-parse preserves the field
+        dumped = bundle.model_dump(by_alias=True)
+        reparsed = Bundle.model_validate(dumped)
+        assert reparsed.fusion.schema_overrides == {
+            "po_receipts": "Financial",
+            "scm_items": "SCM",
+        }, (
+            "schemaOverrides must survive a re-serialize — if the schema "
+            "drops it silently, fix19's preflight tier-1 override path stops "
+            "working"
+        )
+
 
 class TestAidpConfigSchema:
     def test_example_parses(self) -> None:

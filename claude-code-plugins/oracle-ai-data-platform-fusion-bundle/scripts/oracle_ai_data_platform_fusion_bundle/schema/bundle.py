@@ -76,6 +76,25 @@ class FusionConn(BaseModel):
     external_storage: str = Field(alias="externalStorage")
     """The BICC console External Storage profile name (set up once by an admin in BICC's "Configure External Storage" tab — there is no parallel AIDP-side registration)."""
 
+    schema_overrides: dict[str, str] = Field(
+        default_factory=dict, alias="schemaOverrides"
+    )
+    """Per-PVO BICC offering schema overrides (P1.5α-fix19).
+
+    Wins over catalog default + auto-discovery. Key: bundle pvo id —
+    matches ``DatasetSpec.id`` / ``BronzeExtractSpec.dataset_id``
+    (the customer-facing bundle id). Value: BICC offering schema
+    name as it appears in ``/biacm/rest/meta/datastores``.
+
+    Tenant-dependent — use sparingly. The orchestrator's preflight
+    auto-discovers the correct schema for ~80% of mismatch cases via
+    a one-time ``/biacm/rest/meta/datastores`` probe; this field is
+    the escape hatch for the ambiguous case (PVO appears in multiple
+    BICC offerings on this tenant) and the operator-known
+    short-circuit (skip the probe entirely when the answer is
+    already in bundle.yaml).
+    """
+
 
 class AidpRefs(BaseModel):
     """AIDP-side targets for bronze/silver/gold tables."""
