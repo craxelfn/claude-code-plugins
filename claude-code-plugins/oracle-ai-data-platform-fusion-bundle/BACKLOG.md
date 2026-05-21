@@ -468,7 +468,29 @@ Today an autouse pytest fixture handles test isolation (see PLAN §4.9 "Test iso
 - Live evidence — once shipped, run the P1.5α-fix4 gate command against `fusion_bundle_dev`: `aidp-fusion-bundle run --inline --mode seed --layers gold` produces a RunSummary with only gold marts dispatched. That single live run closes both fix4 and fix13 simultaneously.
 **Cross-ref**: P1.5α-fix4 §"Remaining gate" (BACKLOG:299-300); P1.5α-fix12 (the typo-guard fix13 inherits); `cli.py:117`; `commands/run.py:40-97`; `orchestrator/__init__.py:102, 440`.
 
-### `[ ]` P1.5α-fix14 — `resolve_plan` rejects undeclared upstreams (post-α latent-correctness bug, 2026-05-17)
+### `[x]` P1.5α-fix14 — `resolve_plan` rejects undeclared upstreams (shipped 2026-05-21)
+
+**Done**:
+- ✅ `resolve_plan` at `orchestrator/__init__.py:207-262` now distinguishes (A) declared-but-filtered (legitimate `ExternalDep`, preserved) from (B) never-declared-at-all (rejected). For each consumer-upstream pair, if `dep_name not in all_specs`, the offender is collected to `undeclared_deps`; after the consumer loop, a single consolidated `MissingDependencyError` is raised listing every offender with per-line remediation:
+  ```
+  bundle.yaml is missing N upstream declaration(s) — refusing to run with
+  undeclared dependencies (which would silently rebuild from stale on-disk
+  tables or trigger a misleading PrerequisiteError):
+    • bronze 'ap_invoices' (required by 'ap_aging') — add it to bundle.datasets
+    • silver 'dim_supplier' (required by 'supplier_spend') — add it to bundle.dimensions.build
+  ```
+- ✅ 5 new `TestResolvePlan` unit tests in `tests/unit/test_orchestrator_run.py` covering all three undeclared-upstream call sites + case-A regression + multi-offender accumulation:
+  - `test_undeclared_bronze_upstream_raises_missing_dependency` — `GoldMartSpec.depends_on_bronze` call site
+  - `test_undeclared_silver_upstream_raises_missing_dependency` — `GoldMartSpec.depends_on_silver` call site (reviewer catch #1)
+  - `test_undeclared_bronze_upstream_for_silver_dim_raises_missing_dependency` — `SilverDimSpec.depends_on_bronze` call site (reviewer catch #2 — a future refactor could break this branch alone; without this test the regression would slip through)
+  - `test_declared_bronze_filtered_out_becomes_external_dep` — locks in case (A) preservation (the `--layers gold` `ExternalDep` path must NOT break)
+  - `test_multiple_undeclared_upstreams_accumulated_in_one_error` — accumulate-vs-fail-fast contract
+- ✅ Full unit suite green: 503 passed (was 498, +5 regression tests).
+
+**Cross-ref**: P1.5α-fix15 (depends on fix14 — shares the `all_specs` construction site) can now proceed against a clean upstream-declaration contract.
+
+**Original spec follows (preserved for the rationale + reviewer-flagged failure modes):**
+
 **Why**: `resolve_plan` treats every upstream not in `in_plan_names` as an `ExternalDep` to be preflighted on disk (`orchestrator/__init__.py:207-222`) — but `in_plan_names` is derived from `all_specs`, which only contains names declared in `bundle.{datasets, dimensions.build, gold.marts}`. The implementation conflates two scenarios:
 - **(A) Declared but filtered out**: operator declared the upstream in bundle.yaml, then excluded it for this run via `--datasets`/`--layers`. Legitimate `ExternalDep` — preflight against the on-disk Delta table is the correct contract (P1.5α-fix4's design intent at BACKLOG:271-273).
 - **(B) Never declared at all**: operator forgot to declare the upstream in bundle.yaml. Today this becomes an `ExternalDep` and silently passes preflight whenever a stale Delta table happens to exist on disk — gold rebuilds from undeclared, possibly-weeks-old bronze with **no warning**.
