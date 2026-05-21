@@ -115,10 +115,17 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "(P1.5β, not implemented today). The retired alias 'full' is now 'seed'."
 )
 @click.option("--datasets", default=None, help="Comma-separated dataset/dim/mart names to filter (default: all in bundle.yaml).")
+@click.option(
+    "--layers", default=None,
+    help="Comma-separated layer names to filter (bronze, silver, gold). "
+         "Mutually compatible with --datasets — both apply. "
+         "P1.5α-fix13: previously the orchestrator accepted layers= but the "
+         "CLI didn't surface it, so --inline --layers gold errored at Click parse.",
+)
 @click.option("--inline", is_flag=True,
               help="Run the orchestrator in-process (architectural primary — needs Spark + checkpointer + vault from an AIDP notebook session).")
 @click.pass_context
-def run(ctx: click.Context, mode: str, datasets: str | None, inline: bool) -> None:
+def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None, inline: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -127,6 +134,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, inline: bool) -> No
         env_name=ctx.obj["env_name"],
         mode=mode,
         datasets=datasets,
+        layers=layers,
         inline=inline,
         console=console,
     ))

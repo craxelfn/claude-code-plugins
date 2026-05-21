@@ -633,6 +633,212 @@ gold:
             f"declared bronze deps must not appear in the error; got {msg!r}"
         )
 
+    # ----------------------------------------------------------------------
+    # P1.5α-fix15 — honor DatasetSpec.enabled=false + disabled-specific
+    # wording on the consumer-upstream (fix14) AND filter-input (fix12) paths.
+    # All four tests use fully-explicit minimal YAML to suppress schema
+    # defaults that would otherwise inject undeclared upstreams and pollute
+    # the error-message assertions.
+    # ----------------------------------------------------------------------
+
+    def test_disabled_dataset_excluded_from_plan(self, tmp_path: Path) -> None:
+        """Happy path: a `enabled: false` dataset is absent from BOTH the
+        plan and extra_deps (locks the contract that disabled-without-
+        consumers does NOT silently become an ExternalDep).
+
+        Explicit empty `dimensions.build` and `gold.marts` suppress the
+        4-dim + 4-mart defaults — otherwise they'd inject undeclared
+        consumers and crash the test for unrelated reasons.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix15-happy-path-disabled-excluded
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: erp_suppliers
+  - id: ap_invoices
+    enabled: false
+dimensions:
+  build: []
+gold:
+  marts: []
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        plan, extra_deps = orchestrator.resolve_plan(
+            bundle, None, None, paths=paths,
+        )
+        plan_names = {s.dataset_id for s in plan}
+        assert plan_names == {"erp_suppliers"}, (
+            f"only enabled bronze must be in plan; got {plan_names}"
+        )
+        assert extra_deps == (), (
+            f"disabled-without-consumers must not become an ExternalDep; "
+            f"got extra_deps={extra_deps}"
+        )
+        # Defensive: disabled id absent from BOTH paths
+        assert not any(d.dataset_id == "ap_invoices" for d in extra_deps), (
+            "disabled bronze must NOT surface via extra_deps"
+        )
+
+    def test_disabled_dataset_with_gold_consumer_raises_disabled_specific_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Gold-consumer path — `_BUNDLE_SECTION[gold] = bundle.gold.marts`.
+
+        Asserts disabled-specific wording (set enabled: true; remove from
+        bundle.gold.marts) is emitted instead of the generic
+        "add to bundle.datasets" message (which would mislead the operator
+        into adding a duplicate entry — ap_invoices IS already declared,
+        just disabled).
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix15-gold-consumer-disabled-bronze
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: erp_suppliers
+  - id: ap_invoices
+    enabled: false
+dimensions:
+  build: [dim_supplier]
+gold:
+  marts: [supplier_spend]
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Names the disabled dep + the consumer
+        assert "ap_invoices" in msg
+        assert "supplier_spend" in msg
+        # Disabled-specific wording present
+        assert "disabled" in msg, (
+            f"error must contain 'disabled' for the disabled-state path; got {msg!r}"
+        )
+        assert "enabled: true" in msg, (
+            f"error must point at the `enabled: true` remediation; got {msg!r}"
+        )
+        # Correct consumer-layer section (gold → bundle.gold.marts)
+        assert "bundle.gold.marts" in msg, (
+            f"error must point at bundle.gold.marts for a gold consumer; got {msg!r}"
+        )
+        # NOT the misleading generic remediation (would send operator to add
+        # a duplicate entry, since ap_invoices IS already in bundle.datasets)
+        assert "add it to bundle.datasets" not in msg, (
+            f"disabled wording must NOT contain misleading "
+            f"'add it to bundle.datasets'; got {msg!r}"
+        )
+
+    def test_disabled_dataset_with_silver_consumer_raises_disabled_specific_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Silver-consumer path — `_BUNDLE_SECTION[silver] = bundle.dimensions.build`.
+
+        Without consumer_layer derivation in undeclared_deps, this test fails
+        because the wrong section would be named (bundle.gold.marts for a
+        silver consumer). Locks the contract that the wording uses the
+        consumer's layer, not a hardcoded mapping.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix15-silver-consumer-disabled-bronze
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: erp_suppliers
+    enabled: false
+dimensions:
+  build: [dim_supplier]
+gold:
+  marts: []
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(bundle, None, None, paths=paths)
+        msg = str(exc_info.value)
+        # Names the disabled bronze dep + the silver consumer
+        assert "erp_suppliers" in msg
+        assert "dim_supplier" in msg
+        # Disabled-specific wording
+        assert "disabled" in msg
+        assert "enabled: true" in msg
+        # CORRECT section: silver consumer → bundle.dimensions.build,
+        # NOT bundle.gold.marts (would dead-end the operator).
+        assert "bundle.dimensions.build" in msg, (
+            f"silver-consumer remediation must point at bundle.dimensions.build; "
+            f"got {msg!r}"
+        )
+        assert "bundle.gold.marts" not in msg, (
+            f"silver consumer must NOT be told to remove from bundle.gold.marts; "
+            f"got {msg!r}"
+        )
+
+    def test_datasets_filter_with_disabled_id_raises_disabled_specific_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Filter-input path — `--datasets ap_invoices` where ap_invoices is
+        disabled in bundle.datasets. fix12's generic message would say "not
+        in the bundle plan, edit bundle.yaml first" — but the entry IS in
+        the bundle.
+
+        Locks fix12's new branch that consults disabled_datasets BEFORE the
+        generic unknown-dataset error.
+        """
+        bundle_yaml = """
+apiVersion: aidp-fusion-bundle/v1
+project: fix15-filter-input-disabled
+fusion:
+  serviceUrl: https://x
+  username: u
+  password: literal-pw
+  externalStorage: oci://b@n/p
+datasets:
+  - id: ap_invoices
+    enabled: false
+dimensions:
+  build: []
+gold:
+  marts: []
+"""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
+        with pytest.raises(MissingDependencyError) as exc_info:
+            orchestrator.resolve_plan(
+                bundle, datasets=["ap_invoices"], layers=None, paths=paths,
+            )
+        msg = str(exc_info.value)
+        # Names the disabled filter-input id
+        assert "ap_invoices" in msg
+        # Disabled-specific wording present
+        assert "disabled" in msg, (
+            f"error must contain 'disabled' on the filter-input path; got {msg!r}"
+        )
+        assert "enabled: true" in msg, (
+            f"error must point at `enabled: true` remediation; got {msg!r}"
+        )
+        # Generic remediation must NOT be the ONLY message — would send the
+        # operator to "edit bundle.yaml" which they already did (it's disabled).
+        # We allow "not in the bundle plan" to appear if there's ALSO a truly-
+        # unknown name in the filter, but here there's only the disabled one.
+        assert "not in the bundle plan" not in msg, (
+            f"pure-disabled filter must NOT use the generic "
+            f"'not in the bundle plan' wording; got {msg!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # run() — dry_run + empty bundle + credential preflight ordering

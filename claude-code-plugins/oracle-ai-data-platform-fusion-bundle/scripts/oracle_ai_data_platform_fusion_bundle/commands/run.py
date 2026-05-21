@@ -44,6 +44,7 @@ def run(
     *,
     mode: str = "seed",
     datasets: str | None = None,
+    layers: str | None = None,
     inline: bool = False,
     console: Console | None = None,
 ) -> int:
@@ -52,6 +53,11 @@ def run(
     P1.5α-fix2: default mode is ``"seed"`` (was previously the retired
     ``"incremental"`` default — which would immediately exit 2 via the
     orchestrator's `NotImplementedError` guard, hostile UX).
+
+    P1.5α-fix13: ``layers`` is now accepted as a CLI flag. Parses CSV the
+    same shape as ``datasets`` and threads through to ``orchestrator.run``.
+    No new validation here — ``resolve_plan`` already handles unknown layer
+    names via ``MissingDependencyError`` (P1.5α-fix12).
     """
     console = console or Console()
 
@@ -86,14 +92,21 @@ def run(
         [s.strip() for s in datasets.split(",") if s.strip()]
         if datasets else None
     )
+    # P1.5α-fix13: same CSV-parse shape as `datasets`. Empty string after
+    # split → None (consistent with --datasets "" behavior). Typo validation
+    # lives in resolve_plan (P1.5α-fix12), NOT here.
+    layer_filter: list[str] | None = (
+        [s.strip() for s in layers.split(",") if s.strip()]
+        if layers else None
+    )
 
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
         # Pydantic validation, and that step needs the raw YAML text.
-        return _run_inline(bundle_path, mode, dataset_filter, console)
+        return _run_inline(bundle_path, mode, dataset_filter, layer_filter, console)
     return _run_via_aidp_dispatch(
-        bundle_path, config_path, env_name, dataset_filter, mode, console,
+        bundle_path, config_path, env_name, dataset_filter, layer_filter, mode, console,
     )
 
 
@@ -101,6 +114,7 @@ def _run_inline(
     bundle_path: Path,
     mode: str,
     datasets: list[str] | None,
+    layers: list[str] | None,
     console: Console,
 ) -> int:
     """Run the orchestrator in-process.
@@ -119,6 +133,7 @@ def _run_inline(
             bundle_path=bundle_path,
             mode=mode,
             datasets=datasets,
+            layers=layers,
         )
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
@@ -136,6 +151,7 @@ def _run_via_aidp_dispatch(
     config_path: Path,
     env_name: str,
     datasets: list[str] | None,
+    layers: list[str] | None,
     mode: str,
     console: Console,
 ) -> int:
@@ -146,6 +162,10 @@ def _run_via_aidp_dispatch(
     every step: create_job + jobRuns + poll + fetchOutput). The
     exit-2 message points operators at the available execution
     surfaces.
+
+    P1.5α-fix13: ``layers`` is plumbed through the signature even
+    though the body is stubbed today, so future P1.5ε wiring picks
+    up the filter without a second signature change.
     """
     console.print(
         f"[yellow]REST dispatch is not wired in P1.5α (tracked as BACKLOG P1.5ε).[/yellow]\n"
@@ -158,8 +178,10 @@ def _run_via_aidp_dispatch(
         f"  - From a laptop terminal via REST (BACKLOG P1.5ε — unblocked,\n"
         f"    empirically validated; client wrapper still to ship)."
     )
-    if datasets:
-        console.print(f"\nWould have run: mode={mode}, datasets={datasets}")
+    if datasets or layers:
+        console.print(
+            f"\nWould have run: mode={mode}, datasets={datasets}, layers={layers}"
+        )
     return 2
 
 

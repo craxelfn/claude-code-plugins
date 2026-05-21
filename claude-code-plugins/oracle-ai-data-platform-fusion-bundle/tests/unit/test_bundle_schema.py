@@ -89,6 +89,49 @@ class TestBundleSchema:
         bundle = Bundle.model_validate(data)
         assert bundle.aidp.storage_format == "delta"
 
+    def test_dataset_enabled_false_roundtrips_cleanly(self) -> None:
+        """P1.5α-fix15: `enabled: false` must parse cleanly AND survive a
+        re-serialize. The orchestrator honors this field at
+        ``resolve_plan`` (skipping the dataset from ``all_specs``); if the
+        schema silently dropped the field, the orchestrator would treat
+        the disabled dataset as enabled and the fix15 contract would
+        regress without anyone noticing.
+        """
+        data = {
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "project": "test-fix15-roundtrip",
+            "fusion": {
+                "serviceUrl": "https://x",
+                "username": "u",
+                "password": "p",
+                "externalStorage": "s",
+            },
+            "datasets": [
+                {"id": "ap_invoices", "enabled": False},
+                {"id": "erp_suppliers"},  # default: enabled=True
+            ],
+        }
+        bundle = Bundle.model_validate(data)
+        # Field parses to the expected values
+        assert len(bundle.datasets) == 2
+        ds_by_id = {d.id: d for d in bundle.datasets}
+        assert ds_by_id["ap_invoices"].enabled is False, (
+            "explicit `enabled: false` must be honored"
+        )
+        assert ds_by_id["erp_suppliers"].enabled is True, (
+            "default `enabled: True` must be applied when omitted"
+        )
+
+        # Round-trip: re-serialize + re-parse must preserve the field
+        dumped = bundle.model_dump(by_alias=True)
+        reparsed = Bundle.model_validate(dumped)
+        reparsed_by_id = {d.id: d for d in reparsed.datasets}
+        assert reparsed_by_id["ap_invoices"].enabled is False, (
+            "`enabled: false` must survive a re-serialize — if the schema "
+            "drops it silently, the orchestrator's fix15 honor-check at "
+            "resolve_plan stops working"
+        )
+
 
 class TestAidpConfigSchema:
     def test_example_parses(self) -> None:

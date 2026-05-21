@@ -224,6 +224,75 @@ class TestRun:
         # Whitespace trimmed; empty segments dropped
         assert mock_run.call_args.kwargs["datasets"] == ["ap_aging", "dim_supplier"]
 
+    # ----------------------------------------------------------------------
+    # P1.5α-fix13 — --layers Click option threaded through the CLI
+    # ----------------------------------------------------------------------
+
+    def test_run_inline_with_layers_filter_passes_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`run --inline --layers gold` reaches orchestrator.run with
+        layers=["gold"] and datasets=None. P1.5α-fix13.
+
+        Before fix13, Click rejected --layers at parse time with
+        "Error: No such option: --layers" — defeating the "CLI is the
+        contract" principle.
+        """
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import RunSummary
+        fake_summary = RunSummary.empty("minimal", "seed")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            return_value=fake_summary,
+        ) as mock_run:
+            result = CliRunner().invoke(
+                cli.main,
+                ["run", "--mode", "seed", "--inline", "--layers", "gold"],
+            )
+        assert result.exit_code == 0, (
+            f"expected exit 0, got {result.exit_code}: {result.output}"
+        )
+        assert mock_run.called
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["layers"] == ["gold"], (
+            f"--layers gold must parse to ['gold']; got {call_kwargs.get('layers')!r}"
+        )
+        assert call_kwargs["datasets"] is None, (
+            f"--datasets unspecified must remain None; got {call_kwargs.get('datasets')!r}"
+        )
+
+    def test_run_inline_with_layers_and_datasets_combined(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both filters are mutually compatible — the CLI help text says so.
+        ``--layers bronze --datasets ap_invoices`` → orchestrator.run gets
+        layers=['bronze'], datasets=['ap_invoices']. P1.5α-fix13.
+        """
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import RunSummary
+        fake_summary = RunSummary.empty("minimal", "seed")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
+            return_value=fake_summary,
+        ) as mock_run:
+            CliRunner().invoke(cli.main, [
+                "run", "--mode", "seed", "--inline",
+                "--layers", "bronze, silver",
+                "--datasets", "ap_invoices",
+            ])
+        # Both filters reach orchestrator.run; CSV whitespace trimmed
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["layers"] == ["bronze", "silver"]
+        assert call_kwargs["datasets"] == ["ap_invoices"]
+
     @pytest.mark.parametrize("exc_cls,msg_fragment", [
         ("BundleLoadError", "test bundle load failure"),
         ("UnsupportedModeError", "mode='full' is not supported"),
