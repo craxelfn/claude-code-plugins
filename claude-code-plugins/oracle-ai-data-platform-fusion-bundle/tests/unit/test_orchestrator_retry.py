@@ -227,3 +227,57 @@ class TestRunWithRetry:
         )
         assert result == "ok"
         assert sleep.call_args_list == [((0.001,),), ((0.001,),)]
+
+    def test_silver_gold_count_must_be_inside_retried_callable(self) -> None:
+        """Reviewer catch (fix17-20-skills PR): silver/gold's ``df.count()``
+        MUST be inside the ``run_with_retry`` callable, not after it.
+
+        Why: if ``builder()`` writes the table successfully but the subsequent
+        ``df.count()`` hits a transient (Spark executor lost, OCI Object
+        Storage 503 on the count's read path), the orchestrator would mark
+        the step ``failed`` and cascade/abort downstream — even though the
+        silver/gold table is already materialized correctly on disk.
+
+        Mirror the production closure: ``_do_silver_gold()`` runs ``builder``
+        then ``count`` and returns the count. The retry wrapper sees the
+        count failure and retries the WHOLE thing (build is CREATE OR REPLACE
+        under seed mode, so re-building is safe).
+        """
+        sleep = MagicMock()
+
+        # Track builder + count calls to verify the WHOLE closure retried.
+        builder_calls = []
+        count_calls = []
+
+        class _FakeDf:
+            def __init__(self, fail_count_once: bool) -> None:
+                self._fail_count_once = fail_count_once
+
+            def count(self) -> int:
+                count_calls.append(1)
+                if self._fail_count_once and len(count_calls) == 1:
+                    raise ConnectionResetError("transient count failure")
+                return 42
+
+        def fake_builder(spark, *, paths, run_id):
+            builder_calls.append(1)
+            # First call: builder + count(fails). Second call: builder + count(ok).
+            fail_first = len(builder_calls) == 1
+            return _FakeDf(fail_count_once=fail_first)
+
+        def _do_silver_gold() -> int:
+            # Mirrors the production closure in orchestrator/__init__.py
+            df = fake_builder(spark=None, paths=None, run_id="r1")
+            return df.count()
+
+        row_count = run_with_retry(
+            _do_silver_gold, dataset_id="dim_supplier",
+            backoff_base_s=0.001, backoff_factor=1.0,
+            sleep=sleep,
+        )
+        assert row_count == 42
+        # Both the builder AND the count must have been called twice — the
+        # retry RE-RAN the whole closure, not just the count.
+        assert len(builder_calls) == 2, "builder must be retried (closure retry, not just count)"
+        assert len(count_calls) == 2, "count must be retried"
+        assert sleep.call_count == 1, "exactly one backoff between the failed and successful attempt"

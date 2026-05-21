@@ -312,14 +312,24 @@ def _execute_node(
 
         if isinstance(node, (SilverDimSpec, GoldMartSpec)):
             from .retry import run_with_retry
+
             # B3: thread run_id for the silver_run_id/gold_run_id audit column.
-            df = run_with_retry(
-                lambda: node.builder(spark, paths=paths, run_id=run_id),
-                dataset_id=node.dataset_id,
-            )
+            # The builder writes the silver/gold table; the returned DataFrame
+            # points at it. We must include df.count() in the retried callable —
+            # a transient Spark/Object Storage failure during the count would
+            # otherwise mark the step failed + cascade/abort downstream even
+            # though the table was already materialized. (P1.5α-fix20-fix1
+            # reviewer catch.) Retrying the full (build → count) is safe because
+            # build() uses CREATE OR REPLACE seed semantics — re-running just
+            # rebuilds the same content.
+            def _do_silver_gold() -> int:
+                df = node.builder(spark, paths=paths, run_id=run_id)
+                return df.count()
+
+            row_count = run_with_retry(_do_silver_gold, dataset_id=node.dataset_id)
             return RunStep.success(
                 node, run_id, mode,
-                row_count=df.count(),
+                row_count=row_count,
                 duration_seconds=perf_counter() - t0,
             )
 

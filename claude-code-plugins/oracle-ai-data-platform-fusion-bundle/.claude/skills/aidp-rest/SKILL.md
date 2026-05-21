@@ -53,11 +53,13 @@ job_key = client.create_notebook_job(
 )
 run_key = client.submit_run(job_key)
 
-# 4. Poll to terminal state
-status, run = client.poll_run(run_key, timeout_s=2700, interval_s=20)
+# 4. Poll to terminal state — returns a RunResult dataclass with .status + .raw
+result = client.poll_run(run_key, timeout_s=2700, interval_s=20)
+if result.status != "SUCCESS":
+    handle_failure(result.raw)
 
 # 5. Fetch the executed notebook
-task_run_key = client.resolve_task_run_key(run, "main")
+task_run_key = client.resolve_task_run_key(result.raw, "main")
 executed_nb_json = client.fetch_output(task_run_key)
 
 # 6. Parse a stdout marker the notebook printed

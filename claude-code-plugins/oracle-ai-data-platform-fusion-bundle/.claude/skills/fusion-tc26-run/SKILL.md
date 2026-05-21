@@ -85,7 +85,13 @@ After a successful run, the operator can append a redacted section to `tests/liv
 
 ## Diagnostic when it fails
 
-If the orchestrator reports a `failed` step but `error_message` is empty (`AnalysisException()` problem), re-run with `--diagnose <dataset_id>` — the script injects a try/except wrapper that re-calls the failed extractor inline, captures the full `str(exc)` and traceback, and prints it. This is how we caught the `_watermark_used` schema-merge bug in commit `d9292f3`.
+If the orchestrator reports a `failed` step but `error_message` is empty (`AnalysisException()` / `Py4JJavaError()` repr-only problem — the orchestrator stores `repr(exc)` and some Java-side exceptions have empty reprs), the diagnostic technique is:
+
+1. Read the executed notebook saved at `/tmp/tc26-{scope}-{stamp}/run_tc26_{scope}.executed.ipynb`.
+2. For the failed dataset, hand-author a small follow-up notebook that re-calls `extractors.bicc.extract_pvo(...)` (or `node.builder(...)` for silver/gold) wrapped in `try/except`, walking the Py4J cause chain via `exc.java_exception.getMessage()` + `getStackTrace()`.
+3. Upload + dispatch that one-cell diagnostic with the same `AidpRestClient` primitives the main `dispatch.py` uses.
+
+This is how the `_watermark_used` schema-merge bug (commit `d9292f3`) and the `DATA_ACCESS_LAYER_0031 — Schema: SCM not found` bug (P1.5α-fix17 origin) were diagnosed. A `--diagnose <dataset_id>` flag that automates this would be useful — tracked as a follow-up but not yet implemented.
 
 ## Known follow-ups (not yet skill-encoded)
 
