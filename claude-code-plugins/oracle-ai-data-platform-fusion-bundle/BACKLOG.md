@@ -532,6 +532,135 @@ gold:
 - `test_bundle_schema.py` gets a round-trip test confirming `enabled: false` parses cleanly and the field survives a re-serialize.
 **Cross-ref**: reviewer-flagged dead-field bug at `orchestrator/__init__.py:118` + `schema/bundle.py:104`; P1.5α-fix14 (shares the `all_specs` construction site).
 
+### `[x]` P1.5α-fix17 — Preflight bronze-PVO schema probe (shipped 2026-05-21)
+**Why**: TC26 full happy-path burned 32 minutes of cluster compute + wrote 14.7M bronze rows before dying on PVO #10 with `DATA_ACCESS_LAYER_0031 - Schema: SCM not found`. The catalog declared `schema="SCM"` for `po_receipts` and `scm_items`; BICC on saasfademo1 only publishes a `"Financial"` offering. Same class of failure (catalog drift / tenant variance / BICC unreachable) will bite every customer on first-tenant adoption — and at 32min/run, the cost compounds fast across the discovery loop. Need a cheap fail-fast probe before the orchestrator commits to the real extract loop.
+
+**Done**:
+- ✅ New module `orchestrator/preflight.py` — iterates `plan` for every `BronzeExtractSpec`, calls `extract_pvo()` + `df.schema` (BICC's `inferSchema` metadata-only roundtrip, ~1-2s per PVO, no data transfer, no `saveAsTable`). Catches `BaseException` (Py4JJavaError inherits from it). Classifies failures via message inspection (`DATA_ACCESS_LAYER_0031` → "BICC offering schema not found on this tenant"; `401`/`Unauthorized` → credential rejection; `Connection refused`/`UnknownHost` → unreachable). Aggregates failures — operator gets ONE consolidated `BronzeSchemaProbeError` listing every offending PVO with classification + hint, not N separate exceptions.
+- ✅ New error class `errors.BronzeSchemaProbeError(OrchestratorConfigError)` — carries structured `.failures: list[dict]` for programmatic callers.
+- ✅ Hook into `orchestrator.run()` at new step 5.6, **after** credential preflight (3.5) + Spark bootstrap (4) + state-table ensure (5) + external-deps preflight (5.5), **before** the main `for node in plan: _execute_node(...)` loop. Failure → exit 2 with no Spark writes.
+- ✅ Re-exported `BronzeSchemaProbeError` at package level + `__all__`.
+- ✅ 8 unit tests in `tests/unit/test_orchestrator_preflight_bronze_schemas.py`: clean run, skips deferred/silver/gold, schema-not-found classified, credential failure classified, unreachable classified, aggregates all failures (not first-fail), preflight makes zero writes.
+
+**Live evidence**: TC26 narrow probe re-run after the fix lands cleanly on a polluted target table (catalog fix18 shipped together). Closing 21-step happy-path run pending re-dispatch.
+
+**Cross-ref**: surfaced live by `run_id=3f9b0648-181f-4549-952e-8a5b143d4d3b` (TC26 full happy-path, 2026-05-21). Same-session sibling fix18 (catalog SCM→Financial). Follow-up: fix19 (auto-discovery via BICC metadata + bundle-level `schemaOverrides`) — see below.
+
+### `[x]` P1.5α-fix18 — Catalog: `po_receipts` + `scm_items` schema "SCM" → "Financial" (shipped 2026-05-21)
+**Why**: Data fix — `schema/fusion_catalog.py` declared `schema="SCM"` for both PVOs based on AM-hierarchy heuristic (both live under `FscmTopModelAM.ScmExtractAM.*`). Live TC26 confirmed saasfademo1's BICC only publishes a `"Financial"` offering; the `ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO` PVO is correctly accessible under `schema="Financial"` (564,752 rows / 459 columns verified). Same for `EgpBiccExtractAM.ItemExtractPVO`.
+
+**Done**:
+- ✅ `_ITEM_EXTRACT.schema = "Financial"` (was `"SCM"`)
+- ✅ `_PO_RECEIPTS.schema = "Financial"` (was `"SCM"`)
+- ✅ Comments on both entries note the schema field is tenant-dependent (P2.22 detection-knob candidate; fix19 follow-up will auto-discover).
+
+**Cross-ref**: fix17 (preflight that surfaced this); fix19 (auto-discovery to remove the need for tenant-by-tenant catalog edits).
+
+### `[ ]` P1.5α-fix19 — Auto-discover BICC offering schema + bundle-level `schemaOverrides` (follow-up to fix17)
+**Why**: Today's flow forces every new customer to **edit the plugin's source** when their tenant's BICC offering structure diverges from the shipped catalog. That violates the CLAUDE.md doctrine — BICC offering schema names are *data-shape discovery*, not *tenant-declared policy*. Customers don't know upfront whether their tenant publishes `po_receipts` under `"Financial"`, `"SCM"`, or `"Supply Chain Management"` — it depends on BICC subscription packages. The plugin must auto-correct or, when it can't, give the customer an in-bundle override that doesn't require touching plugin source.
+
+The fix17 preflight already detects the failure mode cleanly and fails loud. fix19 turns "fail loud" into "self-correct (warn-once) OR escalate to an explicit override". Mirrors the existing detection pattern used by `dim_supplier`'s column-dialect probe (`KNOWN_*_ALIASES`) and matches CLAUDE.md's stated rule: *"Explicit `kwarg=` always wins over detection."*
+
+**Approach** (3-tier resolution, evaluated in order):
+
+1. **Catalog default** (fast path — what fix17 already tries first; no probe cost on the happy path).
+2. **Auto-discovery on `DATA_ACCESS_LAYER_0031`** — on schema-not-found, hit `/biacm/rest/meta/datastores` (the same endpoint `commands/catalog.py::probe` uses), collect all PVOs grouped by offering schema, and search for the catalog's `datastore` name across schemas.
+   - **Found in exactly one schema** → retry the inferSchema probe with that schema. On success: log a structured WARN (`"auto-corrected po_receipts: catalog=SCM → discovered=Financial"`), continue with the discovered schema for THIS run, and emit a one-line recommendation in the final RunSummary footer ("consider adding `schemaOverrides.po_receipts: Financial` to bundle.yaml to make this stable across runs").
+   - **Found in multiple schemas** → raise `BronzeSchemaProbeError` with the candidate list. Auto-pick is unsafe; customer must choose explicitly via override (tier 3).
+   - **Not found anywhere** → raise with hint ("PVO datastore not present on this tenant — catalog drift, PVO renamed, or BICC subscription doesn't include it").
+3. **Bundle-level escape hatch** — new optional field on `FusionConn`:
+   ```yaml
+   fusion:
+     serviceUrl: ...
+     username: ...
+     password: ...
+     externalStorage: ...
+     schemaOverrides:           # NEW, optional
+       po_receipts: Financial
+       scm_items: Financial
+   ```
+   Override always wins over both #1 and #2 (matches CLAUDE.md "explicit kwarg=" rule). Operator-known short-circuit; never triggers the discovery probe.
+
+**Why 3 tiers, not 2** (catalog + override): the auto-discovery tier is the load-bearing piece for portability. Without it, every new customer trips fix17 on first run and has to read the error message + figure out the right override. With it, ~80% of cases self-correct silently (auto-WARN + recommendation), and only the ambiguous "multiple schemas match" case requires customer action.
+
+**Size**: M
+- `orchestrator/preflight.py` grows ~80 LOC: on `DATA_ACCESS_LAYER_0031` catch, call new helper `discover_pvo_schema(bundle.fusion.service_url, bundle.fusion.username, password, pvo.datastore) → str | list[str] | None`. The helper hits `/biacm/rest/meta/datastores` (auth=basic; same shape as `commands/catalog.py::probe`), parses the response, returns the unique schema or candidate list or None.
+- `schema/bundle.py` grows ~5 LOC: new `FusionConn.schema_overrides: dict[str, str] = Field(default_factory=dict, alias="schemaOverrides")`.
+- `orchestrator/preflight.py` consults `bundle.fusion.schema_overrides.get(pvo.id, pvo.schema)` before the catalog default — override wins.
+- `commands/run.py` surfaces the WARN-once recommendation in the operator-facing summary.
+- Tests: per-tier unit tests (mock catalog + mock BICC response); end-to-end test that an override skips the probe entirely; live re-dispatch on saasfademo1 with `schemaOverrides` removed proves auto-discovery picks "Financial" cleanly.
+
+**Depends on**: P1.5α-fix17 (preflight infrastructure + failure classification).
+**Accept**:
+- New `FusionConn.schema_overrides` field with round-trip Pydantic test.
+- `preflight_bronze_schemas` consults overrides first, catalog second, auto-discovery third.
+- Schema-not-found with unique discovery → run succeeds, WARN logged, RunSummary footer carries the recommendation.
+- Schema-not-found with ambiguous discovery → `BronzeSchemaProbeError` listing all candidate schemas.
+- Schema-not-found with no discovery → `BronzeSchemaProbeError` with PVO-renamed/removed hint.
+- Override explicitly set → no discovery probe; override value used directly.
+- Live re-dispatch on saasfademo1 with catalog reverted to `schema="SCM"` + NO override → auto-discovery picks `"Financial"`, run lands cleanly with one WARN per offending PVO.
+
+**Cross-ref**: surfaced as follow-up during fix17/fix18 shipping (2026-05-21); doctrine ref CLAUDE.md "What varies per tenant — policy vs discovery" — schema name is canonically a discovery problem, not policy. P2.22 (deferred-knob backlog) becomes the documentation home for the discovery-vs-policy classification of new fields as they arise.
+
+### `[x]` P1.5α-fix20 — Per-step retry with exponential backoff on transient infra failures (shipped 2026-05-21)
+**Why**: TC26 full happy-path re-run (run_id=`da298a83`, 2026-05-21) succeeded on 5/21 steps then hit a transient `Py4JJavaError` at `gl_coa.saveAsTable` after extracting data successfully. Standalone diagnostic re-ran the same call and it succeeded (63,464 rows) — confirming the failure was transient (OCI Object Storage / Spark executor hiccup under load: 11 parallel BICC pulls churning ~14M rows + the 11M-row `gl_period_balances` write at the same time). With `maxRetries: 0`, the orchestrator cascade-aborted 11 downstream nodes and the operator would have to re-run a 25-minute pipeline from scratch. Same shape as today's bug will bite every customer on every tenant under load — and at 25min/iteration, it's the difference between "demo-grade" and "production-grade."
+
+**Done** (Tier 1+2 of the layered fault-tolerance design):
+- ✅ New module `orchestrator/retry.py`:
+  - `is_transient(exc) → bool` classifier. Inspects: Python exception type (`ConnectionResetError`, `ConnectionRefusedError`, `BrokenPipeError`, `TimeoutError`, etc.), `str(exc)` against transient-pattern list, Py4JJavaError nested `.java_exception.getMessage()` + class name. **Permanent patterns always win** over transient — a message with both "Connection reset" and "AccessDenied" classifies as permanent.
+  - `run_with_retry(fn, *, dataset_id, max_retries=3, backoff_base_s=10.0, backoff_factor=3.0, sleep=time.sleep)` helper. Exponential schedule: 10s → 30s → 90s (≤2.2min worst-case extra wall time). Injected `sleep` for testability. Returns `fn()`'s value on first success; re-raises on permanent OR after retries exhausted.
+- ✅ Transient pattern list: `Connection reset`, `Read timed out`, `503 Service Unavailable`, `ServiceUnavailable`, `SlowDown`, `RequestTimeout`, `Throttling`, `Temporarily unavailable`, `Executor lost`, `TaskKilled`, `Could not get block locations`, etc.
+- ✅ Permanent pattern list: `DATA_ACCESS_LAYER_0031` (schema not found — fix17 origin), `DELTA_FAILED_TO_MERGE_FIELDS` (fix16 origin), `401 Unauthorized`, `403 Forbidden`, `AccessDenied`, `NotAuthorizedOrNotFound`, `AnalysisException`, `MissingDependencyError`, `BundleVersionMismatchError`, `OutOfMemoryError`, etc.
+- ✅ Hook into `_execute_node`: bronze branch wraps `extract → enrich → saveAsTable → count` in `run_with_retry`. Silver/Gold branches wrap `node.builder(...)` similarly — `saveAsTable` is the most likely transient and ALL three layers do it.
+- ✅ 20 unit tests in `tests/unit/test_orchestrator_retry.py`: classifier coverage (Python builtins + Py4J nested traversal + permanent-wins-over-transient), retry-loop semantics (success first try, transient-then-success, permanent-no-retry, exhaust-retries, zero-retries, mixed transient-then-permanent, injectable backoff).
+
+**Behavior change**:
+- **Happy path**: zero overhead. Retry wrapper is a no-op when `fn()` succeeds on attempt 1.
+- **Transient hit**: one retry of `gl_coa` after 10s sleep, succeeds, run continues. Today's failure becomes a non-event.
+- **Permanent hit**: fails fast with NO retries (preserves fix17's preflight semantics + cascade contract).
+- **Persistent transient**: 4 attempts (1 + 3 retries) with 10s + 30s + 90s sleep → 2.2min worst-case extra time → fails with same `repr(exc)` as before. Cascade still triggers correctly.
+
+**Live evidence**: pending re-dispatch of TC26 full happy-path after fix20 ships. Expected: gl_coa-class transients become invisible to operators; only persistent failures (e.g., a 5-minute BICC outage) escape to the cascade path.
+
+**Cross-ref**: surfaced live by `run_id=da298a83-f9d5-4d94-bbb2-5c9f626cad0a` (TC26 full happy-path, 2026-05-21); fix17 (preflight that classifies permanent BICC config bugs — the retry classifier deliberately overlaps with fix17's permanent set). Follow-up: fix21 (Tier 3 + Tier 4 — resume from checkpoint + chaos test).
+
+### `[ ]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20)
+**Why**: fix20's retry handles transient hiccups that resolve in seconds (2.2min worst case). It does NOT help when:
+- Retries exhaust on a genuinely flaky upstream (e.g. a 5-minute BICC outage that exceeds 130s of cumulative backoff).
+- The customer Ctrl-Cs a run halfway through, or the cluster auto-terminates after `autoTerminationMinutes`.
+- A permanent config bug (caught by fix17 preflight OR fix20's permanent classifier) fails the run after 9 successful bronze pulls — the operator has to re-run those 9 pulls from scratch.
+
+For a 25-minute pipeline with ~14M row-writes in flight, "re-run from scratch" is a real customer-facing reliability problem. fix21 solves it.
+
+**Approach** (Tier 3 + Tier 4 of the layered fault-tolerance design):
+
+**Tier 3 — Resume from checkpoint** (M, ~200 LOC + new CLI flag):
+- New `aidp-fusion-bundle run --resume <run_id>` flag.
+- At orchestrator start, if `--resume` is set: query `fusion_bundle_state` for that run_id. Build a `resumed_from` set of (`dataset_id`) where `status='success'`. Skip those nodes in the dispatch loop — their bronze/silver/gold tables already have the right rows on disk, no re-fetch needed.
+- Re-attempt nodes with `status='failed'` / `'skipped'` (cascade) / `'skipped'` (aborted). NEW state-table rows are written WITH THE ORIGINAL `run_id` — the row count for any successful resumed step UPSERTs the prior row's metadata.
+- `--resume` semantics: skip-by-state, NOT skip-by-existence. A customer who manually dropped `fusion_catalog.bronze.gl_coa` between runs gets it re-extracted; the state table is the source of truth.
+- Edge cases: resuming a run whose bundle has since changed (different datasets, different schema) must raise a clear error rather than silently mixing schemas. Probably enforced by hashing the bundle's resolved plan into the state-table.
+
+**Tier 4 — Chaos test the retry classifier** (S, ~80 LOC):
+- New `tests/integration/test_retry_chaos.py` (or unit-level if we can stub the cluster).
+- Injects randomized transient + permanent failures into N% of saveAsTable / extract calls via monkeypatch.
+- Asserts: transient → retried → eventual success; permanent → not retried → fast failure; cascade still fires when all retries exhausted; state-table rows are consistent.
+- Without this, fix20's classifier is a list of patterns that might rot — the chaos test pins down the contract empirically.
+
+**Size**: M+S = ~half a day's work, deserves its own PR (Tier 3 alone is bigger than fix17+fix18+fix20 combined).
+
+**Depends on**: P1.5α-fix20 (transient classifier provides the permanent/transient distinction that resume needs to know whether to retry-or-resume-or-bail).
+
+**Accept**:
+- `--resume <run_id>` skips `status='success'` nodes; re-attempts the rest.
+- Bundle-drift between resume runs raises a clear `ResumeBundleMismatchError`.
+- State-table row count after resume equals what a clean run would have produced (verified end-to-end on saasfademo1).
+- Chaos test injects ≥5% failure rate across N=100 simulated runs; assertions hold for transient/permanent/cascade contracts.
+- Live evidence (TC27 or extension to TC26 doc): a deliberate kill-mid-run + `--resume` produces a complete pipeline in (resume time) ≪ (clean run time).
+
+**Cross-ref**: fix20 (the retry classifier this builds on); TC26 cost data (25min/run + ~14M row writes lost on transient = strong motivation for resume).
+
+
 ### `[ ]` P1.5δ — Claude-Code-driven MCP dispatch slash command — **reassess after P1.5ε**
 **Status note (2026-05-15)**: Original justification was that surface #3 (laptop terminal → REST) was blocked upstream, leaving MCP as the only way for Claude Code users to dispatch. That premise broke when the `aiwap` REST API shipped 2026-04-30 (see P1.5ε). Once P1.5ε lands and TC28 confirms OCI signing works, Claude Code users can just shell out to `aidp-fusion-bundle run --mode seed` — no slash command, no MCP, no second dispatch path to maintain. **Decision deferred**: keep this entry alive but do not start work. After P1.5ε ships, choose one of: (a) **cancel** P1.5δ if REST works cleanly for Claude Code users with `~/.oci/config` set up; (b) **keep** P1.5δ if REST's auth-setup friction or batch-only semantics (no live kernel for interactive bundle debugging) make it the wrong fit for Claude-Code-driven exploration. Default expectation today: lean toward cancellation — REST is the cleaner primitive and one dispatch path beats two.
 

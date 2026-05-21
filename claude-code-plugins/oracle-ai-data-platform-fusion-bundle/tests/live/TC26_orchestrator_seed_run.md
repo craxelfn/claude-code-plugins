@@ -327,3 +327,81 @@ Both fixes shipped in the same session as commit `d9292f3` (P1.5α-fix16).
 - Commit shipping both fixes: `d9292f3` — `orchestrator: P1.5α-fix16 — extractors submodule import + seed-mode overwriteSchema`
 - Prior live TCs reproduced through the orchestrator: TC8 (supplier_spend), TC8b (dim_supplier 209 rows), TC23 (gl_balance pattern), TC24 (ap_aging pattern), TC26 BICC-bypass (dim_calendar 4018 rows — exact match in this run)
 - Unit suite: 498 passed (was 496, +2 regression tests)
+
+---
+
+## Live evidence — TC26 FULL happy path (2026-05-21)
+
+**Setup**:
+- `run_id`: `3f9b0648-181f-4549-952e-8a5b143d4d3b`
+- `bundle.project`: `tc26-full-happy-path`
+- `bundle.version`: `0.2.0`
+- Bundle mirrors `examples/full_finance.yaml` — 11 datasets, 5 dimensions, 5 gold marts (21 plan nodes total)
+- Same tenant, cluster, BICC creds, external-storage profile as the narrow probe earlier this session
+- Total wall time: **32 minutes** (1932s; orchestrator-reported 1842s)
+
+**Why this run is the closing TC26 evidence**: the 2026-05-17 BICC-bypass run validated REST dispatch + state-table contracts on a 1-step plan. The 2026-05-21 narrow probe validated bronze→silver→gold cascade on 5 nodes. **This run validates the orchestrator on the actual production-shaped 21-node DAG** including the 10M-row `gl_period_balances` mart that was the original §8 acceptance gate.
+
+### Per-step table
+
+```
+run_id=3f9b0648-181f-4549-952e-8a5b143d4d3b
+steps: 10 ok, 1 failed, 6 skipped, 4 deferred (1842.3s reported / 1932.6s wall)
+
+  bronze  gl_journal_lines          success                 rows=     89108  dur=66.37s
+  bronze  gl_period_balances        success                 rows=  11211211  dur=1040.57s
+  bronze  gl_coa                    success                 rows=     63464  dur=52.74s
+  bronze  erp_suppliers             success                 rows=       209  dur=62.86s
+  bronze  ar_invoices               success                 rows=    187970  dur=95.57s
+  bronze  ar_receipts               success                 rows=     64007  dur=60.59s
+  bronze  ap_invoices               success                 rows=     49552  dur=94.29s
+  bronze  ap_payments               success                 rows=   3476916  dur=292.83s
+  bronze  po_orders                 success                 rows=     16769  dur=53.53s
+  bronze  po_receipts               failed                  rows=         -  dur=0.57s   err=Py4JJavaError("An error occurred while calling o577.load")
+  bronze  scm_items                 skipped    [aborted]    rows=         -  dur=0.00s
+
+  silver  dim_calendar              success                 rows=      4018  dur=22.33s
+  silver  dim_account               skipped    [aborted]    rows=         -  dur=0.00s
+  silver  dim_supplier              skipped    [aborted]    rows=         -  dur=0.00s
+  silver  dim_org                   deferred                rows=         -  dur=0.00s   # P1.7
+  silver  dim_item                  deferred                rows=         -  dur=0.00s   # P1.6
+
+  gold    gl_balance                skipped    [aborted]    rows=         -  dur=0.00s
+  gold    supplier_spend            skipped    [aborted]    rows=         -  dur=0.00s
+  gold    ap_aging                  skipped    [aborted]    rows=         -  dur=0.00s
+  gold    ar_aging                  deferred                rows=         -  dur=0.00s   # P1.10
+  gold    po_backlog                deferred                rows=         -  dur=0.00s   # P1.11
+```
+
+### Contracts validated by this run (cumulative with prior sections)
+
+| Contract | Validated by |
+|---|---|
+| **Orchestrator handles a 21-node DAG end-to-end** | All 21 plan nodes landed exactly one row in `fusion_bundle_state` |
+| **BICC extract scales to 10M+ rows** (`gl_period_balances`) | 11,211,211 rows in 1040s — confirms TC23's 10.18M-row number reproducibly through the orchestrator |
+| BICC extract scales to mid-millions (`ap_payments`) | 3,476,916 rows in 292s |
+| `KNOWN_DEFERRED_*` resolves cleanly to `status='deferred'` instead of crashing | 4 deferred rows: `dim_org`, `dim_item` (silver); `ar_aging`, `po_backlog` (gold) |
+| §4.7 strict-abort contract — first failure halts everything not yet attempted | 6 `skipped[aborted]` rows after `po_receipts` failed: `scm_items`, `dim_account`, `dim_supplier`, `gl_balance`, `supplier_spend`, `ap_aging`. **Note**: all 6 are `aborted`, none are `cascade` — correct, because `po_receipts` is a bronze leaf with no downstream `silver`/`gold` mart in this DAG that depends specifically on it. |
+| Seed-mode overwriteSchema fix (P1.5α-fix16) holds at scale | 14.7M rows written across `gl_period_balances` + `ap_payments` on tables that already existed from the narrow probe — no Delta schema-merge errors |
+| Audit columns at gigabyte scale | `_extract_ts` / `_source_pvo` / `_run_id` / `_watermark_used` populated on all 9 successful bronze tables (verified via state-table query — every successful bronze row carries `_run_id = 3f9b0648-...`) |
+
+### Failures + gotchas surfaced
+
+**`po_receipts` BICC pull broke at JVM `.load()` time** (0.57s, before any data transferred):
+```
+Py4JJavaError("An error occurred while calling o577.load.\n", JavaObject id=o578)
+```
+Different failure class from the orchestrator-fix bugs caught earlier in the session — this is BICC-server-side or PVO-schema-related, not orchestrator logic. Further investigation tracked under a follow-up; the orchestrator's strict-abort contract correctly halted the run without partial writes downstream of the failure.
+
+**AIDP runtime `display_data` strips `json.dumps()` escapes.** The `AIDP_LIVE_TEST_RESULT_BEGIN ... END` stdout-marker payload contained an `error_message` field whose value was the `Py4JJavaError(...)` repr, which itself contains literal `"` chars. `json.dumps()` properly escapes those as `\"` — but when the AIDP notebook runtime stored the print() output as `output_type=display_data` with `data["text/plain"]`, the JSON escapes were stripped, producing un-parseable JSON in the marker. The narrow probe didn't hit this because no failure → no embedded `"` in any error_message. **Workaround**: parse the formatted per-step print lines (used here) or query `fusion_bundle_state` directly. **Future fix candidate**: base64-encode the marker payload so display_data formatting can't corrupt it. Tracked as a follow-up against the orchestrator notebook helpers.
+
+### What's NOT validated by this run
+
+- **A FULLY-clean 21-step happy path** (no failures, no aborts) — pending fix or workaround for the `po_receipts` PVO issue. Closing this is the next live-evidence milestone.
+- **Non-`saasfademo1` tenant** — same blocker as P3.7/P3.9.
+- **Incremental mode** — Phase β follow-up.
+
+### Cross-references
+
+- Skills shipped alongside (next commit): `.claude/skills/aidp-rest/` (REST primitives) + `.claude/skills/fusion-tc26-run/` (TC26 dispatcher) — captures this run's tribal knowledge for next-time reuse.
+- PR shipping the underlying orchestrator fixes: craxelfn/claude-code-plugins#3
