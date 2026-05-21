@@ -234,3 +234,96 @@ This is the kind of bug that only live evidence surfaces. The plan was right —
 
 - Commits: `9e15d79` (P0) → `c6f4ace` (Phase 2) → `f113fb2` (Phase 3) → `2df8cc3` (Phase 4) → `7f57d38` (Phase 5)
 - Prior live TCs: TC23 (gl_balance 10.18M rows), TC24 (ap_aging 132 rows), TC8 (supplier_spend) — TC26 reproduces these numbers through the orchestrator instead of by-hand `build()` calls.
+
+---
+
+## Live evidence — TC26 narrow probe with refreshed creds (2026-05-21)
+
+**Setup**:
+- `run_id`: `80974e23-89ac-4ec0-839f-5306213625f8`
+- `captured_at`: 2026-05-21T00:11:55Z
+- `cluster`: `fusion_bundle_dev` (key `<CLUSTER_KEY>`), ACTIVE
+- `workspace`: `playground` (key `<WORKSPACE_KEY>`), `<AIDP_INSTANCE>` AIDP instance
+- `jobKey`: `<JOB_KEY>`
+- `jobRunKey`: `<JOB_RUN_KEY>`
+- `taskRunKey`: `<TASK_RUN_KEY>`
+- `bundle.version`: `0.2.0`
+- `bundle.project`: `tc26-probe-orchestrator-end-to-end`
+- BICC user: `natalie.salesrep` (Casey.Brown rotated; password resolved at runtime via `aidputils.secrets.get(name="fusion_bicc_password", key="password")`)
+- BICC external storage profile: `fusion_bicc_external_storage_natalie`
+- Total wall time: 155.1 seconds (cluster warm)
+
+**Dispatch path**: REST job-submission via OCI signed requests (the P1.5ε surface — same primitives confirmed in the 2026-05-17 BICC-bypass run; reused as-is for this real-bronze run).
+
+**Scope**: narrow DAG that exercises full bronze→silver→gold cascade without burning the 10M-row `gl_period_balances` pull — 2 BICC pulls (`erp_suppliers`, `ap_invoices`), 2 silver dims (`dim_supplier`, `dim_calendar`), 1 gold mart (`supplier_spend`). Same `orchestrator.run()` code path as `examples/full_finance.yaml`.
+
+```
+--- Cell 2: per-step table (orchestrator.run output) ---
+=== RunSummary ===
+run_id=80974e23-89ac-4ec0-839f-5306213625f8
+project=tc26-probe-orchestrator-end-to-end, mode=seed
+success=5 failed=0 skipped=0 deferred=0 dur=155.1s
+  bronze  erp_suppliers              success     rows=209     dur=60.35s
+  bronze  ap_invoices                success     rows=49552   dur=66.43s
+  silver  dim_calendar               success     rows=4018    dur=8.29s
+  silver  dim_supplier               success     rows=209     dur=9.94s
+  gold    supplier_spend             success     rows=309     dur=10.08s
+
+--- Cell 3: fusion_bundle_state latest-per-dataset for this run_id ---
++--------------+------+----+-------+---------+-----------+-----------------+
+|dataset_id    |layer |mode|status |row_count|skip_reason|duration_seconds |
++--------------+------+----+-------+---------+-----------+-----------------+
+|ap_invoices   |bronze|seed|success|49552    |NULL       |66.43            |
+|erp_suppliers |bronze|seed|success|209      |NULL       |60.35            |
+|dim_calendar  |silver|seed|success|4018     |NULL       |8.29             |
+|dim_supplier  |silver|seed|success|209      |NULL       |9.94             |
+|supplier_spend|gold  |seed|success|309      |NULL       |10.08            |
++--------------+------+----+-------+---------+-----------+-----------------+
+
+--- Cell 3: silver_run_id audit column on dim_supplier ---
+silver_run_id=80974e23-89ac-4ec0-839f-5306213625f8 (3/3 sampled rows match)
+
+--- Cell 3: gold_run_id audit column on supplier_spend ---
+gold_run_id=80974e23-89ac-4ec0-839f-5306213625f8 (3/3 sampled rows match)
+
+--- Cell 2: AIDP_LIVE_TEST_RESULT_* marker ---
+AIDP_LIVE_TEST_RESULT_BEGIN {"tc":"TC26-probe","run_id":"80974e23-89ac-4ec0-839f-5306213625f8","bundle_project":"tc26-probe-orchestrator-end-to-end","mode":"seed","succeeded":5,"failed":0,"skipped":0,"deferred":0,"total_duration_seconds":155.089,"steps":[...]} AIDP_LIVE_TEST_RESULT_END
+```
+
+### Contracts validated by this run (additive to the 2026-05-17 bypass run)
+
+| Contract | Validated by |
+|---|---|
+| **End-to-end bronze→silver→gold against real BICC** | All 5 steps `success`; row counts match prior TC8b/TC23/TC24 patterns |
+| `extractors.bicc.extract_pvo()` → real BICC pull (not mocked) | 60.3s + 66.4s wall times against `fa-eseb-test-saasfademo1.ds-fa.oraclepdemos.com` |
+| `enrich_bronze_audit_cols` populates the 4 mandatory bronze audit columns | bronze tables landed; no Delta merge errors on `_extract_ts` / `_source_pvo` / `_run_id` / `_watermark_used` |
+| `dim_supplier.build()` against real `bronze.erp_suppliers` | silver row_count=209 matches bronze row_count |
+| `dim_calendar.build()` deterministic | row_count=4018 matches 2026-05-17 bypass run exactly |
+| `supplier_spend.build()` cross-bronze join (ap_invoices × erp_suppliers) | gold row_count=309 (subset of ap_invoices.vendor_ids that match erp_suppliers) |
+| Credential resolution via AIDP credential store at runtime | Notebook calls `aidputils.secrets.get(name="fusion_bicc_password", key="password")` as the runtime-injected global; `${FUSION_BICC_PASSWORD}` rendered eagerly by `schema/refs.py::render_vars` before `load_bundle()` |
+| **SOX-trail audit columns end-to-end** | Both `silver_run_id` and `gold_run_id` join cleanly to `fusion_bundle_state.run_id` |
+
+### Real bugs surfaced + fixed during this session
+
+**Bug 1 — `extractors.bicc` submodule never imported.** `orchestrator/__init__.py:275` calls `extractors.bicc.extract_pvo(...)` via dotted attribute access, but `extractors/__init__.py` never re-exported the submodule. First live bronze step failed in 34 µs with `AttributeError("module ...extractors has no attribute bicc")`. Unit tests miss this because `mock.patch("...extractors.bicc.extract_pvo")` does `import a.b.c` to resolve the patch target — implicitly importing the submodule as a side effect.
+
+**Fix**: explicit `from . import bicc, rest, saas_batch_rest` in `extractors/__init__.py` + subprocess-based regression test (`tests/unit/test_extractors_package.py`) that runs in a fresh interpreter to defeat mock side-effects.
+
+**Bug 2 — Seed-mode bronze write missing `overwriteSchema=true`.** Per CLAUDE.md medallion invariant *"CREATE OR REPLACE TABLE is for seed mode only"*, but the write was `df.write.format("delta").mode("overwrite").saveAsTable(target)` — Delta's default is to preserve schema and merge data. On a re-run with stale `_watermark_used` metadata from an earlier half-completed attempt, Delta threw `[DELTA_FAILED_TO_MERGE_FIELDS] Failed to merge fields "_watermark_used" and "_watermark_used"`. Unit tests miss this because no test exercises a seed re-run against a pre-existing target with divergent schema.
+
+**Fix**: `.option("overwriteSchema", "true")` on the seed-mode write + static-source regression test (`tests/unit/test_orchestrator_seed_overwrite_schema.py`) that enforces the CLAUDE.md invariant.
+
+Both fixes shipped in the same session as commit `d9292f3` (P1.5α-fix16).
+
+### What's NOT validated by this run
+
+- **Cascade + abort-remaining contracts in seed mode** — validated in the BICC-bypass + extractors-bug runs earlier in this session (cascade `cascade` vs `aborted` discrimination both surfaced live with `run_id=1095b5b3` and `run_id=3881332f`). Not exercised in the final happy-path run because everything succeeded.
+- **`--mode incremental`** — Phase β follow-up; current modules emit `CREATE OR REPLACE` only.
+- **Full 14-step `examples/full_finance.yaml`** — narrow scope by design; the 10M-row `gl_period_balances` pull would burn ~10 min on the demo pod with no incremental value over the smaller cross-mart probe.
+- **Non-`saasfademo1` tenant** — same blocker as P3.7/P3.9. Plugin-portability claim still needs a second live tenant.
+
+### Cross-references
+
+- Commit shipping both fixes: `d9292f3` — `orchestrator: P1.5α-fix16 — extractors submodule import + seed-mode overwriteSchema`
+- Prior live TCs reproduced through the orchestrator: TC8 (supplier_spend), TC8b (dim_supplier 209 rows), TC23 (gl_balance pattern), TC24 (ap_aging pattern), TC26 BICC-bypass (dim_calendar 4018 rows — exact match in this run)
+- Unit suite: 498 passed (was 496, +2 regression tests)

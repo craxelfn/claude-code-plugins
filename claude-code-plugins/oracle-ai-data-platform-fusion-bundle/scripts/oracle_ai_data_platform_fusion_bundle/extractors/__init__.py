@@ -14,3 +14,7 @@ The orchestrator's router (``orchestrator.routing``) chooses among them per
 the rule from pdf2's conclusion: BICC for ≥10k rows / day; saas-batch for
 hourly or fine-grained pulls; REST for small reference dimensions only.
 """
+
+from . import bicc, rest, saas_batch_rest
+
+__all__ = ["bicc", "rest", "saas_batch_rest"]

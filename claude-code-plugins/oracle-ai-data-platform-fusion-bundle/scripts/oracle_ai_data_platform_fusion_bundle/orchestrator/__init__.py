@@ -286,7 +286,11 @@ def _execute_node(
                 run_id=run_id,
                 watermark=None,  # Phase β fills this for incremental
             )
-            df.write.format("delta").mode("overwrite").saveAsTable(target)
+            # overwriteSchema=true matches CLAUDE.md's "CREATE OR REPLACE for
+            # seed mode" invariant — lets a re-run converge even when the prior
+            # table has stale audit-column metadata (caught by TC26 live probe
+            # with run_id=023482f5: Delta merged _watermark_used into itself).
+            df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
             # Count the materialized table, not the BICC plan (would re-extract).
             row_count = spark.table(target).count()
             return RunStep.success(
