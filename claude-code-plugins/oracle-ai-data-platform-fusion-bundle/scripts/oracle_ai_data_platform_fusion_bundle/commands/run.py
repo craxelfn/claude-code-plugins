@@ -34,6 +34,8 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from ..schema.refs import render_tree
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,32 +186,23 @@ def _run_via_aidp_dispatch(
 ) -> int:
     """Submit the bundle to AIDP via the REST job API.
 
-    Today this is a stub — BACKLOG P1.5ε wires it to
-    `dispatch/aidp_rest.py` (the empirical probe already validated
-    every step: create_job + jobRuns + poll + fetchOutput). The
-    exit-2 message points operators at the available execution
-    surfaces.
-
-    P1.5α-fix13: ``layers`` is plumbed through the signature even
-    though the body is stubbed today, so future P1.5ε wiring picks
-    up the filter without a second signature change.
+    P1.5ε wiring (2026-05-23): delegates to
+    :func:`oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_run`,
+    which owns the seven-phase laptop-side flow (resolve coords →
+    auto-start cluster → build wheel → upload notebook → create job →
+    poll → fetch + render marker). Returns its exit code unchanged.
     """
-    console.print(
-        f"[yellow]REST dispatch is not wired in P1.5α (tracked as BACKLOG P1.5ε).[/yellow]\n"
-        f"\n"
-        f"Three ways to run the orchestrator today:\n"
-        f"  - In an AIDP notebook session:\n"
-        f"      [cyan]aidp-fusion-bundle run --inline --mode {mode}[/cyan]\n"
-        f"  - Via Claude Code MCP (BACKLOG P1.5δ — may be cancelled after P1.5ε):\n"
-        f"      [cyan]/aidp-fusion-bundle run[/cyan]\n"
-        f"  - From a laptop terminal via REST (BACKLOG P1.5ε — unblocked,\n"
-        f"    empirically validated; client wrapper still to ship)."
+    from ..dispatch import dispatch_run
+
+    return dispatch_run(
+        bundle_path=bundle_path,
+        config_path=config_path,
+        env_name=env_name,
+        mode=mode,
+        datasets=datasets,
+        layers=layers,
+        console=console,
     )
-    if datasets or layers:
-        console.print(
-            f"\nWould have run: mode={mode}, datasets={datasets}, layers={layers}"
-        )
-    return 2
 
 
 def _render_summary(console: Console, summary) -> None:
@@ -336,7 +329,7 @@ def status(
     if not bundle_path.exists():
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
-    bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+    bundle = render_tree(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
     from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
     paths = TablePaths.from_bundle(bundle)
     state_table = paths.bronze("fusion_bundle_state")

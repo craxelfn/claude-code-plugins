@@ -15,9 +15,15 @@ import sys
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
 
 from . import __version__
+
+# Auto-load .env from the user's current working directory so placeholders
+# like ${FUSION_BICC_BASE_URL} in bundle.yaml resolve without needing
+# `set -a; source .env; set +a` before every run.
+load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
 
 console = Console()
 
@@ -147,6 +153,32 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         layers=layers,
         inline=inline,
         resume_run_id=resume_run_id,
+        console=console,
+    ))
+
+
+@main.command("fetch-result")
+@click.option(
+    "--run-key", required=True,
+    help="JobRun UUID returned by a previous `aidp-fusion-bundle run`."
+)
+@click.pass_context
+def fetch_result_cmd(ctx: click.Context, run_key: str) -> None:
+    """Fetch + render the result of a previously-dispatched run.
+
+    Use this when `run --mode seed` exited early (long-running job,
+    laptop poll timeout, or OCI session expired mid-poll). Reads the
+    same bundle.yaml / aidp.config.yaml to find the workspace, then
+    pulls the executed notebook and prints the per-step table — no
+    re-dispatch, no wheel rebuild.
+    """
+    from .dispatch import fetch_result
+
+    sys.exit(fetch_result(
+        bundle_path=ctx.obj["bundle_path"],
+        config_path=ctx.obj["config_path"],
+        env_name=ctx.obj["env_name"],
+        run_key=run_key,
         console=console,
     ))
 
