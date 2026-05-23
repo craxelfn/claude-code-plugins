@@ -80,6 +80,37 @@ After step 7, restart your AI client and ask "what's our AR aging?" — OAC MCP 
 
 ---
 
+## Resuming an interrupted run (`--resume`)
+
+A 25-minute pipeline can hit a transient BICC outage, a cluster auto-termination, or an operator Ctrl-C halfway through. Re-running from scratch eats ~14M row-writes and ~25 minutes of cluster time. `--resume` solves this — re-attempting only the failed/skipped steps under the original `run_id`.
+
+```bash
+# After an interrupted run, find the run_id you want to resume:
+aidp-fusion-bundle status      # surfaces the latest fusion_bundle_state per dataset_id
+
+# Resume by run_id (must run with --inline; REST dispatch wiring is P1.5ε scope):
+aidp-fusion-bundle run --inline --mode seed --resume <run_id>
+```
+
+What happens on resume:
+
+- The orchestrator reads `fusion_bundle_state` for `<run_id>`. Datasets whose latest terminal status is `success` or `resumed_skipped` carry forward without re-dispatch.
+- All other datasets re-attempt under the **original `run_id`**, preserving the medallion `<layer>_run_id` audit invariant (one logical pipeline = one `run_id` across the resumed history).
+- `preflight_bronze_schemas` only probes un-succeeded bronze nodes — already-succeeded schemas are pulled from the stored `plan_snapshot`.
+- A drift gate compares the current plan + execution identity (Fusion pod URL, BICC storage, Fusion username, AIDP target paths, plugin version) against the stored hash. Any change raises `ResumeBundleMismatchError` pre-dispatch with the diff rendered: identity changes first, dataset changes second, hash echo last.
+
+The state table becomes append-only on resumed runs — multiple rows per `(run_id, dataset_id)` are expected (failed attempt + carry-forward + eventual success). **Always read from the `fusion_bundle_state_latest` Delta VIEW** (created automatically by `ensure_state_table`), which projects one row per `(run_id, dataset_id)` via `ROW_NUMBER() OVER (PARTITION BY run_id, dataset_id ORDER BY last_run_at DESC)`. See `LIMITS.md` §L-Resume for the full consumer-side contract.
+
+If a `--resume` raises one of:
+
+- `ResumeRunNotFoundError` — typo in run_id, or the state table was truncated.
+- `ResumeRunNotResumableError` — the run predates fix21 (`plan_hash IS NULL`) or was written by a partially-migrated build (`plan_snapshot IS NULL`). The remediation is to re-run from scratch.
+- `ResumeBundleMismatchError` — bundle drift. The error message names which identity field or dataset diverged.
+
+…the CLI exits with code 2 and no traceback (all three classes subclass `OrchestratorConfigError`).
+
+---
+
 ## Architecture
 
 ```

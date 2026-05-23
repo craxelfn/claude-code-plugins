@@ -720,7 +720,24 @@ The fix17 preflight already detects the failure mode cleanly and fails loud. fix
 
 **Cross-ref**: surfaced live by `run_id=da298a83-f9d5-4d94-bbb2-5c9f626cad0a` (TC26 full happy-path, 2026-05-21); fix17 (preflight that classifies permanent BICC config bugs — the retry classifier deliberately overlaps with fix17's permanent set). Follow-up: fix21 (Tier 3 + Tier 4 — resume from checkpoint + chaos test).
 
-### `[ ]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20)
+### `[~]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20) — **IMPLEMENTED 2026-05-23; TC27 live evidence pending**
+
+**Implementation status (2026-05-23)**: Tier 3 + Tier 4 shipped on `oussama-dev-fix21-resume-from-checkpoint`. 624 tests green (566 pre-fix21 + 58 new). Live TC27 evidence template in `tests/live/TC27_resume_from_checkpoint_results.md` — needs operator dispatch on `fusion_bundle_dev` to populate. Once TC27 fills in, this entry strikes through with PR link + shipped date.
+
+Key implementation decisions ratified during multi-round plan review:
+
+  * Identity hash includes 8 fields (added `fusion.username` after review #4): `fusion.{serviceUrl, externalStorage, username}`, `aidp.{catalog, bronzeSchema, silverSchema, goldSchema}`, `plugin_version`. Secrets explicitly excluded.
+  * `plan_snapshot` shape: `{"identity": {...}, "nodes": [...]}` persisted alongside `plan_hash`. Both required for resumability — `read_resumable_state` rejects partial-metadata rows up-front (no degraded path). See `ResumeRunNotResumableError` subcases 1 + 2.
+  * Original `run_id` preserved on resume — load-bearing for the CLAUDE.md medallion `<layer>_run_id` invariant. Trade-off: state-table becomes multi-row-per-`(run_id, dataset_id)` on resume. Mitigation: `fusion_bundle_state_latest` Delta VIEW created by `ensure_state_table` projects one-row-per-pair via `ROW_NUMBER() OVER (PARTITION BY run_id, dataset_id ORDER BY last_run_at DESC)`. Documented in LIMITS.md §L-Resume.
+  * `ResumeContext.succeeded` includes BOTH `'success'` AND `'resumed_skipped'` so a re-resume of an already-resumed run treats carry-forwards as done.
+  * Preflight narrowing: `preflight_bronze_schemas` only probes un-succeeded bronze; succeeded schemas pulled from `plan_snapshot`. Avoids ~5-min/PVO BICC re-probe + transient-failure risk on previously-good nodes.
+  * External-dep preflight on resume includes succeeded-node tables that reattempt-plan nodes read from (`compute_reattempt_extra_deps`). Catches manually-dropped upstream bronze BEFORE downstream-only reattempt dispatches.
+
+PR: <fill-in-on-ship> · Live evidence: `tests/live/TC27_resume_from_checkpoint_results.md`
+
+---
+
+### `[ ]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20) — (original entry below for reference)
 **Why**: fix20's retry handles transient hiccups that resolve in seconds (2.2min worst case). It does NOT help when:
 - Retries exhaust on a genuinely flaky upstream (e.g. a 5-minute BICC outage that exceeds 130s of cumulative backoff).
 - The customer Ctrl-Cs a run halfway through, or the cluster auto-terminates after `autoTerminationMinutes`.
@@ -1248,7 +1265,9 @@ Pros: `make test` "just works" from a fresh checkout after `pip install -e '.[te
 **Depends on**: P1.5α state-table schema (treat as a minor schema evolution).
 **Accept**: `fusion_bundle_state` gains `extract_seconds`, `enrich_seconds`, `write_seconds`, `count_seconds`; `status()` surfaces the breakdown when `--verbose`.
 
-#### `[ ]` P3.24 — Checkpoint-resume on partial failure (DESIGN item F)
+#### `[~]` P3.24 — Checkpoint-resume on partial failure (DESIGN item F) — **SUBSUMED BY P1.5α-fix21 (2026-05-23)**
+**Status**: Subsumed by P1.5α-fix21 (Tier 3 — Resume from checkpoint). Fix21 went broader than P3.24's original scope (~200 LOC vs P3.24's estimated ~40 LOC) — added the 8-field identity hash, plan_snapshot diagnostic diff, drift gate, multi-resume contract, `fusion_bundle_state_latest` Delta VIEW, and the `resumed_skipped` status. P3.24's "Single biggest iterating-on-gold workflow UX improvement" framing remains the right characterization; fix21 just delivered it earlier than the P3 tranche planned and with a stricter safety envelope (identity gate + non-resumable rejection).
+**Original entry preserved below for posterity:**
 **Why**: A 45-minute bronze extract followed by a 2-minute gold SQL fix that fails is expensive to iterate on. Today the operator re-runs from scratch — eats the 45 minutes again. With `--resume`, iteration drops to 2 minutes. Single biggest "iterating-on-gold" workflow UX improvement.
 **Size**: M — ~40 LOC of resume logic + new `RunStep.status="resumed_skipped"` (distinct from cascade-skip) + state-table read-most-recent query + tests.
 **Depends on**: P1.5α-fix3 state-table contract live-verified.

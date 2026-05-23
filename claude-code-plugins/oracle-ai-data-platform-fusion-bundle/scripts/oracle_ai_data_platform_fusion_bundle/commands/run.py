@@ -46,6 +46,7 @@ def run(
     datasets: str | None = None,
     layers: str | None = None,
     inline: bool = False,
+    resume_run_id: str | None = None,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -104,7 +105,18 @@ def run(
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
         # Pydantic validation, and that step needs the raw YAML text.
-        return _run_inline(bundle_path, mode, dataset_filter, layer_filter, console)
+        return _run_inline(bundle_path, mode, dataset_filter, layer_filter, resume_run_id, console)
+    if resume_run_id is not None:
+        # The non-inline path is a stub today (P1.5ε is unblocked but
+        # the client wrapper hasn't shipped). --resume is only
+        # meaningful inside an AIDP notebook session where the
+        # orchestrator can actually read fusion_bundle_state.
+        console.print(
+            f"[red]--resume is only supported with --inline today. "
+            f"P1.5ε REST dispatch will plumb resume through the client "
+            f"wrapper.[/red]"
+        )
+        return 2
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode, console,
     )
@@ -115,6 +127,7 @@ def _run_inline(
     mode: str,
     datasets: list[str] | None,
     layers: list[str] | None,
+    resume_run_id: str | None,
     console: Console,
 ) -> int:
     """Run the orchestrator in-process.
@@ -122,11 +135,24 @@ def _run_inline(
     Catches `(OrchestratorConfigError, NotImplementedError)` and exits 2
     with a single-line message — no traceback. Any other exception
     propagates with full traceback (orchestrator bug, not user error).
+
+    ``resume_run_id`` triggers checkpoint-resume: the orchestrator reads
+    ``fusion_bundle_state`` for that run_id and skips datasets whose
+    latest terminal status is ``success`` or ``resumed_skipped``. The
+    three resume failure modes (``ResumeRunNotFoundError`` /
+    ``ResumeRunNotResumableError`` / ``ResumeBundleMismatchError``)
+    subclass ``OrchestratorConfigError`` and exit 2 cleanly.
     """
     from oracle_ai_data_platform_fusion_bundle import orchestrator
     from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
         OrchestratorConfigError,
     )
+
+    if resume_run_id is not None:
+        console.print(
+            f"[bold cyan]Resuming run[/bold cyan] [dim]{resume_run_id}[/dim] — "
+            f"reading fusion_bundle_state, computing reattempt plan…"
+        )
 
     try:
         summary = orchestrator.run(
@@ -134,6 +160,7 @@ def _run_inline(
             mode=mode,
             datasets=datasets,
             layers=layers,
+            resume_run_id=resume_run_id,
         )
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
@@ -240,14 +267,18 @@ def _render_summary(console: Console, summary) -> None:
     for col in ("dataset_id", "layer", "status", "row_count", "duration_s"):
         table.add_column(col)
     for step in summary.steps:
+        # `resumed_skipped` is cyan — distinguishes carry-forwards
+        # (no work done, but explicitly recorded) from cascade/abort
+        # skips (work was needed but pre-empted).
         status_color = {
             "success": "green",
             "failed": "red",
             "skipped": "yellow",
             "deferred": "dim",
+            "resumed_skipped": "cyan",
         }.get(step.status, "white")
         status_display = step.status.upper()
-        if step.status == "skipped" and step.skip_reason:
+        if step.status in ("skipped", "resumed_skipped") and step.skip_reason:
             status_display = f"{status_display} ({step.skip_reason})"
         table.add_row(
             step.dataset_id,
@@ -258,14 +289,21 @@ def _render_summary(console: Console, summary) -> None:
         )
     console.print(table)
 
-    # Summary counters
+    # Summary counters. `resumed_skipped` shows up only on a resumed
+    # run — kept off the line for normal runs so the common case stays
+    # terse.
+    counters = [
+        f"[green]{summary.succeeded} success[/green]",
+        f"[red]{summary.failed} failed[/red]",
+        f"[yellow]{summary.skipped} skipped[/yellow]",
+    ]
+    if summary.resumed_skipped:
+        counters.append(f"[cyan]{summary.resumed_skipped} resumed-skipped[/cyan]")
+    counters.append(f"[dim]{summary.deferred} deferred[/dim]")
     console.print(
         f"\nrun_id=[dim]{summary.run_id}[/dim] · "
-        f"[green]{summary.succeeded} success[/green] · "
-        f"[red]{summary.failed} failed[/red] · "
-        f"[yellow]{summary.skipped} skipped[/yellow] · "
-        f"[dim]{summary.deferred} deferred[/dim] · "
-        f"total {summary.total_duration_seconds:.2f}s"
+        + " · ".join(counters)
+        + f" · total {summary.total_duration_seconds:.2f}s"
     )
 
     # P1.5α-fix19: recommendations footer — auto-correction by preflight

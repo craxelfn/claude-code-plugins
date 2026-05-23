@@ -141,6 +141,68 @@ class TestRunStepFactories:
         assert step.skip_reason is None
         assert step.duration_seconds == 0.0
 
+    # ---- P1.5α-fix21: resumed_skip factory + frozen-instance contract ----
+
+    def test_resumed_skip_bronze(self) -> None:
+        spec = registry.BRONZE_EXTRACTS["ap_invoices"]
+        step = runtime.RunStep.resumed_skip(spec, "run-1", "seed")
+        assert step.layer == "bronze"
+        assert step.status == "resumed_skipped"
+        assert step.skip_reason == "resume-skip"
+        assert step.row_count is None
+        assert step.duration_seconds == 0.0
+        # Error message names the original run_id for audit traceability.
+        assert "run-1" in (step.error_message or "")
+
+    def test_resumed_skip_silver_and_gold_derive_layer(self) -> None:
+        s_silver = runtime.RunStep.resumed_skip(
+            registry.SILVER_DIMS["dim_supplier"], "run-1", "seed",
+        )
+        assert s_silver.layer == "silver"
+        s_gold = runtime.RunStep.resumed_skip(
+            registry.GOLD_MARTS["supplier_spend"], "run-1", "seed",
+        )
+        assert s_gold.layer == "gold"
+
+    def test_resumed_skip_deferred_reads_spec_layer(self) -> None:
+        spec = registry.DeferredSpec("dim_org", layer="silver", reason="P1.7")
+        step = runtime.RunStep.resumed_skip(spec, "run-1", "seed")
+        assert step.layer == "silver"
+        assert step.status == "resumed_skipped"
+
+    def test_all_factories_accept_plan_hash_and_snapshot_kwargs(self) -> None:
+        """P1.5α-fix21: every factory threads `plan_hash` + `plan_snapshot`
+        into the constructed RunStep via kwargs (NOT post-construction
+        assignment — RunStep is frozen)."""
+        spec = registry.BRONZE_EXTRACTS["ap_invoices"]
+        h, snap = "hash-XYZ", '{"identity":{},"nodes":[]}'
+        for step in (
+            runtime.RunStep.success(spec, "r", "seed", row_count=1, duration_seconds=0.1, plan_hash=h, plan_snapshot=snap),
+            runtime.RunStep.failed(spec, "r", "seed", exc=Exception("x"), duration_seconds=0.1, plan_hash=h, plan_snapshot=snap),
+            runtime.RunStep.skipped_cascade(spec, "r", "seed", upstream_dataset_id="up", plan_hash=h, plan_snapshot=snap),
+            runtime.RunStep.skipped_aborted(spec, "r", "seed", failed_dataset_id="fl", plan_hash=h, plan_snapshot=snap),
+            runtime.RunStep.deferred(registry.DeferredSpec("d", layer="bronze", reason="r"), "r", "seed", error_message="x", plan_hash=h, plan_snapshot=snap),
+            runtime.RunStep.resumed_skip(spec, "r", "seed", plan_hash=h, plan_snapshot=snap),
+        ):
+            assert step.plan_hash == h
+            assert step.plan_snapshot == snap
+
+    def test_runstep_remains_frozen(self) -> None:
+        """Pin the @dataclass(frozen=True) contract — direct
+        attribute assignment must raise FrozenInstanceError. Catches a
+        regression that silently relaxes the immutability and lets the
+        orchestrator mutate a step post-construction (which would
+        bypass the factory-kwarg threading)."""
+        import dataclasses
+        spec = registry.BRONZE_EXTRACTS["ap_invoices"]
+        step = runtime.RunStep.success(
+            spec, "r", "seed", row_count=1, duration_seconds=0.1,
+        )
+        assert dataclasses.is_dataclass(step)
+        assert step.__dataclass_params__.frozen is True
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            step.plan_hash = "mutated"  # type: ignore[misc]
+
 
 class TestRunSummary:
     def test_counter_properties(self) -> None:
@@ -169,6 +231,25 @@ class TestRunSummary:
         assert summary.skipped == 1
         assert summary.deferred == 1
         assert summary.succeeded + summary.failed + summary.skipped + summary.deferred == len(steps)
+
+    def test_resumed_skipped_counter(self) -> None:
+        """P1.5α-fix21: resumed_skipped is its own counter — distinct
+        from `skipped` (which counts cascade + abort skips only)."""
+        spec = registry.BRONZE_EXTRACTS["ap_invoices"]
+        steps = (
+            runtime.RunStep.success(spec, "r", "seed", row_count=1, duration_seconds=0.1),
+            runtime.RunStep.resumed_skip(spec, "r", "seed"),
+            runtime.RunStep.resumed_skip(spec, "r", "seed"),
+        )
+        from datetime import datetime, timezone
+        summary = runtime.RunSummary(
+            run_id="r", started_at=datetime.now(tz=timezone.utc),
+            finished_at=datetime.now(tz=timezone.utc),
+            bundle_project="p", mode="seed", steps=steps,
+        )
+        assert summary.resumed_skipped == 2
+        # `skipped` is independent — counts only cascade/abort.
+        assert summary.skipped == 0
 
     def test_empty_bundle_path(self) -> None:
         s = runtime.RunSummary.empty("p", "seed")

@@ -1,0 +1,637 @@
+"""Unit tests for P1.5α-fix21 resume flow.
+
+Covers:
+  * Skip-by-state — succeeded nodes carry forward as ``resumed_skipped``.
+  * Re-resume contract — ``ResumeContext.succeeded`` includes BOTH
+    ``'success'`` AND ``'resumed_skipped'`` so a second --resume of an
+    already-resumed run treats carry-forwards as done.
+  * Original-run_id preservation — resume reuses the stored run_id
+    (CLAUDE.md medallion ``_run_id`` invariant).
+  * Bundle drift — hash mismatch (identity or plan shape) raises
+    ``ResumeBundleMismatchError``.
+  * Non-resumable subcases — pre-fix21 row (``plan_hash IS NULL``) and
+    partially-migrated row (``plan_snapshot IS NULL``) both raise
+    ``ResumeRunNotResumableError``.
+  * ``ResumeRunNotFoundError`` for unknown run_id.
+  * Preflight narrowing — succeeded bronze nodes are NOT re-probed.
+  * Scope reconstruction — bare --resume rebuilds scope from snapshot.
+
+Uses an enhanced ``_FakeSpark`` that returns canned rows for the
+``read_resumable_state`` SQL pattern. All other SQL (CREATE TABLE,
+ALTER, INSERT, DELETE, CREATE VIEW) is a no-op.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from oracle_ai_data_platform_fusion_bundle import orchestrator
+from oracle_ai_data_platform_fusion_bundle.orchestrator import registry
+from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
+    ResumeBundleMismatchError,
+    ResumeRunNotFoundError,
+    ResumeRunNotResumableError,
+)
+from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+    ResumeContext,
+)
+
+
+# ---------------------------------------------------------------------------
+# Bundle fixtures
+# ---------------------------------------------------------------------------
+
+
+_MIN_BUNDLE = """
+apiVersion: aidp-fusion-bundle/v1
+project: test-orchestrator
+fusion:
+  serviceUrl: https://example.com
+  username: alice@oracle
+  password: literal-password
+  externalStorage: oci://bucket@ns/path
+datasets:
+  - id: erp_suppliers
+    mode: full
+  - id: ap_invoices
+    mode: full
+  - id: gl_coa
+    mode: full
+  - id: gl_period_balances
+    mode: full
+dimensions:
+  build:
+    - dim_supplier
+    - dim_account
+    - dim_calendar
+gold:
+  marts:
+    - supplier_spend
+    - gl_balance
+    - ap_aging
+"""
+
+
+def _bundle_file(tmp_path: Path, content: str = _MIN_BUNDLE) -> Path:
+    p = tmp_path / "bundle.yaml"
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Fake Spark — enhanced to model state-table reads
+# ---------------------------------------------------------------------------
+
+
+class _FakeDataFrame:
+    def __init__(self, row_count: int = 100) -> None:
+        self._row_count = row_count
+        self.write = MagicMock()
+        self.write.format.return_value = self.write
+        self.write.mode.return_value = self.write
+        self.write.option.return_value = self.write
+        self.write.saveAsTable.return_value = None
+
+    def count(self) -> int:
+        return self._row_count
+
+    def withColumn(self, *args, **kwargs) -> "_FakeDataFrame":
+        return self
+
+    def collect(self) -> list[Any]:
+        return []
+
+
+class _FakeRow:
+    """Fake pyspark Row: supports both attribute and item access."""
+
+    def __init__(self, **kwargs) -> None:
+        self._data = kwargs
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __getattr__(self, key: str) -> Any:
+        try:
+            return self._data[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
+class _FakeCatalog:
+    def __init__(self, existing_tables: set[str] | None = None) -> None:
+        self._existing = existing_tables or set()
+
+    def tableExists(self, path: str) -> bool:
+        # Default True so the external-dep preflight doesn't bark.
+        if not self._existing:
+            return True
+        return path in self._existing
+
+
+class _FakeSpark:
+    """Fake Spark for resume tests. Captures every SQL string for
+    assertions; routes state-table SELECTs to a canned-row response.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_rows: list[_FakeRow] | None = None,
+        existing_tables: set[str] | None = None,
+        row_count_per_table: int = 100,
+    ) -> None:
+        self.catalog = _FakeCatalog(existing_tables)
+        self.sql_calls: list[str] = []
+        self._state_rows = state_rows or []
+        self._row_count_per_table = row_count_per_table
+
+    def sql(self, query: str) -> _FakeDataFrame:
+        self.sql_calls.append(query)
+        # State-table read: detect by presence of `ranked` CTE +
+        # `fusion_bundle_state` (the read_resumable_state SQL shape).
+        if "ranked AS" in query and "fusion_bundle_state" in query and "WHERE run_id" in query:
+            df = _FakeDataFrame()
+            df.collect = lambda: list(self._state_rows)  # type: ignore[method-assign]
+            return df
+        return _FakeDataFrame(0)
+
+    def table(self, name: str) -> _FakeDataFrame:
+        return _FakeDataFrame(self._row_count_per_table)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot builder — mirrors the shape `serialize_plan_snapshot` writes
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot(
+    *,
+    identity_overrides: dict[str, str] | None = None,
+    nodes: list[dict[str, str]] | None = None,
+) -> str:
+    base_identity = {
+        "fusion.serviceUrl": "https://example.com",
+        "fusion.externalStorage": "oci://bucket@ns/path",
+        "fusion.username": "alice@oracle",
+        "aidp.catalog": "fusion_catalog",
+        "aidp.bronzeSchema": "bronze",
+        "aidp.silverSchema": "silver",
+        "aidp.goldSchema": "gold",
+        "plugin_version": "0.1.0a0",
+    }
+    if identity_overrides:
+        base_identity.update(identity_overrides)
+    # Default: ALL 10 in-plan nodes from the minimal bundle (4 bronze + 3 silver + 3 gold).
+    if nodes is None:
+        nodes = [
+            {"dataset_id": "ap_invoices", "layer": "bronze", "mode": "seed", "effective_schema": "Financial"},
+            {"dataset_id": "erp_suppliers", "layer": "bronze", "mode": "seed", "effective_schema": "Financial"},
+            {"dataset_id": "gl_coa", "layer": "bronze", "mode": "seed", "effective_schema": "Financial"},
+            {"dataset_id": "gl_period_balances", "layer": "bronze", "mode": "seed", "effective_schema": "Financial"},
+            {"dataset_id": "dim_supplier", "layer": "silver", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "dim_account", "layer": "silver", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "dim_calendar", "layer": "silver", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "supplier_spend", "layer": "gold", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "gl_balance", "layer": "gold", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "ap_aging", "layer": "gold", "mode": "seed", "effective_schema": ""},
+        ]
+    return json.dumps({"identity": base_identity, "nodes": nodes})
+
+
+def _state_rows_from(
+    *,
+    succeeded: list[str],
+    failed: list[str],
+    snapshot: str | None = None,
+    plan_hash: str | None = "fake-hash-123",
+) -> list[_FakeRow]:
+    """Build canned state-table rows for a fixture."""
+    if snapshot is None:
+        snapshot = _make_snapshot()
+    rows: list[_FakeRow] = []
+    from datetime import datetime
+    base_time = datetime(2026, 5, 21, 12, 0, 0)
+    for ds in succeeded:
+        rows.append(_FakeRow(
+            dataset_id=ds, status="success",
+            plan_hash=plan_hash, plan_snapshot=snapshot,
+            last_run_at=base_time,
+        ))
+    for ds in failed:
+        rows.append(_FakeRow(
+            dataset_id=ds, status="failed",
+            plan_hash=plan_hash, plan_snapshot=snapshot,
+            last_run_at=base_time,
+        ))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Test class — skip-by-state + original-run_id preservation
+# ---------------------------------------------------------------------------
+
+
+class TestResumeSkipByState:
+    def test_succeeded_nodes_emit_resumed_skipped(self, tmp_path: Path) -> None:
+        """Resume scenario: 9 succeeded + 1 failed (gl_period_balances).
+        Dispatch loop emits 9 resumed_skipped + re-attempts the 1 failed.
+        Original run_id preserved on every row.
+        """
+        original_run_id = "abc-123"
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices", "erp_suppliers", "gl_coa",
+                       "dim_supplier", "dim_account", "dim_calendar",
+                       "supplier_spend", "gl_balance", "ap_aging"],
+            failed=["gl_period_balances"],
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        # Patch preflight + hash so the drift gate doesn't fire +
+        # extractors so the un-succeeded bronze can be re-dispatched
+        # without a real BICC call.
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import registry as reg
+        fake_silver = lambda spark, **k: _FakeDataFrame(0)  # noqa: E731
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="fake-hash-123",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=_make_snapshot(),
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
+            return_value=_FakeDataFrame(42),
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
+            side_effect=lambda df, **k: df,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={"gl_period_balances": "Financial"},
+                recommendations=(),
+            )
+            summary = orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id=original_run_id,
+            )
+
+        # Original run_id preserved.
+        assert summary.run_id == original_run_id
+        # 9 carry-forwards + 1 re-dispatch = 10 steps total.
+        statuses = [(s.dataset_id, s.status) for s in summary.steps]
+        succeeded_or_resumed = [d for d, s in statuses if s in ("success", "resumed_skipped")]
+        assert "ap_invoices" in succeeded_or_resumed
+        # The one that was failed should re-dispatch (and succeed via fake).
+        gl_pb_step = next(s for s in summary.steps if s.dataset_id == "gl_period_balances")
+        assert gl_pb_step.status == "success"
+        # Resumed-skipped count == 9.
+        resumed_count = sum(1 for s in summary.steps if s.status == "resumed_skipped")
+        assert resumed_count == 9
+        # All steps carry the original run_id.
+        for step in summary.steps:
+            assert step.run_id == original_run_id
+
+    def test_resumed_skipped_steps_carry_plan_hash_and_snapshot(
+        self, tmp_path: Path,
+    ) -> None:
+        """plan_hash + plan_snapshot are threaded into every step,
+        including the resumed_skipped carry-forwards (so the state
+        table row for the carry-forward has the same drift-gate
+        metadata as if it were a fresh write)."""
+        snapshot = _make_snapshot()
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices", "erp_suppliers", "gl_coa", "gl_period_balances",
+                       "dim_supplier", "dim_account", "dim_calendar",
+                       "supplier_spend", "gl_balance", "ap_aging"],
+            failed=[],
+            plan_hash="locked-hash",
+            snapshot=snapshot,
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="locked-hash",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={}, recommendations=(),
+            )
+            summary = orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="run-X",
+            )
+        for step in summary.steps:
+            assert step.status == "resumed_skipped"
+            assert step.plan_hash == "locked-hash"
+            assert step.plan_snapshot == snapshot
+            assert step.skip_reason == "resume-skip"
+
+
+# ---------------------------------------------------------------------------
+# Test class — re-resume contract (P3.24 / fix21 multi-resume)
+# ---------------------------------------------------------------------------
+
+
+class TestReResumeContract:
+    def test_resumed_skipped_status_counts_as_succeeded_on_next_resume(
+        self, tmp_path: Path,
+    ) -> None:
+        """A dataset whose latest row is `resumed_skipped` from a
+        prior resume must NOT be re-dispatched on a re-resume. Pin
+        the contract via ResumeContext.succeeded inclusion."""
+        snapshot = _make_snapshot()
+        # Every node already has status='resumed_skipped' (carried forward).
+        state_rows = []
+        from datetime import datetime
+        for ds in [
+            "ap_invoices", "erp_suppliers", "gl_coa", "gl_period_balances",
+            "dim_supplier", "dim_account", "dim_calendar",
+            "supplier_spend", "gl_balance", "ap_aging",
+        ]:
+            state_rows.append(_FakeRow(
+                dataset_id=ds, status="resumed_skipped",
+                plan_hash="hash-1", plan_snapshot=snapshot,
+                last_run_at=datetime(2026, 5, 22, 10, 0, 0),
+            ))
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="hash-1",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={}, recommendations=(),
+            )
+            summary = orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="run-A",
+            )
+        # Every node re-emits resumed_skipped — NONE re-execute.
+        assert all(s.status == "resumed_skipped" for s in summary.steps)
+
+
+# ---------------------------------------------------------------------------
+# Test class — bundle drift (ResumeBundleMismatchError)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeDrift:
+    def test_hash_mismatch_raises_bundle_mismatch(self, tmp_path: Path) -> None:
+        snapshot = _make_snapshot()
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices"], failed=["erp_suppliers"],
+            snapshot=snapshot, plan_hash="stored-hash",
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="CURRENT-hash",  # ← drifted
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={}, recommendations=(),
+            )
+            with pytest.raises(ResumeBundleMismatchError) as exc_info:
+                orchestrator.run(
+                    _bundle_file(tmp_path),
+                    spark=spark, mode="seed",
+                    resume_run_id="run-A",
+                )
+        # Drift renderer output present in the message.
+        msg = str(exc_info.value)
+        assert "bundle drift detected" in msg.lower() or "drift" in msg.lower()
+        assert "run-A" in msg
+
+
+# ---------------------------------------------------------------------------
+# Test class — non-resumable subcases + not-found
+# ---------------------------------------------------------------------------
+
+
+class TestResumeFailureModes:
+    def test_unknown_run_id_raises_not_found(self, tmp_path: Path) -> None:
+        # state_rows empty → no rows for any run_id
+        spark = _FakeSpark(state_rows=[])
+        with pytest.raises(ResumeRunNotFoundError, match="ghost-run"):
+            orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="ghost-run",
+            )
+
+    def test_pre_fix21_run_raises_not_resumable_subcase_1(self, tmp_path: Path) -> None:
+        """All rows have plan_hash=NULL (pre-fix21 deployment). Both
+        subcases live in the same error class; the message names the
+        structural reason."""
+        from datetime import datetime
+        rows = [
+            _FakeRow(
+                dataset_id="ap_invoices", status="success",
+                plan_hash=None, plan_snapshot=None,
+                last_run_at=datetime(2026, 5, 20, 12, 0, 0),
+            ),
+        ]
+        spark = _FakeSpark(state_rows=rows)
+        with pytest.raises(ResumeRunNotResumableError, match="plan_hash"):
+            orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="legacy-run",
+            )
+
+    def test_partial_migration_raises_not_resumable_subcase_2(
+        self, tmp_path: Path,
+    ) -> None:
+        """plan_hash set, plan_snapshot NULL — partially-migrated row.
+        Rejected up-front so the resume flow never enters a degraded-
+        metadata path."""
+        from datetime import datetime
+        rows = [
+            _FakeRow(
+                dataset_id="ap_invoices", status="success",
+                plan_hash="hash-but-no-snapshot", plan_snapshot=None,
+                last_run_at=datetime(2026, 5, 20, 12, 0, 0),
+            ),
+        ]
+        spark = _FakeSpark(state_rows=rows)
+        with pytest.raises(ResumeRunNotResumableError, match="plan_snapshot"):
+            orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="partial-run",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test class — preflight narrowing
+# ---------------------------------------------------------------------------
+
+
+class TestResumePreflightNarrowing:
+    def test_succeeded_bronze_not_in_preflight_input(self, tmp_path: Path) -> None:
+        """preflight_bronze_schemas must be called with only the
+        un-succeeded bronze nodes (re-probing succeeded ones via JDBC
+        wastes minutes per node)."""
+        snapshot = _make_snapshot()
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices", "erp_suppliers", "gl_coa",
+                       "dim_supplier", "dim_account", "dim_calendar",
+                       "supplier_spend", "gl_balance", "ap_aging"],
+            failed=["gl_period_balances"],
+            snapshot=snapshot,
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="fake-hash-123",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={"gl_period_balances": "Financial"},
+                recommendations=(),
+            )
+            orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="run-A",
+            )
+        # Inspect the plan that preflight was called with.
+        _, _, plan_arg = mock_preflight.call_args.args[:3]
+        bronze_in_preflight = {
+            n.dataset_id for n in plan_arg
+            if isinstance(n, registry.BronzeExtractSpec)
+        }
+        # Only the un-succeeded bronze should be there.
+        assert bronze_in_preflight == {"gl_period_balances"}
+
+
+# ---------------------------------------------------------------------------
+# Test class — extra-dep preflight on resume
+# ---------------------------------------------------------------------------
+
+
+class TestResumeExtraDepPreflight:
+    def test_all_succeeded_resume_no_op_does_not_preflight_dropped_upstream(
+        self, tmp_path: Path,
+    ) -> None:
+        """All-succeeded resume of a filtered downstream-only scope
+        must NOT raise ``PrerequisiteError`` even if an upstream
+        out-of-scope table was dropped. With zero reattempt nodes,
+        the preflight has nothing meaningful to check — every
+        carry-forward is a no-op that doesn't actually read its
+        upstream on the resume.
+
+        Reproduces the bug where compute_reattempt_extra_deps
+        returned ``original_extra_deps`` unconditionally and forced
+        the orchestrator to preflight upstreams that no reattempt
+        node touches.
+        """
+        snapshot = _make_snapshot(nodes=[
+            {"dataset_id": "supplier_spend", "layer": "gold", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "gl_balance", "layer": "gold", "mode": "seed", "effective_schema": ""},
+            {"dataset_id": "ap_aging", "layer": "gold", "mode": "seed", "effective_schema": ""},
+        ])
+        # Resume scope = gold-only; every gold mart succeeded
+        # originally. The upstream bronze + silver tables would be
+        # `original_extra_deps`. Simulate that one of them was
+        # dropped between runs by passing `existing_tables=set()`
+        # (every catalog.tableExists() call returns False).
+        state_rows = _state_rows_from(
+            succeeded=["supplier_spend", "gl_balance", "ap_aging"],
+            failed=[],
+            snapshot=snapshot,
+        )
+        spark = _FakeSpark(state_rows=state_rows, existing_tables={"__nothing__"})
+        # The catalog returns False for every table check — would
+        # have raised PrerequisiteError on the original run too.
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="fake-hash-123",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={}, recommendations=(),
+            )
+            summary = orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                layers=["gold"],          # filtered scope
+                resume_run_id="run-A",
+            )
+        # No PrerequisiteError raised; resume completes as a no-op.
+        # Every step is a resumed_skipped carry-forward.
+        assert summary.run_id == "run-A"
+        assert all(s.status == "resumed_skipped" for s in summary.steps)
+        assert {s.dataset_id for s in summary.steps} == {
+            "supplier_spend", "gl_balance", "ap_aging",
+        }
+
+    def test_partial_resume_preflights_upstreams_consumed_by_reattempt_nodes(
+        self, tmp_path: Path,
+    ) -> None:
+        """Inverse of the no-op test: when SOME nodes need reattempt,
+        the preflight DOES check upstreams that the reattempting
+        nodes read from. Drop a succeeded bronze table and verify
+        ``PrerequisiteError`` fires before dispatch."""
+        snapshot = _make_snapshot()
+        # ap_invoices succeeded; supplier_spend (its downstream gold)
+        # is in the reattempt set. supplier_spend reads ap_invoices.
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices", "erp_suppliers", "gl_coa", "gl_period_balances",
+                       "dim_supplier", "dim_account", "dim_calendar",
+                       "gl_balance", "ap_aging"],
+            failed=["supplier_spend"],
+            snapshot=snapshot,
+        )
+        # Make EVERY table missing — supplier_spend's dropped-bronze
+        # check should fire even with the other tables present.
+        spark = _FakeSpark(state_rows=state_rows, existing_tables={"__nothing__"})
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
+            PrerequisiteError,
+        )
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="fake-hash-123",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={}, recommendations=(),
+            )
+            with pytest.raises(PrerequisiteError):
+                orchestrator.run(
+                    _bundle_file(tmp_path),
+                    spark=spark, mode="seed",
+                    resume_run_id="run-A",
+                )
