@@ -659,7 +659,16 @@ def run(
         spark = spark or _bootstrap_spark()
         state.ensure_state_table(spark, paths)
         resume_context = state.read_resumable_state(spark, paths, resume_run_id)
-        from .resume import reconstruct_resume_scope
+        # Identity-only drift check BEFORE any preflight / BICC call.
+        # Drifted fusion.serviceUrl/username here would otherwise send
+        # credentials to the wrong endpoint at the bronze preflight step.
+        from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+        from .resume import check_identity_drift, reconstruct_resume_scope
+        check_identity_drift(
+            resume_context.plan_snapshot,
+            bundle=bundle, paths=paths, plugin_version=_pv,
+            run_id=resume_context.run_id,
+        )
         datasets, layers = reconstruct_resume_scope(resume_context.plan_snapshot)
 
     # 2. Resolve which datasets / dims / marts are in scope + classify
@@ -697,6 +706,15 @@ def run(
     # for resolve_plan to catch typos first.
     if resume_run_id is not None and resume_context is None:
         resume_context = state.read_resumable_state(spark, paths, resume_run_id)
+        # Identity-only drift check BEFORE preflight unwraps the
+        # password + contacts BICC at fusion.serviceUrl.
+        from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+        from .resume import check_identity_drift
+        check_identity_drift(
+            resume_context.plan_snapshot,
+            bundle=bundle, paths=paths, plugin_version=_pv,
+            run_id=resume_context.run_id,
+        )
 
     # 5.5. HARD — every bronze PVO probes cleanly (schema name + PVO existence
     #     + BICC credential at reader layer). Catches the most common class of
@@ -803,6 +821,7 @@ def run(
         if resume_context is not None and node.dataset_id in resume_context.succeeded:
             step = RunStep.resumed_skip(
                 node, run_id, mode,
+                row_count=resume_context.succeeded_row_counts.get(node.dataset_id),
                 plan_hash=plan_hash_value,
                 plan_snapshot=plan_snapshot_value,
             )

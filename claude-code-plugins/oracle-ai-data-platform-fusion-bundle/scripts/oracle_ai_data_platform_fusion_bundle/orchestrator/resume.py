@@ -277,8 +277,68 @@ def render_drift_error(
     return "\n".join(lines)
 
 
+def check_identity_drift(
+    plan_snapshot_json: str,
+    *,
+    bundle: "Any",
+    paths: "Any",
+    plugin_version: str,
+    run_id: str,
+) -> None:
+    """Raise ``ResumeBundleMismatchError`` if the current bundle's
+    8-field execution identity diverges from the snapshot's stored
+    identity.
+
+    Runs BEFORE any preflight / BICC call / password unwrap so a
+    drifted ``fusion.serviceUrl`` / ``fusion.username`` never sends
+    credentials to the wrong endpoint, and a drifted
+    ``aidp.{catalog,bronzeSchema}`` is detected before downstream
+    state-write side effects on the drifted path.
+
+    Identity-only check — does NOT compare plan shape or per-node
+    ``effective_schema`` (those need preflight to compute and can't
+    be checked here). The full hash compare after preflight catches
+    shape/schema drift; this one catches identity drift early.
+
+    Pure: no spark, no I/O. Parses ``plan_snapshot_json``, builds the
+    current identity dict via ``_identity_dict`` from ``plan_hash``,
+    diffs them, raises on any difference with an identity-only diff
+    rendered by ``render_drift_error`` (with empty current/stored
+    node tuples so only the identity section shows).
+    """
+    from .errors import ResumeBundleMismatchError
+    from .plan_hash import _identity_dict
+
+    try:
+        snapshot = json.loads(plan_snapshot_json)
+    except (ValueError, TypeError):  # pragma: no cover — guard
+        # Unparseable snapshot is a non-resumable condition, not a
+        # drift condition. read_resumable_state should have rejected
+        # this already; defense in depth.
+        return
+
+    stored_identity = snapshot.get("identity", {})
+    current_identity = _identity_dict(bundle, paths, plugin_version)
+    if stored_identity == current_identity:
+        return
+
+    # Identity-only diff — pass empty node lists so the dataset-diff
+    # section renders nothing, and a placeholder for the hashes
+    # (full hash isn't computed yet — preflight would be needed).
+    msg = render_drift_error(
+        stored_snapshot_json=plan_snapshot_json,
+        current_identity=current_identity,
+        current_node_tuples=snapshot.get("nodes", []),  # same as stored
+        stored_hash="<identity-only check, full hash not computed>",
+        current_hash="<identity-only check, full hash not computed>",
+        run_id=run_id,
+    )
+    raise ResumeBundleMismatchError(msg)
+
+
 __all__ = [
     "reconstruct_resume_scope",
     "compute_reattempt_extra_deps",
     "render_drift_error",
+    "check_identity_drift",
 ]

@@ -286,6 +286,7 @@ class RunStep:
         run_id: str,
         mode: str,
         *,
+        row_count: int | None = None,
         plan_hash: str | None = None,
         plan_snapshot: str | None = None,
     ) -> "RunStep":
@@ -296,6 +297,12 @@ class RunStep:
         SOX-audit consumers can tell "this row was carried forward
         from a prior run" apart from "this row never got a chance to
         run".
+
+        ``row_count`` carries forward the original successful row's
+        count so the latest-per-(run_id, dataset_id) projection (and
+        the ``fusion_bundle_state_latest`` VIEW) preserve the logical
+        row count instead of showing NULL. Caller passes
+        ``resume_context.succeeded_row_counts[node.dataset_id]``.
 
         ``error_message`` is informational, not an error: it names
         the original ``run_id`` so the audit chain stays visible from
@@ -315,7 +322,7 @@ class RunStep:
             layer=layer,
             mode=mode,  # type: ignore[arg-type]
             status="resumed_skipped",
-            row_count=None,
+            row_count=row_count,
             duration_seconds=0.0,
             error_message=_RESUME_SKIP_MSG_TMPL.format(run_id=run_id),
             watermark_used=None,

@@ -1,4 +1,4 @@
-"""Unit tests for P1.5α-fix21 resume flow.
+"""Unit tests for resume flow.
 
 Covers:
   * Skip-by-state — succeeded nodes carry forward as ``resumed_skipped``.
@@ -157,7 +157,15 @@ class _FakeSpark:
         # `fusion_bundle_state` (the read_resumable_state SQL shape).
         if "ranked AS" in query and "fusion_bundle_state" in query and "WHERE run_id" in query:
             df = _FakeDataFrame()
-            df.collect = lambda: list(self._state_rows)  # type: ignore[method-assign]
+            # The "row_count IS NOT NULL" variant feeds the
+            # succeeded_row_counts dict — filter the fake rows.
+            if "row_count IS NOT NULL" in query:
+                df.collect = lambda: [  # type: ignore[method-assign]
+                    r for r in self._state_rows
+                    if getattr(r, "_data", {}).get("row_count") is not None
+                ]
+            else:
+                df.collect = lambda: list(self._state_rows)  # type: ignore[method-assign]
             return df
         return _FakeDataFrame(0)
 
@@ -210,8 +218,12 @@ def _state_rows_from(
     failed: list[str],
     snapshot: str | None = None,
     plan_hash: str | None = "fake-hash-123",
+    succeeded_row_count: int = 42,
 ) -> list[_FakeRow]:
-    """Build canned state-table rows for a fixture."""
+    """Build canned state-table rows for a fixture. Succeeded rows
+    carry ``row_count=succeeded_row_count`` so the row-count carry-
+    forward query has something to pick up; failed rows carry
+    ``row_count=None`` (matches real behavior)."""
     if snapshot is None:
         snapshot = _make_snapshot()
     rows: list[_FakeRow] = []
@@ -220,12 +232,14 @@ def _state_rows_from(
     for ds in succeeded:
         rows.append(_FakeRow(
             dataset_id=ds, status="success",
+            row_count=succeeded_row_count,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
         ))
     for ds in failed:
         rows.append(_FakeRow(
             dataset_id=ds, status="failed",
+            row_count=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
         ))
@@ -361,6 +375,7 @@ class TestReResumeContract:
         ]:
             state_rows.append(_FakeRow(
                 dataset_id=ds, status="resumed_skipped",
+                row_count=None,  # resumed_skipped rows always have NULL count
                 plan_hash="hash-1", plan_snapshot=snapshot,
                 last_run_at=datetime(2026, 5, 22, 10, 0, 0),
             ))
@@ -447,6 +462,7 @@ class TestResumeFailureModes:
         rows = [
             _FakeRow(
                 dataset_id="ap_invoices", status="success",
+                row_count=42,
                 plan_hash=None, plan_snapshot=None,
                 last_run_at=datetime(2026, 5, 20, 12, 0, 0),
             ),
@@ -469,6 +485,7 @@ class TestResumeFailureModes:
         rows = [
             _FakeRow(
                 dataset_id="ap_invoices", status="success",
+                row_count=42,
                 plan_hash="hash-but-no-snapshot", plan_snapshot=None,
                 last_run_at=datetime(2026, 5, 20, 12, 0, 0),
             ),
@@ -635,3 +652,136 @@ class TestResumeExtraDepPreflight:
                     spark=spark, mode="seed",
                     resume_run_id="run-A",
                 )
+
+
+# ---------------------------------------------------------------------------
+# Test class — identity-drift gate fires BEFORE preflight (security-critical)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeIdentityDriftGateBeforePreflight:
+    """The identity-only drift check must fire before any preflight /
+    BICC call. Otherwise a drifted `fusion.serviceUrl` / `fusion.username`
+    would send credentials to the wrong endpoint at the bronze
+    preflight step.
+    """
+
+    def test_identity_drift_does_not_call_preflight(self, tmp_path: Path) -> None:
+        """Construct a snapshot whose stored identity differs from the
+        current bundle's identity. The orchestrator must raise
+        ResumeBundleMismatchError BEFORE preflight_bronze_schemas is
+        invoked — i.e. before any password unwrap / BICC contact."""
+        # Snapshot identity uses a DIFFERENT serviceUrl than the
+        # test bundle (which uses https://example.com).
+        drifted_snapshot = _make_snapshot(identity_overrides={
+            "fusion.serviceUrl": "https://OLD-DRIFTED-POD.example.com",
+        })
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices"], failed=["erp_suppliers"],
+            snapshot=drifted_snapshot, plan_hash="stored-hash",
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.runtime._resolve_password",
+        ) as mock_resolve:
+            with pytest.raises(ResumeBundleMismatchError) as exc_info:
+                orchestrator.run(
+                    _bundle_file(tmp_path),
+                    spark=spark, mode="seed",
+                    resume_run_id="run-A",
+                )
+        # Preflight + password unwrap must NEVER be called.
+        mock_preflight.assert_not_called()
+        # _resolve_password may run once for the credential preflight
+        # in the deferred path, but it returns a SecretStr (not over
+        # the wire) — the wire contact via .get_secret_value() inside
+        # preflight is what we must prevent. Assert preflight didn't
+        # consume the unwrapped value.
+        msg = str(exc_info.value)
+        assert "fusion.serviceUrl" in msg
+        assert "OLD-DRIFTED-POD" in msg
+
+    def test_identity_drift_username_blocks_before_preflight(
+        self, tmp_path: Path,
+    ) -> None:
+        """Mixed-authorization guard: principal swap must block
+        BEFORE we contact the (possibly drifted) endpoint."""
+        drifted_snapshot = _make_snapshot(identity_overrides={
+            "fusion.username": "bob@oracle",
+        })
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices"], failed=["erp_suppliers"],
+            snapshot=drifted_snapshot,
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight:
+            with pytest.raises(ResumeBundleMismatchError) as exc_info:
+                orchestrator.run(
+                    _bundle_file(tmp_path),
+                    spark=spark, mode="seed",
+                    resume_run_id="run-A",
+                )
+        mock_preflight.assert_not_called()
+        assert "fusion.username" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Test class — row_count carry-forward on resume
+# ---------------------------------------------------------------------------
+
+
+class TestResumeRowCountCarryForward:
+    """Resumed-skipped rows must preserve the original successful
+    row_count so the latest-per-(run_id, dataset_id) projection (and
+    the fusion_bundle_state_latest VIEW) don't lose count parity.
+    """
+
+    def test_resumed_skip_carries_prior_row_count(self, tmp_path: Path) -> None:
+        """Fixture: ap_invoices succeeded originally with row_count=42.
+        On resume, ap_invoices carries forward as resumed_skipped —
+        the new row's row_count must equal 42, not NULL."""
+        snapshot = _make_snapshot()
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices", "erp_suppliers", "gl_coa",
+                       "dim_supplier", "dim_account", "dim_calendar",
+                       "supplier_spend", "gl_balance", "ap_aging"],
+            failed=["gl_period_balances"],
+            snapshot=snapshot,
+            succeeded_row_count=42,
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.preflight.preflight_bronze_schemas",
+        ) as mock_preflight, patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.hash_resolved_plan",
+            return_value="fake-hash-123",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash.serialize_plan_snapshot",
+            return_value=snapshot,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.extractors.bicc.extract_pvo",
+            return_value=_FakeDataFrame(99),
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.orchestrator.enrich_bronze_audit_cols",
+            side_effect=lambda df, **k: df,
+        ):
+            mock_preflight.return_value = MagicMock(
+                effective_schemas={"gl_period_balances": "Financial"},
+                recommendations=(),
+            )
+            summary = orchestrator.run(
+                _bundle_file(tmp_path),
+                spark=spark, mode="seed",
+                resume_run_id="run-A",
+            )
+        ap_invoices_step = next(s for s in summary.steps if s.dataset_id == "ap_invoices")
+        assert ap_invoices_step.status == "resumed_skipped"
+        # The original row_count=42 must carry forward — NOT NULL.
+        assert ap_invoices_step.row_count == 42, (
+            "resumed_skipped step must inherit row_count from the prior "
+            "successful row so fusion_bundle_state_latest preserves it"
+        )

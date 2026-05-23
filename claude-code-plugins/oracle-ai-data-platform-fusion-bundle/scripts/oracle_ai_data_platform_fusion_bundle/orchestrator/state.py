@@ -390,6 +390,14 @@ class ResumeContext:
     flow uses this to compute the post-preflight plan hash without
     re-probing BICC for already-succeeded nodes.
 
+    ``succeeded_row_counts``: ``dataset_id`` → most-recent non-NULL
+    ``row_count`` observed for the dataset under this ``run_id``.
+    Carry-forwarded into ``RunStep.resumed_skip`` so the latest-row
+    projection (and the ``fusion_bundle_state_latest`` VIEW) preserve
+    the original logical row count instead of NULL. Walks back past
+    any ``resumed_skipped`` rows (those have NULL row_count by
+    definition — no work done) to the actual success row.
+
     ``original_started_at``: earliest ``last_run_at`` for this run_id.
     Surfaced in the resume-banner so the operator sees how old the
     checkpoint is.
@@ -400,6 +408,7 @@ class ResumeContext:
     plan_hash: str
     plan_snapshot: str
     succeeded_schemas: "dict[str, str]"
+    succeeded_row_counts: "dict[str, int]"
     original_started_at: "datetime"
 
 
@@ -548,12 +557,40 @@ def read_resumable_state(
 
     original_started_at = min(r["last_run_at"] for r in rows)
 
+    # Build succeeded_row_counts: for each succeeded dataset_id, the
+    # most-recent non-NULL row_count under this run_id. A `resumed_skipped`
+    # row has NULL row_count by definition (no work done), so on a
+    # re-resume the latest terminal row may be NULL; walk back to find
+    # the actual success row's count. Done as a second small query so
+    # the existing latest-per-dataset window doesn't need to widen.
+    row_count_query = f"""
+        WITH ranked AS (
+          SELECT dataset_id, row_count, last_run_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY dataset_id
+                   ORDER BY last_run_at DESC
+                 ) AS rn
+          FROM {table_path}
+          WHERE run_id = '{escaped_run_id}'
+            AND status IN ({status_list})
+            AND row_count IS NOT NULL
+        )
+        SELECT dataset_id, row_count FROM ranked WHERE rn = 1
+    """
+    rc_rows = spark.sql(row_count_query).collect()
+    succeeded_row_counts: dict[str, int] = {}
+    for r in rc_rows:
+        ds_id = r["dataset_id"]
+        if ds_id in succeeded:
+            succeeded_row_counts[ds_id] = int(r["row_count"])
+
     return ResumeContext(
         run_id=run_id,
         succeeded=frozenset(succeeded),
         plan_hash=plan_hash,
         plan_snapshot=plan_snapshot,
         succeeded_schemas=succeeded_schemas,
+        succeeded_row_counts=succeeded_row_counts,
         original_started_at=original_started_at,
     )
 
