@@ -124,8 +124,18 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
 )
 @click.option("--inline", is_flag=True,
               help="Run the orchestrator in-process (architectural primary — needs Spark + checkpointer + vault from an AIDP notebook session).")
+@click.option(
+    "--resume", "resume_run_id", default=None,
+    help="Resume an interrupted run by its run_id. Skips datasets whose latest "
+         "terminal status under this run_id is 'success' or 'resumed_skipped'; "
+         "re-attempts the rest under the ORIGINAL run_id (preserves the "
+         "medallion _run_id audit invariant). Scope is reconstructed from the "
+         "stored plan_snapshot when --datasets/--layers are omitted. Drift "
+         "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
+         "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch.",
+)
 @click.pass_context
-def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None, inline: bool) -> None:
+def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None, inline: bool, resume_run_id: str | None) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -136,6 +146,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         datasets=datasets,
         layers=layers,
         inline=inline,
+        resume_run_id=resume_run_id,
         console=console,
     ))
 

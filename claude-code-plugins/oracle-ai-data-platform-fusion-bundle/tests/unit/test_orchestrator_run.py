@@ -77,11 +77,13 @@ def _bundle_file(tmp_path: Path, content: str = _MIN_BUNDLE) -> Path:
 
 
 class _FakeDataFrame:
-    def __init__(self, row_count: int = 100) -> None:
+    def __init__(self, row_count: int = 100, *, rows: list | None = None) -> None:
         self._row_count = row_count
+        self._rows = rows or []
         self.write = MagicMock()
         self.write.format.return_value = self.write
         self.write.mode.return_value = self.write
+        self.write.option.return_value = self.write
         self.write.saveAsTable.return_value = None
 
     def count(self) -> int:
@@ -89,6 +91,9 @@ class _FakeDataFrame:
 
     def withColumn(self, *args, **kwargs) -> "_FakeDataFrame":
         return self
+
+    def collect(self) -> list:
+        return self._rows
 
 
 class _FakeCatalog:
@@ -103,6 +108,11 @@ class _FakeSpark:
     """Just enough Spark for the orchestrator to dispatch. The run loop calls
     ``spark.table(target).count()`` on the bronze branch and
     ``state.ensure_state_table``/``write_state_row`` SQL — stubbed to no-ops.
+
+    ``DESCRIBE TABLE`` is recognized and returns an empty result (so
+    ``ensure_state_table``'s schema-aware migration sees a "no
+    existing columns" view and emits the ALTER TABLE — harmless
+    against the fake).
     """
 
     def __init__(self, existing_tables: set[str] | None = None) -> None:

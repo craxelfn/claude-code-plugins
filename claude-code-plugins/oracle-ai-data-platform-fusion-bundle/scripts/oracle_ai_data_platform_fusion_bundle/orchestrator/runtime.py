@@ -80,6 +80,10 @@ def _new_run_id() -> str:
 
 _CASCADE_MSG_TMPL: Final[str] = "cascade: upstream {upstream!r} failed"
 _ABORT_MSG_TMPL:   Final[str] = "aborted: run halted on prior failure of {failed!r}"
+# Carries forward a node that already succeeded under this run_id
+# (or was carried-forward under a prior resume) — the table is on
+# disk, nothing to do.
+_RESUME_SKIP_MSG_TMPL: Final[str] = "resume-skip: succeeded under run {run_id!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -99,15 +103,30 @@ class RunStep:
     dataset_id: str
     layer: Literal["bronze", "silver", "gold"]
     mode: Literal["seed", "incremental"]
-    status: Literal["success", "failed", "skipped", "deferred"]
+    # ``resumed_skipped`` is the third "skipped" flavor — set when a
+    # resume carries forward a node whose latest terminal status is
+    # ``success`` (or a prior ``resumed_skipped``). Distinct from
+    # cascade-skip and abort-skip so SOX/audit consumers can tell
+    # "carried forward from a prior run" apart from "pre-empted by
+    # an upstream failure".
+    status: Literal["success", "failed", "skipped", "deferred", "resumed_skipped"]
     row_count: int | None
     duration_seconds: float
     error_message: str | None
     watermark_used: datetime | None
-    # B1.1: structured discriminator for the two `skipped` flavors.
-    # Persisted to fusion_bundle_state.skip_reason (§3.2). NULL for
-    # non-skipped rows.
-    skip_reason: Literal["cascade", "aborted"] | None = None
+    # Structured discriminator for the three `skipped` flavors and
+    # the ``resumed_skipped`` carry-forward. Persisted to
+    # fusion_bundle_state.skip_reason (§3.2). NULL for non-skipped /
+    # non-resumed-skipped rows.
+    skip_reason: Literal["cascade", "aborted", "resume-skip"] | None = None
+    # Plan hash + canonical snapshot persisted on every row of a
+    # run, threaded through every factory call so the frozen
+    # instance carries the right metadata at construction (direct
+    # post-construction assignment would raise ``FrozenInstanceError``).
+    # Legacy rows from earlier plugin builds land NULL on both;
+    # ``read_resumable_state`` rejects those as non-resumable.
+    plan_hash: str | None = None
+    plan_snapshot: str | None = None
 
     # --- Factories ---------------------------------------------------------
 
@@ -121,6 +140,8 @@ class RunStep:
         row_count: int,
         duration_seconds: float,
         watermark_used: datetime | None = None,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Step ran and produced rows. ``row_count`` is the materialized
         target's count (per §4.4 — never ``df.count()`` on a lazy plan
@@ -136,6 +157,8 @@ class RunStep:
             duration_seconds=duration_seconds,
             error_message=None,
             watermark_used=watermark_used,
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
         )
 
     @classmethod
@@ -147,6 +170,8 @@ class RunStep:
         *,
         exc: BaseException,
         duration_seconds: float,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Module dispatch raised. ``error_message`` carries ``repr(exc)`` so
         the state-row preserves the type + args for post-mortem grepping
@@ -163,6 +188,8 @@ class RunStep:
             duration_seconds=duration_seconds,
             error_message=repr(exc),
             watermark_used=None,
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
         )
 
     @classmethod
@@ -173,6 +200,8 @@ class RunStep:
         mode: str,
         *,
         upstream_dataset_id: str,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Cascade-skip: an upstream dependency of ``spec`` failed. Called
         by ``_skip_dependents``. Sets ``skip_reason='cascade'``."""
@@ -188,6 +217,8 @@ class RunStep:
             error_message=_CASCADE_MSG_TMPL.format(upstream=upstream_dataset_id),
             watermark_used=None,
             skip_reason="cascade",
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
         )
 
     @classmethod
@@ -198,6 +229,8 @@ class RunStep:
         mode: str,
         *,
         failed_dataset_id: str,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Abort-skip: the run halted on ``failed_dataset_id``'s failure and
         ``spec`` is an unattempted independent-branch node. Called by
@@ -214,6 +247,8 @@ class RunStep:
             error_message=_ABORT_MSG_TMPL.format(failed=failed_dataset_id),
             watermark_used=None,
             skip_reason="aborted",
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
         )
 
     @classmethod
@@ -224,6 +259,8 @@ class RunStep:
         mode: str,
         *,
         error_message: str,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Spec is a ``DeferredSpec`` — module not yet shipped. Layer comes
         from ``spec.layer`` directly (DeferredSpec carries it).
@@ -238,6 +275,60 @@ class RunStep:
             duration_seconds=0.0,
             error_message=error_message,
             watermark_used=None,
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
+        )
+
+    @classmethod
+    def resumed_skip(
+        cls,
+        spec: Any,  # BronzeExtractSpec | SilverDimSpec | GoldMartSpec | DeferredSpec
+        run_id: str,
+        mode: str,
+        *,
+        row_count: int | None = None,
+        plan_hash: str | None = None,
+        plan_snapshot: str | None = None,
+    ) -> "RunStep":
+        """Resume-skip — node already succeeded under the original
+        ``run_id`` (or was carried-forward by a prior resume). Sets
+        ``status='resumed_skipped'``, ``skip_reason='resume-skip'``,
+        ``duration_seconds=0.0``. Distinct from cascade/abort skips so
+        SOX-audit consumers can tell "this row was carried forward
+        from a prior run" apart from "this row never got a chance to
+        run".
+
+        ``row_count`` carries forward the original successful row's
+        count so the latest-per-(run_id, dataset_id) projection (and
+        the ``fusion_bundle_state_latest`` VIEW) preserve the logical
+        row count instead of showing NULL. Caller passes
+        ``resume_context.succeeded_row_counts[node.dataset_id]``.
+
+        ``error_message`` is informational, not an error: it names
+        the original ``run_id`` so the audit chain stays visible from
+        the carry-forward row itself.
+        """
+        from .registry import BronzeExtractSpec, DeferredSpec, GoldMartSpec, SilverDimSpec, _layer_for_spec
+        # DeferredSpec carries .layer directly; the other three derive it.
+        if isinstance(spec, DeferredSpec):
+            layer = spec.layer
+        elif isinstance(spec, (BronzeExtractSpec, SilverDimSpec, GoldMartSpec)):
+            layer = _layer_for_spec(spec)
+        else:  # pragma: no cover — defensive
+            raise TypeError(f"resumed_skip: unsupported spec type {type(spec)!r}")
+        return cls(
+            run_id=run_id,
+            dataset_id=spec.dataset_id,
+            layer=layer,
+            mode=mode,  # type: ignore[arg-type]
+            status="resumed_skipped",
+            row_count=row_count,
+            duration_seconds=0.0,
+            error_message=_RESUME_SKIP_MSG_TMPL.format(run_id=run_id),
+            watermark_used=None,
+            skip_reason="resume-skip",
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
         )
 
 
@@ -285,6 +376,13 @@ class RunSummary:
     @property
     def deferred(self) -> int:
         return sum(1 for s in self.steps if s.status == "deferred")
+
+    @property
+    def resumed_skipped(self) -> int:
+        """Count of carry-forward steps under ``--resume``. Zero on a
+        normal (non-resumed) run.
+        """
+        return sum(1 for s in self.steps if s.status == "resumed_skipped")
 
     @property
     def total_duration_seconds(self) -> float:
@@ -623,6 +721,7 @@ __all__ = [
     "_VALID_MODES",
     "_CASCADE_MSG_TMPL",
     "_ABORT_MSG_TMPL",
+    "_RESUME_SKIP_MSG_TMPL",
     # Helpers
     "_utc_now",
     "_new_run_id",

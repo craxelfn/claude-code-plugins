@@ -15,8 +15,10 @@ bug. Without retry, the orchestrator cascade-aborted 11 downstream nodes and
 the operator had to re-run a 25-minute pipeline from scratch.
 
 Scope: this is Tier 1+2 of the layered fault-tolerance design. Tier 3 (resume
-from checkpoint via ``--resume <run_id>``) + Tier 4 (chaos-test that injects
-transient + permanent failures in CI) are P1.5α-fix21 follow-ups.
+from checkpoint via ``--resume <run_id>``) ships in ``orchestrator/resume.py``
++ the resume flow in ``orchestrator/__init__.py``. Tier 4 (chaos-test that
+injects transient + permanent failures in CI) lives in
+``tests/integration/test_retry_chaos.py``.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ T = TypeVar("T")
 # Substrings that mark an exception as worth retrying. Bias toward
 # infrastructure-y / transport-y patterns; specifically NOT "TimeoutException"
 # alone (BICC can take ~17min on a 10M-row pull legitimately).
-_TRANSIENT_PATTERNS: tuple[str, ...] = (
+TRANSIENT_PATTERNS: tuple[str, ...] = (
     "Connection reset",
     "Connection refused",       # only if NOT during preflight (preflight classifies separately)
     "Read timed out",
@@ -59,10 +61,14 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
 
 
 # Substrings that mark an exception as DEFINITELY permanent — never retry these.
-# Listed even if they wouldn't match _TRANSIENT_PATTERNS, as a safety net for
+# Listed even if they wouldn't match TRANSIENT_PATTERNS, as a safety net for
 # error messages that combine transient-looking words with a permanent root
 # cause.
-_PERMANENT_PATTERNS: tuple[str, ...] = (
+#
+# TRANSIENT_PATTERNS and PERMANENT_PATTERNS are public so chaos tests
+# can import them as the contract corpus — pinning behavior against a
+# private symbol would couple the test to implementation choices.
+PERMANENT_PATTERNS: tuple[str, ...] = (
     # BICC catalog / schema bugs (P1.5α-fix17 origin)
     "DATA_ACCESS_LAYER_0031",   # Schema X not found
     "DATA_ACCESS_LAYER_0032",   # PVO not found (inferred variant)
@@ -142,7 +148,7 @@ def is_transient(exc: BaseException) -> bool:
 
     # Permanent wins over transient — never retry a known-permanent pattern,
     # even if the message happens to also contain a transient-looking word.
-    for pattern in _PERMANENT_PATTERNS:
+    for pattern in PERMANENT_PATTERNS:
         if pattern in blob:
             return False
 
@@ -150,7 +156,7 @@ def is_transient(exc: BaseException) -> bool:
     if isinstance(exc, _TRANSIENT_EXCEPTION_TYPES):
         return True
 
-    for pattern in _TRANSIENT_PATTERNS:
+    for pattern in TRANSIENT_PATTERNS:
         if pattern in blob:
             return True
     # Default: NOT transient. Bias toward fail-fast so unknown failure modes
@@ -247,4 +253,10 @@ def run_with_retry(
     raise RuntimeError("run_with_retry: loop exited without return/raise") from last_exc
 
 
-__all__ = ["is_transient", "run_with_retry", "DEFAULT_MAX_RETRIES"]
+__all__ = [
+    "is_transient",
+    "run_with_retry",
+    "DEFAULT_MAX_RETRIES",
+    "TRANSIENT_PATTERNS",
+    "PERMANENT_PATTERNS",
+]
