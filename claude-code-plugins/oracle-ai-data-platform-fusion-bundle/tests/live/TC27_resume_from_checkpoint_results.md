@@ -1,7 +1,7 @@
 # TC27 — Resume from checkpoint (P1.5α-fix21 acceptance evidence)
 
 **Test case ID**: TC27
-**Status**: ✅ **EXECUTED 2026-05-23 21:30 UTC** against a live AIDP cluster on a Fusion demo tenant via OCI-signed REST dispatch. Coordinates redacted per the TC26 evidence convention; full identifiers held by the dispatching operator.
+**Status**: ✅ **EXECUTED 2026-05-23 21:30 UTC**, Phase 3 **RE-RUN 2026-05-23 22:00 UTC** against a live AIDP cluster on a Fusion demo tenant via OCI-signed REST dispatch. Coordinates redacted per the TC26 evidence convention; full identifiers held by the dispatching operator. Phase 3 re-run captured post-`a7b9f62` row_count carry-forward behavior.
 **Tracks**: `P1.5α-fix21` acceptance criterion in BACKLOG.md — "deliberate kill-mid-run + `--resume` produces a complete pipeline in (resume time) ≪ (clean run time)."
 
 ## What this verifies (all PASS)
@@ -95,23 +95,43 @@ total_duration=30.45s  wall=67.66s
 
 ## State-table evidence (queried inside Phase 3 notebook)
 
-### Latest-per-`(run_id, dataset_id)` projection
+### Latest-per-`(run_id, dataset_id)` projection — post row_count carry-forward fix
+
+After commit `a7b9f62` added `ResumeContext.succeeded_row_counts` + the
+walk-back-past-NULL query, an all-succeeded re-resume against the same
+`run_id` produced the projection below. Every resumed-skipped row now
+inherits the original row_count (was NULL before the fix). Wall time
+57.3s — no actual work, just 5 carry-forwards under the resumed run_id.
 
 ```
-+--------------+------+---------------+---------+-----------+-----------------+
-|dataset_id    |layer |status         |row_count|skip_reason|duration_seconds |
-+--------------+------+---------------+---------+-----------+-----------------+
-|ap_invoices   |bronze|resumed_skipped|NULL     |resume-skip|0.0              |
-|erp_suppliers |bronze|resumed_skipped|NULL     |resume-skip|0.0              |
-|supplier_spend|gold  |success        |309      |NULL       |21.4356974       |
-|dim_calendar  |silver|resumed_skipped|NULL     |resume-skip|0.0              |
-|dim_supplier  |silver|success        |209      |NULL       |9.0109928        |
-+--------------+------+---------------+---------+-----------+-----------------+
++--------------+------+---------------+---------+-----------+----------------+
+|dataset_id    |layer |status         |row_count|skip_reason|duration_seconds|
++--------------+------+---------------+---------+-----------+----------------+
+|ap_invoices   |bronze|resumed_skipped|49552    |resume-skip|0.0             |
+|erp_suppliers |bronze|resumed_skipped|209      |resume-skip|0.0             |
+|supplier_spend|gold  |resumed_skipped|309      |resume-skip|0.0             |
+|dim_calendar  |silver|resumed_skipped|4018     |resume-skip|0.0             |
+|dim_supplier  |silver|resumed_skipped|209      |resume-skip|0.0             |
++--------------+------+---------------+---------+-----------+----------------+
 ```
 
 - One row per dataset (the projection collapses the multi-row history).
 - All 5 rows share the same `plan_hash` (truncated for display) — drift gate didn't fire (same bundle).
-- Row counts match Phase 1 baseline (209 suppliers, 309 supplier-spend rows).
+- Row counts match Phase 1 baseline exactly (209 suppliers, 49552 ap_invoices, 4018 dim_calendar, 209 dim_supplier, 309 supplier_spend).
+- `dim_supplier` traversed the trickier path (`failed` → `success` → `resumed_skipped`) and the walk-back query still recovered its 209-row count from the intermediate success row.
+
+### Historical projection — pre row_count carry-forward fix
+
+The initial Phase 3 run (commit `e9fc02e`) showed NULL row_counts for
+the carry-forward rows; this was the bug the row_count fix addresses.
+Kept here for the audit trail. Re-running Phase 3 against the same
+run_id under commit `a7b9f62`+ gives the table above.
+
+```
+ap_invoices   bronze resumed_skipped NULL  ← bug: lost the original 49552-row count
+erp_suppliers bronze resumed_skipped NULL  ← bug: lost the original 209-row count
+dim_calendar  silver resumed_skipped NULL  ← bug: lost the original 4018-row count
+```
 
 ### Cross-tab — full append-only history under the resumed `run_id`
 
@@ -120,18 +140,22 @@ total_duration=30.45s  wall=67.66s
 |dataset_id    |status         |row_count|
 +--------------+---------------+---------+
 |ap_invoices   |success        |1        |    ← Phase 2: bronze succeeded
-|ap_invoices   |resumed_skipped|1        |    ← Phase 3: carry-forward
+|ap_invoices   |resumed_skipped|2        |    ← Phase 3 + Phase 3 rerun: carry-forwards
 |dim_calendar  |success        |1        |    ← Phase 2: silver succeeded
-|dim_calendar  |resumed_skipped|1        |    ← Phase 3: carry-forward
+|dim_calendar  |resumed_skipped|2        |    ← Phase 3 + Phase 3 rerun: carry-forwards
 |dim_supplier  |failed         |1        |    ← Phase 2: monkeypatch raised
 |dim_supplier  |success        |1        |    ← Phase 3: re-dispatch succeeded
+|dim_supplier  |resumed_skipped|1        |    ← Phase 3 rerun: carry-forward
 |erp_suppliers |success        |1        |    ← Phase 2: bronze succeeded
-|erp_suppliers |resumed_skipped|1        |    ← Phase 3: carry-forward
+|erp_suppliers |resumed_skipped|2        |    ← Phase 3 + Phase 3 rerun: carry-forwards
 |supplier_spend|skipped        |1        |    ← Phase 2: cascade-skipped
 |supplier_spend|success        |1        |    ← Phase 3: re-dispatch succeeded
+|supplier_spend|resumed_skipped|1        |    ← Phase 3 rerun: carry-forward
 +--------------+---------------+---------+
 
-10 rows total, 5 datasets × 2 attempts each.
+15 rows total — original 5 + 5 from first resume + 5 from Phase 3 rerun
+(post row_count carry-forward fix). Demonstrates re-resume safety AND
+row_count walk-back-past-NULL on Phase 3 rerun.
 ```
 
 This is exactly the append-only multi-row semantics LIMITS.md §L-Resume documents — consumers must read from `fusion_bundle_state_latest` or apply the latest-per-`(run_id, dataset_id)` window to get one row per dataset.

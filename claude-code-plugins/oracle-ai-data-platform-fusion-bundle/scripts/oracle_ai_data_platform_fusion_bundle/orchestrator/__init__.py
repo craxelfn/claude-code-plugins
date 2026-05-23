@@ -687,7 +687,15 @@ def run(
     # 3.5. Credential preflight (B5 + Blocker-5 reorder) — runs BEFORE
     #     _bootstrap_spark so a bad credential never spins up Spark.
     #     Result discarded; we only verify resolvability.
-    _resolve_password(bundle.fusion.password)
+    #
+    # Deferred on resume: a drifted bundle whose password reference is
+    # broken (missing ${env:...} var or unreachable vault OCID) should
+    # still surface ResumeBundleMismatchError — not CredentialResolutionError
+    # masking the real issue. On the resume paths we skip the preflight
+    # here and run it after the identity drift gate has rendered the
+    # right error (if any).
+    if resume_run_id is None:
+        _resolve_password(bundle.fusion.password)
 
     # 4. Spark bootstrap (caller-overridable). Idempotent if the bare-
     #    --resume pre-read above already bootstrapped.
@@ -715,6 +723,12 @@ def run(
             bundle=bundle, paths=paths, plugin_version=_pv,
             run_id=resume_context.run_id,
         )
+
+    # 5.4. Resume credential preflight — deferred from step 3.5 so the
+    #      identity drift gate gets first refusal. Now safe to verify
+    #      the password resolves before we hand it to preflight.
+    if resume_run_id is not None:
+        _resolve_password(bundle.fusion.password)
 
     # 5.5. HARD — every bronze PVO probes cleanly (schema name + PVO existence
     #     + BICC credential at reader layer). Catches the most common class of

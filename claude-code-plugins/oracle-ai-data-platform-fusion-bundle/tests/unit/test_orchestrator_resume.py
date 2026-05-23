@@ -785,3 +785,42 @@ class TestResumeRowCountCarryForward:
             "resumed_skipped step must inherit row_count from the prior "
             "successful row so fusion_bundle_state_latest preserves it"
         )
+
+    def test_drifted_identity_with_broken_password_still_raises_mismatch(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Explicit-filter resume path: drifted fusion.serviceUrl AND a
+        password reference whose ${env:VAR} is unset. The drift gate
+        must fire FIRST so the operator sees ResumeBundleMismatchError
+        (the actionable error) — not CredentialResolutionError masking
+        the real issue."""
+        # Bundle uses ${env:NEVER_SET} for the password — would raise
+        # CredentialResolutionError if _resolve_password runs.
+        bundle_yaml = _MIN_BUNDLE.replace(
+            "password: literal-password",
+            "password: ${env:NEVER_SET_FOR_THIS_TEST}",
+        )
+        bundle_path = _bundle_file(tmp_path, bundle_yaml)
+        monkeypatch.delenv("NEVER_SET_FOR_THIS_TEST", raising=False)
+
+        drifted_snapshot = _make_snapshot(identity_overrides={
+            "fusion.serviceUrl": "https://OLD-DRIFTED-POD.example.com",
+        })
+        state_rows = _state_rows_from(
+            succeeded=["ap_invoices"], failed=["erp_suppliers"],
+            snapshot=drifted_snapshot,
+        )
+        spark = _FakeSpark(state_rows=state_rows)
+        # Explicit --datasets triggers the deferred-state-read path.
+        with pytest.raises(ResumeBundleMismatchError) as exc_info:
+            orchestrator.run(
+                bundle_path,
+                spark=spark, mode="seed",
+                datasets=["ap_invoices", "erp_suppliers"],
+                resume_run_id="run-A",
+            )
+        msg = str(exc_info.value)
+        assert "fusion.serviceUrl" in msg
+        assert "OLD-DRIFTED-POD" in msg
+        # The CredentialResolutionError must NOT have masked the real issue.
+        assert "NEVER_SET_FOR_THIS_TEST" not in msg
