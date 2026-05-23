@@ -15,9 +15,15 @@ import sys
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
 
 from . import __version__
+
+# Auto-load .env from the user's current working directory so placeholders
+# like ${FUSION_BICC_BASE_URL} in bundle.yaml resolve without needing
+# `set -a; source .env; set +a` before every run.
+load_dotenv()
 
 console = Console()
 

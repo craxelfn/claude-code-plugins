@@ -26,6 +26,7 @@ from rich.table import Table
 
 from ..schema.bundle import AidpConfig, Bundle
 from ..schema.fusion_catalog import CATALOG
+from ..schema.refs import render_tree
 
 
 class _ProbeResult:
@@ -86,7 +87,8 @@ def _load(
     config = None
     try:
         if bundle_path.exists():
-            bundle = Bundle.model_validate(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
+            raw = render_tree(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
+            bundle = Bundle.model_validate(raw)
             results.append(_ProbeResult("bundle.yaml", "PASS", f"{len(bundle.datasets)} datasets"))
         else:
             results.append(_ProbeResult(
@@ -97,7 +99,8 @@ def _load(
         results.append(_ProbeResult("bundle.yaml", "FAIL", str(exc).splitlines()[0]))
     try:
         if config_path.exists():
-            config = AidpConfig.model_validate(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+            raw = render_tree(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+            config = AidpConfig.model_validate(raw)
             results.append(_ProbeResult(
                 "aidp.config.yaml", "PASS",
                 f"environments: {sorted(config.environments.keys())}",
@@ -134,7 +137,7 @@ def _probe_bicc(bundle: Bundle, results: list[_ProbeResult]) -> None:
 
     url = pod_url + "/biacm/rest/meta/datastores"
     try:
-        response = requests.get(url, auth=(user, pwd), timeout=30)
+        response = requests.get(url, auth=(user, pwd), timeout=120)
     except requests.RequestException as exc:
         results.append(_ProbeResult("bicc-auth", "FAIL", f"network error: {exc}"))
         return
@@ -232,6 +235,12 @@ def _extract_datastore_names(body) -> set[str]:
                 val = node.get(key)
                 if isinstance(val, str):
                     names.add(val)
+            for key in ("dataStores", "datastores"):
+                val = node.get(key)
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, str):
+                            names.add(item)
             for v in node.values():
                 visit(v)
         elif isinstance(node, list):

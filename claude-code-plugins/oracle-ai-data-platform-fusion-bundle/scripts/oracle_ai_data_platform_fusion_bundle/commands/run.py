@@ -34,6 +34,8 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from ..schema.refs import render_tree
+
 logger = logging.getLogger(__name__)
 
 
@@ -336,7 +338,7 @@ def status(
     if not bundle_path.exists():
         console.print(f"[red]bundle not found:[/red] {bundle_path}")
         return 1
-    bundle = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+    bundle = render_tree(yaml.safe_load(bundle_path.read_text(encoding="utf-8")))
     from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
     paths = TablePaths.from_bundle(bundle)
     state_table = paths.bronze("fusion_bundle_state")

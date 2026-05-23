@@ -7,6 +7,7 @@ import pytest
 from oracle_ai_data_platform_fusion_bundle.schema.refs import (
     VaultRef,
     find_vault_refs,
+    render_tree,
     render_vars,
     replace_vault_refs,
 )
@@ -72,3 +73,47 @@ class TestReplaceVaultRefs:
         s = "user=Casey.Brown pwd=${vault:ocid1.vaultsecret.oc1.iad.aaa} other=stuff"
         out = replace_vault_refs(s, {"ocid1.vaultsecret.oc1.iad.aaa": "S3cret!"})
         assert out == "user=Casey.Brown pwd=S3cret! other=stuff"
+
+
+class TestRenderTree:
+    def test_expands_string_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MY_URL", "https://example.oracle.com")
+        assert render_tree("${MY_URL}") == "https://example.oracle.com"
+
+    def test_walks_nested_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FUSION_BICC_BASE_URL", "https://fa-test.demos.com")
+        monkeypatch.setenv("FUSION_BICC_USER", "user.oracle")
+        data = {
+            "fusion": {
+                "serviceUrl": "${FUSION_BICC_BASE_URL}",
+                "username": "${FUSION_BICC_USER}",
+            },
+            "aidp": {"catalog": "fusion_catalog"},
+        }
+        assert render_tree(data) == {
+            "fusion": {
+                "serviceUrl": "https://fa-test.demos.com",
+                "username": "user.oracle",
+            },
+            "aidp": {"catalog": "fusion_catalog"},
+        }
+
+    def test_walks_list_of_dicts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEAM", "cecl")
+        data = [{"id": "gl_coa", "team": "${TEAM}"}, {"id": "gl_journal_lines"}]
+        assert render_tree(data) == [
+            {"id": "gl_coa", "team": "cecl"},
+            {"id": "gl_journal_lines"},
+        ]
+
+    def test_leaves_unknown_var_intact(self) -> None:
+        # Lenient behavior: unknown vars stay as the literal placeholder
+        assert render_tree("${UNKNOWN_VAR_XYZ_123}") == "${UNKNOWN_VAR_XYZ_123}"
+
+    def test_leaves_vault_refs_untouched(self) -> None:
+        s = "${vault:ocid1.vaultsecret.oc1.iad.aaa}"
+        assert render_tree(s) == s
+
+    def test_passes_through_non_strings(self) -> None:
+        data = {"enabled": True, "count": 42, "ratio": 3.14, "skip": None}
+        assert render_tree(data) == data
