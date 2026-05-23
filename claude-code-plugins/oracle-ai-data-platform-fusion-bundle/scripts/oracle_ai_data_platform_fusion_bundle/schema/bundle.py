@@ -27,12 +27,58 @@ class AuthSpec(BaseModel):
     """Vault secret OCID containing the base64 PEM private key (mode=vault only)."""
 
 
+class SecretSpec(BaseModel):
+    """AIDP credential-store lookup keys for the BICC password.
+
+    The dispatch notebook fetches the password at runtime via
+    ``aidputils.secrets.get(name=..., key=...)`` on the cluster, so it
+    never lives in source. Defaults match the recommended one-time
+    setup (``fusion_bicc_password`` / ``password``).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str = "fusion_bicc_password"
+    key: str = "password"
+
+
 class EnvSpec(BaseModel):
     """One named environment block (e.g. ``dev``, ``prod``)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    workspace_key: str = Field(alias="workspaceKey")
+    # AIDP coordinates (control-plane dispatch additions, 2026-05-23).
+    # All three are optional in the schema so existing bundles keep
+    # validating; ``dispatch_run`` enforces presence with a precise
+    # remediation message before the first REST call.
+    aidp_id: str | None = Field(default=None, alias="aidpId")
+    """OCID of the AIDP instance — used to scope the control-plane API."""
+
+    workspace_name: str | None = Field(default=None, alias="workspaceName")
+    """Human-readable workspace name. When set, the dispatcher resolves it
+    to a UUID via ``find_workspace_by_name`` so customers don't have to
+    paste UUIDs."""
+
+    workspace_key: str | None = Field(default=None, alias="workspaceKey")
+    """Workspace UUID. Used directly when set; otherwise resolved from
+    ``workspaceName``. (Optional in the schema; required at dispatch time
+    if ``workspaceName`` is absent.)"""
+
+    cluster_name: str | None = Field(default=None, alias="clusterName")
+    """Display name of the Spark cluster to dispatch to. The dispatcher
+    resolves it to a key via ``find_cluster_by_name`` and auto-starts
+    the cluster if it's STOPPED."""
+
+    cluster_key: str | None = Field(default=None, alias="clusterKey")
+    """Cluster UUID — set this only when there are multiple clusters
+    sharing a display name. Otherwise leave blank and use
+    ``clusterName``."""
+
+    secret: SecretSpec | None = None
+    """AIDP credential-store lookup for the Fusion BICC password. Defaults
+    to ``{name: fusion_bicc_password, key: password}`` (see
+    ``SecretSpec``)."""
+
     data_lake_ocid: str | None = Field(default=None, alias="dataLakeOcid")
     region: str | None = None
     oci_profile: str | None = Field(default="DEFAULT", alias="ociProfile")
