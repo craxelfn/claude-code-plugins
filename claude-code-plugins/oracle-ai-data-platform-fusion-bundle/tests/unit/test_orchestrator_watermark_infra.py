@@ -953,3 +953,142 @@ class TestBronzeWatermarkCapture:
         assert step.status == "failed"
         assert "WatermarkMonotonicityError" in (step.error_message or "")
         assert "TypeError" not in (step.error_message or "")
+
+
+# ---------------------------------------------------------------------------
+# C5 — write_state_row persists step.last_watermark, NOT step.watermark_used
+# ---------------------------------------------------------------------------
+#
+# The Phase α SQL conflated input and output: ``{_ts(step.watermark_used)}``
+# went into the ``last_watermark`` column. β.1 swaps the source to
+# ``{_ts(step.last_watermark)}`` so the persisted cursor is the captured
+# output, not the consumed input. A regression in this SQL — accidentally
+# reverting to ``watermark_used`` (visible to a future ``--amend``-style
+# refactor), or breaking the timestamp rendering — would corrupt the
+# fusion_bundle_state cursor without surfacing through any other test,
+# because every other unit test asserts ``step.last_watermark`` BEFORE
+# the persistence wrapper runs. Pin the SQL contract directly.
+
+
+class _SqlCapturingSpark:
+    """Captures every ``spark.sql(...)`` call as a string. Used by the
+    write_state_row contract test to assert which watermark value lands
+    in the SQL VALUES list.
+    """
+
+    def __init__(self) -> None:
+        self.sql_calls: list[str] = []
+
+    def sql(self, query: str) -> _DfFromRows:
+        self.sql_calls.append(query)
+        return _DfFromRows([])
+
+
+class TestWriteStateRowPersistsLastWatermark:
+    """C5 contract — ``write_state_row`` writes ``step.last_watermark``
+    to the ``last_watermark`` column. The input audit ``watermark_used``
+    is in-memory only on ``RunStep`` and MUST NOT appear in the SQL.
+    """
+
+    def _make_success_step(
+        self, *, watermark_used: datetime | None, last_watermark: datetime | None,
+    ) -> RunStep:
+        spec = BronzeExtractSpec("ap_invoices", "ap_invoices")
+        return RunStep.success(
+            spec, run_id="r-test", mode="seed",
+            row_count=42,
+            duration_seconds=1.5,
+            watermark_used=watermark_used,
+            last_watermark=last_watermark,
+        )
+
+    def test_persists_last_watermark_not_watermark_used(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+            write_state_row,
+        )
+
+        W_input = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        W_output = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        step = self._make_success_step(
+            watermark_used=W_input, last_watermark=W_output,
+        )
+        spark = _SqlCapturingSpark()
+        write_state_row(spark, _TEST_PATHS, step)
+
+        assert len(spark.sql_calls) == 1, "write_state_row must issue exactly one INSERT"
+        sql = spark.sql_calls[0]
+        # The output W2 lands in the SQL VALUES list.
+        assert W_output.isoformat(sep=" ") in sql, (
+            f"expected last_watermark={W_output!r} rendered as TIMESTAMP "
+            f"literal in the INSERT; sql={sql!r}"
+        )
+        # The input W1 does NOT — Phase α persisted it; β.1 must NOT.
+        assert W_input.isoformat(sep=" ") not in sql, (
+            f"watermark_used={W_input!r} must stay in-memory only; "
+            f"finding it in the persisted SQL indicates a regression to "
+            f"the Phase α conflation. sql={sql!r}"
+        )
+
+    def test_none_last_watermark_persists_as_typed_null(self) -> None:
+        """Silver/gold rows in β.1 leave ``last_watermark=None``. The
+        SQL must use ``CAST(NULL AS TIMESTAMP)`` so Delta's strict
+        schema-merge accepts the row (matches the Phase α
+        ``ensure_state_table`` writeability-probe fix).
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+            write_state_row,
+        )
+
+        step = self._make_success_step(
+            watermark_used=None, last_watermark=None,
+        )
+        spark = _SqlCapturingSpark()
+        write_state_row(spark, _TEST_PATHS, step)
+
+        sql = spark.sql_calls[0]
+        # The last_watermark column position carries the typed-NULL cast.
+        assert "CAST(NULL AS TIMESTAMP)" in sql
+
+    def test_null_watermark_used_with_non_null_last_watermark_persists_output(
+        self,
+    ) -> None:
+        """First-run case: no prior state row, so ``watermark_used=None``,
+        but the bronze closure DID capture a new cursor. The output must
+        still land in the SQL.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+            write_state_row,
+        )
+
+        W_output = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        step = self._make_success_step(
+            watermark_used=None, last_watermark=W_output,
+        )
+        spark = _SqlCapturingSpark()
+        write_state_row(spark, _TEST_PATHS, step)
+
+        sql = spark.sql_calls[0]
+        assert W_output.isoformat(sep=" ") in sql
+
+    def test_timestamp_rendering_uses_iso_with_space_separator(self) -> None:
+        """Pin the exact ``_ts`` rendering shape — Delta accepts
+        ``TIMESTAMP 'YYYY-MM-DD HH:MM:SS[.ffffff][+HH:MM]'`` (space
+        separator, NOT 'T'). A regression to ``isoformat()`` without
+        ``sep=' '`` would land 'T' in the literal and Delta would
+        reject the INSERT.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+            write_state_row,
+        )
+
+        W = datetime(2026, 5, 22, 12, 34, 56, 789012, tzinfo=timezone.utc)
+        step = self._make_success_step(watermark_used=None, last_watermark=W)
+        spark = _SqlCapturingSpark()
+        write_state_row(spark, _TEST_PATHS, step)
+
+        sql = spark.sql_calls[0]
+        # Expected literal shape (space separator, no 'T').
+        assert "TIMESTAMP '2026-05-22 12:34:56.789012+00:00'" in sql, (
+            f"timestamp literal shape regression — Delta requires space "
+            f"separator between date and time. sql={sql!r}"
+        )
