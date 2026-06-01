@@ -630,29 +630,39 @@ class TestExceptionHierarchy:
         assert issubclass(UnsupportedModeError, OrchestratorConfigError)
 
     def test_every_public_error_class_inherits_marker(self) -> None:
-        """Self-maintaining lint (P1.5α-fix6): every name exported from
-        ``errors.__all__`` (other than the marker itself) must have
-        ``OrchestratorConfigError`` in its MRO. Guards against a future
-        contributor adding ``class FooError(Exception)`` to errors.py —
-        that class would fall outside the CLI's exit-2 catch and surface
-        as a traceback to the operator, which is the bug the marker
-        pattern explicitly fixes.
+        """Self-maintaining lint (P1.5α-fix6, broadened in P1.5β.1):
+        every name exported from ``errors.__all__`` (other than the
+        two marker base classes themselves) must inherit from EITHER
+        ``OrchestratorConfigError`` (pre-dispatch / config errors —
+        CLI exit-2 catch) OR ``OrchestratorRuntimeError`` (per-step
+        dispatch errors — surface through the normal
+        ``RunStep.failed`` cascade path).
 
-        Self-maintaining because it loops over ``errors.__all__`` rather
-        than enumerating class names — new classes added to ``__all__``
-        are automatically subject to the contract.
+        Guards against a future contributor adding
+        ``class FooError(Exception)`` to errors.py without a marker
+        base — that class would fall through both code paths and
+        surface as a traceback to the operator OR mask a real
+        cascade decision.
+
+        Self-maintaining because it loops over ``errors.__all__``
+        rather than enumerating class names.
         """
         from oracle_ai_data_platform_fusion_bundle.orchestrator import errors
 
+        marker_bases = {"OrchestratorConfigError", "OrchestratorRuntimeError"}
         offenders: list[str] = []
         for name in errors.__all__:
-            if name == "OrchestratorConfigError":
+            if name in marker_bases:
                 continue
             cls = getattr(errors, name)
-            if not issubclass(cls, errors.OrchestratorConfigError):
+            if not issubclass(
+                cls, (errors.OrchestratorConfigError, errors.OrchestratorRuntimeError)
+            ):
                 offenders.append(name)
         assert not offenders, (
-            f"every exception class in errors.__all__ must inherit "
-            f"OrchestratorConfigError (the CLI exit-2 marker). Offenders: "
-            f"{offenders}. Did you add a new error class without the marker base?"
+            f"every exception class in errors.__all__ must inherit either "
+            f"OrchestratorConfigError (CLI exit-2 marker) or "
+            f"OrchestratorRuntimeError (per-step dispatch marker). "
+            f"Offenders: {offenders}. Did you add a new error class without "
+            f"a marker base?"
         )

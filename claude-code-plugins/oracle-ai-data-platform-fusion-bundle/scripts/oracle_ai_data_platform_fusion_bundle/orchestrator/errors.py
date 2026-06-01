@@ -32,6 +32,82 @@ class OrchestratorConfigError(Exception):
     """
 
 
+class OrchestratorRuntimeError(Exception):
+    """Base class for failures DURING orchestrator dispatch (P1.5β.1).
+
+    Distinct from :class:`OrchestratorConfigError`, which signals problems
+    gating the run BEFORE dispatch (bundle load, identifier validation,
+    credential resolution, missing dependency, etc.). Runtime errors are
+    raised by per-step execution paths and are caught by the
+    ``_execute_node`` outer try/except → ``RunStep.failed`` → cascade.
+
+    Subclasses (as of P1.5β.1):
+      - WatermarkMonotonicityError — captured bronze cursor regressed
+        below the prior-success row's persisted cursor
+      - MultipleUpstreamWatermarkError — resolver hit a spec with
+        ``len(depends_on_bronze) >= 2`` and no per-upstream policy
+        is shipped yet (P1.17's decision)
+
+    Inherits directly from ``Exception``, NOT from
+    ``OrchestratorConfigError``: the CLI exit-2 catch is for
+    pre-dispatch errors only; runtime errors surface through the
+    normal per-step state-row path so the operator sees them as
+    ``status='failed'`` rows with the exception ``repr`` in
+    ``error_message``.
+    """
+
+
+class WatermarkMonotonicityError(OrchestratorRuntimeError):
+    """Captured bronze cursor is strictly less than the prior-success
+    row's persisted cursor (clock regression / bronze-clock-skew bug).
+
+    Phase β.1 captures the persisted cursor as
+    ``extract_started_at - WATERMARK_SAFETY_WINDOW`` where
+    ``extract_started_at = datetime.now(timezone.utc)`` immediately
+    before the BICC extract. Under normal forward-time conditions
+    the cursor strictly increases each run, so this error never
+    fires; it exists as a defensive invariant for clock-jumping
+    VMs (NTP correction, suspend/resume warp) and for a future
+    change that re-introduces a non-wall-clock cursor source.
+
+    Carries the prior and new watermarks plus the offending
+    ``dataset_id`` in the message so the operator can correlate
+    with the state-table row directly.
+    """
+
+    def __init__(
+        self,
+        *,
+        prior: object,
+        new: object,
+        dataset_id: str,
+    ) -> None:
+        super().__init__(
+            f"watermark monotonicity violation for dataset_id={dataset_id!r}: "
+            f"new={new!r} < prior={prior!r}. The captured bronze cursor "
+            f"regressed below the prior-success row's persisted cursor. "
+            f"This usually indicates AIDP clock regression (NTP correction "
+            f"or VM clock warp on suspend/resume) larger than "
+            f"WATERMARK_SAFETY_WINDOW; investigate orchestrator-host clock "
+            f"before re-running."
+        )
+        self.prior = prior
+        self.new = new
+        self.dataset_id = dataset_id
+
+
+class MultipleUpstreamWatermarkError(OrchestratorRuntimeError):
+    """A silver/gold spec has more than one upstream bronze
+    dependency, and the per-upstream watermark policy hasn't been
+    decided yet (P1.17 picks one).
+
+    No shipped silver dim or gold mart hits this today; the resolver
+    raises eagerly so any future registry entry with
+    ``len(depends_on_bronze) >= 2`` surfaces the policy gap at
+    dispatch time rather than silently picking ``depends_on_bronze[0]``.
+    """
+
+
 class BundleLoadError(OrchestratorConfigError):
     """Wraps every bundle.yaml load failure into one class so the CLI's
     exit-2 path catches them uniformly. Five failure modes (§4.4b):
@@ -200,4 +276,7 @@ __all__ = [
     "ResumeRunNotFoundError",
     "ResumeRunNotResumableError",
     "ResumeBundleMismatchError",
+    "OrchestratorRuntimeError",
+    "WatermarkMonotonicityError",
+    "MultipleUpstreamWatermarkError",
 ]

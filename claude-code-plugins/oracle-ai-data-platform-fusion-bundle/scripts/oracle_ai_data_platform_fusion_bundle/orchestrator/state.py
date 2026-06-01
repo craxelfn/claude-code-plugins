@@ -12,9 +12,13 @@ Two-layer failure semantics:
     which logs WARN and continues on per-step failures (transient flakes
     shouldn't kill a long medallion run).
 
-``read_last_watermark`` is stubbed for α (returns None — incremental mode
-is Phase β; seed mode never reads watermarks). Phase β implementation
-will query the most-recent ``last_watermark`` for the given dataset_id.
+``read_last_watermark`` (P1.5β.1) returns the most-recent ``status='success'``
+row's ``last_watermark`` for a given ``(dataset_id, layer)`` pair, ordered
+by ``last_run_at DESC, last_watermark DESC NULLS LAST LIMIT 1``. Read is
+SOFT: an underlying Spark/metastore exception returns ``None`` and emits
+a structured WARN log carrying the marker ``watermark_read_soft_failed``
+that operators can grep / alert on. Phase α stub semantics (always
+``None``) are preserved for the no-prior-row + NULL-watermark cases.
 
 Resume + multi-row semantics
 ============================
@@ -49,16 +53,49 @@ them as non-resumable.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
 
 if TYPE_CHECKING:  # pragma: no cover
-    from datetime import datetime
-
     from pyspark.sql import SparkSession
 
     from .runtime import RunStep
+
+logger = logging.getLogger(__name__)
+
+# Stable marker string embedded in the WARN log when
+# ``read_last_watermark`` soft-fails (Spark/metastore exception swallowed
+# → ``None`` return). Part of the public audit-signal contract — operator
+# alerting / log shippers key off this exact string. Do NOT rename
+# without coordinating with LIMITS.md F6 + D5c's regression test.
+WATERMARK_READ_SOFT_FAILED_MARKER: Literal[
+    "watermark_read_soft_failed"
+] = "watermark_read_soft_failed"
+
+
+def _normalize_to_utc(ts: "datetime | None") -> "datetime | None":
+    """Coerce a Spark-returned ``datetime`` to aware UTC.
+
+    Spark ``TIMESTAMP`` columns deserialize to Python ``datetime`` with
+    session-dependent ``tzinfo`` — naive on some builds, aware-with-
+    session-zone on others. The state-table write path always persists
+    ``datetime.now(timezone.utc) - WATERMARK_SAFETY_WINDOW``, so any
+    naive value coming back is a session-precision artifact of the same
+    aware-UTC value that was written. Normalizing at the read boundary
+    keeps every downstream comparison (monotonicity check, arithmetic)
+    from raising ``TypeError: can't compare offset-naive and offset-
+    aware datetimes`` — which would surface as a spurious step failure
+    and cascade-skip rather than the intended
+    ``WatermarkMonotonicityError``.
+    """
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +360,14 @@ def write_state_row(
         # Bare `0.0` is DECIMAL(2,1); needs explicit DOUBLE cast for Delta.
         return f"CAST({d} AS DOUBLE)"
 
+    # P1.5β.1: persist ``step.last_watermark`` (the OUTPUT cursor —
+    # captured pre-extract as ``extract_started_at -
+    # WATERMARK_SAFETY_WINDOW`` for bronze, preserved on empty deltas,
+    # ``None`` for silver/gold until P1.17). Phase α conflated
+    # ``watermark_used`` (INPUT) with this column; β.1 separates the
+    # two — ``watermark_used`` stays in-memory only on ``RunStep``
+    # for debug/logs/__repr__, no state column carries it. See B0
+    # of the P1.5β plan.
     spark.sql(
         f"""
         INSERT INTO {table_path}
@@ -334,7 +379,7 @@ def write_state_row(
            {_q(step.dataset_id)},
            {_q(step.layer)},
            {_q(step.mode)},
-           {_ts(step.watermark_used)},
+           {_ts(step.last_watermark)},
            current_timestamp(),
            {_q(step.status)},
            {_bigint(step.row_count)},
@@ -348,15 +393,80 @@ def write_state_row(
 
 
 def read_last_watermark(
-    spark: "SparkSession", paths: TablePaths, dataset_id: str
+    spark: "SparkSession",
+    paths: TablePaths,
+    dataset_id: str,
+    layer: Literal["bronze", "silver", "gold"] = "bronze",
 ) -> "datetime | None":
-    """Phase β stub. Returns None in α (seed mode never reads watermarks).
+    """Return the most-recent ``status='success'`` row's
+    ``last_watermark`` for ``(dataset_id, layer)``, as an aware UTC
+    ``datetime``. Returns ``None`` when:
 
-    Phase β implementation:
-        ``SELECT MAX(last_watermark) FROM fusion_bundle_state WHERE
-        dataset_id = ? AND status = 'success'``
+    - no ``status='success'`` row exists for the pair;
+    - the most-recent success row has ``last_watermark IS NULL``
+      (e.g. a true-first-empty bronze run, or any silver/gold row
+      in β.1 — silver/gold ``last_watermark`` capture is deferred
+      to P1.17);
+    - the underlying Spark/metastore read raises (soft-fail: log
+      WARN + return ``None``; the exception is swallowed).
+
+    Ordering — ``last_run_at DESC, last_watermark DESC NULLS LAST
+    LIMIT 1``. ``last_run_at`` is the primary key per Phase α's
+    convention (see ``state.py:194`` and ``read_resumable_state``);
+    the secondary key breaks ties deterministically by preferring the
+    row that recorded more progress, aligning with the monotonicity
+    invariant. There is no ``finished_at`` column on the schema —
+    do not order by it.
+
+    Read is issued via ``spark.sql(...)`` (matching Phase α's
+    ``read_resumable_state`` convention so the same in-memory
+    ``_FakeSpark`` test harness works); user-controlled identifiers
+    (``dataset_id``, ``layer``) are escaped via :func:`_q` to defeat
+    apostrophe-bearing strings without falling through to the
+    DataFrame API (which would require pyspark at import time and
+    break the unit-test environment).
+
+    Failure semantics: a Spark/SQL exception logs a structured WARN
+    carrying ``dataset_id``, ``layer``, ``repr(exc)`` and the stable
+    marker ``"watermark_read_soft_failed"`` (see
+    :data:`WATERMARK_READ_SOFT_FAILED_MARKER`), then returns ``None``.
+    Operators monitor for the marker to detect the documented
+    empty-delta + read-failure regression (LIMITS.md F6).
     """
-    return None
+    def _q(s: str | None) -> str:
+        # Mirrors the helper defined locally inside ``write_state_row``
+        # for the same escaping contract; defined here too so the read
+        # path doesn't reach into the write helper's local scope.
+        if s is None:
+            return "CAST(NULL AS STRING)"
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+
+    table_path = _state_table_path(paths)
+    query = f"""
+        SELECT last_watermark
+        FROM {table_path}
+        WHERE dataset_id = {_q(dataset_id)}
+          AND layer = {_q(layer)}
+          AND status = 'success'
+        ORDER BY last_run_at DESC, last_watermark DESC NULLS LAST
+        LIMIT 1
+    """
+    try:
+        rows = spark.sql(query).collect()
+    except Exception as exc:
+        logger.warning(
+            "%s dataset_id=%r layer=%r exc=%r",
+            WATERMARK_READ_SOFT_FAILED_MARKER,
+            dataset_id,
+            layer,
+            exc,
+        )
+        return None
+
+    if not rows:
+        return None
+    return _normalize_to_utc(rows[0]["last_watermark"])
 
 
 # ---------------------------------------------------------------------------
@@ -390,13 +500,25 @@ class ResumeContext:
     flow uses this to compute the post-preflight plan hash without
     re-probing BICC for already-succeeded nodes.
 
-    ``succeeded_row_counts``: ``dataset_id`` → most-recent non-NULL
-    ``row_count`` observed for the dataset under this ``run_id``.
-    Carry-forwarded into ``RunStep.resumed_skip`` so the latest-row
-    projection (and the ``fusion_bundle_state_latest`` VIEW) preserve
-    the original logical row count instead of NULL. Walks back past
-    any ``resumed_skipped`` rows (those have NULL row_count by
-    definition — no work done) to the actual success row.
+    ``succeeded_row_counts``: ``(dataset_id, layer)`` → most-recent
+    non-NULL ``row_count`` observed for that pair under this
+    ``run_id``. Carry-forwarded into ``RunStep.resumed_skip`` so the
+    latest-row projection (and the ``fusion_bundle_state_latest``
+    VIEW) preserve the original logical row count instead of NULL.
+    Walks back past any ``resumed_skipped`` rows (those have NULL
+    row_count by definition — no work done) to the actual success
+    row. **Tuple key** (P1.5β.1): matches the state table's
+    primary-key grain; today no shipped registry entry reuses a
+    ``dataset_id`` across layers, but a future addition that did
+    would silently collide under the prior ``str``-only key.
+
+    ``succeeded_last_watermarks`` (P1.5β.1): ``(dataset_id, layer)``
+    → most-recent ``last_watermark`` observed for that pair under
+    this ``run_id``. Carry-forwarded into ``RunStep.resumed_skip``
+    so a resumed-skip row preserves the original bronze run's
+    persisted cursor on the ``fusion_bundle_state_latest``
+    projection rather than regressing it to NULL. Same tuple-key
+    rationale as ``succeeded_row_counts``.
 
     ``original_started_at``: earliest ``last_run_at`` for this run_id.
     Surfaced in the resume-banner so the operator sees how old the
@@ -408,7 +530,8 @@ class ResumeContext:
     plan_hash: str
     plan_snapshot: str
     succeeded_schemas: "dict[str, str]"
-    succeeded_row_counts: "dict[str, int]"
+    succeeded_row_counts: "dict[tuple[str, str], int]"
+    succeeded_last_watermarks: "dict[tuple[str, str], datetime | None]"
     original_started_at: "datetime"
 
 
@@ -468,13 +591,20 @@ def read_resumable_state(
     # table_path components; the caller-supplied run_id is the only
     # value originating outside the trusted boundary.
     escaped_run_id = run_id.replace("'", "''")
+    # P1.5β.1: partition by (dataset_id, layer) — the state-table
+    # primary-key grain. Today no shipped registry entry reuses a
+    # ``dataset_id`` across layers; the partition fix is paired with
+    # the tuple-keyed ``succeeded_row_counts`` /
+    # ``succeeded_last_watermarks`` dicts so a future registry
+    # addition that collides ``dataset_id`` across layers doesn't
+    # silently drop the upper-layer row from the window.
     query = f"""
         WITH ranked AS (
           SELECT
             dataset_id, status, plan_hash, plan_snapshot,
             last_run_at, layer, mode,
             ROW_NUMBER() OVER (
-              PARTITION BY dataset_id
+              PARTITION BY dataset_id, layer
               ORDER BY last_run_at DESC
             ) AS rn
           FROM {table_path}
@@ -482,7 +612,7 @@ def read_resumable_state(
             AND status IN ({status_list})
         )
         SELECT dataset_id, status, plan_hash, plan_snapshot,
-               last_run_at
+               last_run_at, layer
         FROM ranked
         WHERE rn = 1
     """
@@ -557,17 +687,22 @@ def read_resumable_state(
 
     original_started_at = min(r["last_run_at"] for r in rows)
 
-    # Build succeeded_row_counts: for each succeeded dataset_id, the
-    # most-recent non-NULL row_count under this run_id. A `resumed_skipped`
-    # row has NULL row_count by definition (no work done), so on a
-    # re-resume the latest terminal row may be NULL; walk back to find
-    # the actual success row's count. Done as a second small query so
-    # the existing latest-per-dataset window doesn't need to widen.
+    # Build succeeded_row_counts: for each succeeded (dataset_id, layer),
+    # the most-recent non-NULL row_count under this run_id. A
+    # `resumed_skipped` row has NULL row_count by definition (no work
+    # done), so on a re-resume the latest terminal row may be NULL;
+    # walk back to find the actual success row's count. Done as a
+    # second small query so the existing latest-per-(dataset, layer)
+    # window doesn't need to widen.
+    #
+    # P1.5β.1: partition + dict key are now (dataset_id, layer) tuples
+    # matching the state-table primary-key grain. See ResumeContext
+    # docstring for rationale.
     row_count_query = f"""
         WITH ranked AS (
-          SELECT dataset_id, row_count, last_run_at,
+          SELECT dataset_id, layer, row_count, last_run_at,
                  ROW_NUMBER() OVER (
-                   PARTITION BY dataset_id
+                   PARTITION BY dataset_id, layer
                    ORDER BY last_run_at DESC
                  ) AS rn
           FROM {table_path}
@@ -575,14 +710,46 @@ def read_resumable_state(
             AND status IN ({status_list})
             AND row_count IS NOT NULL
         )
-        SELECT dataset_id, row_count FROM ranked WHERE rn = 1
+        SELECT dataset_id, layer, row_count FROM ranked WHERE rn = 1
     """
     rc_rows = spark.sql(row_count_query).collect()
-    succeeded_row_counts: dict[str, int] = {}
+    succeeded_row_counts: dict[tuple[str, str], int] = {}
     for r in rc_rows:
         ds_id = r["dataset_id"]
+        layer = r["layer"]
         if ds_id in succeeded:
-            succeeded_row_counts[ds_id] = int(r["row_count"])
+            succeeded_row_counts[(ds_id, layer)] = int(r["row_count"])
+
+    # Build succeeded_last_watermarks: for each succeeded
+    # (dataset_id, layer), the most-recent ``last_watermark`` (which
+    # may be NULL — e.g. silver/gold rows in β.1, or a true-first-
+    # empty bronze run). Unlike succeeded_row_counts, we DO NOT
+    # filter out NULL ``last_watermark`` rows in the WHERE clause —
+    # a silver/gold success row with NULL watermark is the canonical
+    # case in β.1, and carrying ``None`` forward is the correct
+    # behavior. The latest terminal row per pair wins.
+    last_watermark_query = f"""
+        WITH ranked AS (
+          SELECT dataset_id, layer, last_watermark, last_run_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY dataset_id, layer
+                   ORDER BY last_run_at DESC
+                 ) AS rn
+          FROM {table_path}
+          WHERE run_id = '{escaped_run_id}'
+            AND status IN ({status_list})
+        )
+        SELECT dataset_id, layer, last_watermark FROM ranked WHERE rn = 1
+    """
+    lw_rows = spark.sql(last_watermark_query).collect()
+    succeeded_last_watermarks: dict[tuple[str, str], datetime | None] = {}
+    for r in lw_rows:
+        ds_id = r["dataset_id"]
+        layer = r["layer"]
+        if ds_id in succeeded:
+            succeeded_last_watermarks[(ds_id, layer)] = _normalize_to_utc(
+                r["last_watermark"]
+            )
 
     return ResumeContext(
         run_id=run_id,
@@ -591,6 +758,7 @@ def read_resumable_state(
         plan_snapshot=plan_snapshot,
         succeeded_schemas=succeeded_schemas,
         succeeded_row_counts=succeeded_row_counts,
+        succeeded_last_watermarks=succeeded_last_watermarks,
         original_started_at=original_started_at,
     )
 
@@ -601,4 +769,5 @@ __all__ = [
     "read_last_watermark",
     "read_resumable_state",
     "ResumeContext",
+    "WATERMARK_READ_SOFT_FAILED_MARKER",
 ]

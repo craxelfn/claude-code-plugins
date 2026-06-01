@@ -18,6 +18,7 @@ Modules ``runtime`` / ``registry`` / ``state`` / ``errors`` are imports.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from graphlib import TopologicalSorter
 from pathlib import Path
 from time import perf_counter
@@ -33,6 +34,7 @@ from .errors import (
     MissingDependencyError,
     OrchestratorConfigError,
     UnsupportedModeError,
+    WatermarkMonotonicityError,
 )
 from .registry import (
     BRONZE_EXTRACTS,
@@ -49,11 +51,13 @@ from .registry import (
     _resolve_bronze,
     _resolve_dim,
     _resolve_mart,
+    _resolve_watermark_source,
 )
 from .runtime import (
     ExternalDep,
     RunStep,
     RunSummary,
+    WATERMARK_SAFETY_WINDOW,
     _new_run_id,
     _preflight_external_deps,
     _resolve_password,
@@ -74,7 +78,10 @@ from .errors import (  # noqa: E402  (re-export at module level)
     BundleLoadError,
     BundleVersionMismatchError,
     CredentialResolutionError,
+    MultipleUpstreamWatermarkError,
+    OrchestratorRuntimeError,
     PrerequisiteError,
+    WatermarkMonotonicityError,
 )
 
 
@@ -373,15 +380,45 @@ def _execute_node(
     ``preflight_bronze_schemas`` so the real bronze dispatch uses the
     SAME schema preflight validated. Without this, overrides + auto-
     discovery would be cosmetic-only.
+
+    P1.5β.1: resolves ``prior_watermark`` via
+    :func:`_resolve_watermark_source` + :func:`state.read_last_watermark`
+    for EVERY node regardless of ``mode`` — the resolver/read is not
+    mode-gated, only the eventual ``extract_pvo(watermark=...)``
+    threading is (and that stays unwired in this PR per the
+    ``NotImplementedError`` gate). Bronze closures capture
+    ``extract_started_at - WATERMARK_SAFETY_WINDOW`` into
+    ``RunStep.last_watermark``; silver/gold leave it ``None`` (capture
+    deferred to P1.17). The monotonicity check (bronze only) compares
+    the captured cursor to ``prior_watermark`` and raises
+    :class:`WatermarkMonotonicityError` on regression.
     """
     t0 = perf_counter()
+    # P1.5β.1: resolve + read the prior watermark for this node BEFORE
+    # the build dispatches. The resolver is layer-aware: bronze reads
+    # its own state row; silver/gold read the upstream bronze's row;
+    # parameter-driven specs (dim_calendar) return None. The read is
+    # soft — a Spark/metastore failure logs a structured WARN with the
+    # ``watermark_read_soft_failed`` marker and returns None. NAMED
+    # ``prior_watermark`` (NOT ``resolved``) to avoid collision with
+    # the ``resolved_password`` SecretStr in the bronze branch.
+    _wm_source = _resolve_watermark_source(node)
+    prior_watermark = (
+        state.read_last_watermark(spark, paths, *_wm_source)
+        if _wm_source is not None
+        else None
+    )
     try:
         if isinstance(node, BronzeExtractSpec):
             pvo = fusion_catalog.get(node.pvo_id)
             target = paths.bronze(pvo.bronze_table_name)
             # Credential resolution at dispatch (preflight already verified
-            # resolvability; this call should always succeed).
-            resolved = _resolve_password(bundle.fusion.password)
+            # resolvability; this call should always succeed). Local
+            # named ``resolved_password`` (not ``resolved``) to keep it
+            # distinct from any watermark-related ``resolved`` in scope —
+            # the bronze closure threads both a SecretStr and a datetime,
+            # so the rename is a defensive hygiene measure.
+            resolved_password = _resolve_password(bundle.fusion.password)
             # P1.5α-fix19: preflight resolved schema via override → catalog →
             # auto-discovery. Use the SAME value here — without this, override
             # + auto-discovery would be cosmetic (preflight passes, real run
@@ -389,21 +426,37 @@ def _execute_node(
             # if dataset_id missing = orchestrator bug, fail loudly.
             effective_schema = effective_schemas[node.dataset_id]
 
-            def _do_bronze() -> int:
+            def _do_bronze() -> tuple[int, datetime | None]:
+                # P1.5β.1: capture orchestrator wall clock immediately
+                # before BICC extract. ``extract_started_at`` is the
+                # un-windowed audit instant (stamped as ``_extract_ts``
+                # on every row); ``persisted_cursor`` subtracts the
+                # safety window to absorb AIDP-vs-Fusion clock skew
+                # and lands on ``RunStep.last_watermark``. Each retry
+                # re-evaluates both — that's correct, a successful
+                # retry's cursor reflects the moment IT extracted, not
+                # the failed attempt's wall clock.
+                extract_started_at = datetime.now(timezone.utc)
+                persisted_cursor = extract_started_at - WATERMARK_SAFETY_WINDOW
                 df = extractors.bicc.extract_pvo(
                     spark,
                     pvo,
                     fusion_service_url=bundle.fusion.service_url,
                     username=bundle.fusion.username,
-                    password=resolved.get_secret_value(),  # SOLE unwrap site
+                    password=resolved_password.get_secret_value(),  # SOLE unwrap site
                     fusion_external_storage=bundle.fusion.external_storage,
                     schema=effective_schema,  # P1.5α-fix19 dispatch contract
+                    # watermark stays None until P1.17 — see Invariant 2
+                    # in the plan: threading the resolved watermark into
+                    # extract_pvo without the non-destructive write
+                    # strategy in place corrupts bronze tables.
                 )
                 df = enrich_bronze_audit_cols(
                     df,
                     source_pvo=pvo.datastore,
                     run_id=run_id,
-                    watermark=None,  # Phase β fills this for incremental
+                    watermark=None,  # _watermark_used column stays NULL until P1.17
+                    extract_ts=extract_started_at,  # audit literal == this run's instant
                 )
                 # overwriteSchema=true matches CLAUDE.md's "CREATE OR REPLACE for
                 # seed mode" invariant — lets a re-run converge even when the prior
@@ -411,7 +464,14 @@ def _execute_node(
                 # with run_id=023482f5: Delta merged _watermark_used into itself).
                 df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
                 # Count the materialized table, not the BICC plan (would re-extract).
-                return spark.table(target).count()
+                row_count = spark.table(target).count()
+                # B3/B5 empty-delta preservation: a successful run with
+                # zero rows MUST NOT regress the prior watermark to
+                # NULL — fall back to ``prior_watermark`` instead.
+                # Only a truly-first-empty run (no prior row at all)
+                # persists ``last_watermark = NULL``.
+                new_wm = persisted_cursor if row_count > 0 else prior_watermark
+                return (row_count, new_wm)
 
             # P1.5α-fix20: transient infra hiccups (OCI Object Storage 5xx,
             # Spark executor loss, BICC connection reset) shouldn't waste a
@@ -419,11 +479,31 @@ def _execute_node(
             # merge errors) skip retry entirely and fail fast — preserves the
             # cascade-vs-abort contract by NOT masking real bugs.
             from .retry import run_with_retry
-            row_count = run_with_retry(_do_bronze, dataset_id=node.dataset_id)
+            row_count, new_wm = run_with_retry(_do_bronze, dataset_id=node.dataset_id)
+            # P1.5β.1 monotonicity check (bronze only). Under the
+            # orchestrator-wall-clock contract, time moves forward and
+            # the cursor strictly increases; this check is defensive —
+            # it fires only on clock-jumping VMs (NTP correction,
+            # suspend/resume warp) larger than the safety window, OR
+            # if a future change reintroduces a non-wall-clock cursor.
+            # Empty-delta runs (where ``new_wm == prior_watermark``)
+            # pass trivially.
+            if (
+                prior_watermark is not None
+                and new_wm is not None
+                and new_wm < prior_watermark
+            ):
+                raise WatermarkMonotonicityError(
+                    prior=prior_watermark,
+                    new=new_wm,
+                    dataset_id=node.dataset_id,
+                )
             return RunStep.success(
                 node, run_id, mode,
                 row_count=row_count,
                 duration_seconds=perf_counter() - t0,
+                watermark_used=prior_watermark,  # in-memory audit only (B0)
+                last_watermark=new_wm,
                 plan_hash=plan_hash,
                 plan_snapshot=plan_snapshot,
             )
@@ -445,10 +525,16 @@ def _execute_node(
                 return df.count()
 
             row_count = run_with_retry(_do_silver_gold, dataset_id=node.dataset_id)
+            # P1.5β.1: silver/gold ``last_watermark`` stays None per
+            # Invariant 6 — per-layer lineage capture is deferred to
+            # P1.17. ``watermark_used`` still records the upstream
+            # bronze's cursor for in-memory audit (debug/logs/__repr__).
             return RunStep.success(
                 node, run_id, mode,
                 row_count=row_count,
                 duration_seconds=perf_counter() - t0,
+                watermark_used=prior_watermark,
+                last_watermark=None,
                 plan_hash=plan_hash,
                 plan_snapshot=plan_snapshot,
             )
@@ -833,9 +919,17 @@ def run(
         # runs, we trust state (the upstream preflight at 5.7 catches
         # dropped tables a downstream reattempt actually reads).
         if resume_context is not None and node.dataset_id in resume_context.succeeded:
+            # P1.5β.1: tuple-keyed (dataset_id, layer) lookups —
+            # matches the state-table primary-key grain. Without this
+            # change, future registry additions that reuse a
+            # ``dataset_id`` across layers would silently regress
+            # row_count + last_watermark to NULL on the
+            # ``fusion_bundle_state_latest`` projection.
+            _resume_key = (node.dataset_id, _layer_for_spec(node))
             step = RunStep.resumed_skip(
                 node, run_id, mode,
-                row_count=resume_context.succeeded_row_counts.get(node.dataset_id),
+                row_count=resume_context.succeeded_row_counts.get(_resume_key),
+                last_watermark=resume_context.succeeded_last_watermarks.get(_resume_key),
                 plan_hash=plan_hash_value,
                 plan_snapshot=plan_snapshot_value,
             )
@@ -890,4 +984,8 @@ __all__ = [
     "PrerequisiteError",
     "CredentialResolutionError",
     "BronzeSchemaProbeError",
+    # P1.5β.1 runtime errors
+    "OrchestratorRuntimeError",
+    "WatermarkMonotonicityError",
+    "MultipleUpstreamWatermarkError",
 ]
