@@ -10,9 +10,9 @@
 |---|---|---:|
 | **P0** | Pre-flight hygiene — fix things that make the alpha misleading or shipping-blocked | 6 |
 | **P1** | Phase 2 dataflow — implement the actual product (transforms / dimensions / gold marts / release) | 20 |
-| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 22 |
+| **P2** | Quality, coverage, polish — testing, bug fixes, docs, versioning | 27 |
 | **P3** | Roadmap, upstream advocacy, tracked blockers | 9 |
-| **Total** | | **57** |
+| **Total** | | **62** |
 
 ## Effort legend
 
@@ -123,7 +123,7 @@
 **Depends on**: P1.1–P1.4 (shipped).
 **Accept**:
 - ✅ `orchestrator.run(bundle_path, *, spark=None, mode='seed', datasets=None, layers=None, dry_run=False) → RunSummary`.
-- 🟡 Incremental watermarking — Phase β (separate plan); `read_last_watermark` stubbed for α.
+- 🟡 Incremental watermarking — Phase β.1 (state-contract infrastructure) shipped: `read_last_watermark` real + DataFrame-API/`spark.sql`-tested, `_resolve_watermark_source` resolver, `RunStep.last_watermark` field, bronze closure captures `extract_started_at - WATERMARK_SAFETY_WINDOW` (1h), `WatermarkMonotonicityError` + monotonicity check, tuple-keyed `succeeded_row_counts` + new `succeeded_last_watermarks` carry-forward. User-facing `--mode incremental` STAYS gated by `NotImplementedError` — flag flip + non-destructive bronze writes (MERGE) land in P1.17. β.1 live evidence pending (TC28 + TC28b clock-skew probe).
 - ✅ Notebook at `notebooks/run_orchestrator.ipynb` (3 cells: import, seed run, state-table + audit-col verification).
 - ✅ `cli.py` `run` command: `--inline` calls orchestrator directly; REST dispatch path is a stub today (BACKLOG P1.5ε — empirically validated, not wired).
 - ✅ Removed the TODO from `commands/run.py:175` (closes P0.2).
@@ -837,7 +837,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 ### `[ ]` P1.17 — Switch dims + gold marts from `CREATE OR REPLACE` to `MERGE INTO` with watermark gate
 **Why**: Every silver/gold module emits `CREATE OR REPLACE TABLE … USING DELTA AS SELECT …` (`dim_account.py:223`, `dim_supplier.py:64`, `transforms/gold/supplier_spend.py:100`, `transforms/gold/gl_balance.py:248`, `transforms/gold/ap_aging.py:428`). That's a full table rewrite every refresh — the **medallion-architecture concept break**: bronze is supposed to grow incrementally, silver/gold MERGE on changed slices, but today a daily refresh of `gold.gl_balance` rewrites all 11M rows. On a tenant with 5 years of GL history (~50M rows projected), daily incremental refresh costs the same as the seed load. Same problem applies to `supplier_spend` and `ap_aging`. Cascades into three already-noted side-effects: `monotonically_increasing_id()` surrogate keys are unstable (P1.19); window-function dedupe sorts the full bronze every rebuild (`dim_account.py:243-252`, `dim_supplier.py:87-94`); `ap_aging` double-scans `bronze.ap_invoices` (P2.20). Fix the root, the rest fall out.
 **Size**: L — six modules + watermark-write contract + live re-verification of TC22 / TC23 / TC24 incremental shape.
-**Depends on**: P1.5 (orchestrator) — MERGE needs the orchestrator to advance the watermark in `fusion_bundle_state` after each successful build. Building MERGE logic on top of a not-yet-wired dispatch path is wasted work.
+**Depends on**: P1.5 (orchestrator) — MERGE needs the orchestrator to advance the watermark in `fusion_bundle_state` after each successful build. Building MERGE logic on top of a not-yet-wired dispatch path is wasted work. **P1.5β.1 (state-contract infrastructure) shipped**: `read_last_watermark` real, `_resolve_watermark_source` resolver, `RunStep.last_watermark`, bronze closure captures `extract_started_at - WATERMARK_SAFETY_WINDOW`, `WatermarkMonotonicityError` + check, tuple-keyed resume carry-forward — all unit-tested. P1.17 owns: removing the `NotImplementedError` gate at `__init__.py:641-645`, threading `prior_watermark` into `extract_pvo(watermark=...)` at `__init__.py:393`, non-destructive bronze/silver/gold write strategy (MERGE), silver/gold lineage column + capture, `bundle.yaml` `incremental.watermark_safety_window_seconds` override, README update, end-to-end live evidence with delta-only extract.
 **Accept**:
 - Each `build()` accepts `refresh_mode: Literal["seed", "incremental"]`. `"seed"` keeps the existing `CREATE OR REPLACE` shape (first run, full backfill). `"incremental"` emits `MERGE INTO target USING (… filtered by _extract_ts > last_watermark …) ON target.<natural_key> = src.<natural_key> WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`.
 - Watermark is read from + written to `fusion_bundle_state` by the orchestrator only — mart modules stay stateless.
@@ -1133,6 +1133,73 @@ Pros: `make test` "just works" from a fresh checkout after `pip install -e '.[te
 - `aidp-fusion-bundle catalog probe --pod X` (no `--password`, no `--allow-env-creds`) errors with "set --password or pass --allow-env-creds for dev use" instead of silently picking up `FUSION_BICC_PASSWORD` from env.
 - CI greps the repo for `debug(.*password|debug(.*\.fusion\.` and fails the build on a match.
 - Unit tests cover all four items; live evidence on `saasfademo1` shows the validator + preflight running cleanly with the existing example bundles.
+
+## Theme: Claude-assisted diagnostics + tenant customization
+
+### `[ ]` P2.24 — `aidp-fusion-bundle doctor` root-cause command
+**Why**: Claude and operators currently debug failures by stitching together Rich output, `fusion_bundle_state`, table existence, preflight messages, and ad-hoc Spark queries. That makes the AI guessy and makes customer support inconsistent. A dedicated `doctor` command should turn the latest run into a concise root-cause report with evidence and safe next actions.
+**Size**: M — new `commands/doctor.py`, CLI wiring, state/table readers, tests.
+**Depends on**: P1.5α state table + P1.5α-fix21 resume/latest-view metadata; benefits from P2.25 when error codes exist.
+**Accept**:
+- `aidp-fusion-bundle doctor --run-id <id>` reads `fusion_bundle_state` / `fusion_bundle_state_latest`, validates expected bronze/silver/gold tables exist, and reports failed/deferred/skipped nodes with evidence.
+- Output includes stable fields: `problem`, `evidence`, `likely_cause`, `safe_fix`, `needs_user_input`, and `next_command`.
+- `doctor` never prints secrets or full bundle contents; redaction tests cover Fusion URL, username, password refs, Vault OCIDs, and env var names.
+- Unit tests cover: latest successful run, failed bronze schema probe, failed silver/gold build, missing table despite success state, and resume-skipped carry-forward.
+- Cross-ref: P2.25 (structured diagnostics), P2.26 (customization registry), P3.26 (structured JSON logging).
+
+### `[ ]` P2.25 — Structured diagnostics artifact + stable error-code remediation map
+**Why**: Free-form logs are bad input for AI debugging. Claude needs structured facts: what node ran, which schema was chosen, what watermark was used, what exception class/code happened, and what remediation is allowed. This should be a local artifact, not only console text.
+**Size**: M — `orchestrator/diagnostics.py`, error-code helpers, write path, tests.
+**Depends on**: P1.5α state table; pairs naturally with P2.24.
+**Accept**:
+- Each orchestrator run can emit `diagnostics/<run_id>.jsonl` (path configurable or defaulting under the working directory) with one JSON object per run/step event.
+- Step records include at least: `run_id`, `dataset_id`, `layer`, `mode`, `status`, `row_count`, `effective_schema`, `watermark_used`, `last_watermark`, `duration_seconds`, `error_type`, `error_code`, `message_redacted`, `recommendation`.
+- Add a central remediation map for stable codes such as `BICC_SCHEMA_NOT_FOUND`, `BICC_AUTH_FAILED`, `MISSING_REQUIRED_COLUMN`, `STATE_WATERMARK_READ_FAILED`, `BRONZE_DESTRUCTIVE_INCREMENTAL_BLOCKED`, `OAC_CONNECTION_NOT_FOUND`, and `UNKNOWN_ORCHESTRATOR_ERROR`.
+- Exceptions that already have structured classes use their class/code directly; message-inspection classifiers remain quarantined in one helper with unit tests.
+- Redaction tests assert no password, Vault secret value, auth token, or raw connection JSON can appear in the JSONL artifact.
+- `doctor` consumes this artifact when present and falls back to state/table inspection when absent.
+
+### `[ ]` P2.26 — Tenant customization registry backed by `bundle.yaml`
+**Why**: Customer-specific fixes should not become one-off Python edits. The plugin already has scattered knobs (`schemaOverrides`, COA maps, aging behavior, fiscal calendar options), but there is no single contract Claude can inspect to decide whether a tenant problem is solved by config, discovery, or code. Centralizing override definitions makes customization bounded and reviewable.
+**Size**: L — schema additions, `config/overrides.py`, module plumbing, migration docs, tests.
+**Depends on**: P1.5a portability plumbing; promotes selected P2.22 knobs only when supported by evidence.
+**Accept**:
+- Add `config/overrides.py` with typed override definitions, validation helpers, docs strings, and "when to use" guidance for each supported knob.
+- `bundle.yaml` schema exposes only proven override families: BICC `schemaOverrides`, COA semantic segments, calendar range/fiscal naming, column aliases for known modules, natural-key overrides where MERGE requires them, and incremental `watermark_safety_window_seconds` after P1.17 consumes watermarks.
+- Every override has one of three classifications: `tenant_declared_policy`, `data_shape_discovery_override`, or `dangerous_escape_hatch`; dangerous entries require explicit opt-in naming the risk.
+- `doctor` recommends config overrides only when the failed diagnostic code maps to a supported override; otherwise it says "code change required" or "unsupported tenant variant".
+- Tests cover schema validation, unknown override rejection, override precedence over discovery, and at least one end-to-end module consuming each override family.
+- Cross-ref: P2.12 (`docs/customizing.md`) becomes the user-facing guide for this registry; P2.22 remains the evidence backlog for future knobs.
+
+### `[ ]` P2.27 — Debug evidence pack + Claude workflow docs
+**Why**: When a customer asks Claude to debug a run, the prompt should include a sanitized evidence pack instead of screenshots or pasted logs. The repo also needs explicit workflows that distinguish "review only", "debug and patch", and "tenant customization", so agents do not accidentally edit code during a plan review or invent unsupported knobs during debugging.
+**Size**: S-M — CLI helper + docs + redaction tests.
+**Depends on**: P2.24 / P2.25 for richest evidence; can start with state/table snapshots.
+**Accept**:
+- `aidp-fusion-bundle debug collect --run-id <id> --out debug_artifacts/<run_id>` writes a redacted pack containing: selected state rows, diagnostics JSONL, bundle config shape with secrets redacted, table-existence summary, schema probe results, CLI version, and environment metadata safe for support.
+- The command refuses to include raw data rows by default; `--include-sample-rows` requires an explicit warning/confirmation flag and still redacts configured sensitive columns.
+- Add `docs/workflows/review_only.md`, `docs/workflows/debug_mode.md`, and `docs/workflows/customize_tenant.md` with agent instructions, allowed actions, required evidence, and stop conditions.
+- Unit tests assert the evidence pack is valid JSON/Markdown, deterministic enough for snapshots, and redacts credentials.
+- Update `CLAUDE.md` cross-references so Claude knows to ask for or generate a debug pack before proposing custom code.
+
+### `[ ]` P2.28 — Focused Claude skills for debugging, customization, live evidence, and review
+**Why**: The current `skills/aidp-fusion-bundle/SKILL.md` is a broad product/onboarding skill. It helps Claude understand the plugin, but it does not give crisp mode-specific behavior for high-risk work. Debugging a failed customer run, reviewing a plan, collecting live evidence, and customizing a tenant need different guardrails. Separate focused skills keep Claude from mixing modes (e.g., editing code during a read-only plan review, or inventing a tenant knob while debugging).
+**Size**: S — five concise `SKILL.md` files, optional small references, marketplace metadata update.
+**Depends on**: P2.24 / P2.25 / P2.27 for the best debug inputs, but the skills can land earlier and reference those as future preferred artifacts.
+**Skill set**:
+- `aidp-fusion-debug-run`: triggered by "debug failed run", "doctor", "run_id", "why did orchestrator fail"; reads `doctor` output, diagnostics JSONL, state rows, and table existence before naming a root cause.
+- `aidp-fusion-customize-tenant`: triggered by "custom tenant", "schema variant", "column missing", "COA mapping", "override"; classifies the issue as tenant-declared policy vs data-shape discovery vs code gap, prefers supported `bundle.yaml` overrides, and rejects speculative knobs.
+- `aidp-fusion-live-evidence`: triggered by "run live TC", "validate on tenant", "TC26", "TC28"; follows `tests/live/*.md` evidence format, captures operator-redacted outputs, and never records secrets or raw customer data.
+- `aidp-fusion-plan-review`: triggered by "review plan"; read-only plan review against medallion correctness, state-table contracts, tenant portability, acceptance criteria, tests, and live evidence.
+- `aidp-fusion-orchestrator-debug`: triggered by "fix orchestrator", "state table", "watermark", "resume", "incremental"; code-focused workflow for `orchestrator/` internals, targeted unit tests, and `CLAUDE.md` invariants.
+**Accept**:
+- Add skill directories under `skills/` (or the plugin-approved skill location) with concise frontmatter descriptions that trigger only on their intended task.
+- Each skill names allowed mode, first files to inspect, required evidence, and stop conditions.
+- `aidp-fusion-plan-review` explicitly says read-only unless the user asks to patch.
+- `aidp-fusion-customize-tenant` explicitly says "no new config knob without real tenant evidence or documented Oracle source"; cross-ref P2.22 and P2.26.
+- `aidp-fusion-debug-run` prefers `doctor` / diagnostics JSONL / debug evidence pack when present, and falls back to `fusion_bundle_state` + targeted repo reads when absent.
+- Update `.claude-plugin/marketplace.json` or plugin metadata so the new skills are discoverable in a predictable order.
+- Smoke test by asking Claude five realistic prompts (one per skill) and confirming the intended skill triggers without loading unrelated workflows.
 
 ---
 

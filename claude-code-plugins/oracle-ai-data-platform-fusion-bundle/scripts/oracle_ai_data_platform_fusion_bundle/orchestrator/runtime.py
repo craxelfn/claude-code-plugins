@@ -16,7 +16,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 from uuid import uuid4
@@ -56,6 +56,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _VALID_MODES: Final[frozenset[str]] = frozenset({"seed", "incremental"})
+
+
+# ---------------------------------------------------------------------------
+# P1.5β.1 — watermark safety window
+# ---------------------------------------------------------------------------
+#
+# The bronze closure captures the orchestrator wall clock immediately
+# before ``extract_pvo`` as ``extract_started_at``, then persists the
+# state-table cursor as ``extract_started_at - WATERMARK_SAFETY_WINDOW``.
+# The overlap absorbs AIDP-vs-Fusion clock skew — the next incremental
+# run's BICC filter is evaluated against Fusion's clock, not AIDP's,
+# and the next run re-extracts the overlap. P1.17's MERGE-by-natural-key
+# write strategy dedupes the re-extracted rows.
+#
+# β.1 uses a **hardcoded module-level constant** (no ``bundle.yaml`` knob,
+# no env override). Per-tenant configurability lands in P1.17 paired
+# with the actual ``extract_pvo(watermark=...)`` threading — the cursor
+# is captured here but NOT consumed by BICC in this PR (the
+# ``NotImplementedError`` gate stays). If a tenant's observed AIDP-vs-
+# Fusion clock skew exceeds 1 hour, widening the constant before
+# enabling P1.17 is the only intervention.
+#
+# Industry-standard CDC pattern (Debezium / Kafka Connect / Airbyte all
+# use safety-windowed cursors for cross-system incremental extraction).
+WATERMARK_SAFETY_WINDOW: Final[timedelta] = timedelta(hours=1)
 
 
 def _utc_now() -> datetime:
@@ -113,7 +138,19 @@ class RunStep:
     row_count: int | None
     duration_seconds: float
     error_message: str | None
+    # ``watermark_used`` is the INPUT — the watermark resolved at
+    # dispatch time. In β.1 it stays in-memory only (debug/logs,
+    # ``__repr__``, test assertions) and is NOT written to any state
+    # column. The prior success row's ``last_watermark`` is the
+    # implicit input audit (see B0 of the P1.5β plan).
     watermark_used: datetime | None
+    # ``last_watermark`` is the OUTPUT — the value persisted to the
+    # ``last_watermark`` column. Bronze closures capture
+    # ``extract_started_at - WATERMARK_SAFETY_WINDOW`` here (or fall
+    # back to ``prior_watermark`` on an empty delta to preserve
+    # progress). Silver/gold rows leave it at ``None`` until P1.17
+    # ships per-layer lineage capture.
+    last_watermark: datetime | None = None
     # Structured discriminator for the three `skipped` flavors and
     # the ``resumed_skipped`` carry-forward. Persisted to
     # fusion_bundle_state.skip_reason (§3.2). NULL for non-skipped /
@@ -140,12 +177,20 @@ class RunStep:
         row_count: int,
         duration_seconds: float,
         watermark_used: datetime | None = None,
+        last_watermark: datetime | None = None,
         plan_hash: str | None = None,
         plan_snapshot: str | None = None,
     ) -> "RunStep":
         """Step ran and produced rows. ``row_count`` is the materialized
         target's count (per §4.4 — never ``df.count()`` on a lazy plan
-        for the bronze branch)."""
+        for the bronze branch).
+
+        ``last_watermark`` (P1.5β.1) is the OUTPUT cursor for bronze
+        rows — ``extract_started_at - WATERMARK_SAFETY_WINDOW`` on a
+        non-empty run, or the preserved ``prior_watermark`` on an
+        empty-delta run. Silver/gold leave it at ``None`` (capture
+        deferred to P1.17).
+        """
         from .registry import _layer_for_spec
         return cls(
             run_id=run_id,
@@ -157,6 +202,7 @@ class RunStep:
             duration_seconds=duration_seconds,
             error_message=None,
             watermark_used=watermark_used,
+            last_watermark=last_watermark,
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
         )
@@ -188,6 +234,7 @@ class RunStep:
             duration_seconds=duration_seconds,
             error_message=repr(exc),
             watermark_used=None,
+            last_watermark=None,
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
         )
@@ -216,6 +263,7 @@ class RunStep:
             duration_seconds=0.0,
             error_message=_CASCADE_MSG_TMPL.format(upstream=upstream_dataset_id),
             watermark_used=None,
+            last_watermark=None,
             skip_reason="cascade",
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
@@ -246,6 +294,7 @@ class RunStep:
             duration_seconds=0.0,
             error_message=_ABORT_MSG_TMPL.format(failed=failed_dataset_id),
             watermark_used=None,
+            last_watermark=None,
             skip_reason="aborted",
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
@@ -275,6 +324,7 @@ class RunStep:
             duration_seconds=0.0,
             error_message=error_message,
             watermark_used=None,
+            last_watermark=None,
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
         )
@@ -287,6 +337,7 @@ class RunStep:
         mode: str,
         *,
         row_count: int | None = None,
+        last_watermark: datetime | None = None,
         plan_hash: str | None = None,
         plan_snapshot: str | None = None,
     ) -> "RunStep":
@@ -302,7 +353,15 @@ class RunStep:
         count so the latest-per-(run_id, dataset_id) projection (and
         the ``fusion_bundle_state_latest`` VIEW) preserve the logical
         row count instead of showing NULL. Caller passes
-        ``resume_context.succeeded_row_counts[node.dataset_id]``.
+        ``resume_context.succeeded_row_counts[(node.dataset_id, layer)]``.
+
+        ``last_watermark`` (P1.5β.1) carries forward the original
+        bronze run's persisted cursor so a resumed_skipped row does
+        not regress the watermark to ``NULL`` on the
+        ``fusion_bundle_state_latest`` projection. Caller passes
+        ``resume_context.succeeded_last_watermarks[(node.dataset_id,
+        layer)]``. Silver/gold + nodes that did not advance a
+        watermark in the original run pass ``None`` (default).
 
         ``error_message`` is informational, not an error: it names
         the original ``run_id`` so the audit chain stays visible from
@@ -326,6 +385,7 @@ class RunStep:
             duration_seconds=0.0,
             error_message=_RESUME_SKIP_MSG_TMPL.format(run_id=run_id),
             watermark_used=None,
+            last_watermark=last_watermark,
             skip_reason="resume-skip",
             plan_hash=plan_hash,
             plan_snapshot=plan_snapshot,
@@ -479,17 +539,38 @@ def enrich_bronze_audit_cols(
     source_pvo: str,
     run_id: str,
     watermark: datetime | None,
+    extract_ts: datetime,
 ) -> "DataFrame":
     """Add the four mandatory bronze audit columns to every row.
 
     Called by ``_execute_node`` between extract and write. Keeps the
     extractor a pure I/O primitive (CLAUDE.md "modules are stateless");
     ``run_id`` and ``source_pvo`` are orchestrator-owned.
+
+    ``extract_ts`` (P1.5β.1) is the caller-supplied orchestrator wall
+    clock captured immediately before the BICC extract — stamped as
+    the literal ``_extract_ts`` audit column on every row. Replaces
+    the Phase α ``F.current_timestamp()`` self-stamp, which evaluated
+    at Spark action time (strictly LATER than the extract instant the
+    audit column claims to record). The orchestrator already needs
+    this value to compute the state-table cursor
+    (``extract_started_at - WATERMARK_SAFETY_WINDOW``), so passing it
+    through here keeps the audit column and the cursor strictly
+    consistent: ``_extract_ts == extract_started_at`` and
+    ``last_watermark == extract_started_at - WATERMARK_SAFETY_WINDOW``,
+    with a known gap of exactly one window.
+
+    Distinct from ``watermark`` — that kwarg controls the
+    ``_watermark_used`` audit column (records the watermark INPUT
+    consumed by the extract). In β.1 the dispatch site passes
+    ``watermark=None`` since the ``NotImplementedError`` gate stays
+    and the BICC call doesn't consume a watermark; that audit
+    column is wired in P1.17.
     """
     from pyspark.sql import functions as F
 
     return (
-        df.withColumn("_extract_ts", F.current_timestamp())
+        df.withColumn("_extract_ts", F.lit(extract_ts).cast("timestamp"))
         .withColumn("_source_pvo", F.lit(source_pvo))
         .withColumn("_run_id", F.lit(run_id))
         .withColumn(
@@ -722,6 +803,7 @@ __all__ = [
     "_CASCADE_MSG_TMPL",
     "_ABORT_MSG_TMPL",
     "_RESUME_SKIP_MSG_TMPL",
+    "WATERMARK_SAFETY_WINDOW",
     # Helpers
     "_utc_now",
     "_new_run_id",

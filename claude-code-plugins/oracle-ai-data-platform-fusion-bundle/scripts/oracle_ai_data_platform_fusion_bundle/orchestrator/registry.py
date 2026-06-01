@@ -39,7 +39,7 @@ from oracle_ai_data_platform_fusion_bundle.transforms.gold import (
     supplier_spend,
 )
 
-from .errors import MissingDependencyError
+from .errors import MissingDependencyError, MultipleUpstreamWatermarkError
 
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame
@@ -275,6 +275,57 @@ def _layer_for_spec(spec: object) -> Literal["bronze", "silver", "gold"]:
     raise TypeError(f"unknown spec type: {type(spec).__name__}")
 
 
+def _resolve_watermark_source(spec: object) -> "tuple[str, str] | None":
+    """Map a spec to the ``(dataset_id, layer)`` whose ``fusion_bundle_state``
+    row carries the watermark to read for that spec.
+
+    Required because Phase α writes one state row per
+    ``(dataset_id, layer)`` and silver/gold ``dataset_id`` values
+    (e.g. ``dim_supplier``, ``gl_balance``) **do not match** their
+    upstream bronze ids (e.g. ``erp_suppliers``,
+    ``gl_period_balances``). A naive ``(node.dataset_id, "bronze")``
+    lookup for ``dim_supplier`` would return ``None`` every run.
+
+    Contract:
+      * :class:`BronzeExtractSpec` → ``(spec.dataset_id, "bronze")``
+        (reads its own state row).
+      * :class:`SilverDimSpec` / :class:`GoldMartSpec` with no bronze
+        upstream (today only ``dim_calendar``) → ``None``. Parameter-
+        driven specs have no source watermark to track.
+      * :class:`SilverDimSpec` / :class:`GoldMartSpec` with exactly one
+        bronze upstream → ``(depends_on_bronze[0], "bronze")``.
+      * :class:`SilverDimSpec` / :class:`GoldMartSpec` with two or more
+        bronze upstreams → raises
+        :class:`MultipleUpstreamWatermarkError`. No shipped mart hits
+        this today; P1.17 picks the multi-upstream policy (min, max,
+        or explicit per-upstream) once it actually consumes the cursor.
+      * :class:`DeferredSpec` → ``None``. Deferred specs never
+        dispatch, so they neither read nor advance watermarks.
+
+    Pure function over the spec — no Spark, no paths, no side effects.
+    Trivially unit-testable.
+    """
+    if isinstance(spec, BronzeExtractSpec):
+        return (spec.dataset_id, "bronze")
+    if isinstance(spec, (SilverDimSpec, GoldMartSpec)):
+        upstreams = spec.depends_on_bronze
+        if len(upstreams) == 0:
+            return None
+        if len(upstreams) == 1:
+            return (upstreams[0], "bronze")
+        raise MultipleUpstreamWatermarkError(
+            f"spec {spec.dataset_id!r} has {len(upstreams)} bronze upstreams "
+            f"({list(upstreams)!r}); multi-upstream watermark policy is not "
+            f"shipped yet (P1.17). Either declare a single upstream or wait "
+            f"for the P1.17 resolver to pick min/max/per-upstream semantics."
+        )
+    if isinstance(spec, DeferredSpec):
+        return None
+    raise TypeError(
+        f"_resolve_watermark_source: unknown spec type {type(spec).__name__}"
+    )
+
+
 __all__ = [
     "BronzeExtractSpec",
     "SilverDimSpec",
@@ -290,5 +341,6 @@ __all__ = [
     "_resolve_dim",
     "_resolve_mart",
     "_layer_for_spec",
+    "_resolve_watermark_source",
     "_VALID_LAYERS",
 ]

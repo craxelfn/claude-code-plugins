@@ -212,6 +212,30 @@ def _make_snapshot(
     return json.dumps({"identity": base_identity, "nodes": nodes})
 
 
+_TEST_LAYER_FOR_DS: dict[str, str] = {
+    # bronze
+    "erp_suppliers": "bronze",
+    "ap_invoices": "bronze",
+    "ap_payments": "bronze",
+    "ar_invoices": "bronze",
+    "ar_receipts": "bronze",
+    "gl_coa": "bronze",
+    "gl_journal_lines": "bronze",
+    "gl_period_balances": "bronze",
+    "po_orders": "bronze",
+    "po_receipts": "bronze",
+    "scm_items": "bronze",
+    # silver
+    "dim_supplier": "silver",
+    "dim_account": "silver",
+    "dim_calendar": "silver",
+    # gold
+    "supplier_spend": "gold",
+    "gl_balance": "gold",
+    "ap_aging": "gold",
+}
+
+
 def _state_rows_from(
     *,
     succeeded: list[str],
@@ -223,7 +247,16 @@ def _state_rows_from(
     """Build canned state-table rows for a fixture. Succeeded rows
     carry ``row_count=succeeded_row_count`` so the row-count carry-
     forward query has something to pick up; failed rows carry
-    ``row_count=None`` (matches real behavior)."""
+    ``row_count=None`` (matches real behavior).
+
+    P1.5β.1: every row now carries ``layer`` (derived from the
+    shipped registry — see ``_TEST_LAYER_FOR_DS``) and
+    ``last_watermark=None`` so the tuple-keyed
+    ``succeeded_row_counts`` / ``succeeded_last_watermarks`` reads
+    in ``read_resumable_state`` find a layer to key on. Tests that
+    need a non-NULL bronze watermark override via the new
+    ``last_watermarks`` mapping.
+    """
     if snapshot is None:
         snapshot = _make_snapshot()
     rows: list[_FakeRow] = []
@@ -232,14 +265,18 @@ def _state_rows_from(
     for ds in succeeded:
         rows.append(_FakeRow(
             dataset_id=ds, status="success",
+            layer=_TEST_LAYER_FOR_DS.get(ds, "bronze"),
             row_count=succeeded_row_count,
+            last_watermark=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
         ))
     for ds in failed:
         rows.append(_FakeRow(
             dataset_id=ds, status="failed",
+            layer=_TEST_LAYER_FOR_DS.get(ds, "bronze"),
             row_count=None,
+            last_watermark=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
         ))
@@ -375,7 +412,9 @@ class TestReResumeContract:
         ]:
             state_rows.append(_FakeRow(
                 dataset_id=ds, status="resumed_skipped",
+                layer=_TEST_LAYER_FOR_DS.get(ds, "bronze"),
                 row_count=None,  # resumed_skipped rows always have NULL count
+                last_watermark=None,
                 plan_hash="hash-1", plan_snapshot=snapshot,
                 last_run_at=datetime(2026, 5, 22, 10, 0, 0),
             ))

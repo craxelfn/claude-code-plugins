@@ -972,7 +972,7 @@ class TestLayerFilterPreflight:
             gold_calls.append("gold")
             return _FakeDataFrame(3)
 
-        def fake_enrich(df, *, source_pvo, run_id, watermark):
+        def fake_enrich(df, *, source_pvo, run_id, watermark, extract_ts):
             return df
 
         with patch(
@@ -1106,7 +1106,7 @@ gold:
         # installed locally (the real function imports pyspark.sql.functions).
         # The cascade test cares about step status + skip_reason, not the
         # actual audit-column shape.
-        def fake_enrich(df, *, source_pvo, run_id, watermark):
+        def fake_enrich(df, *, source_pvo, run_id, watermark, extract_ts):
             return df
 
         # P1.5α-fix3: verify the run loop persists state through the SOFT
@@ -1227,7 +1227,7 @@ gold:
         def fake_builder(spark, **kwargs):
             return _FakeDataFrame(5)
 
-        def fake_enrich(df, *, source_pvo, run_id, watermark):
+        def fake_enrich(df, *, source_pvo, run_id, watermark, extract_ts):
             return df
 
         # state.write_state_row raises on the SECOND call (i.e. mid-run), not
