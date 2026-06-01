@@ -510,21 +510,6 @@ gold:
 """
 
 
-class TestIncrementalGatePreserved:
-    """Coupled with the P1.17 gate removal — if a future PR removes the
-    NotImplementedError block at ``__init__.py:641-645`` WITHOUT also
-    removing this test, the test suite fails. That coupling is the
-    contract between β.1 and P1.17.
-    """
-
-    def test_run_mode_incremental_raises_not_implemented(self, tmp_path: Path) -> None:
-        bundle_path = tmp_path / "bundle.yaml"
-        bundle_path.write_text(_MIN_BUNDLE, encoding="utf-8")
-        # No Spark required — the gate fires before any I/O.
-        with pytest.raises(NotImplementedError, match="Incremental mode"):
-            orchestrator.run(bundle_path, mode="incremental")
-
-
 # ---------------------------------------------------------------------------
 # D-resume: tuple-keyed succeeded_row_counts + succeeded_last_watermarks
 # ---------------------------------------------------------------------------

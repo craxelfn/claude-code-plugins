@@ -31,6 +31,7 @@ from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
 
 from . import registry, state
 from .errors import (
+    IncrementalCursorMissingError,
     MissingDependencyError,
     OrchestratorConfigError,
     UnsupportedModeError,
@@ -51,6 +52,7 @@ from .registry import (
     _resolve_bronze,
     _resolve_dim,
     _resolve_mart,
+    _resolve_target_table,
     _resolve_watermark_source,
 )
 from .runtime import (
@@ -61,6 +63,7 @@ from .runtime import (
     _new_run_id,
     _preflight_external_deps,
     _resolve_password,
+    _resolve_safety_window,
     _safe_write_state_row,
     _utc_now,
     _VALID_MODES,
@@ -78,6 +81,7 @@ from .errors import (  # noqa: E402  (re-export at module level)
     BundleLoadError,
     BundleVersionMismatchError,
     CredentialResolutionError,
+    MultipleNaturalKeyError,
     MultipleUpstreamWatermarkError,
     OrchestratorRuntimeError,
     PrerequisiteError,
@@ -347,6 +351,58 @@ def resolve_plan(
 
 
 # ---------------------------------------------------------------------------
+# P1.17 — bronze MERGE helpers
+# ---------------------------------------------------------------------------
+
+
+def _to_bicc_iso(wm: datetime) -> str:
+    """Format a UTC ``datetime`` as the ISO-8601 string BICC's
+    ``fusion.initial.extract-date`` option accepts (e.g.
+    ``"2026-04-01T00:00:00Z"``). Pure function — trivially unit-testable.
+    """
+    return wm.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _natural_key_join_sql(
+    natural_key: "str | tuple[str, ...]",
+    *,
+    target_alias: str = "target",
+    src_alias: str = "src",
+) -> str:
+    """Build the MERGE ON predicate for a single- or multi-column natural key.
+
+    Uses Spark's NULL-safe equality operator ``<=>`` instead of ``=`` so
+    composite keys with NULL components (e.g. ``gl_period_balances`` on
+    ``BalanceTranslatedFlag`` — see LIMITS.md P1.17-L8) still match
+    NULL-vs-NULL rows. The operator is identical to ``=`` for non-NULL
+    values; the NULL-safety is the only behavioral difference.
+
+    Single-column key → ``target.k <=> src.k``.
+    Composite tuple → ``target.k1 <=> src.k1 AND target.k2 <=> src.k2 AND ...``.
+    Empty string / empty tuple raises — caller must validate the spec
+    has a populated natural_key before invoking MERGE.
+    """
+    if isinstance(natural_key, str):
+        if not natural_key:
+            raise ValueError(
+                "natural_key is empty — cannot construct MERGE ON predicate. "
+                "Populate spec.natural_key / PvoEntry.natural_key before MERGE."
+            )
+        cols: tuple[str, ...] = (natural_key,)
+    else:
+        if len(natural_key) == 0:
+            raise ValueError(
+                "natural_key is empty tuple — cannot construct MERGE ON "
+                "predicate. Populate spec.natural_key / PvoEntry.natural_key "
+                "before MERGE."
+            )
+        cols = tuple(natural_key)
+    return " AND ".join(
+        f"{target_alias}.{c} <=> {src_alias}.{c}" for c in cols
+    )
+
+
+# ---------------------------------------------------------------------------
 # _execute_node — per-step dispatch with try/except + timing wrapping
 # ---------------------------------------------------------------------------
 
@@ -426,6 +482,9 @@ def _execute_node(
             # if dataset_id missing = orchestrator bug, fail loudly.
             effective_schema = effective_schemas[node.dataset_id]
 
+            # P1.17 — resolve per-run safety window (bundle override or default).
+            safety_window = _resolve_safety_window(bundle)
+
             def _do_bronze() -> tuple[int, datetime | None]:
                 # P1.5β.1: capture orchestrator wall clock immediately
                 # before BICC extract. ``extract_started_at`` is the
@@ -437,7 +496,26 @@ def _execute_node(
                 # retry's cursor reflects the moment IT extracted, not
                 # the failed attempt's wall clock.
                 extract_started_at = datetime.now(timezone.utc)
-                persisted_cursor = extract_started_at - WATERMARK_SAFETY_WINDOW
+                persisted_cursor = extract_started_at - safety_window
+
+                # P1.17 B5 + B6b — three-condition gate on threading
+                # the prior watermark to BICC:
+                #   1. prior_watermark must be non-None (fresh tenant
+                #      → full extract; bronze degenerates cleanly).
+                #   2. PVO must support `fusion.initial.extract-date`
+                #      (`incremental_capable=True`). Three PVOs today
+                #      carry False: gl_period_balances, gl_coa,
+                #      ap_aging_periods — BICC's cursor filter is
+                #      not respected for these. See LIMITS.md P1.17-L2.
+                #   3. orchestrator mode must be "incremental".
+                bicc_watermark = (
+                    _to_bicc_iso(prior_watermark) if (
+                        prior_watermark is not None
+                        and pvo.incremental_capable
+                        and mode == "incremental"
+                    ) else None
+                )
+
                 df = extractors.bicc.extract_pvo(
                     spark,
                     pvo,
@@ -446,32 +524,76 @@ def _execute_node(
                     password=resolved_password.get_secret_value(),  # SOLE unwrap site
                     fusion_external_storage=bundle.fusion.external_storage,
                     schema=effective_schema,  # P1.5α-fix19 dispatch contract
-                    # watermark stays None until P1.17 — see Invariant 2
-                    # in the plan: threading the resolved watermark into
-                    # extract_pvo without the non-destructive write
-                    # strategy in place corrupts bronze tables.
+                    watermark=bicc_watermark,  # P1.17 — None for seed/fresh/non-capable
                 )
                 df = enrich_bronze_audit_cols(
                     df,
                     source_pvo=pvo.datastore,
                     run_id=run_id,
-                    watermark=None,  # _watermark_used column stays NULL until P1.17
+                    watermark=None,  # _watermark_used column stays NULL (B0 in-memory only)
                     extract_ts=extract_started_at,  # audit literal == this run's instant
                 )
-                # overwriteSchema=true matches CLAUDE.md's "CREATE OR REPLACE for
-                # seed mode" invariant — lets a re-run converge even when the prior
-                # table has stale audit-column metadata (caught by TC26 live probe
-                # with run_id=023482f5: Delta merged _watermark_used into itself).
-                df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
-                # Count the materialized table, not the BICC plan (would re-extract).
-                row_count = spark.table(target).count()
-                # B3/B5 empty-delta preservation: a successful run with
-                # zero rows MUST NOT regress the prior watermark to
-                # NULL — fall back to ``prior_watermark`` instead.
-                # Only a truly-first-empty run (no prior row at all)
-                # persists ``last_watermark = NULL``.
-                new_wm = persisted_cursor if row_count > 0 else prior_watermark
-                return (row_count, new_wm)
+
+                # P1.17 B6 — cache the source DataFrame: we count it
+                # for the empty-delta gate AND read it again for the
+                # MERGE source. Without caching, MERGE re-executes the
+                # full BICC extract under the hood.
+                df.cache()
+                try:
+                    source_delta_count = df.count()
+
+                    if mode == "seed":
+                        # Phase α path — full overwrite; target count == source count.
+                        # overwriteSchema=true matches CLAUDE.md's "CREATE OR
+                        # REPLACE for seed mode" invariant.
+                        df.write.format("delta").mode("overwrite").option(
+                            "overwriteSchema", "true",
+                        ).saveAsTable(target)
+                        materialized_count = source_delta_count
+                    else:
+                        # P1.17 incremental — MERGE INTO. Ensures target
+                        # exists BEFORE branching on source_delta_count
+                        # so the empty-source short-circuit's
+                        # `spark.table(target).count()` query never hits
+                        # TABLE_OR_VIEW_NOT_FOUND on a fresh tenant
+                        # whose first incremental run extracts zero
+                        # rows (B6c).
+                        state._ensure_target_table_exists(spark, target, df.schema)
+                        if source_delta_count == 0:
+                            # P1.17 short-circuit: empty source → no MERGE.
+                            # Avoids a wasted MERGE plan AND prevents
+                            # _extract_ts being touched on any existing rows.
+                            materialized_count = spark.table(target).count()
+                        else:
+                            df.createOrReplaceTempView("_p117_bronze_src")
+                            # B6 + B6d — unconditional UPDATE SET * (payload-diff
+                            # predicate DEFERRED to P1.17e). The NULL-safe `<=>`
+                            # join predicate handles composite keys with NULL
+                            # components (LIMITS.md P1.17-L8 — gl_period_balances).
+                            natural_key_join = _natural_key_join_sql(pvo.natural_key)
+                            spark.sql(f"""
+                                MERGE INTO {target} AS target
+                                USING _p117_bronze_src AS src
+                                ON {natural_key_join}
+                                WHEN MATCHED THEN UPDATE SET *
+                                WHEN NOT MATCHED THEN INSERT *
+                            """)
+                            materialized_count = spark.table(target).count()
+                finally:
+                    df.unpersist()
+
+                # B5 empty-delta gate uses SOURCE count (BICC delta size),
+                # NOT materialized count (which under MERGE includes
+                # existing rows — would falsely advance the cursor on
+                # an empty delta against a non-empty target).
+                new_wm = persisted_cursor if source_delta_count > 0 else prior_watermark
+
+                # State row's `row_count` column carries the materialized
+                # (target) count — operators reading
+                # `fusion_bundle_state.row_count` for a bronze row see
+                # the table's current size, matching Phase α audit
+                # semantics exactly.
+                return (materialized_count, new_wm)
 
             # P1.5α-fix20: transient infra hiccups (OCI Object Storage 5xx,
             # Spark executor loss, BICC connection reset) shouldn't waste a
@@ -511,30 +633,79 @@ def _execute_node(
         if isinstance(node, (SilverDimSpec, GoldMartSpec)):
             from .retry import run_with_retry
 
-            # B3: thread run_id for the silver_run_id/gold_run_id audit column.
-            # The builder writes the silver/gold table; the returned DataFrame
-            # points at it. We must include df.count() in the retried callable —
-            # a transient Spark/Object Storage failure during the count would
-            # otherwise mark the step failed + cascade/abort downstream even
-            # though the table was already materialized. (P1.5α-fix20-fix1
-            # reviewer catch.) Retrying the full (build → count) is safe because
-            # build() uses CREATE OR REPLACE seed semantics — re-running just
-            # rebuilds the same content.
+            # P1.17 C5 + B4 — TWO-READ shape:
+            #   READ #1 (prior_watermark above): upstream-bronze cursor —
+            #     `(depends_on_bronze[0], "bronze")`. Used for
+            #     RunStep.watermark_used in-memory audit only (β.1 B0).
+            #     NOT passed to the silver/gold builder.
+            #   READ #2 (here):                  layer-local cursor —
+            #     `(node.dataset_id, layer)`. Threaded to the builder's
+            #     `watermark` kwarg per B8a. Filters the MERGE source
+            #     predicate `WHERE bronze_extract_ts > <watermark>`.
+            #
+            # `dim_calendar` skips READ #2 (no source watermark, resolver
+            # returned None for READ #1 already).
+            _own_layer = _layer_for_spec(node)
+            if _wm_source is None:
+                own_layer_wm: datetime | None = None
+            else:
+                own_layer_wm = state.read_last_watermark(
+                    spark, paths, node.dataset_id, _own_layer,
+                )
+
+            # P1.17 B4 / B3b — for marts flagged `incremental_capable=False`
+            # the builder ignores `refresh_mode` and always emits seed-shape
+            # SQL. Orchestrator still passes the kwargs for signature
+            # symmetry, but downgrades the mode signal to "seed" so the
+            # builder's branch logic never sees "incremental" for an
+            # exempt mart.
+            effective_refresh_mode = (
+                mode if (
+                    mode == "incremental"
+                    and getattr(node, "incremental_capable", True)
+                ) else "seed"
+            )
+
+            # P1.17 C5a — builder dispatch differs by spec class:
+            #   - dim_calendar (no upstream bronze) → no refresh_mode /
+            #     watermark kwargs (Invariant 3).
+            #   - all other silver/gold → (refresh_mode, watermark)
+            #     kwargs added.
             def _do_silver_gold() -> int:
-                df = node.builder(spark, paths=paths, run_id=run_id)
+                if _wm_source is None:
+                    df = node.builder(spark, paths=paths, run_id=run_id)
+                else:
+                    df = node.builder(
+                        spark, paths=paths, run_id=run_id,
+                        refresh_mode=effective_refresh_mode,
+                        watermark=own_layer_wm,
+                    )
                 return df.count()
 
             row_count = run_with_retry(_do_silver_gold, dataset_id=node.dataset_id)
-            # P1.5β.1: silver/gold ``last_watermark`` stays None per
-            # Invariant 6 — per-layer lineage capture is deferred to
-            # P1.17. ``watermark_used`` still records the upstream
-            # bronze's cursor for in-memory audit (debug/logs/__repr__).
+
+            # P1.17 B8 + C5 — silver/gold `last_watermark` capture in
+            # BOTH seed AND incremental modes (except dim_calendar — no
+            # `bronze_extract_ts` column). Seed-mode capture is what
+            # populates the FIRST incremental run's READ #2 (own_layer_wm)
+            # — without it, the first incremental run sees
+            # `own_layer_wm = None` and trips B4b's preflight.
+            new_wm: datetime | None
+            if _wm_source is not None:
+                target_table = _resolve_target_table(node, paths)
+                wm_row = spark.sql(
+                    f"SELECT MAX(bronze_extract_ts) AS wm FROM {target_table}"
+                ).first()
+                new_wm = wm_row["wm"] if wm_row is not None else None
+            else:
+                new_wm = None  # dim_calendar — no source watermark
+
             return RunStep.success(
                 node, run_id, mode,
                 row_count=row_count,
                 duration_seconds=perf_counter() - t0,
-                watermark_used=prior_watermark,
-                last_watermark=None,
+                watermark_used=prior_watermark,  # upstream-bronze, in-memory audit (B0)
+                last_watermark=new_wm,           # layer-local, persisted (B8)
                 plan_hash=plan_hash,
                 plan_snapshot=plan_snapshot,
             )
@@ -684,8 +855,10 @@ def run(
         spark: optional pre-existing SparkSession (notebook callers pass
             the AIDP-injected one; standalone callers leave None to use
             ``_bootstrap_spark``).
-        mode: ``"seed"`` (Phase α — all that's implemented) or
-            ``"incremental"`` (Phase β — raises NotImplementedError).
+        mode: ``"seed"`` (Phase α — full overwrite per layer) or
+            ``"incremental"`` (P1.17 — bronze MERGE + row-level
+            silver/gold MERGE; exempt marts `supplier_spend`,
+            `ap_aging`, `dim_calendar` always run seed-shape).
         datasets: ``--datasets`` CSV filter, classified across registries.
         layers: ``--layers`` filter, e.g. ``["gold"]``.
         dry_run: skip execution; return ``RunSummary.empty(..., plan=...)``
@@ -705,7 +878,9 @@ def run(
 
     Raises:
         UnsupportedModeError: mode not in ``{"seed", "incremental"}``.
-        NotImplementedError: mode == ``"incremental"`` (Phase β).
+        IncrementalCursorMissingError: ``mode="incremental"`` requested
+            but one or more silver/gold nodes lack a prior cursor in
+            ``fusion_bundle_state``. Run ``--mode seed`` first.
         BundleLoadError: any bundle.yaml load failure.
         CredentialResolutionError: ``bundle.fusion.password`` unresolvable.
         MissingDependencyError: typo in datasets/dims/marts.
@@ -724,11 +899,10 @@ def run(
             f"{sorted(_VALID_MODES)}. "
             f"(The retired alias 'full' is now called 'seed'.)"
         )
-    if mode == "incremental":
-        raise NotImplementedError(
-            "Incremental mode is P1.5β follow-up; current modules emit "
-            "CREATE OR REPLACE only. Use mode='seed' for now."
-        )
+    # P1.17 — the β.1 NotImplementedError gate is gone. `mode="incremental"`
+    # now dispatches the bronze MERGE + silver/gold MERGE pipeline; the
+    # write-strategy / state-contract pieces shipped together to keep the
+    # destructive-write blast radius contained.
 
     # 1. Load bundle.yaml → (Bundle, TablePaths) via load_bundle (§4.4b).
     bundle, paths = load_bundle(bundle_path)
@@ -903,6 +1077,18 @@ def run(
         effective_extra_deps = extra_deps
     _preflight_external_deps(spark, effective_extra_deps)
 
+    # 5.8. P1.17 — incremental cursor preflight. Fails fast at run-level
+    # (NOT per-node) before any module dispatch when ``--mode incremental``
+    # is asked for but one or more silver/gold nodes lack a prior
+    # ``last_watermark`` in fusion_bundle_state. Bronze tolerates a null
+    # prior cursor (full extract); silver/gold can't, so we consolidate
+    # the missing-cursor list into a single ``IncrementalCursorMissingError``
+    # → CLI exit-2 with the full remediation list. Skips ``dim_calendar``
+    # + ``incremental_capable=False`` marts (supplier_spend, ap_aging).
+    if mode == "incremental":
+        from .preflight import _preflight_incremental_cursors
+        _preflight_incremental_cursors(spark, plan, paths)
+
     # 6. Execute plan.
     # On resume, preserve the original run_id so the state-table
     # audit trail (and the medallion `<layer>_run_id` invariant)
@@ -984,6 +1170,9 @@ __all__ = [
     "PrerequisiteError",
     "CredentialResolutionError",
     "BronzeSchemaProbeError",
+    # P1.17 — new config errors
+    "IncrementalCursorMissingError",
+    "MultipleNaturalKeyError",
     # P1.5β.1 runtime errors
     "OrchestratorRuntimeError",
     "WatermarkMonotonicityError",

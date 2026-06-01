@@ -44,6 +44,7 @@ from .registry import BronzeExtractSpec
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
+    from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
     from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
 
 
@@ -391,4 +392,76 @@ def preflight_bronze_schemas(
     raise BronzeSchemaProbeError("\n".join(lines), failures=failures)
 
 
-__all__ = ["preflight_bronze_schemas", "PreflightResult"]
+# ---------------------------------------------------------------------------
+# P1.17 — incremental cursor preflight
+# ---------------------------------------------------------------------------
+
+
+def _preflight_incremental_cursors(
+    spark: "SparkSession",
+    plan: "list",
+    paths: "TablePaths",
+) -> None:
+    """Raise :class:`IncrementalCursorMissingError` if any silver/gold node
+    in ``plan`` lacks a prior ``last_watermark`` in ``fusion_bundle_state``.
+
+    Runs at run-level (caller: :func:`orchestrator.run`) AFTER
+    ``ensure_state_table`` + BEFORE the dispatch loop, ONLY when
+    ``mode == "incremental"``. A single consolidated error lists every
+    affected dataset → operator sees the full remediation list at once.
+
+    Skipped node classes (per B4b):
+      * :class:`BronzeExtractSpec` — bronze tolerates null prior cursor
+        (full extract → MERGE-by-natural-key inserts every row).
+      * :class:`DeferredSpec` — never dispatched.
+      * ``dim_calendar`` :class:`SilverDimSpec` — parameter-driven,
+        resolver returns ``None``, no source watermark.
+      * :class:`GoldMartSpec` with ``incremental_capable=False`` —
+        always emits seed-shape regardless of mode (supplier_spend,
+        ap_aging).
+
+    Bronze is excluded because its empty-cursor degradation is safe and
+    documented (extract-pvo with ``watermark=None`` returns the full
+    PVO). Silver/gold can't do the same because their MERGE source
+    predicate ``WHERE bronze_extract_ts > <watermark>`` becomes empty
+    under ``watermark=None`` → permanently-stuck mart.
+
+    P1.17c will extend this helper to ALSO check target-table existence
+    (raises ``IncrementalTargetMissingError`` when target missing AND
+    prior cursor non-null — the dropped-target silent-corruption guard).
+    NOT in V1; documented as LIMITS.md P1.17-L5.
+    """
+    from . import state
+    from .errors import IncrementalCursorMissingError
+    from .registry import (
+        BronzeExtractSpec,
+        DeferredSpec,
+        GoldMartSpec,
+        SilverDimSpec,
+        _layer_for_spec,
+    )
+
+    missing_cursors: list[tuple[str, str]] = []
+    for node in plan:
+        if isinstance(node, BronzeExtractSpec):
+            continue
+        if isinstance(node, DeferredSpec):
+            continue
+        if isinstance(node, SilverDimSpec) and node.dataset_id == "dim_calendar":
+            continue
+        if isinstance(node, GoldMartSpec) and not getattr(node, "incremental_capable", True):
+            continue
+        layer = _layer_for_spec(node)
+        cursor = state.read_last_watermark(spark, paths, node.dataset_id, layer)
+        if cursor is None:
+            missing_cursors.append((node.dataset_id, layer))
+
+    if missing_cursors:
+        raise IncrementalCursorMissingError(missing=missing_cursors)
+
+
+__all__ = [
+    "preflight_bronze_schemas",
+    "PreflightResult",
+    "_preflight_incremental_cursors",
+]

@@ -71,16 +71,29 @@ _VALID_MODES: Final[frozenset[str]] = frozenset({"seed", "incremental"})
 # write strategy dedupes the re-extracted rows.
 #
 # β.1 uses a **hardcoded module-level constant** (no ``bundle.yaml`` knob,
-# no env override). Per-tenant configurability lands in P1.17 paired
-# with the actual ``extract_pvo(watermark=...)`` threading — the cursor
-# is captured here but NOT consumed by BICC in this PR (the
-# ``NotImplementedError`` gate stays). If a tenant's observed AIDP-vs-
-# Fusion clock skew exceeds 1 hour, widening the constant before
-# enabling P1.17 is the only intervention.
+# no env override). P1.17 keeps the constant as the **default** but adds
+# a per-tenant override via ``bundle.incremental.watermark_safety_window_seconds``;
+# :func:`_resolve_safety_window` reads the bundle field and falls back
+# to this module-level default when the bundle hasn't declared one.
 #
 # Industry-standard CDC pattern (Debezium / Kafka Connect / Airbyte all
 # use safety-windowed cursors for cross-system incremental extraction).
 WATERMARK_SAFETY_WINDOW: Final[timedelta] = timedelta(hours=1)
+
+
+def _resolve_safety_window(bundle: "Bundle") -> timedelta:
+    """Return the per-run watermark safety window from ``bundle.incremental``.
+
+    Reads ``bundle.incremental.watermark_safety_window_seconds`` (Pydantic
+    field, ``gt=0`` validated; default 3600 — see
+    :class:`oracle_ai_data_platform_fusion_bundle.schema.bundle.IncrementalConfig`).
+    Pure function — no I/O, trivially unit-testable.
+
+    The bronze closure captures the resolved timedelta via closure-scope
+    binding at ``_execute_node`` setup; subsequent within-run retries
+    re-use the same value (the bundle isn't reloaded mid-run).
+    """
+    return timedelta(seconds=bundle.incremental.watermark_safety_window_seconds)
 
 
 def _utc_now() -> datetime:
@@ -804,6 +817,7 @@ __all__ = [
     "_ABORT_MSG_TMPL",
     "_RESUME_SKIP_MSG_TMPL",
     "WATERMARK_SAFETY_WINDOW",
+    "_resolve_safety_window",
     # Helpers
     "_utc_now",
     "_new_run_id",

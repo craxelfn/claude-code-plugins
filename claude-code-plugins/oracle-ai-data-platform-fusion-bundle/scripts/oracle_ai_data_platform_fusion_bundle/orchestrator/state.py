@@ -188,6 +188,33 @@ def _existing_state_columns(spark: "SparkSession", table_path: str) -> set[str]:
     return columns
 
 
+def _ensure_target_table_exists(
+    spark: "SparkSession",
+    target: str,
+    schema: "object",
+) -> None:
+    """Idempotent ``CREATE TABLE IF NOT EXISTS`` for a Delta target whose
+    schema is supplied by the source DataFrame.
+
+    P1.17 B6c — used pre-MERGE for fresh-tenant bronze writes (the bronze
+    MERGE against a non-existent target raises ``TABLE_OR_VIEW_NOT_FOUND``
+    on the first incremental run for a tenant where seed never created
+    that bronze table). On existing tables this is a no-op.
+
+    ``schema`` is a Spark ``StructType`` from the source DataFrame; columns
+    are emitted in the SAME order, each with the ``simpleString()`` form
+    of its data type. NOTE: V1 ships ONLY the simple create path — the
+    dropped-target silent-corruption guard (target missing AND prior
+    cursor non-null) ships in P1.17c as ``IncrementalTargetMissingError``.
+    """
+    if spark.catalog.tableExists(target):
+        return
+    col_specs = ", ".join(
+        f"{f.name} {f.dataType.simpleString()}" for f in schema.fields
+    )
+    spark.sql(f"CREATE TABLE IF NOT EXISTS {target} ({col_specs}) USING DELTA")
+
+
 def _build_add_columns_ddl(table_path: str, missing: list[tuple[str, str]]) -> str:
     """Schema-aware ``ALTER TABLE ... ADD COLUMNS (...)`` for the
     given ``(name, type)`` pairs.
@@ -770,4 +797,5 @@ __all__ = [
     "read_resumable_state",
     "ResumeContext",
     "WATERMARK_READ_SOFT_FAILED_MARKER",
+    "_ensure_target_table_exists",
 ]

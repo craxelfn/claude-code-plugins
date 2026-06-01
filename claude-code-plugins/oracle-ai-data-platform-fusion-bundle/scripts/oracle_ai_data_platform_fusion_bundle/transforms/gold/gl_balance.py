@@ -104,7 +104,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Final, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
 
@@ -122,6 +123,20 @@ DEFAULT_ACTUAL_FLAG_FILTER: Final[str] = "A"
 #: own semantic-alias validation. Configured output column names must match
 #: this so a misconfigured tenant config can't produce malformed SQL.
 _SQL_IDENTIFIER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: Composite gold-side natural key for the incremental MERGE ON predicate
+#: (P1.17). Matches ``GoldMartSpec.natural_key`` in the registry. The
+#: 7-column tuple follows the verified grain in the module docstring
+#: (lines 4-5) — TC23 cross-confirmed.
+NATURAL_KEY_COLUMNS: Final[tuple[str, ...]] = (
+    "ledger_id",
+    "account_id",
+    "period_year",
+    "period_num",
+    "currency_code",
+    "actual_flag",
+    "translated_flag",
+)
 
 #: Default mapping of COA segment position (1-based) → ``gl_balance`` output
 #: column name. Matches the Fusion-conventional six-segment ordering so
@@ -192,84 +207,22 @@ def _run_id_audit_sql(run_id: str | None) -> str:
     return f"'{escaped}'"
 
 
-def build_gl_balance_sql(
-    *,
-    paths:           TablePaths | None = None,
-    bronze_balances: str | None = None,
-    silver_dim:      str | None = None,
-    gold_table:      str | None = None,
-    actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
-    coa_segment_map: Mapping[int, str] | None = None,
-    run_id:          str | None = None,
+def _balance_select_sql(
+    bronze_balances: str,
+    silver_dim: str,
+    where_clauses: str,
+    segment_select_block: str,
+    run_id_sql: str,
 ) -> str:
-    """Return the CREATE-OR-REPLACE Delta SQL for ``gold.gl_balance``.
+    """The SELECT projection shared by seed + incremental SQL renderers.
 
-    Pure string output — no Spark required. Used by unit tests to verify the
-    projection shape; called by :func:`build` to materialize the table.
-
-    Single LEFT JOIN to ``silver.dim_account`` (fact preserved); no
-    ``dim_calendar`` join (grain mismatch — period vs day). Casts amount
-    columns from source ``decimal(38,30)`` to ``DECIMAL(28,2)`` for output.
-
-    ``actual_flag_filter`` controls the WHERE-clause filter on
-    ``BalanceActualFlag``:
-
-    * ``"A"`` (default) — actuals only; the canonical CFO-dashboard view.
-    * ``"E"`` / ``"B"`` — encumbrance / budget only for tenants whose
-      dashboards need those balance types.
-    * ``None`` — disable the filter; surface all flags. Consumers slice
-      on ``actual_flag`` themselves.
-
-    ``coa_segment_map`` controls how dim_account's positional
-    ``segment_NN`` columns are surfaced. Defaults to
-    :data:`DEFAULT_COA_SEGMENT_MAP` (the Fusion-conventional six). Tenants
-    whose COA puts natural account at a different segment override the
-    map (``{1: "company", 5: "natural_account", ...}``); the output column
-    names follow the map values. Pass ``{}`` to omit segment columns
-    entirely — consumers can read ``da.segment_NN`` from ``silver.dim_account``
-    if they want a tenant-agnostic shape.
-
-    Plugin-portability: gl_balance used to read ``da.company``,
-    ``da.cost_center``, etc. directly. Those aliases are now optional in
-    dim_account (the dim's ``semantic_segment_map`` is tenant-configurable),
-    so a non-conventional COA tenant could find them missing. Reading
-    positional ``segment_NN`` instead decouples gl_balance from the dim's
-    alias contract — positional columns are always emitted.
+    Adds the P1.17 ``bronze_extract_ts`` column (row-level passthrough
+    from ``b._extract_ts`` — gl_balance is row-level, not aggregate, so
+    no ``MAX()`` aggregation is needed). Used by the orchestrator's
+    post-build ``MAX(bronze_extract_ts)`` capture (B8) to feed the next
+    incremental run's layer-local cursor (B8a).
     """
-    if paths is None:
-        paths = DEFAULT_PATHS
-    if bronze_balances is None:
-        bronze_balances = paths.bronze("gl_period_balances")
-    if silver_dim is None:
-        silver_dim = paths.silver("dim_account")
-    if gold_table is None:
-        gold_table = paths.gold("gl_balance")
-
-    if actual_flag_filter is None:
-        where_clauses = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
-    else:
-        if actual_flag_filter not in {"A", "E", "B"}:
-            raise ValueError(
-                "actual_flag_filter must be one of 'A' (actuals), 'E' "
-                "(encumbrance), 'B' (budget), or None to disable; "
-                f"got {actual_flag_filter!r}"
-            )
-        where_clauses = (
-            f"WHERE b.BalanceActualFlag = '{actual_flag_filter}'\n"
-            "  AND b.BalanceCodeCombinationId IS NOT NULL"
-        )
-
-    if coa_segment_map is None:
-        coa_segment_map = DEFAULT_COA_SEGMENT_MAP
-    _validate_coa_segment_map(coa_segment_map)
-    segment_select_block = _segment_select_lines(coa_segment_map)
-    segment_select_block = f"{segment_select_block}\n" if segment_select_block else ""
-    run_id_sql = _run_id_audit_sql(run_id)
-
     return f"""\
-CREATE OR REPLACE TABLE {gold_table}
-USING DELTA
-AS
 WITH balances AS (
   SELECT
     b.BalanceLedgerId,
@@ -280,6 +233,7 @@ WITH balances AS (
     b.BalanceCurrencyCode,
     b.BalanceActualFlag,
     b.BalanceTranslatedFlag,
+    b._extract_ts                                                  AS bronze_extract_ts,
     CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 2))                AS begin_balance_dr,
     CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 2))                AS begin_balance_cr,
     CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 2))                AS period_net_dr,
@@ -309,12 +263,117 @@ SELECT
     - COALESCE(b.period_net_cr,    0),
     2
   )                                                                AS closing_balance,
+  b.bronze_extract_ts                                              AS bronze_extract_ts,
   current_timestamp()                                              AS gold_built_at,
   {run_id_sql}                                                     AS gold_run_id
 FROM balances b
 LEFT JOIN {silver_dim}  da
-  ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)
-"""
+  ON da.account_id = CAST(b.BalanceCodeCombinationId AS BIGINT)"""
+
+
+def build_gl_balance_sql(
+    *,
+    paths:           TablePaths | None = None,
+    bronze_balances: str | None = None,
+    silver_dim:      str | None = None,
+    gold_table:      str | None = None,
+    actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
+    coa_segment_map: Mapping[int, str] | None = None,
+    run_id:          str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
+) -> str:
+    """Return the SQL that produces ``gold.gl_balance`` in the requested mode.
+
+    Pure string output — no Spark required. Used by unit tests to verify the
+    projection shape; called by :func:`build` to materialize the table.
+
+    ``refresh_mode`` (P1.17):
+      * ``"seed"`` (default) — ``CREATE OR REPLACE TABLE`` Delta SQL,
+        identical pre-P1.17 shape **except** for the new
+        ``bronze_extract_ts`` column carried row-level from
+        ``b._extract_ts`` (B3 lineage rollout).
+      * ``"incremental"`` — ``MERGE INTO ... ON (7-column composite,
+        NULL-safe) WHEN MATCHED UPDATE SET * WHEN NOT MATCHED INSERT *``.
+        The source-side ``AND b._extract_ts > <watermark>`` predicate
+        filters bronze rows the gold layer has already incorporated
+        (layer-local cursor per B8a). NULL-safe ``<=>`` on the join
+        predicate is required because ``BalanceTranslatedFlag`` is NULL
+        on saasfademo1 (LIMITS.md P1.17-L8).
+
+    ``watermark`` (P1.17 incremental only): UTC ``datetime`` of the
+    layer-local prior cursor.
+
+    Other knobs (``actual_flag_filter``, ``coa_segment_map``) unchanged
+    from pre-P1.17.
+    """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_balances is None:
+        bronze_balances = paths.bronze("gl_period_balances")
+    if silver_dim is None:
+        silver_dim = paths.silver("dim_account")
+    if gold_table is None:
+        gold_table = paths.gold("gl_balance")
+
+    if actual_flag_filter is None:
+        base_where = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
+    else:
+        if actual_flag_filter not in {"A", "E", "B"}:
+            raise ValueError(
+                "actual_flag_filter must be one of 'A' (actuals), 'E' "
+                "(encumbrance), 'B' (budget), or None to disable; "
+                f"got {actual_flag_filter!r}"
+            )
+        base_where = (
+            f"WHERE b.BalanceActualFlag = '{actual_flag_filter}'\n"
+            "  AND b.BalanceCodeCombinationId IS NOT NULL"
+        )
+
+    if coa_segment_map is None:
+        coa_segment_map = DEFAULT_COA_SEGMENT_MAP
+    _validate_coa_segment_map(coa_segment_map)
+    segment_select_block = _segment_select_lines(coa_segment_map)
+    segment_select_block = f"{segment_select_block}\n" if segment_select_block else ""
+    run_id_sql = _run_id_audit_sql(run_id)
+
+    if refresh_mode == "seed":
+        select_sql = _balance_select_sql(
+            bronze_balances, silver_dim, base_where, segment_select_block, run_id_sql,
+        )
+        return f"CREATE OR REPLACE TABLE {gold_table}\nUSING DELTA\nAS\n{select_sql}\n"
+
+    if refresh_mode == "incremental":
+        if watermark is None:
+            raise ValueError(
+                "gl_balance.build_gl_balance_sql: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior cursor). "
+                "The orchestrator's _preflight_incremental_cursors should have "
+                "raised IncrementalCursorMissingError before reaching this path."
+            )
+        watermark_iso = watermark.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        # Append the layer-local watermark predicate to the existing WHERE clause.
+        inc_where = f"{base_where}\n  AND b._extract_ts > '{watermark_iso}'"
+        select_sql = _balance_select_sql(
+            bronze_balances, silver_dim, inc_where, segment_select_block, run_id_sql,
+        )
+        on_predicate = " AND ".join(
+            f"target.{c} <=> src.{c}" for c in NATURAL_KEY_COLUMNS
+        )
+        return (
+            f"MERGE INTO {gold_table} AS target\n"
+            f"USING (\n{select_sql}\n) AS src\n"
+            f"ON {on_predicate}\n"
+            f"WHEN MATCHED THEN UPDATE SET *\n"
+            f"WHEN NOT MATCHED THEN INSERT *\n"
+        )
+
+    raise ValueError(
+        f"gl_balance.build_gl_balance_sql: refresh_mode must be 'seed' or "
+        f"'incremental'; got {refresh_mode!r}"
+    )
 
 
 def build(
@@ -327,20 +386,22 @@ def build(
     actual_flag_filter: str | None = DEFAULT_ACTUAL_FLAG_FILTER,
     coa_segment_map: Mapping[int, str] | None = None,
     run_id:          str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
 ) -> DataFrame:
     """Materialize ``gold.gl_balance``; returns a DataFrame backed by it.
 
     Runs the SQL from :func:`build_gl_balance_sql` and returns the freshly-
-    written gold table. Idempotent — uses ``CREATE OR REPLACE`` so reruns
-    produce the same shape. ``actual_flag_filter`` is forwarded to the SQL
-    builder (default ``'A'`` for the canonical actuals view; pass ``None``
-    to surface all flags). ``coa_segment_map`` controls which positional
-    ``segment_NN`` columns from ``silver.dim_account`` are surfaced and
-    under what names (default: Fusion-conventional six-segment ordering).
+    written gold table. ``actual_flag_filter`` (default ``'A'``) and
+    ``coa_segment_map`` are forwarded to the SQL builder.
+
+    ``refresh_mode`` (P1.17) selects ``"seed"`` (``CREATE OR REPLACE``) or
+    ``"incremental"`` (``MERGE INTO`` row-level with 7-column composite
+    key). Incremental requires ``watermark`` (the layer-local prior
+    cursor).
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver/gold
     table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
-    Explicit per-table kwargs win over ``paths``.
     """
     if paths is None:
         paths = DEFAULT_PATHS
@@ -357,6 +418,8 @@ def build(
         actual_flag_filter=actual_flag_filter,
         coa_segment_map=coa_segment_map,
         run_id=run_id,
+        refresh_mode=refresh_mode,
+        watermark=watermark,
     )
     spark.sql(sql)
     return spark.table(gold_table)
@@ -365,6 +428,7 @@ def build(
 __all__ = [
     "DEFAULT_ACTUAL_FLAG_FILTER",
     "DEFAULT_COA_SEGMENT_MAP",
+    "NATURAL_KEY_COLUMNS",
     "SOURCE_BRONZE_TABLE",
     "SOURCE_SILVER_DIM",
     "TARGET_GOLD_TABLE",

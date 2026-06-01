@@ -241,6 +241,60 @@ class ResumeBundleMismatchError(OrchestratorConfigError):
     """
 
 
+class IncrementalCursorMissingError(OrchestratorConfigError):
+    """One or more silver/gold datasets lack a prior ``last_watermark`` in
+    ``fusion_bundle_state`` and cannot run in ``--mode incremental``.
+
+    Raised by ``_preflight_incremental_cursors`` (P1.17 B4b) at run-level,
+    AFTER ``ensure_state_table`` and BEFORE the dispatch loop. Single
+    consolidated error lists every affected dataset so the operator sees
+    the full remediation list at once instead of fix-rerun-fix-rerun.
+
+    The error inherits from :class:`OrchestratorConfigError` so the CLI's
+    ``_run_inline`` exit-2 catch fires it cleanly — no traceback, no
+    partial dispatch, no half-materialized state.
+
+    Bronze nodes are NOT checked: bronze tolerates a null prior cursor
+    (full extract → MERGE inserts every row → fresh-tenant bronze
+    succeeds without prior cursor). ``dim_calendar`` and any
+    ``GoldMartSpec`` with ``incremental_capable=False`` (e.g.
+    ``supplier_spend``, ``ap_aging``) are also skipped — they route
+    through seed-shape regardless of mode.
+    """
+
+    def __init__(self, *, missing: list[tuple[str, str]]) -> None:
+        self.missing = missing
+        bullets = "\n".join(f"  - {ds} ({layer})" for ds, layer in missing)
+        super().__init__(
+            f"{len(missing)} silver/gold dataset(s) lack a prior "
+            f"last_watermark in fusion_bundle_state and cannot run in "
+            f"--mode incremental:\n"
+            f"{bullets}\n"
+            f"--mode incremental requires a prior --mode seed run to have "
+            f"populated each layer's cursor. Run `aidp-fusion-bundle run "
+            f"--mode seed` (full bundle) OR `aidp-fusion-bundle run --mode "
+            f"seed --datasets <listed_above>` (scoped). After seed completes "
+            f"successfully, re-run incremental.\n\n"
+            f"Note: if you just ran a seed and still see this error, check "
+            f"the orchestrator logs for the marker `watermark_read_soft_failed` "
+            f"— a transient metastore failure may have prevented the cursor "
+            f"read. Re-running incremental usually clears it; if the WARN "
+            f"persists, escalate per LIMITS.md L6."
+        )
+
+
+class MultipleNaturalKeyError(OrchestratorConfigError):
+    """A spec's natural_key was overridden in a way that conflicts with
+    the catalog's natural_key for the same upstream PVO.
+
+    Defensive — no shipped customer override path triggers this today;
+    introduced under P1.17 for forward-compat with a hypothetical
+    bundle.yaml customer override that names a different natural key
+    than the catalog. If exercised, message names the dataset_id and
+    both candidate keys so the operator can reconcile.
+    """
+
+
 class BronzeSchemaProbeError(OrchestratorConfigError):
     """At least one bronze PVO's BICC schema/PVO-name probe failed before
     any data write. Surfaced at exit-2 via the §4.4 step-5.6 preflight, NOT
@@ -272,6 +326,8 @@ __all__ = [
     "PrerequisiteError",
     "CredentialResolutionError",
     "BronzeSchemaProbeError",
+    "IncrementalCursorMissingError",
+    "MultipleNaturalKeyError",
     # Resume failure modes
     "ResumeRunNotFoundError",
     "ResumeRunNotResumableError",

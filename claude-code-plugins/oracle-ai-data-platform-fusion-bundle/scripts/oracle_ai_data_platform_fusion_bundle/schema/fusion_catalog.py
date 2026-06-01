@@ -75,6 +75,25 @@ class PvoEntry:
     incremental_capable: bool = True
     """Whether ``fusion.initial.extract-date`` is meaningful for this dataset."""
 
+    natural_key: "str | tuple[str, ...]" = ""
+    """Natural-key column(s) used by P1.17 bronze MERGE for upsert semantics.
+
+    Single-column keys are stored as a bare string (e.g. ``"SEGMENT1"``);
+    composite keys as a tuple of column names. The MERGE ``ON`` predicate
+    joins target/src on each member (composite → ``AND``-conjunction of
+    per-column equalities).
+
+    Default ``""`` keeps the dataclass backwards-compatible for code paths
+    that don't perform MERGE (preflight discovery, dry-run plan rendering).
+    The orchestrator's bronze MERGE path raises a clear error rather than
+    silently dispatching with an empty key.
+
+    Source: P1.17 A1 inventory — verified against shipped builders that
+    read the bronze table OR against live BICC catalog probes. ⚠️
+    inferred entries (e.g. ``ap_payments`` composite) must be confirmed
+    via ``catalog probe`` before the bronze MERGE is enabled for that PVO.
+    """
+
     extract_columns: list[str] = field(default_factory=list)
     """Optional column projection (pdf1 Pro Tip: prune to what you need; default = all)."""
 
@@ -108,6 +127,8 @@ _SUPPLIER_EXTRACT = PvoEntry(
     bronze_table_name="erp_suppliers",
     description="Supplier master — live-validated 2026-04-30 against saasfademo1 (229 rows).",
     confirmed=True,
+    # P1.17 natural key — confirmed via dim_supplier.py:107 (`SEGMENT1 AS supplier_number`).
+    natural_key="SEGMENT1",
 )
 
 _PRC_EXTRACT_PO = PvoEntry(
@@ -119,6 +140,9 @@ _PRC_EXTRACT_PO = PvoEntry(
     bronze_table_name="po_orders",
     description="Purchase order headers — verified live 2026-04-30 against saasfademo1 BICC catalog.",
     confirmed=True,
+    # P1.17 natural key — inferred from PurchasingDocumentHeaderExtractPVO naming
+    # convention; verify via `catalog probe` before enabling bronze MERGE.
+    natural_key="PoHeadersAllPoHeaderId",
 )
 
 _ITEM_EXTRACT = PvoEntry(
@@ -134,6 +158,9 @@ _ITEM_EXTRACT = PvoEntry(
     description="Item master — verified live 2026-04-30 against saasfademo1 BICC catalog.",
     confirmed=True,
     incremental_capable=True,
+    # P1.17 natural key — inferred composite (item × inventory org grain);
+    # verify via `catalog probe` before enabling bronze MERGE.
+    natural_key=("EgpSystemItemsBInventoryItemId", "EgpSystemItemsBOrganizationId"),
 )
 
 # Verified live 2026-04-30 — all datastore names confirmed against /biacm/rest/meta/datastores
@@ -146,6 +173,8 @@ _GL_JOURNAL_LINES = PvoEntry(
     bronze_table_name="gl_journal_headers",
     description="GL journal headers — verified-live PVO name. (Use JournalLineExtractPVO under FinGlJrnlEntriesAM for line-level granularity.)",
     confirmed=True,
+    # P1.17 natural key — inferred (header-level grain); verify via `catalog probe`.
+    natural_key="GlJeHeadersJeHeaderId",
 )
 
 _GL_PERIOD_BALANCES = PvoEntry(
@@ -156,6 +185,20 @@ _GL_PERIOD_BALANCES = PvoEntry(
     description="GL period balances — verified-live PVO name (monthly snapshot).",
     incremental_capable=False,
     confirmed=True,
+    # P1.17 natural key — confirmed via TC23 (gl_balance.py module docstring
+    # lines 4-5; TC23 evidence rows 136-151). 7-column composite.
+    # BalanceTranslatedFlag is NULL on saasfademo1 — see LIMITS.md P1.17-L8
+    # for NULL-component MERGE caveat; use NULL-safe `<=>` in the bronze
+    # MERGE ON predicate for this PVO when MERGE goes live.
+    natural_key=(
+        "BalanceLedgerId",
+        "BalanceCodeCombinationId",
+        "BalancePeriodYear",
+        "BalancePeriodNum",
+        "BalanceCurrencyCode",
+        "BalanceActualFlag",
+        "BalanceTranslatedFlag",
+    ),
 )
 
 _GL_COA = PvoEntry(
@@ -166,6 +209,9 @@ _GL_COA = PvoEntry(
     description="Chart of accounts (code combinations) — verified-live PVO name. Source for dim_account.",
     incremental_capable=False,
     confirmed=True,
+    # P1.17 natural key — confirmed via dim_account.py:247 (reads
+    # `CodeCombinationCodeCombinationId AS account_id`).
+    natural_key="CodeCombinationCodeCombinationId",
 )
 
 _AR_INVOICES = PvoEntry(
@@ -176,6 +222,8 @@ _AR_INVOICES = PvoEntry(
     bronze_table_name="ar_invoices",
     description="AR invoices (Fusion AR Transaction Headers) — verified-live PVO name.",
     confirmed=True,
+    # P1.17 natural key — inferred; verify via `catalog probe`.
+    natural_key="RaCustTrxAllCustomerTrxId",
 )
 
 _AR_RECEIPTS = PvoEntry(
@@ -185,6 +233,8 @@ _AR_RECEIPTS = PvoEntry(
     bronze_table_name="ar_receipts",
     description="AR receipts — verified-live PVO name.",
     confirmed=True,
+    # P1.17 natural key — inferred; verify via `catalog probe`.
+    natural_key="ArCashReceiptsAllCashReceiptId",
 )
 
 _AP_INVOICES = PvoEntry(
@@ -195,6 +245,10 @@ _AP_INVOICES = PvoEntry(
     bronze_table_name="ap_invoices",
     description="AP invoices — live-validated 2026-04-30 (49,985 rows from saasfademo1).",
     confirmed=True,
+    # P1.17 natural key — inferred from ApInvoices* prefix convention
+    # (matches supplier_spend.py + ap_aging.py column reads); verify via
+    # `catalog probe`.
+    natural_key="ApInvoicesInvoiceId",
 )
 
 _AP_PAYMENTS = PvoEntry(
@@ -204,6 +258,14 @@ _AP_PAYMENTS = PvoEntry(
     bronze_table_name="ap_payments",
     description="AP payments (Payment History Distribution) — verified-live PVO name.",
     confirmed=True,
+    # P1.17 natural key — inferred composite (payment × distribution
+    # grain); ⚠️ high-risk inferred entry — verify via `catalog probe`
+    # before bronze MERGE goes live for this PVO. Until confirmed, the
+    # bronze write path stays on seed-shape regardless of mode.
+    natural_key=(
+        "ApPayHistDistInvoicePaymentId",
+        "ApPayHistDistPaymentHistDistId",
+    ),
 )
 
 _AP_AGING_PERIODS = PvoEntry(
@@ -219,6 +281,8 @@ _AP_AGING_PERIODS = PvoEntry(
     description="AP aging period definitions — bucket configs only; aging gold mart computed downstream from ap_invoices + ap_payments.",
     incremental_capable=False,
     confirmed=True,
+    # P1.17 natural key — inferred; verify via `catalog probe`.
+    natural_key="AgingPeriodHeaderAgingPeriodId",
 )
 
 _PO_RECEIPTS = PvoEntry(
@@ -232,6 +296,8 @@ _PO_RECEIPTS = PvoEntry(
     bronze_table_name="po_receipts",
     description="PO receipts (Receiving Receipt Transactions) — verified-live PVO name. Lives under ScmExtractAM in the AM hierarchy; BICC offering schema is tenant-dependent (see schema field comment).",
     confirmed=True,
+    # P1.17 natural key — inferred; verify via `catalog probe`.
+    natural_key="RcvTransactionsTransactionId",
 )
 
 # v2 deliverable — uses saas-batch REST path, NOT BICC. The kind=SAAS_BATCH

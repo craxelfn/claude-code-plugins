@@ -57,7 +57,8 @@ prefix). Confirmed live on ``fusion_bundle_dev`` (2026-05-07).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from datetime import datetime
+from typing import TYPE_CHECKING, Final, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
 
@@ -132,7 +133,8 @@ WITH invoices AS (
     inv.ApInvoicesApprovalStatus,
     inv.ApInvoicesInvoiceAmount,
     inv.ApInvoicesAmountPaid,
-    CAST(inv.ApInvoicesInvoiceDate AS DATE)                        AS invoice_date
+    CAST(inv.ApInvoicesInvoiceDate AS DATE)                        AS invoice_date,
+    inv._extract_ts                                                AS bronze_extract_ts
   FROM {bronze_invoices} inv
   WHERE inv.ApInvoicesVendorId IS NOT NULL
 )
@@ -149,6 +151,7 @@ SELECT
   ROUND(SUM(COALESCE(CAST(inv.ApInvoicesAmountPaid    AS DECIMAL(20, 2)), 0)), 2)
                                                                        AS total_paid,
   MAX(inv.invoice_date)                                            AS last_invoice_date,
+  MAX(inv.bronze_extract_ts)                                       AS bronze_extract_ts,
   current_timestamp()                                              AS gold_built_at,
   {run_id_sql}                                                     AS gold_run_id
 FROM invoices inv
@@ -195,6 +198,8 @@ def build(
     gold_table:      str | None = None,
     currency_col:    str = DEFAULT_CURRENCY_COL,
     run_id:          str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
 ) -> DataFrame:
     """Materialize ``gold.supplier_spend``; returns a DataFrame backed by it.
 
@@ -206,16 +211,31 @@ def build(
 
     ``auto_detect=True`` (default) probes ``bronze.ap_invoices`` for the
     canonical ``ApInvoicesInvoiceCurrencyCode`` or its supported alias
-    ``ApInvoicesCurrencyCode`` and uses whichever is present. An explicit
-    ``currency_col`` kwarg different from the default wins (for tenants
-    whose extract uses some other alias). If neither alias is found AND
-    no explicit override is passed, ``build`` raises a clear ValueError
-    — the mart cannot ship without currency in grain.
+    ``ApInvoicesCurrencyCode`` and uses whichever is present.
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver/gold
     table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
-    Explicit per-table kwargs win over ``paths``.
+
+    ``refresh_mode`` (P1.17): accepted for signature symmetry with the
+    other gold marts but **IGNORED** — ``supplier_spend`` is
+    ``incremental_capable=False`` (B2 + C1a). The shipped 6-column
+    GROUP BY grain mixes a mutable fact attribute (``approval_status``);
+    a partial-MERGE pattern in V1 would leave both old and new
+    aggregate rows on a PENDING → APPROVED status flip → off-by-one
+    invoice_count + double-counted totals. The aggregate-MERGE pattern
+    (affected-keys + DELETE) is deferred to P1.17b. Until then the
+    mart always emits seed-shape ``CREATE OR REPLACE TABLE`` SQL
+    regardless of orchestrator mode. ``watermark`` is likewise
+    accepted + ignored.
     """
+    # P1.17 B2 — supplier_spend is incremental-exempt; the kwargs are
+    # accepted for orchestrator-dispatch symmetry but the builder
+    # always emits seed-shape SQL. The orchestrator's _execute_node
+    # already downgrades the effective mode to "seed" for marts flagged
+    # incremental_capable=False, but the builder honors that decision
+    # locally too so direct callers (notebook, unit tests) get the same
+    # behavior.
+    del refresh_mode, watermark  # explicit acknowledgement: unused in V1
     if paths is None:
         paths = DEFAULT_PATHS
     if bronze_invoices is None:

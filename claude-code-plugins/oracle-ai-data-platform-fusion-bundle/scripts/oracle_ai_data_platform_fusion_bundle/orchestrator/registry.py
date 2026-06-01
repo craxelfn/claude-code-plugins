@@ -44,6 +44,8 @@ from .errors import MissingDependencyError, MultipleUpstreamWatermarkError
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame
 
+    from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+
 
 # Closed set of layer values. DeferredSpec.__post_init__ + _layer_for_spec
 # in runtime.py both reference this; widening here widens both call sites
@@ -79,23 +81,50 @@ class SilverDimSpec:
     """A silver dimension's dispatch info: builder callable + upstream bronze
     dataset_ids for topo-sort. Modules accept ``run_id: str | None = None``
     keyword-only for the SOX-trail audit column (§3.5a).
+
+    ``natural_key`` (P1.17) is the **silver-side projected** column name
+    used by the incremental MERGE ``ON`` predicate (``target.<natural_key>
+    = src.<natural_key>``). Empty string for ``dim_calendar`` (exempt;
+    parameter-driven, no source watermark).
     """
 
     dataset_id: str
     builder: Callable[..., "DataFrame"]
     depends_on_bronze: tuple[str, ...]
+    natural_key: "str | tuple[str, ...]" = ""
 
 
 @dataclass(frozen=True)
 class GoldMartSpec:
     """A gold mart's dispatch info. Same shape as ``SilverDimSpec`` plus
     ``depends_on_silver`` for the second topo-sort edge.
+
+    ``natural_key`` (P1.17) is the **gold-side projected** column(s) used
+    by the incremental MERGE ``ON`` predicate. Composite keys stored as
+    a tuple. Unused for marts where ``incremental_capable=False``
+    (recorded for completeness + P1.17b consumption).
+
+    ``incremental_capable`` (P1.17 B3b + B2): when ``False`` the mart
+    always emits seed-shape ``CREATE OR REPLACE TABLE`` regardless of
+    orchestrator mode. Mirrors :attr:`PvoEntry.incremental_capable` for
+    bronze — same name, same semantics, different layer.
+
+    V1-exempt marts:
+      * ``supplier_spend`` — aggregate over a grain that mixes mutable
+        dim + fact attributes (``approval_status``); partial-MERGE would
+        leave both old and new aggregate rows. Aggregate-MERGE pattern
+        deferred to P1.17b.
+      * ``ap_aging`` — bucket assignments are ``CURRENT_DATE()``-anchored,
+        so rows age daily independent of bronze deltas. Full-recompute
+        keeps buckets accurate.
     """
 
     dataset_id: str
     builder: Callable[..., "DataFrame"]
     depends_on_bronze: tuple[str, ...]
     depends_on_silver: tuple[str, ...]
+    natural_key: "str | tuple[str, ...]" = ""
+    incremental_capable: bool = True
 
 
 @dataclass(frozen=True)
@@ -156,16 +185,25 @@ SILVER_DIMS: dict[str, SilverDimSpec] = {
         "dim_supplier",
         builder=dim_supplier.build,
         depends_on_bronze=("erp_suppliers",),
+        # Silver-side projection name (dim_supplier.py:107 emits
+        # `SEGMENT1 AS supplier_number`). MERGE ON clause matches against
+        # this column, not the bronze-side `SEGMENT1`.
+        natural_key="supplier_number",
     ),
     "dim_account": SilverDimSpec(
         "dim_account",
         builder=dim_account.build,
         depends_on_bronze=("gl_coa",),
+        # Silver-side projection name (dim_account.py:247 emits
+        # `CAST(CodeCombinationCodeCombinationId AS BIGINT) AS account_id`).
+        natural_key="account_id",
     ),
     "dim_calendar": SilverDimSpec(
         "dim_calendar",
         builder=dim_calendar.build,
         depends_on_bronze=(),  # calendar is parameter-driven, not bronze-driven
+        # Exempt — resolver returns None; never reaches the MERGE branch.
+        natural_key="",
     ),
 }
 
@@ -175,18 +213,44 @@ GOLD_MARTS: dict[str, GoldMartSpec] = {
         builder=supplier_spend.build,
         depends_on_bronze=("ap_invoices",),
         depends_on_silver=("dim_supplier",),
+        # P1.17 A1 verified 6-col grain at supplier_spend.py:157-163.
+        # Unused under V1 (incremental_capable=False routes through
+        # seed-shape); recorded for P1.17b's affected-keys + MERGE pattern.
+        natural_key=(
+            "vendor_id", "currency_code", "supplier_number",
+            "supplier_name", "business_relationship", "approval_status",
+        ),
+        incremental_capable=False,  # P1.17b will flip True
     ),
     "gl_balance": GoldMartSpec(
         "gl_balance",
         builder=gl_balance.build,
         depends_on_bronze=("gl_period_balances",),
         depends_on_silver=("dim_account",),
+        # Gold-side projection names matching gl_balance.py:291-300 grain
+        # (composite — TC23 verified). `translated_flag` is NULL on
+        # saasfademo1 (TC23 row 151) — see LIMITS.md P1.17-L8 for the
+        # NULL-component MERGE caveat. Builder uses NULL-safe `<=>` on
+        # this column in the incremental MERGE ON predicate.
+        natural_key=(
+            "ledger_id", "account_id", "period_year", "period_num",
+            "currency_code", "actual_flag", "translated_flag",
+        ),
+        incremental_capable=True,  # row-level, V1 ships incremental MERGE
     ),
     "ap_aging": GoldMartSpec(
         "ap_aging",
         builder=ap_aging.build,
         depends_on_bronze=("ap_invoices",),
         depends_on_silver=("dim_supplier",),
+        # P1.17 A1 verified 6-col grain at ap_aging.py:495-501. Unused
+        # under V1 (incremental_capable=False routes through seed-shape
+        # per B3b — CURRENT_DATE()-anchored buckets age daily).
+        natural_key=(
+            "vendor_id", "currency_code", "supplier_number",
+            "supplier_name", "business_relationship", "aging_bucket",
+        ),
+        incremental_capable=False,  # CURRENT_DATE()-anchored buckets; post-P1.17 P3.x
     ),
 }
 
@@ -257,6 +321,40 @@ def _resolve_mart(name: str) -> GoldMartSpec | DeferredSpec:
 # ---------------------------------------------------------------------------
 # Layer-from-spec helper (single source of truth for the mapping)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_target_table(spec: object, paths: "TablePaths") -> str:
+    """Return the 3-part Delta target table identifier for ``spec``.
+
+    Single source of truth for the spec → ``catalog.schema.table`` mapping
+    that several P1.17 sites need: post-build ``MAX(bronze_extract_ts)``
+    capture (C5/B4), the bronze MERGE target (C4), and any future
+    inspection (β.1 inlines the equivalent expression at two
+    ``__init__.py`` sites).
+
+    For :class:`BronzeExtractSpec`, the bronze table name lives on the
+    PVO entry (``PvoEntry.bronze_table_name``); for silver/gold the
+    table name equals ``spec.dataset_id``.
+
+    :class:`DeferredSpec` raises — deferred specs never materialize a
+    Delta target and the caller has no meaningful path to render.
+    """
+    from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
+
+    if isinstance(spec, BronzeExtractSpec):
+        return paths.bronze(fusion_catalog.get(spec.pvo_id).bronze_table_name)
+    if isinstance(spec, SilverDimSpec):
+        return paths.silver(spec.dataset_id)
+    if isinstance(spec, GoldMartSpec):
+        return paths.gold(spec.dataset_id)
+    if isinstance(spec, DeferredSpec):
+        raise TypeError(
+            f"_resolve_target_table: deferred spec {spec.dataset_id!r} has no "
+            "materialized target table to resolve."
+        )
+    raise TypeError(
+        f"_resolve_target_table: unknown spec type {type(spec).__name__}"
+    )
 
 
 def _layer_for_spec(spec: object) -> Literal["bronze", "silver", "gold"]:
@@ -341,6 +439,7 @@ __all__ = [
     "_resolve_dim",
     "_resolve_mart",
     "_layer_for_spec",
+    "_resolve_target_table",
     "_resolve_watermark_source",
     "_VALID_LAYERS",
 ]

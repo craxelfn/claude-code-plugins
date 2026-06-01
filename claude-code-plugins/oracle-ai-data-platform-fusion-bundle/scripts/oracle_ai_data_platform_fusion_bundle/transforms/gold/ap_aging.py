@@ -101,7 +101,8 @@ GROUP BY and ROUND aggregate consistently.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from datetime import datetime
+from typing import TYPE_CHECKING, Final, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
 
@@ -464,6 +465,7 @@ WITH open_invoices AS (
     CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(28, 2))
       - CAST(COALESCE(inv.ApInvoicesAmountPaid, 0) AS DECIMAL(28, 2))        AS open_amount,
     CAST(inv.ApInvoicesInvoiceDate AS DATE)                                  AS invoice_date,
+    inv._extract_ts                                                          AS bronze_extract_ts,
 {cte_due_date}
   FROM {bronze_table} inv
   WHERE inv.ApInvoicesVendorId IS NOT NULL
@@ -487,6 +489,7 @@ SELECT
   {due_date_source_proj}{net30_fallback_count_proj}MIN(o.invoice_date)                                                      AS oldest_invoice_date,
   MAX({days_expr})                                                         AS {max_days_alias},
   CAST({as_of_date_expr} AS DATE)                                          AS as_of_date,
+  MAX(o.bronze_extract_ts)                                                 AS bronze_extract_ts,
   current_timestamp()                                                      AS gold_built_at,
   {run_id_sql}                                                             AS gold_run_id
 FROM open_invoices o
@@ -583,8 +586,21 @@ def build(
     cancelled_kind: str        = CANCELLED_KIND_DATE,
     currency_col:   str        = "ApInvoicesInvoiceCurrencyCode",
     run_id:         str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
 ) -> DataFrame:
     """Materialize the AP aging mart; returns a DataFrame backed by the gold table.
+
+    ``refresh_mode`` (P1.17): accepted for signature symmetry with the
+    other gold marts but **IGNORED** — ``ap_aging`` is
+    ``incremental_capable=False`` (B3b). Aging buckets are
+    ``CURRENT_DATE()``-anchored, so rows age daily independent of any
+    bronze delta. Under MERGE this would leave the prior bucket
+    assignment frozen — stale by one day, daily. The mart therefore
+    always emits seed-shape ``CREATE OR REPLACE TABLE`` SQL regardless
+    of orchestrator mode (P3.x ticket will refactor to a frozen
+    ``as_of_date`` parameter that enables real incremental MERGE).
+    ``watermark`` is likewise accepted + ignored.
 
     ``auto_detect=True`` (default) probes the bronze schema first to handle
     Fusion AP column-name variants (TermsDate vs DueDate presence, Cancelled-
@@ -622,6 +638,12 @@ def build(
        earlier (under ``'auto'``) would catastrophically pick the proxy
        table for every above-threshold tenant.
     """
+    # P1.17 B3b — ap_aging is incremental-exempt; refresh_mode/watermark
+    # are accepted for orchestrator-dispatch symmetry but unused. The
+    # CURRENT_DATE()-anchored bucket assignments make every cycle a
+    # full-recompute regardless of bronze deltas.
+    del refresh_mode, watermark
+
     if paths is None:
         paths = DEFAULT_PATHS
     if bronze_table is None:
