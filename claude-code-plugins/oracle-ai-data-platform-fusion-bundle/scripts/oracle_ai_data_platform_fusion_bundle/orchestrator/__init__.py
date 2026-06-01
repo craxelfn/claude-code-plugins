@@ -546,9 +546,7 @@ def _execute_node(
                         # Phase α path — full overwrite; target count == source count.
                         # overwriteSchema=true matches CLAUDE.md's "CREATE OR
                         # REPLACE for seed mode" invariant.
-                        df.write.format("delta").mode("overwrite").option(
-                            "overwriteSchema", "true",
-                        ).saveAsTable(target)
+                        df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
                         materialized_count = source_delta_count
                     else:
                         # P1.17 incremental — MERGE INTO. Ensures target

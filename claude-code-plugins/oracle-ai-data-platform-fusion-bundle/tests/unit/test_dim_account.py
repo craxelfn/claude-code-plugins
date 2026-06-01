@@ -137,11 +137,18 @@ class TestSqlBuilder:
         assert "current_timestamp()" in sql
         assert "AS silver_built_at" in sql
 
-    def test_surrogate_key_uses_monotonically_increasing_id(self) -> None:
-        """Surrogate is non-stable across rebuilds; downstream joins on account_id."""
+    def test_surrogate_key_uses_xxhash64_of_natural_key(self) -> None:
+        """P1.17 / P1.19 surrogate-key contract: ``xxhash64(CCID)`` —
+        deterministic across rebuilds + stable under MERGE refreshes.
+        Pre-P1.19 used ``monotonically_increasing_id()`` which would
+        silently invalidate any downstream cache keyed on the surrogate
+        after the first incremental MERGE. Downstream marts MUST still
+        join on ``account_id`` (the natural key).
+        """
         sql = build_dim_account_sql()
-        assert "monotonically_increasing_id()" in sql
+        assert "xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))" in sql
         assert "AS account_key" in sql
+        assert "monotonically_increasing_id" not in sql
 
     def test_uses_custom_table_names_when_provided(self) -> None:
         sql = build_dim_account_sql(

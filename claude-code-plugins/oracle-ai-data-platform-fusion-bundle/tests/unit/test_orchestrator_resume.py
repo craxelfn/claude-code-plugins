@@ -96,6 +96,9 @@ class _FakeDataFrame:
         self.write.mode.return_value = self.write
         self.write.option.return_value = self.write
         self.write.saveAsTable.return_value = None
+        # P1.17 — _ensure_target_table_exists needs `.schema.fields`.
+        self.schema = MagicMock()
+        self.schema.fields = []
 
     def count(self) -> int:
         return self._row_count
@@ -105,6 +108,19 @@ class _FakeDataFrame:
 
     def collect(self) -> list[Any]:
         return []
+
+    def first(self):
+        # P1.17 silver/gold capture path. Empty result → None.
+        return None
+
+    def cache(self) -> "_FakeDataFrame":
+        return self
+
+    def unpersist(self) -> None:
+        return None
+
+    def createOrReplaceTempView(self, _name: str) -> None:
+        return None
 
 
 class _FakeRow:
