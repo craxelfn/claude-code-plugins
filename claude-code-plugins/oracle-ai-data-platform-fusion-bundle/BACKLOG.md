@@ -903,7 +903,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - Live evidence: incremental run on `gl_period_balances` after a no-change bronze cycle → `DESCRIBE HISTORY gold.gl_balance` shows NO new MERGE commit (matched-but-no-payload-change path didn't propagate).
 - LIMITS.md P1.17-L7 moved to §Resolved.
 
-### `[ ]` P1.17d — Schema evolution under MERGE (ALTER TABLE ADD COLUMNS helper)
+### `[x]` P1.17d — Schema evolution under MERGE (ALTER TABLE ADD COLUMNS helper) — **IMPLEMENTED 2026-06-02 (branch `oussama-dev-p1.17d-schema-evolution`); LIMITS §P1.17-L6 moved to §Resolved. 17 new unit tests + 4 import-graph regression guards. Live evidence TC30c dispatch pending operator-side cluster run.**
 **Why**: V1's bronze MERGE assumes the target's schema matches the source DataFrame's schema exactly. If BICC adds a column to a PVO between cycles, the MERGE fails with a Spark `AnalysisException` naming the new column. Documented as **LIMITS.md P1.17-L6**; interim mitigation is manual `ALTER TABLE ADD COLUMNS` + re-run. Plan ranks this as bullet 4 in the sequencing recommendation — "pair with the next BICC drift incident; not urgent until a real schema change hits." Pairs naturally with BACKLOG L1 (BICC schema drift) / P2.16 (drift-detection tooling).
 **Size**: M (~2 days) — `_ensure_target_schema_for_merge(spark, target, source_schema)` helper + call site in `_do_bronze` incremental branch + each silver/gold incremental branch + 3 sub-cases of D-schema test (source-wider, target-wider, type-conflict).
 **Depends on**: P1.17 (shipped — `5f644d7`).

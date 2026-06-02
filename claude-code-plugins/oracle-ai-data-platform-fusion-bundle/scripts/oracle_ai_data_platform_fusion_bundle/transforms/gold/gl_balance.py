@@ -282,6 +282,8 @@ def build_gl_balance_sql(
     run_id:          str | None = None,
     refresh_mode: Literal["seed", "incremental"] = "seed",
     watermark:    datetime | None = None,
+    target_only_columns: tuple[str, ...] = (),
+    source_columns: tuple[str, ...] | None = None,
 ) -> str:
     """Return the SQL that produces ``gold.gl_balance`` in the requested mode.
 
@@ -362,12 +364,33 @@ def build_gl_balance_sql(
         on_predicate = " AND ".join(
             f"target.{c} <=> src.{c}" for c in NATURAL_KEY_COLUMNS
         )
+        # P1.17d — render explicit-column-list MERGE when target has
+        # columns the source lacks; preserves target-only columns by
+        # omitting them from UPDATE/INSERT lists. Otherwise V1 shape.
+        if target_only_columns:
+            if source_columns is None:
+                raise ValueError(
+                    "build_gl_balance_sql: when target_only_columns is "
+                    "non-empty (explicit-column-list MERGE shape), the "
+                    "source_columns kwarg MUST be provided. The "
+                    "orchestrator's build() supplies this from "
+                    "spark.sql(<select>).schema."
+                )
+            from oracle_ai_data_platform_fusion_bundle.orchestrator.merge_sql import (
+                build_explicit_when_matched_clause,
+                build_explicit_when_not_matched_clause,
+            )
+            when_matched_clause = build_explicit_when_matched_clause(source_columns)
+            when_not_matched_clause = build_explicit_when_not_matched_clause(source_columns)
+        else:
+            when_matched_clause = "WHEN MATCHED THEN UPDATE SET *"
+            when_not_matched_clause = "WHEN NOT MATCHED THEN INSERT *"
         return (
             f"MERGE INTO {gold_table} AS target\n"
             f"USING (\n{select_sql}\n) AS src\n"
             f"ON {on_predicate}\n"
-            f"WHEN MATCHED THEN UPDATE SET *\n"
-            f"WHEN NOT MATCHED THEN INSERT *\n"
+            f"{when_matched_clause}\n"
+            f"{when_not_matched_clause}\n"
         )
 
     raise ValueError(
@@ -411,6 +434,45 @@ def build(
         silver_dim = paths.silver("dim_account")
     if gold_table is None:
         gold_table = paths.gold("gl_balance")
+
+    # P1.17d — under incremental, reconcile target schema with source
+    # projection BEFORE the MERGE. gl_balance's SELECT joins bronze ×
+    # silver — the source's column list is the projection's union of
+    # both layers' columns + the segment-select-block expansions.
+    # spark.sql(<select>).schema resolves the full projection in one
+    # planner call.
+    target_only_columns: tuple[str, ...] = ()
+    source_columns: tuple[str, ...] | None = None
+    if refresh_mode == "incremental":
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+        if actual_flag_filter is None:
+            _base_where = "WHERE b.BalanceCodeCombinationId IS NOT NULL"
+        else:
+            _base_where = (
+                f"WHERE b.BalanceActualFlag = '{actual_flag_filter}'\n"
+                "  AND b.BalanceCodeCombinationId IS NOT NULL"
+            )
+        _coa = coa_segment_map if coa_segment_map is not None else DEFAULT_COA_SEGMENT_MAP
+        _segment_select_block = _segment_select_lines(_coa)
+        _segment_select_block = (
+            f"{_segment_select_block}\n" if _segment_select_block else ""
+        )
+        _run_id_sql = _run_id_audit_sql(run_id)
+        inner_select = _balance_select_sql(
+            bronze_balances, silver_dim, _base_where,
+            _segment_select_block, _run_id_sql,
+        )
+        source_schema = spark.sql(
+            f"SELECT * FROM ({inner_select}) WHERE 1=0"
+        ).schema
+        reconcile = _state._ensure_target_schema_for_merge(
+            spark, gold_table, source_schema.names, source_schema,
+        )
+        if reconcile.target_only_columns:
+            target_only_columns = reconcile.target_only_columns
+            source_columns = tuple(source_schema.names)
+
     sql = build_gl_balance_sql(
         bronze_balances=bronze_balances,
         silver_dim=silver_dim,
@@ -420,6 +482,8 @@ def build(
         run_id=run_id,
         refresh_mode=refresh_mode,
         watermark=watermark,
+        target_only_columns=target_only_columns,
+        source_columns=source_columns,
     )
     spark.sql(sql)
     return spark.table(gold_table)

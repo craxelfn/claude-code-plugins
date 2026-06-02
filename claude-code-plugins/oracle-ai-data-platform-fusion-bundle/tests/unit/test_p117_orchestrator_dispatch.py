@@ -124,18 +124,48 @@ class _DispatchSpark:
         table_count: int = 0,
         table_exists: bool = True,
         state_read_raises: bool = False,
+        describe_table_schema: dict[str, list[tuple[str, str]]] | None = None,
     ) -> None:
         self.prior_rows = prior_rows or []
         self.silver_gold_wm = silver_gold_wm
         self.table_count = table_count
         self.table_exists = table_exists
         self.state_read_raises = state_read_raises
+        # P1.17d — route DESCRIBE TABLE <target> queries through this
+        # mapping. Per-target keys win; a "" key acts as a global
+        # fallback. Tests that want schema drift set explicit values;
+        # tests that don't can use the no-drift default by registering
+        # the source schema via _set_default_describe_schema().
+        self.describe_table_schema: dict[str, list[tuple[str, str]]] = (
+            describe_table_schema or {}
+        )
         self.sql_calls: list[str] = []
         self.catalog = MagicMock()
         self.catalog.tableExists.side_effect = lambda *_a, **_kw: self.table_exists
 
+    def _set_default_describe_schema(
+        self, schema_fields: list[tuple[str, str]]
+    ) -> None:
+        """Register a fallback DESCRIBE TABLE schema for any target.
+
+        Called by ``_execute_bronze`` from the source ``_DfStub`` so
+        existing tests see "no drift" by default (the post-CREATE
+        target's schema matches the source DataFrame's). Tests that
+        want target-wider / source-wider / type-conflict drift set
+        per-target entries directly on ``self.describe_table_schema``.
+        """
+        # Empty key = global fallback for any target not in the per-key map.
+        self.describe_table_schema.setdefault("", schema_fields)
+
     def sql(self, query: str) -> _DfFromRows:
         self.sql_calls.append(query)
+        # P1.17d — fresh-tenant path: state._ensure_target_table_exists
+        # issues `CREATE TABLE IF NOT EXISTS <target> ... USING DELTA`
+        # on the target. Real Spark flips tableExists True after this;
+        # the fake mirrors that so the subsequent
+        # _ensure_target_schema_for_merge precondition check passes.
+        if query.lstrip().upper().startswith("CREATE TABLE IF NOT EXISTS"):
+            self.table_exists = True
         # read_last_watermark
         if "SELECT last_watermark" in query and "fusion_bundle_state" in query:
             if self.state_read_raises:
@@ -149,6 +179,20 @@ class _DispatchSpark:
         if "MAX(bronze_extract_ts)" in query:
             return _DfFromRows(
                 [_FakeRow(wm=self.silver_gold_wm)] if self.silver_gold_wm else [_FakeRow(wm=None)]
+            )
+        # P1.17d — DESCRIBE TABLE for schema reconciliation
+        if query.lstrip().upper().startswith("DESCRIBE TABLE"):
+            import re
+
+            m = re.match(r"\s*DESCRIBE\s+TABLE\s+(\S+)", query, re.IGNORECASE)
+            target = m.group(1).strip() if m else ""
+            # Per-target override wins; otherwise global fallback;
+            # otherwise empty (target appears to have no columns).
+            fields = self.describe_table_schema.get(
+                target, self.describe_table_schema.get("", [])
+            )
+            return _DfFromRows(
+                [_FakeRow(col_name=n, data_type=t) for n, t in fields]
             )
         return _DfFromRows([])
 
@@ -188,10 +232,21 @@ class _DfStub:
         # `.name` + `.dataType.simpleString()`-bearing objects.
         fields = schema_fields or [("_extract_ts", "timestamp"), ("SEGMENT1", "string")]
         self.schema = MagicMock()
-        self.schema.fields = [
-            MagicMock(name=name, dataType=MagicMock(simpleString=lambda t=t: t)) | _name_mock(name)
-            for name, t in fields
-        ]
+        # P1.17d — use a concrete object whose `.name` returns the actual
+        # string + `.dataType.simpleString()` returns the type string.
+        # The earlier MagicMock-OR chain produced opaque mock objects
+        # whose `.name` access yielded MagicMock instances, breaking
+        # `_ensure_target_schema_for_merge`'s type-extraction loop.
+        class _DTypeStub:
+            def __init__(self, simple: str) -> None:
+                self._simple = simple
+            def simpleString(self) -> str:
+                return self._simple
+        class _FieldStub:
+            def __init__(self, name: str, dtype: str) -> None:
+                self.name = name
+                self.dataType = _DTypeStub(dtype)
+        self.schema.fields = [_FieldStub(name, t) for name, t in fields]
         # P1.17e — renderer reads `df.schema.names`; mirror PySpark's
         # StructType.names property as a plain list derived from
         # schema_fields (preserves source order — important for stable
@@ -256,6 +311,19 @@ def _execute_bronze(
 ) -> tuple[RunStep, dict[str, Any], _DfStub]:
     """Invoke `_execute_node` for a bronze spec. Returns (step, captured_kwargs, df_stub)."""
     df = df_stub if df_stub is not None else _DfStub(count=5)
+    # P1.17d — auto-register the source schema as the default
+    # DESCRIBE TABLE response so existing tests see "no drift"
+    # (post-CREATE target schema == source schema). Tests that want
+    # drift override per-target via spark.describe_table_schema[target].
+    if hasattr(spark, "_set_default_describe_schema"):
+        # Derive (name, type) pairs from the df_stub's mocked schema.
+        # _DfStub.schema.fields is a list of MagicMocks with `.name` set
+        # via _name_mock + `.dataType.simpleString` lambda.
+        default_fields = [
+            (f.name, f.dataType.simpleString())
+            for f in df.schema.fields
+        ]
+        spark._set_default_describe_schema(default_fields)
     captured: dict[str, Any] = {}
 
     def fake_extract_pvo(_spark, _pvo, **kw):
@@ -1199,3 +1267,364 @@ class TestPreflightIncrementalCursors:
         plan = [BRONZE_EXTRACTS["ap_invoices"]]
         # No raise.
         _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# P1.17d — schema evolution under MERGE (helper + dispatch tests)
+# ---------------------------------------------------------------------------
+
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (  # noqa: E402
+    SchemaReconcileResult,
+    _ensure_target_schema_for_merge,
+)
+
+
+class _StructLike:
+    """Minimal StructType-shaped object for helper tests."""
+
+    def __init__(self, fields: list[tuple[str, str]]) -> None:
+        class _Field:
+            def __init__(self, name: str, dtype: str) -> None:
+                self.name = name
+                self.dataType = type(
+                    "_DT", (), {"simpleString": lambda self, _d=dtype: _d}
+                )()
+
+        self.fields = [_Field(n, t) for n, t in fields]
+
+    @property
+    def names(self) -> list[str]:
+        return [f.name for f in self.fields]
+
+
+class TestSchemaReconcileHelper:
+    """P1.17d — unit tests for `_ensure_target_schema_for_merge`.
+
+    Pins the helper's contract independently of any builder/dispatch
+    code that consumes it. Covers all documented result states +
+    precondition + generator-coerced source_columns.
+    """
+
+    def test_no_drift_returns_empty_diff(self) -> None:
+        # Source == target by name set → no ALTER fires, no
+        # target_only_columns reported.
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_a", "string"), ("col_b", "int"),
+        ]
+        result = _ensure_target_schema_for_merge(
+            spark, "cat.b.t",  # type: ignore[arg-type]
+            ["col_a", "col_b"],
+            _StructLike([("col_a", "string"), ("col_b", "int")]),
+        )
+        assert result.common_columns == ("col_a", "col_b")
+        assert result.source_only_columns == ()
+        assert result.target_only_columns == ()
+        # No ALTER dispatched.
+        assert not any(
+            "ALTER TABLE" in q for q in spark.sql_calls
+        ), "no-drift case should not emit ALTER"
+
+    def test_source_wider_emits_alter_table_add_columns(self) -> None:
+        # Source has col_new; target lacks it → helper emits ALTER
+        # TABLE ADD COLUMNS (col_new <type>) before returning.
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_a", "string"),
+        ]
+        result = _ensure_target_schema_for_merge(
+            spark, "cat.b.t",  # type: ignore[arg-type]
+            ["col_a", "col_new"],
+            _StructLike([("col_a", "string"), ("col_new", "bigint")]),
+        )
+        assert result.source_only_columns == ("col_new",)
+        assert result.target_only_columns == ()
+        # ALTER was dispatched with the new col + type.
+        alter_calls = [q for q in spark.sql_calls if "ALTER TABLE" in q]
+        assert len(alter_calls) == 1
+        assert "col_new bigint" in alter_calls[0]
+
+    def test_target_wider_returns_target_only_columns_without_alter(self) -> None:
+        # Target has col_legacy; source lacks it → no ALTER, but
+        # target_only_columns flags the caller to use explicit MERGE.
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_a", "string"), ("col_legacy", "string"),
+        ]
+        result = _ensure_target_schema_for_merge(
+            spark, "cat.b.t",  # type: ignore[arg-type]
+            ["col_a"],
+            _StructLike([("col_a", "string")]),
+        )
+        assert result.target_only_columns == ("col_legacy",)
+        assert result.source_only_columns == ()
+        # No ALTER (target retains the column).
+        assert not any("ALTER TABLE" in q for q in spark.sql_calls)
+
+    def test_mixed_source_wider_and_target_wider(self) -> None:
+        # Both directions of drift simultaneously.
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_a", "string"), ("col_legacy", "string"),
+        ]
+        result = _ensure_target_schema_for_merge(
+            spark, "cat.b.t",  # type: ignore[arg-type]
+            ["col_a", "col_new"],
+            _StructLike([("col_a", "string"), ("col_new", "bigint")]),
+        )
+        assert result.source_only_columns == ("col_new",)
+        assert result.target_only_columns == ("col_legacy",)
+        # ALTER fired for the new col only.
+        alter_calls = [q for q in spark.sql_calls if "ALTER TABLE" in q]
+        assert len(alter_calls) == 1
+        assert "col_new bigint" in alter_calls[0]
+        assert "col_legacy" not in alter_calls[0]
+
+    def test_type_conflict_raises_before_any_alter(self) -> None:
+        # Common column with mismatched types → raise SchemaEvolution
+        # TypeConflictError BEFORE any ALTER is dispatched (A5
+        # ordering contract).
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
+            SchemaEvolutionTypeConflictError,
+        )
+
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_x", "string"),  # target type
+        ]
+        with pytest.raises(SchemaEvolutionTypeConflictError) as exc_info:
+            _ensure_target_schema_for_merge(
+                spark, "cat.b.t",  # type: ignore[arg-type]
+                ["col_x", "col_new"],
+                _StructLike([("col_x", "bigint"), ("col_new", "int")]),  # source mismatch
+            )
+        # Conflict captured.
+        assert exc_info.value.target == "cat.b.t"
+        assert exc_info.value.conflicts == [("col_x", "bigint", "string")]
+        # ALTER must NOT have been dispatched (A5 — raise before alter).
+        assert not any("ALTER TABLE" in q for q in spark.sql_calls), (
+            "type-conflict raise must precede ALTER dispatch"
+        )
+
+    def test_helper_raises_runtime_error_when_target_missing(self) -> None:
+        # Precondition violation — caller skipped _ensure_target_table_
+        # exists. Helper uses explicit `if not ...: raise RuntimeError`
+        # (NOT assert) so Python -O doesn't strip the check.
+        spark = _DispatchSpark(table_exists=False)
+        with pytest.raises(RuntimeError) as exc_info:
+            _ensure_target_schema_for_merge(
+                spark, "cat.b.missing",  # type: ignore[arg-type]
+                ["col_a"],
+                _StructLike([("col_a", "string")]),
+            )
+        # Message points at the remediation.
+        assert "must exist before reconciliation" in str(exc_info.value)
+        assert "_ensure_target_table_exists" in str(exc_info.value)
+        # No DESCRIBE or ALTER dispatched — pure precondition check.
+        for q in spark.sql_calls:
+            assert "DESCRIBE TABLE" not in q
+            assert "ALTER TABLE" not in q
+
+    def test_helper_accepts_generator_source_columns(self) -> None:
+        # Source columns can be a one-shot generator (Iterable[str]).
+        # Without `source_columns = tuple(source_columns)` at function
+        # entry, the first iteration would consume the generator and
+        # subsequent passes would see an empty iterable, silently
+        # producing wrong source_only / common_columns.
+        spark = _DispatchSpark(table_exists=True)
+        spark.describe_table_schema["cat.b.t"] = [
+            ("col_a", "string"),
+        ]
+        result = _ensure_target_schema_for_merge(
+            spark, "cat.b.t",  # type: ignore[arg-type]
+            iter(["col_a", "col_new"]),  # one-shot generator
+            _StructLike([("col_a", "string"), ("col_new", "bigint")]),
+        )
+        # If the generator were consumed by the first iteration,
+        # source_only would be empty and the ALTER wouldn't fire.
+        assert result.source_only_columns == ("col_new",)
+        assert any("ALTER TABLE" in q for q in spark.sql_calls)
+
+
+class TestSchemaEvolution:
+    """P1.17d — bronze MERGE renderer's branch logic over schema-
+    reconciliation result states. Composes with P1.17e payload-diff.
+    """
+
+    def test_source_wider_triggers_alter_then_v1_merge_shape(self) -> None:
+        # Source has _TC_NEW_COL; target lacks it. Helper ALTERs target;
+        # downstream MERGE proceeds with V1 UPDATE SET * / INSERT *
+        # shape (target now matches source after the ALTER).
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=10, table_exists=True,
+        )
+        # Source carries _TC_NEW_COL; explicit override of the
+        # auto-default schema makes the target NARROWER.
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),
+                ("_TC_NEW_COL", "string"),
+                ("_extract_ts", "timestamp"),
+            ],
+        )
+        # The auto-default registers ALL three on the target; override
+        # to simulate target-narrower (target lacks _TC_NEW_COL).
+        target = "fusion_catalog.bronze.ap_invoices"
+        spark.describe_table_schema[target] = [
+            ("ApInvoicesInvoiceId", "bigint"),
+            ("_extract_ts", "timestamp"),
+        ]
+        step, _captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=df_stub,
+        )
+        assert step.status == "success"
+        # ALTER fired with _TC_NEW_COL.
+        alter_calls = [q for q in spark.sql_calls if "ALTER TABLE" in q]
+        assert len(alter_calls) == 1
+        assert "_TC_NEW_COL string" in alter_calls[0]
+        # The MERGE then used V1 shape (post-ALTER schemas match;
+        # target_only_columns is empty).
+        merge_calls = [q for q in spark.sql_calls if "MERGE INTO" in q]
+        assert len(merge_calls) == 1
+        merge_sql = merge_calls[0]
+        # P1.17e payload-diff predicate still gates the UPDATE (the
+        # payload-diff applies whenever non-audit data columns exist —
+        # ALTER doesn't disable it).
+        assert "WHEN MATCHED AND (" in merge_sql
+        # No explicit-list shape (no target-wider drift).
+        assert "INSERT (" not in merge_sql or "INSERT *" in merge_sql.split("WHEN NOT MATCHED", 1)[1]
+
+    def test_target_wider_triggers_explicit_column_list_merge(self) -> None:
+        # Target has _TC_LEGACY; source lacks it. Renderer switches
+        # to explicit-column-list MERGE; _TC_LEGACY is NOT mentioned
+        # in UPDATE/INSERT (preserves target-only column value).
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=10, table_exists=True,
+        )
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),
+                ("_extract_ts", "timestamp"),
+            ],
+        )
+        # Target carries _TC_LEGACY in addition to source's two cols.
+        target = "fusion_catalog.bronze.ap_invoices"
+        spark.describe_table_schema[target] = [
+            ("ApInvoicesInvoiceId", "bigint"),
+            ("_TC_LEGACY", "string"),
+            ("_extract_ts", "timestamp"),
+        ]
+        step, _captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=df_stub,
+        )
+        assert step.status == "success"
+        # No ALTER (target retains its extra column).
+        assert not any("ALTER TABLE" in q for q in spark.sql_calls)
+        # Explicit-list MERGE.
+        merge_calls = [q for q in spark.sql_calls if "MERGE INTO" in q]
+        assert len(merge_calls) == 1
+        merge_sql = merge_calls[0]
+        assert "WHEN MATCHED AND (" in merge_sql  # payload-diff still applies
+        assert "UPDATE SET target.ApInvoicesInvoiceId = src.ApInvoicesInvoiceId" in merge_sql
+        assert "INSERT (ApInvoicesInvoiceId, _extract_ts)" in merge_sql
+        # _TC_LEGACY is NOT in UPDATE or INSERT (preserved by exclusion).
+        update_clause = merge_sql.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
+        insert_clause = merge_sql.split("WHEN NOT MATCHED")[1]
+        assert "_TC_LEGACY" not in update_clause
+        assert "_TC_LEGACY" not in insert_clause
+
+    def test_no_drift_renders_v1_shape(self) -> None:
+        # Schemas match → no ALTER, V1 shape (with P1.17e payload-diff).
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=10, table_exists=True,
+        )
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),
+                ("_extract_ts", "timestamp"),
+            ],
+        )
+        # _execute_bronze auto-registers the source schema as the
+        # default DESCRIBE TABLE response — no drift.
+        step, _captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=df_stub,
+        )
+        assert step.status == "success"
+        # No ALTER, V1 shape.
+        assert not any("ALTER TABLE" in q for q in spark.sql_calls)
+        merge_calls = [q for q in spark.sql_calls if "MERGE INTO" in q]
+        assert len(merge_calls) == 1
+        merge_sql = merge_calls[0]
+        # No explicit-list (no target-wider drift).
+        assert "UPDATE SET target." not in merge_sql
+        # P1.17e payload-diff still applies.
+        assert "WHEN MATCHED AND (" in merge_sql
+
+    def test_type_conflict_fails_run_before_merge(self) -> None:
+        # Type conflict raises SchemaEvolutionTypeConflictError during
+        # the bronze renderer's _ensure_target_schema_for_merge call.
+        # The orchestrator wraps the exception (via _execute_node's
+        # try/except) and the run step status is `failed`.
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=10, table_exists=True,
+        )
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),  # source: bigint
+                ("_extract_ts", "timestamp"),
+            ],
+        )
+        target = "fusion_catalog.bronze.ap_invoices"
+        # Target has same column name but a different type → conflict.
+        spark.describe_table_schema[target] = [
+            ("ApInvoicesInvoiceId", "string"),  # target: string (mismatch!)
+            ("_extract_ts", "timestamp"),
+        ]
+        step, _captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=df_stub,
+        )
+        assert step.status == "failed"
+        assert "SchemaEvolutionTypeConflictError" in (step.error_message or "")
+        # No MERGE was dispatched (raise pre-MERGE).
+        assert not any("MERGE INTO" in q for q in spark.sql_calls)

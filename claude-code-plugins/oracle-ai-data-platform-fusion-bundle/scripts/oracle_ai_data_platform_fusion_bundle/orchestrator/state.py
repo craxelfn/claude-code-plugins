@@ -54,13 +54,17 @@ them as non-resumable.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Iterable
+
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import StructType
 
     from .runtime import RunStep
 
@@ -239,6 +243,208 @@ def _build_add_columns_ddl(table_path: str, missing: list[tuple[str, str]]) -> s
     """
     col_specs = ", ".join(f"{name} {dtype}" for name, dtype in missing)
     return f"ALTER TABLE {table_path} ADD COLUMNS ({col_specs})"
+
+
+# ---------------------------------------------------------------------------
+# P1.17d — schema evolution under MERGE
+# ---------------------------------------------------------------------------
+
+
+def _existing_state_columns_with_types(
+    spark: "SparkSession", table_path: str
+) -> list[tuple[str, str]]:
+    """Return ``(col_name, data_type)`` pairs for ``table_path`` in
+    physical order.
+
+    Mirrors :func:`_existing_state_columns` but preserves the
+    ``DESCRIBE TABLE`` result row order and pairs each name with its
+    Spark-normalized ``simpleString()`` data type. Used by
+    :func:`_ensure_target_schema_for_merge` (P1.17d) to detect
+    type-conflicts and to compute the target's physical column order
+    for explicit-column-list MERGE generation.
+
+    Same defensive row-shape fallback as the names-only variant:
+    tries ``row["col_name"]`` first, falls back to ``row[0]`` /
+    ``row[1]`` for Spark forks with a different row class. Stops at
+    the first ``#``-prefixed metadata marker.
+    """
+    rows = spark.sql(f"DESCRIBE TABLE {table_path}").collect()
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        try:
+            name = row["col_name"]
+            dtype = row["data_type"]
+        except (KeyError, TypeError, IndexError):
+            try:
+                name = row[0]
+                dtype = row[1]
+            except (KeyError, TypeError, IndexError):
+                continue
+        if not name or name.startswith("#"):
+            break
+        out.append((name, dtype))
+    return out
+
+
+@dataclass(frozen=True)
+class SchemaReconcileResult:
+    """Outcome of :func:`_ensure_target_schema_for_merge` — P1.17d.
+
+    Result states (cf. plan.md §B1):
+      - **No drift**: ``source_only_columns`` and ``target_only_columns``
+        both empty. Caller proceeds with V1 ``UPDATE SET *`` / ``INSERT *``
+        MERGE shape.
+      - **Source-wider only**: ``source_only_columns`` non-empty,
+        ``target_only_columns`` empty. The helper has already emitted
+        ``ALTER TABLE ... ADD COLUMNS (...)`` for the new columns;
+        target now matches source. Caller proceeds with V1 shape.
+      - **Target-wider only** (or **both**): ``target_only_columns``
+        non-empty. Caller MUST switch to explicit-column-list MERGE
+        syntax over ``common_columns + source_only_columns``;
+        target-only columns are preserved by being omitted from the
+        UPDATE/INSERT lists.
+      - **Type-conflict**: NOT a returned result —
+        :class:`SchemaEvolutionTypeConflictError` is raised before any
+        ALTER or MERGE.
+
+    "Cold start" (target missing) is NOT a returned result either —
+    it's a precondition violation that raises explicit ``RuntimeError``
+    (caller must invoke ``_ensure_target_table_exists`` first, or rely
+    on P1.17c's incremental preflight for silver/gold). Explicit
+    ``if not ...: raise`` survives ``python -O`` (asserts would not).
+    """
+
+    common_columns: tuple[str, ...]
+    """Intersection of source and target column names, in target's
+    physical order. Stable across runs for golden-snapshot SQL tests."""
+
+    source_only_columns: tuple[str, ...]
+    """Columns in source not previously in target. AFTER the helper
+    runs, these have been ALTERed INTO the target (post-helper, the
+    target's physical schema includes them)."""
+
+    target_only_columns: tuple[str, ...]
+    """Columns in target not in source. Non-empty → caller MUST use
+    explicit-column-list MERGE syntax to avoid disturbing them."""
+
+
+def _ensure_target_schema_for_merge(
+    spark: "SparkSession",
+    target: str,
+    source_columns: "Iterable[str]",
+    source_schema_struct: "StructType",
+) -> SchemaReconcileResult:
+    """Reconcile target Delta-table schema with source DataFrame's schema
+    before an incremental MERGE — P1.17d.
+
+    Resolves the four schema-drift modes documented in
+    :class:`SchemaReconcileResult`. The helper composes three existing
+    primitives (:func:`_existing_state_columns_with_types`,
+    :func:`_build_add_columns_ddl`, and ``spark.catalog.tableExists``)
+    plus :class:`SchemaEvolutionTypeConflictError` for the unresolvable
+    type-conflict case.
+
+    ``source_columns`` is materialized to a tuple at the top so the
+    helper can iterate it multiple times (set construction +
+    source-order preservation for ``source_only`` + per-column
+    type lookup). Generators/``iter(...)`` inputs are safe.
+
+    Precondition: ``spark.catalog.tableExists(target)`` is True.
+    Callers satisfy this differently per layer:
+      - Bronze (orchestrator dispatch): ``_do_bronze`` invokes
+        :func:`_ensure_target_table_exists` immediately before.
+      - Silver/gold (orchestrator dispatch): P1.17c's
+        :func:`_preflight_incremental_cursors` certifies target
+        existence at run-level before any node dispatch.
+      - Silver/gold (standalone notebook use): caller's responsibility;
+        helper raises ``RuntimeError`` with remediation pointer.
+
+    Ordering invariant (Stage A5): type-conflict detection runs BEFORE
+    any ALTER. A partial-ALTER on the target when an operator hasn't
+    decided how to handle a type conflict would leave the schema half-
+    reconciled.
+
+    Args:
+        spark: SparkSession with metastore access to ``target``.
+        target: Fully-qualified Delta table identifier (e.g.
+            ``fusion_catalog.bronze.ap_invoices``).
+        source_columns: Iterable of source DataFrame column names.
+            Tuple-coerced internally; generators are safe.
+        source_schema_struct: PySpark ``StructType`` from the source
+            DataFrame. Used to (a) detect type conflicts via
+            ``simpleString()`` comparison, and (b) supply the data-type
+            DDL for any ``source_only`` columns being ALTER-ed in.
+
+    Returns:
+        A :class:`SchemaReconcileResult` describing the post-helper
+        state. Callers branch on ``target_only_columns`` to decide
+        between V1 and explicit-column-list MERGE shapes.
+
+    Raises:
+        RuntimeError: ``target`` does not exist (precondition
+            violation).
+        SchemaEvolutionTypeConflictError: one or more columns shared
+            between source and target have incompatible types.
+            Auto-promotion is out of scope (operator must decide).
+    """
+    # Materialize up-front so generators/iterables aren't consumed by
+    # the first iteration. This is load-bearing — the helper iterates
+    # source_columns three times below.
+    source_columns = tuple(source_columns)
+
+    # Precondition — target must already exist. Explicit `if not
+    # ...: raise RuntimeError(...)` rather than `assert` so Python -O
+    # doesn't strip the check.
+    if not spark.catalog.tableExists(target):
+        raise RuntimeError(
+            f"target {target!r} must exist before reconciliation; "
+            f"call _ensure_target_table_exists first (bronze) or rely "
+            f"on the P1.17c IncrementalTargetMissingError preflight "
+            f"(silver/gold under orchestrator dispatch)"
+        )
+
+    target_cols_with_types = _existing_state_columns_with_types(spark, target)
+    target_names_ordered = [n for n, _ in target_cols_with_types]
+    target_set = set(target_names_ordered)
+
+    # Map source-side names to their simpleString types for both
+    # conflict detection AND ALTER-DDL generation.
+    source_types = {
+        f.name: f.dataType.simpleString() for f in source_schema_struct.fields
+    }
+
+    # A5 — detect type conflicts BEFORE any ALTER.
+    conflicts: list[tuple[str, str, str]] = []
+    for name, target_type in target_cols_with_types:
+        if name in source_types and source_types[name] != target_type:
+            conflicts.append((name, source_types[name], target_type))
+    if conflicts:
+        # Lazy import to avoid circular: errors.py is imported by
+        # __init__.py at package load.
+        from .errors import SchemaEvolutionTypeConflictError
+
+        raise SchemaEvolutionTypeConflictError(
+            target=target, conflicts=conflicts
+        )
+
+    # Diffs over the materialized tuple.
+    source_set = set(source_columns)
+    source_only = tuple(c for c in source_columns if c not in target_set)
+    target_only = tuple(c for c in target_names_ordered if c not in source_set)
+    common = tuple(c for c in target_names_ordered if c in source_set)
+
+    # Source-wider: emit ALTER TABLE ADD COLUMNS so target catches up
+    # with source before the MERGE.
+    if source_only:
+        new_col_specs = [(c, source_types[c]) for c in source_only]
+        alter_ddl = _build_add_columns_ddl(target, new_col_specs)
+        spark.sql(alter_ddl)
+
+    return SchemaReconcileResult(
+        common_columns=common,
+        source_only_columns=source_only,
+        target_only_columns=target_only,
+    )
 
 
 def _latest_view_ddl(table_path: str, view_path: str) -> str:
@@ -601,9 +807,6 @@ def read_last_watermark_strict(
 # ---------------------------------------------------------------------------
 # Resume-time state read
 # ---------------------------------------------------------------------------
-
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
