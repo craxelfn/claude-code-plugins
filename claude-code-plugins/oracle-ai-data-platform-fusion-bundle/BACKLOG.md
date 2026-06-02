@@ -109,7 +109,7 @@
 - Surrogate `calendar_key`, `fiscal_year`, `fiscal_period`, `calendar_date`.
 - Unit test verifies coverage + no gaps.
 
-### `[~]` P1.5 — orchestrator/__init__.py + notebooks/run_orchestrator.ipynb (Phase α shipped in commits 9e15d79 → 7f57d38; live TC26 pending)
+### `[x]` P1.5 — orchestrator/__init__.py + notebooks/run_orchestrator.ipynb (Phase α shipped 9e15d79 → 7f57d38; live TC26 closed 2026-06-02, run_id `00bd680f-…`)
 **Status (2026-05-17)**: Phase α implementation **shipped** across five atomic commits on `oussama-dev`:
 - `9e15d79` P0  — catalog cleanup (bronze_table_name rename, SAAS_BATCH, ar_aging/ap_aging cleanup)
 - `c6f4ace` Phase 2 — orchestrator package (errors, registry, runtime, state) + Bundle versioning
@@ -266,7 +266,7 @@
 - ✅ `TestStateWriteFailureSemantics.test_ensure_state_table_failure_halts_run_before_dispatch` — `PermissionError` from `ensure_state_table` propagates; `_execute_node` patched + `assert_not_called()` confirms zero dispatch attempts.
 - ✅ `TestRunCascadeAndAbort.test_failed_bronze_cascades_to_skipped_silver_and_gold` updated with `wraps=`-style patches that count both wrapper invocations and underlying `state.write_state_row` calls — both equal `len(steps)`, proving the run loop persists every step through the SOFT wrapper.
 
-### `[~]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (impl + tests shipped 2026-05-17; awaiting live evidence for `[x]`)
+### `[x]` P1.5α-fix4 — Layer/dataset filter semantics: intra-plan vs extra-plan dependencies (impl + tests 2026-05-17; live evidence TC26 2026-06-02 — 5 deferred rows + 10 success rows on 15-node DAG demonstrate classification)
 **Why**: the §4.2 advertises `layers=["gold"]` as the iterating-on-gold-SQL workflow ("only rebuild gold without re-extracting bronze"). §4.7 simultaneously says any consumer whose dependency is filtered out of the current run hard-fails with `MissingDependencyError`. The two contradict: running `orchestrator.run(layers=["gold"])` would crash on every gold mart's bronze prerequisite.
 **Approach** (Option 4 — distinguish intra-plan from extra-plan dependencies):
 - **Intra-plan** deps (both consumer and provider in current plan): standard topo-sort + cascade-on-failure as today.
@@ -352,7 +352,7 @@
 - ✅ `TestExceptionHierarchy.test_subclass_of_orchestrator_config_error` (`test_orchestrator_runtime.py`) parametrized over 6 cases (`BundleLoadError`, `BundleVersionMismatchError`, `MissingDependencyError`, `CredentialResolutionError`, `PrerequisiteError`, `UnsupportedModeError`) — every direct subclass asserted via `issubclass(cls, OrchestratorConfigError)`.
 - ✅ `test_every_public_error_class_inherits_marker` — self-maintaining lint that loops `errors.__all__` and asserts each non-marker class has `OrchestratorConfigError` in MRO. New error classes added to `__all__` are automatically subject to the contract.
 
-### `[~]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (impl + tests shipped 2026-05-17; awaiting live evidence for `[x]`)
+### `[x]` P1.5α-fix7 — CLI wiring: thread `bundle_path`, pass `datasets=None` by default (impl + tests 2026-05-17; live evidence TC26 2026-06-02 — dispatcher invoked `orchestrator.run(bundle_path=…, datasets=None, layers=None)` with full end-to-end success)
 **Why**: the §4.5 `_run_inline` pseudocode had three coupled bugs the reviewer caught:
 1. **`bundle_path` not threaded.** Pseudocode signature `_run_inline(bundle_data, mode, dataset_ids)` took the parsed YAML *dict*, but `orchestrator.run(bundle_path=...)` (§4.2 public API) needs the *Path*. The orchestrator re-reads the YAML internally because `_render_env_vars` (§4.4a) must run on raw text BEFORE Pydantic validation. Passing a parsed dict would skip env-var rendering entirely.
 2. **Default `datasets=` is over-restrictive bronze-only.** `commands/run.py:47` calls `_resolve_datasets(bundle_data, datasets)` which, when `--datasets` is omitted, returns the full list of enabled `datasets[*].id` from bundle.yaml — those are BICC PVO names (`ap_invoices`, `gl_period_balances`, etc.), all bronze. Silver dim names (`dim_supplier`, `dim_account`) and gold mart names (`supplier_spend`, `ap_aging`) are NOT in `bundle.datasets[]`. Passing that list as `datasets=` to the orchestrator filters silver + gold out. **Worst-kind-of-bug**: `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) returns exit 0, RunSummary shows 11 bronze success rows, customer thinks everything materialized — silver + gold never dispatched.
@@ -377,7 +377,7 @@
 **Remaining gate for `[x]` flip**:
 - **Live evidence (TC26)**: `aidp-fusion-bundle run --inline --mode seed` (no `--datasets`) on `fusion_bundle_dev` produces a RunSummary with all 11 bronze + 3 silver + 3 gold success rows (the actual bug Bug 2 would have hidden — silver/gold rows MUST be present). Blocked on BICC credential refresh — same blocker as fix4's live-evidence gate.
 
-### `[~]` P1.5α-fix9 — Module retrofit: `run_id` kwarg + `<layer>_run_id` audit column (impl + tests shipped 2026-05-17 in commit `2df8cc3`; awaiting live evidence for `[x]`)
+### `[x]` P1.5α-fix9 — Module retrofit: `run_id` kwarg + `<layer>_run_id` audit column (impl + tests 2026-05-17 in commit `2df8cc3`; live evidence TC26 2026-06-02 — SOX-trail JOIN matches 4018/4018 silver + 131/131 gold)
 **Why**: PLAN §3.1 widens every silver/gold `build()` signature to accept `run_id: str | None = None`, and §3.5a adds `silver_run_id` / `gold_run_id` audit columns. PLAN §4.4 `_execute_node` calls `node.builder(spark, paths=paths, run_id=run_id)` — but the six shipped modules' live signatures don't accept `run_id` today. Without this retrofit, the first silver/gold dispatch in P1.5α will TypeError on `unexpected keyword argument 'run_id'`. The old §8 "Modules untouched" acceptance criterion has been replaced (in-plan) by an explicit Module-retrofit criterion — this entry tracks the mechanical work.
 **Files touched** (6 modules + their tests):
 - `scripts/.../dimensions/dim_supplier.py` (build + SQL builder + `SOURCE_BRONZE_TABLE` consumers)
@@ -720,7 +720,7 @@ The fix17 preflight already detects the failure mode cleanly and fails loud. fix
 
 **Cross-ref**: surfaced live by `run_id=da298a83-f9d5-4d94-bbb2-5c9f626cad0a` (TC26 full happy-path, 2026-05-21); fix17 (preflight that classifies permanent BICC config bugs — the retry classifier deliberately overlaps with fix17's permanent set). Follow-up: fix21 (Tier 3 + Tier 4 — resume from checkpoint + chaos test).
 
-### `[~]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20) — **IMPLEMENTED 2026-05-23; TC27 live evidence pending**
+### `[x]` P1.5α-fix21 — Resume from checkpoint + chaos-test the retry classifier (follow-up to fix20) — **CLOSED 2026-06-02 (TC27 re-validation on new pod / new BICC user). Original 2026-05-23 evidence + 2026-06-02 re-validation in `tests/live/TC27_resume_from_checkpoint_results.md`.**
 
 **Implementation status (2026-05-23)**: Tier 3 + Tier 4 shipped on `oussama-dev-fix21-resume-from-checkpoint`. 624 tests green (566 pre-fix21 + 58 new). Live TC27 evidence template in `tests/live/TC27_resume_from_checkpoint_results.md` — needs operator dispatch on `fusion_bundle_dev` to populate. Once TC27 fills in, this entry strikes through with PR link + shipped date.
 
@@ -893,7 +893,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - Live evidence: vendor V1 with 3 invoices (100/200/300); inject delta `I2.amount=250`; assert post-incremental `supplier_spend.V1.total_spend == 650` (NOT 700 from leftover old row); `DESCRIBE HISTORY` shows a MERGE commit (not CREATE OR REPLACE).
 - LIMITS.md P1.17-L3 + P1.17-L4 moved to §Resolved.
 
-### `[ ]` P1.17e — Bronze MERGE payload-diff predicate (downstream cost optimization)
+### `[x]` P1.17e — Bronze MERGE payload-diff predicate (downstream cost optimization) — **IMPLEMENTED 2026-06-02 (branch `oussama-dev-p1.17e-bronze-merge-payload-diff`); LIMITS §P1.17-L7 moved to §Resolved. Live evidence TC30b dispatch pending operator-side cluster run.**
 **Why**: V1's bronze MERGE uses unconditional `WHEN MATCHED THEN UPDATE SET *` — rewrites every matched row's `_extract_ts` on every cycle. For PVOs flagged `incremental_capable=False` (full re-extract every cycle — `gl_period_balances`, `gl_coa`, `ap_aging_periods`), this means downstream silver/gold's `WHERE bronze_extract_ts > prior_silver_watermark` predicate matches every row → downstream MERGE runs on every cycle even when nothing materially changed. Documented as **LIMITS.md P1.17-L7**; cost ≈ silver/gold seed-mode cost on every incremental cycle for the affected chain (`dim_account` + `gl_balance`). Cost optimization NOT correctness — produces correct results, just wasted compute. Plan ranks this as bullet 3 in the sequencing recommendation — "quick win once metrics confirm the cost hit is real."
 **Size**: S (~1 day) — `WHEN MATCHED AND (target.<col> IS DISTINCT FROM src.<col> OR ...) THEN UPDATE SET *` predicate generated from the bronze schema (excluding audit columns).
 **Depends on**: P1.17 (shipped — `5f644d7`).

@@ -323,3 +323,125 @@ class TestSurrogateKeyStabilityShape:
     def test_dim_account_emits_deterministic_surrogate_expr(self) -> None:
         sql = build_dim_account_sql(refresh_mode="seed")
         assert "xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))" in sql
+
+
+# ---------------------------------------------------------------------------
+# P1.17e — bronze MERGE payload-diff predicate helper + emitted SQL shape
+# ---------------------------------------------------------------------------
+
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator import (  # noqa: E402
+    BRONZE_AUDIT_COLUMNS,
+    _payload_diff_predicate_sql,
+)
+
+
+class TestPayloadDiffPredicateHelper:
+    """Direct unit tests for ``_payload_diff_predicate_sql`` — P1.17e's
+    bronze MERGE payload-diff predicate generator. Pins the helper's
+    contract independently of the renderer that consumes it."""
+
+    def test_excludes_only_audit_cols_and_preserves_source_order(self) -> None:
+        # E3 — pin the exclusion contract + source-order preservation.
+        # Source order matters because Python set-iteration is not
+        # deterministic; sorting would mask helper-side ordering bugs.
+        cols = [
+            "col_a",
+            "_extract_ts",
+            "col_b",
+            "_source_pvo",
+            "_run_id",
+            "_watermark_used",
+            "col_c",
+        ]
+        predicate = _payload_diff_predicate_sql(cols)
+        assert predicate == (
+            "target.col_a IS DISTINCT FROM src.col_a"
+            " OR target.col_b IS DISTINCT FROM src.col_b"
+            " OR target.col_c IS DISTINCT FROM src.col_c"
+        )
+
+    def test_returns_none_on_empty_input(self) -> None:
+        assert _payload_diff_predicate_sql([]) is None
+
+    def test_returns_none_when_only_audit_columns_present(self) -> None:
+        # Defensive fallback path — caller renders V1 unconditional MERGE
+        # shape unchanged when there are no data columns to diff.
+        assert _payload_diff_predicate_sql(sorted(BRONZE_AUDIT_COLUMNS)) is None
+
+    def test_alias_overrides_propagate(self) -> None:
+        predicate = _payload_diff_predicate_sql(
+            ["x"], target_alias="t", src_alias="s"
+        )
+        assert predicate == "t.x IS DISTINCT FROM s.x"
+
+    def test_default_aliases_are_target_and_src(self) -> None:
+        predicate = _payload_diff_predicate_sql(["x"])
+        assert predicate == "target.x IS DISTINCT FROM src.x"
+
+    def test_each_audit_column_excluded_individually(self) -> None:
+        # Regression guard — if BRONZE_AUDIT_COLUMNS shrinks by mistake,
+        # this test catches the leak. Pins every individual audit name.
+        for audit in sorted(BRONZE_AUDIT_COLUMNS):
+            predicate = _payload_diff_predicate_sql(["payload_col", audit])
+            assert predicate == "target.payload_col IS DISTINCT FROM src.payload_col", (
+                f"audit column {audit!r} leaked into payload-diff predicate"
+            )
+
+
+class TestBronzeMergePayloadDiffSQLShape:
+    """End-to-end SQL-shape assertions for the bronze MERGE renderer +
+    payload-diff predicate. Pure-string tests against the helper output
+    (no orchestrator dispatch). The dispatch-boundary wiring is pinned
+    separately in ``test_p117_orchestrator_dispatch.py`` (E4)."""
+
+    def test_single_column_natural_key_shape(self) -> None:
+        # E1 — single-column natural key (`erp_suppliers.SEGMENT1`).
+        # Simulate the bronze column list as the renderer would see it
+        # post-`enrich_bronze_audit_cols`: payload cols + 4 audit cols.
+        cols = ["SEGMENT1", "VENDORID", "PARTYID", "_extract_ts", "_source_pvo", "_run_id", "_watermark_used"]
+        predicate = _payload_diff_predicate_sql(cols)
+        assert predicate is not None
+        # Predicate contains an OR-clause for every payload col.
+        assert "target.SEGMENT1 IS DISTINCT FROM src.SEGMENT1" in predicate
+        assert "target.VENDORID IS DISTINCT FROM src.VENDORID" in predicate
+        assert "target.PARTYID IS DISTINCT FROM src.PARTYID" in predicate
+        # And NONE of the four audit cols.
+        for audit in BRONZE_AUDIT_COLUMNS:
+            assert audit not in predicate, (
+                f"audit col {audit!r} leaked into payload-diff predicate: {predicate}"
+            )
+
+    def test_composite_natural_key_shape(self) -> None:
+        # E2 — composite natural key (`gl_period_balances`-shaped, 7-col
+        # composite key per registry.py:233-240). Each natural-key column
+        # is included in the diff (harmless — the ON predicate already
+        # matched, so target.k IS DISTINCT FROM src.k → false on those
+        # cols). Pins the helper's decoupling from the natural-key set.
+        cols = [
+            "BalanceLedgerId",
+            "BalanceCodeCombinationId",
+            "BalancePeriodYear",
+            "BalancePeriodNumber",
+            "BalanceCurrencyCode",
+            "BalanceActualFlag",
+            "BalanceTranslatedFlag",
+            "BalanceBeginBalance",
+            "BalanceEndBalance",
+            "_extract_ts",
+            "_source_pvo",
+            "_run_id",
+            "_watermark_used",
+        ]
+        predicate = _payload_diff_predicate_sql(cols)
+        assert predicate is not None
+        # Each non-audit col contributes an OR-clause.
+        non_audit = [c for c in cols if c not in BRONZE_AUDIT_COLUMNS]
+        for col in non_audit:
+            assert f"target.{col} IS DISTINCT FROM src.{col}" in predicate
+        # `<=>` is reserved for the ON predicate — the payload-diff helper
+        # MUST NOT emit it (regression guard against renderer-helper drift).
+        assert "<=>" not in predicate
+        # Audit cols excluded.
+        for audit in BRONZE_AUDIT_COLUMNS:
+            assert audit not in predicate

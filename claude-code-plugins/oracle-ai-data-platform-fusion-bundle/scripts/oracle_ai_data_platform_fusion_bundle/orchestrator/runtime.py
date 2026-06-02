@@ -546,6 +546,23 @@ def _preflight_external_deps(
 # ---------------------------------------------------------------------------
 
 
+BRONZE_AUDIT_COLUMNS: frozenset[str] = frozenset({
+    "_extract_ts",
+    "_source_pvo",
+    "_run_id",
+    "_watermark_used",
+})
+"""Canonical name set for the four bronze audit columns added by
+``enrich_bronze_audit_cols``. Single source of truth — consumed by the
+P1.17e bronze MERGE payload-diff predicate generator
+(``orchestrator/__init__.py::_payload_diff_predicate_sql``) to exclude
+audit columns from the ``IS DISTINCT FROM`` clause, and by this
+module's enrichment assertion. Order is irrelevant (set semantics);
+``enrich_bronze_audit_cols`` controls the column-add order via its
+explicit ``withColumn`` chain.
+"""
+
+
 def enrich_bronze_audit_cols(
     df: "DataFrame",
     *,
@@ -559,6 +576,12 @@ def enrich_bronze_audit_cols(
     Called by ``_execute_node`` between extract and write. Keeps the
     extractor a pure I/O primitive (CLAUDE.md "modules are stateless");
     ``run_id`` and ``source_pvo`` are orchestrator-owned.
+
+    The canonical name set is :data:`BRONZE_AUDIT_COLUMNS` (see module
+    constant above); this function's ``withColumn`` chain materializes
+    those four names + values. The constant exists so the P1.17e
+    payload-diff predicate generator can exclude audit columns by
+    symbolic reference rather than a duplicated hardcoded list.
 
     ``extract_ts`` (P1.5β.1) is the caller-supplied orchestrator wall
     clock captured immediately before the BICC extract — stamped as
@@ -582,7 +605,7 @@ def enrich_bronze_audit_cols(
     """
     from pyspark.sql import functions as F
 
-    return (
+    out = (
         df.withColumn("_extract_ts", F.lit(extract_ts).cast("timestamp"))
         .withColumn("_source_pvo", F.lit(source_pvo))
         .withColumn("_run_id", F.lit(run_id))
@@ -591,6 +614,15 @@ def enrich_bronze_audit_cols(
             F.lit(watermark).cast("timestamp") if watermark is not None else F.lit(None).cast("timestamp"),
         )
     )
+    # Defensive: catches a future refactor that adds/removes an audit column
+    # without updating BRONZE_AUDIT_COLUMNS. Set difference, not equality, so
+    # original payload columns (which are not in BRONZE_AUDIT_COLUMNS) don't
+    # trip the check.
+    assert BRONZE_AUDIT_COLUMNS.issubset(set(out.columns)), (
+        f"enrich_bronze_audit_cols failed to add all of "
+        f"{sorted(BRONZE_AUDIT_COLUMNS)}; got {sorted(set(out.columns) - set(df.columns))}"
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
