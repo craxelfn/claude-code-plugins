@@ -386,6 +386,91 @@ class TestExtractPvoWatermarkThreading:
         )
         assert captured["extract_kwargs"]["watermark"] is None
 
+    # P1.17 reviewer catch — the `_watermark_used` bronze audit column
+    # must reflect the SAME cursor BICC actually consumed. β.1 hardcoded
+    # None because the NotImplementedError gate kept BICC from receiving
+    # any cursor; P1.17 removes the gate and wires the audit column.
+    # SOX traceability — every bronze row records which input window
+    # produced it.
+
+    def test_incremental_audit_column_records_prior_watermark_when_bicc_used_cursor(self) -> None:
+        # The three-condition gate (prior_watermark non-None AND
+        # incremental_capable AND mode==incremental) fires → BICC consumed
+        # the ISO cursor → enrich_bronze_audit_cols must stamp the raw
+        # datetime into `_watermark_used`. NOT the ISO string and NOT
+        # `bicc_watermark` — runtime.enrich_bronze_audit_cols expects a
+        # datetime that it casts to TIMESTAMP via F.lit(...).cast(...).
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=5, table_exists=True,
+        )
+        _step, captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=_DfStub(count=5),
+        )
+        # BICC saw the ISO form …
+        assert captured["extract_kwargs"]["watermark"] == "2026-05-22T10:00:00Z"
+        # …and the bronze rows record the SAME instant as a datetime.
+        assert captured["enrich_kwargs"]["watermark"] == W1
+
+    def test_seed_mode_audit_column_is_none(self) -> None:
+        # mode=seed → BICC threading gated off → no cursor consumed →
+        # bronze rows record _watermark_used = None.
+        fake_now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(prior_rows=[], table_count=5)
+        _step, captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="seed",
+            df_stub=_DfStub(count=5),
+        )
+        assert captured["extract_kwargs"]["watermark"] is None
+        assert captured["enrich_kwargs"]["watermark"] is None
+
+    def test_fresh_tenant_incremental_audit_column_is_none(self) -> None:
+        # Fresh tenant → prior_watermark=None → BICC threading gated off
+        # (first condition fails) → bronze rows record None. Without this
+        # gate the audit column would lie about the input window.
+        fake_now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(prior_rows=[], table_count=5, table_exists=False)
+        _step, captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=_DfStub(count=5),
+        )
+        assert captured["extract_kwargs"]["watermark"] is None
+        assert captured["enrich_kwargs"]["watermark"] is None
+
+    def test_incremental_capable_false_pvo_audit_column_is_none(self) -> None:
+        # gl_period_balances.incremental_capable=False → BICC threading
+        # gated off (second condition fails) → audit column NULL even
+        # though a prior cursor exists. The bronze rows are NOT the
+        # product of a windowed extract — BICC ignores the cursor for
+        # this PVO — so the audit column correctly says "no window
+        # consumed."
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="gl_period_balances", layer="bronze",
+                    status="success", last_watermark=W1, last_run_at=W1,
+                ),
+            ],
+            table_count=5, table_exists=True,
+        )
+        _step, captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            pvo_id="gl_period_balances",
+            df_stub=_DfStub(count=5),
+        )
+        assert captured["extract_kwargs"]["watermark"] is None
+        assert captured["enrich_kwargs"]["watermark"] is None
+
 
 # ---------------------------------------------------------------------------
 # D-fresh-tenant-bronze + D-empty-bronze-merge

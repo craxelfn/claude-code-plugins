@@ -530,7 +530,17 @@ def _execute_node(
                     df,
                     source_pvo=pvo.datastore,
                     run_id=run_id,
-                    watermark=None,  # _watermark_used column stays NULL (B0 in-memory only)
+                    # P1.17 — when BICC actually consumed a cursor (the three-
+                    # condition gate above produced a non-None `bicc_watermark`),
+                    # stamp every bronze row's `_watermark_used` with the same
+                    # raw datetime that fed `_to_bicc_iso`. Without this, the
+                    # bronze audit column says NULL while BICC's filter saw a
+                    # real cursor — SOX traceability for "what window produced
+                    # this row" is broken. β.1's "stays NULL" comment applied
+                    # under the NotImplementedError gate (BICC never received a
+                    # watermark in β.1); P1.17 removes the gate and wires the
+                    # audit column per runtime.enrich_bronze_audit_cols' docstring.
+                    watermark=prior_watermark if bicc_watermark is not None else None,
                     extract_ts=extract_started_at,  # audit literal == this run's instant
                 )
 
