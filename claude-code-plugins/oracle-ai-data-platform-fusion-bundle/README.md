@@ -111,6 +111,67 @@ If a `--resume` raises one of:
 
 ---
 
+## Incremental refresh (`--mode incremental`)
+
+`--mode seed` rebuilds bronze + silver + gold from scratch on every cycle — full BICC extract, `CREATE OR REPLACE TABLE` everywhere. Fine for a fresh-tenant first run; wasteful for a daily refresh that touches the same 50M-row GL fact only a few thousand rows at a time. P1.17 ships `--mode incremental`:
+
+- **Bronze** — BICC's `fusion.initial.extract-date` filter receives the prior run's safety-windowed watermark; the orchestrator `MERGE INTO bronze_target ... ON target.<natural_key> = src.<natural_key>` instead of `mode("overwrite")`. The overlap re-extracted by the safety window dedupes by natural key.
+- **Silver `dim_supplier`, `dim_account` + Gold `gl_balance` (row-level)** — `MERGE INTO target USING (... WHERE bronze_extract_ts > <layer-local watermark>) ON target.<natural_key> = src.<natural_key>`. One bronze row changed → one silver/gold row updated.
+- **Exempt marts (`supplier_spend`, `ap_aging`, `dim_calendar`)** — always run `CREATE OR REPLACE TABLE` regardless of mode. `supplier_spend`'s GROUP BY mixes a mutable fact attribute (`approval_status`) so partial-MERGE would leave stale aggregate rows on status flips (correct incremental ships in P1.17b). `ap_aging` buckets are `CURRENT_DATE()`-anchored — incremental MERGE would freeze the bucket assignment a row had on the last run, going stale by one day daily. `dim_calendar` is parameter-driven, no source watermark.
+
+```bash
+# First incremental run requires a prior --mode seed run to have populated each
+# layer's last_watermark in fusion_bundle_state. The orchestrator raises
+# IncrementalCursorMissingError listing every silver/gold dataset that lacks one.
+aidp-fusion-bundle run --inline --mode seed              # day 1
+aidp-fusion-bundle run --inline --mode incremental       # day 2+
+```
+
+### Tuning the safety window — `bundle.incremental.watermark_safety_window_seconds`
+
+The bronze cursor is stored as `extract_started_at − safety_window` (not `extract_started_at` directly) to absorb AIDP-vs-Fusion clock skew. Default is 3600s (one hour) — wider than typical NTP-synced drift between OCI-hosted AIDP and Fusion Cloud.
+
+```yaml
+# bundle.yaml — opt in only when needed
+incremental:
+  watermarkSafetyWindowSeconds: 7200   # widen to 2h if observed skew exceeds 1h
+```
+
+Validated `gt=0`. Setting `0` or a negative value is rejected at bundle load — those would erase the buffer or send a future-dated cursor to BICC.
+
+### Clock-skew probe (per-tenant onboarding step)
+
+Before flipping a new tenant to `--mode incremental`, run the TC28b clock-skew probe to confirm the safety window absorbs the observed skew comfortably. The probe is a single round-trip via `extract_pvo`:
+
+```python
+from datetime import datetime, timezone
+from oracle_ai_data_platform_fusion_bundle.extractors import bicc as bicc_mod
+from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
+
+pvo = fusion_catalog.get("erp_suppliers")
+t0 = datetime.now(timezone.utc)
+df = bicc_mod.extract_pvo(spark, pvo, fusion_service_url=..., username=..., password=..., fusion_external_storage=..., watermark=None)
+_ = df.limit(1).count()
+t1 = datetime.now(timezone.utc)
+skew_seconds = (t1 - t0).total_seconds()
+print(f"AIDP→BICC round-trip: {skew_seconds:.1f}s")
+print(f"bundle.incremental.watermark_safety_window_seconds: {bundle.incremental.watermark_safety_window_seconds}")
+assert skew_seconds < bundle.incremental.watermark_safety_window_seconds
+```
+
+If the assertion fails, widen `watermarkSafetyWindowSeconds` to comfortably exceed the observed skew before enabling incremental mode.
+
+### Empty-delta + soft-fail operator playbook
+
+Two cases land at the same place (preserved bronze cursor + a WARN-log marker):
+
+- **Empty delta** — BICC's `fusion.initial.extract-date` filter returned zero rows. Expected and harmless on a no-op cycle (Fusion didn't change between runs). The bronze cursor is preserved (NOT advanced) so the next run picks up the same time window. State-table row is written with `status='success'` and the prior `last_watermark` value.
+- **`watermark_read_soft_failed` WARN** — a transient metastore failure prevented reading the prior `fusion_bundle_state` cursor. The orchestrator logs a structured WARN with the `watermark_read_soft_failed` marker key (set up alerts on this string) and proceeds with `prior_watermark=None`, falling back to a full extract for that node. Re-running the same `--mode incremental` command after the metastore recovers usually clears it. If the WARN persists across multiple runs, see `LIMITS.md §L6`.
+
+Both signals show up in the orchestrator stdout under the same `[step]` line for the affected dataset — no separate audit table needed.
+
+---
+
 ## Architecture
 
 ```
