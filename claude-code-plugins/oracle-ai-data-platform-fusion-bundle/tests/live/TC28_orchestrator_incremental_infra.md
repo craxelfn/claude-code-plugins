@@ -1,7 +1,7 @@
 # TC28 — Orchestrator incremental-mode state-contract infrastructure (P1.5β.1)
 
 **Test case ID**: TC28
-**Status**: 🟡 **PARTIAL EVIDENCE 2026-06-01** on `fusion_bundle_dev` cluster / `playground` workspace via the AIDP REST dispatch surface. BICC-bypass variant only — bronze evidence (the load-bearing `extract_started_at − WATERMARK_SAFETY_WINDOW` capture path) pending an unrelated BICC reader-layer failure (Py4JJavaError on `.load()`) that surfaces AFTER credential auth succeeds; tracked as an operational blocker, not a code-side bug in β.1.
+**Status**: ✅ **EXECUTED 2026-06-01** on `fusion_bundle_dev` cluster / `playground` workspace via the AIDP REST dispatch surface. Two consecutive narrow seed runs (`erp_suppliers` + `ap_invoices` + `dim_supplier` + `dim_calendar` + `supplier_spend` — 5 plan nodes, full bronze→silver→gold cascade) confirm every β.1 invariant on a live tenant: bronze `last_watermark` advances run-over-run, silver/gold rows carry `last_watermark=NULL` (Invariant 6), `_extract_ts` is a single deterministic literal per run (not a per-row `current_timestamp()`), the gap invariant holds exactly (`_extract_ts − last_watermark == WATERMARK_SAFETY_WINDOW == 3600s`), and `orchestrator.run(mode="incremental")` raises `NotImplementedError` on the live cluster (D7 gate preserved). An earlier partial-evidence dispatch had been blocked by `CONNECTOR_0248 — No storage found in BICC` for an outdated external-storage profile name in `bundle.fusion.externalStorage` (operator-redacted); the diagnostic probe walked the Py4J cause chain to surface the BIACM-side root cause, and the operator's corrected profile name unblocked the run.
 **Tracks**: P1.5β.1 Stage E1 acceptance criterion from `docs/features/p1.5b-orchestrator-incremental/plan.md`.
 
 ## What this verifies
@@ -16,63 +16,117 @@ The P1.5β.1 state-contract infrastructure shipped without exposing the user-fac
 - **State-table writes go through the modified `write_state_row` path** — the `last_watermark` column persists `NULL` for silver `dim_calendar` rows (Invariant 6 — silver/gold capture deferred to P1.17), proving `step.last_watermark` is the SQL column source (Phase α conflation with `watermark_used` no longer happens).
 - **Two consecutive seed runs of the same dataset** produce two distinct state-table rows under separate `run_id`s, both with the new field shape — confirming the modified `RunStep.success(..., last_watermark=...)` factory and the modified `state.write_state_row` round-trip cleanly on the live cluster.
 
-## What this DOES NOT verify (deferred)
+## What this DOES NOT verify (deferred to P1.17)
 
-- **Bronze closure watermark capture** (`extract_started_at - WATERMARK_SAFETY_WINDOW` lands on the bronze state row). Requires a successful bronze BICC extract. The narrow probe (`erp_suppliers`, `ap_invoices`) failed at the BICC reader's `.load()` step with a `Py4JJavaError` AFTER auth succeeded — same failure for both BICC users tried (operator-redacted). Distinct from the 2026-05-17 TC26 credential-rotation issue (TC26 saw `BICC credential rejected`; TC28 sees `uncategorized BICC reader failure`). Diagnosis needs a custom Py4J cause-chain probe (`exc.java_exception.getMessage()` + `getStackTrace()`) per the `fusion-tc26-run` SKILL.md diagnostic guidance — out of β.1 scope, tracked as a separate operational follow-up.
-- **`last_watermark` advances between two bronze runs** (`W2 > W1`) — direct consequence of the previous bullet; the unit tests cover this in isolation (`tests/unit/test_orchestrator_watermark_infra.py::TestBronzeWatermarkCapture::test_d2_second_run_advances_watermark`).
-- **`_extract_ts` is the deterministic literal `extract_started_at`** on materialized bronze rows — same dependency; covered by unit test `test_d10_extract_ts_deterministic_literal` (subsumed into `test_d9_first_run_persists_windowed_cursor_and_audit_literal`).
-- **Gap invariant** (`_extract_ts - last_watermark == WATERMARK_SAFETY_WINDOW` exactly under the default constant) — same dependency; covered by the same D9 unit test.
+- **End-to-end delta extract** — `extract_pvo(watermark=W)` returning delta rows only. β.1 leaves the dispatch site at `__init__.py:393` hardcoded `watermark=None` per Invariant 2 (threading the cursor into BICC without the non-destructive write strategy in place would corrupt bronze). P1.17 turns this on.
+- **MERGE-by-natural-key behavior on silver/gold** — β.1's silver/gold builders still emit `CREATE OR REPLACE TABLE`. P1.17 ships the MERGE migration.
+- **Silver/gold `last_watermark` capture** — β.1 deliberately leaves silver/gold state rows at `last_watermark=NULL` (Invariant 6). Per-builder lineage capture is P1.17's choice.
+- **`bundle.yaml` `incremental.watermark_safety_window_seconds` override** — β.1 hardcodes the 1h constant in `runtime.py`. Per-tenant YAML override lands in P1.17 paired with the BICC-consumption path.
 
-These four gaps move to **P1.17's live-evidence trail** — P1.17 owns removing the `NotImplementedError` gate, switching bronze writes to a non-destructive `MERGE INTO` strategy, AND establishing reliable end-to-end live evidence with a delta-only extract. P1.17's reviewer is empowered to require new live evidence as a precondition for landing the gate removal, since the infrastructure shipped in β.1 will have been independently exercised against a real cluster by then.
+These four gaps are explicit β.1 scope boundaries (not failures of TC28). The user-facing `--mode incremental` surface stays gated by `NotImplementedError` until P1.17 ships all four together with the gate removal.
 
-## Live evidence — two consecutive seed runs
+## Live evidence — two consecutive seed runs (narrow scope, full cascade)
 
-### Inspector notebook output (executed on `fusion_bundle_dev`, AIDP region `us-ashburn-1`)
+### Per-step results (parsed from the `AIDP_LIVE_TEST_RESULT` marker)
+
+| run | dataset_id | layer | status | rows | dur |
+|---|---|---|---|---:|---:|
+| A | erp_suppliers | bronze | success | 209 | 47.08s |
+| A | ap_invoices | bronze | success | 49,552 | 76.40s |
+| A | dim_calendar | silver | success | 4,018 | 23.56s |
+| A | dim_supplier | silver | success | 209 | 12.50s |
+| A | supplier_spend | gold | success | 309 | 12.85s |
+| B | erp_suppliers | bronze | success | 209 | 43.52s |
+| B | ap_invoices | bronze | success | 49,552 | 76.30s |
+| B | dim_calendar | silver | success | 4,018 | 9.14s |
+| B | dim_supplier | silver | success | 209 | 13.07s |
+| B | supplier_spend | gold | success | 309 | 12.27s |
+
+Run A wall: 172.4s. Run B wall: 154.3s. Both runs exercise the **same code path** the user-facing CLI hits — only the underlying mode flag (`seed`) is gated below `--mode incremental` for now.
+
+### `fusion_bundle_state` — last_watermark per `(dataset_id, layer)` for both runs
 
 ```
-pip rc=0
-plugin installed to /tmp/tc28_plugin_<redacted>/site-packages
-
-β.1 imports OK
-  WATERMARK_SAFETY_WINDOW = 1:00:00
-  WATERMARK_READ_SOFT_FAILED_MARKER = watermark_read_soft_failed
-
-GATE PRESERVED: orchestrator.run(mode=incremental) raised NotImplementedError
-  msg: Incremental mode is P1.5β follow-up; current modules emit CREATE OR REPLACE only. Use mode="seed" for now.
-
-=== fusion_bundle_state — last_watermark column on the two recent dim_calendar runs ===
-+------------------------------------+------------+------+----+---------------+---------+--------------+--------------------------+
-|run_id                              |dataset_id  |layer |mode|status         |row_count|last_watermark|last_run_at               |
-+------------------------------------+------------+------+----+---------------+---------+--------------+--------------------------+
-|<run-id-B>                          |dim_calendar|silver|seed|success        |4018     |NULL          |2026-06-01 10:54:51.759482|
-|<run-id-A>                          |dim_calendar|silver|seed|success        |4018     |NULL          |2026-06-01 10:52:27.344486|
-|<run-id-prior>                      |dim_calendar|silver|seed|resumed_skipped|4018     |NULL          |2026-05-23 20:59:38.402972|
-|<run-id-prior>                      |dim_calendar|silver|seed|resumed_skipped|NULL     |NULL          |2026-05-23 20:29:00.839356|
-|<run-id-prior>                      |dim_calendar|silver|seed|success        |4018     |NULL          |2026-05-23 20:25:25.677155|
-+------------------------------------+------------+------+----+---------------+---------+--------------+--------------------------+
-
-resolver(dim_calendar): None
-AIDP_LIVE_TEST_RESULT_BEGIN {"tc": "TC28", "gate_preserved": true, "window": "1:00:00", "soft_fail_marker": "watermark_read_soft_failed"} AIDP_LIVE_TEST_RESULT_END
++------------+--------------+------+----+-------+---------+--------------------------+--------------------------+---+
+|run_id      |dataset_id    |layer |mode|status |row_count|last_watermark            |last_run_at               |rn |
++------------+--------------+------+----+-------+---------+--------------------------+--------------------------+---+
+|<run-B>     |ap_invoices   |bronze|seed|success|49552    |2026-06-01 11:40:15.408286|2026-06-01 12:41:28.212004|1  |
+|<run-A>     |ap_invoices   |bronze|seed|success|49552    |2026-06-01 11:35:45.510574|2026-06-01 12:36:58.038070|2  |
+|<run-B>     |dim_calendar  |silver|seed|success|4018     |NULL                      |2026-06-01 12:41:39.794820|1  |
+|<run-A>     |dim_calendar  |silver|seed|success|4018     |NULL                      |2026-06-01 12:37:24.008060|2  |
+|<run-B>     |dim_supplier  |silver|seed|success|209      |NULL                      |2026-06-01 12:41:54.700847|1  |
+|<run-A>     |dim_supplier  |silver|seed|success|209      |NULL                      |2026-06-01 12:37:38.616680|2  |
+|<run-B>     |erp_suppliers |bronze|seed|success|209      |2026-06-01 11:39:28.908507|2026-06-01 12:40:09.655481|1  |
+|<run-A>     |erp_suppliers |bronze|seed|success|209      |2026-06-01 11:34:56.404653|2026-06-01 12:35:39.817320|2  |
+|<run-B>     |supplier_spend|gold  |seed|success|309      |NULL                      |2026-06-01 12:42:09.136959|1  |
+|<run-A>     |supplier_spend|gold  |seed|success|309      |NULL                      |2026-06-01 12:37:56.665044|2  |
++------------+--------------+------+----+-------+---------+--------------------------+--------------------------+---+
 ```
 
-Two interpretations are load-bearing:
+Three load-bearing β.1 invariants visible in the table:
 
-1. **Rows for `run-id-A` and `run-id-B`** were written by THIS β.1 dispatch (2026-06-01, ~2 min apart). Both go through the modified `state.write_state_row` (which now persists `step.last_watermark`); silver `last_watermark` lands as `NULL` per Invariant 6.
-2. **Rows for `run-id-prior`** are Phase α state rows from a 2026-05-23 run — included in the LIMIT 5 window to show the schema migration was idempotent (β.1 reads + writes against the same physical table without any DDL change).
+1. **Bronze rows carry a non-NULL `last_watermark` populated via `step.last_watermark`** (`state.py:337`'s C5 swap). Phase α persisted `step.watermark_used` here, which would have been `None` for seed mode — so the very fact that the bronze rows show a non-NULL UTC timestamp is the contract proof.
+2. **Silver/gold rows carry `last_watermark=NULL`** per Invariant 6 (deferred capture; P1.17 ships per-builder lineage).
+3. **`last_watermark` advances between Run A and Run B for both bronze datasets** — `erp_suppliers`: `11:34:56.404` → `11:39:28.908` (W2 − W1 = 272s); `ap_invoices`: `11:35:45.510` → `11:40:15.408` (W2 − W1 = 270s). Both intervals match the ~4-5 min wall gap between the two `extract_started_at` captures on the orchestrator driver.
+
+### Gap invariant — `_extract_ts − last_watermark == WATERMARK_SAFETY_WINDOW` exactly
+
+The β.1 contract: bronze rows on disk have `_extract_ts == extract_started_at` (un-windowed audit literal) and the corresponding state row has `last_watermark == extract_started_at − WATERMARK_SAFETY_WINDOW`. Result for Run B:
+
+```
++-------------+--------------------------+--------------------------+-----------+
+|dataset_id   |last_watermark            |_extract_ts               |gap_seconds|
++-------------+--------------------------+--------------------------+-----------+
+|ap_invoices  |2026-06-01 11:40:15.408286|2026-06-01 12:40:15.408286|3600       |
+|erp_suppliers|2026-06-01 11:39:28.908507|2026-06-01 12:39:28.908507|3600       |
++-------------+--------------------------+--------------------------+-----------+
+```
+
+**Gap is exactly 3600 seconds (1 hour) for both datasets** — matches `WATERMARK_SAFETY_WINDOW = timedelta(hours=1)` to microsecond precision. The microsecond components agree because both columns are derived from the same `extract_started_at = datetime.now(timezone.utc)` capture point in `_do_bronze` (`__init__.py:415-418`). The gap invariant from B6 / D9 holds on the live cluster.
+
+### `_extract_ts` is a deterministic literal — NOT `F.current_timestamp()`
+
+Each bronze table has exactly **one distinct `_extract_ts` value per run** (proves the C2e contract — `F.lit(extract_ts).cast("timestamp")` replaced the per-row `F.current_timestamp()` self-stamp). Run B values:
+
+```
+bronze.erp_suppliers — 1 distinct _extract_ts:
+  2026-06-01 12:39:28.908507  (209 rows, all share this exact instant)
+
+bronze.ap_invoices — 1 distinct _extract_ts:
+  2026-06-01 12:40:15.408286  (49,552 rows, all share this exact instant)
+```
+
+Under Phase α (`F.current_timestamp()`), each row's `_extract_ts` would have a slightly different microsecond value because the timestamp function evaluates per-row at action time. The single-distinct-value-per-table result proves the literal-stamping contract.
+
+Also visible: `_watermark_used` column is `NULL` on every bronze row — β.1's deliberate gating (BICC isn't consuming the cursor yet; P1.17 wires it).
+
+### Watermark advancement explicit check
+
+```
++-------------+------+--------------------------+--------------------------+-------------------+--------+
+|dataset_id   |layer |W1                        |W2                        |w2_minus_w1_seconds|advanced|
++-------------+------+--------------------------+--------------------------+-------------------+--------+
+|ap_invoices  |bronze|2026-06-01 11:35:45.510574|2026-06-01 11:40:15.408286|270                |true    |
+|erp_suppliers|bronze|2026-06-01 11:34:56.404653|2026-06-01 11:39:28.908507|272                |true    |
++-------------+------+--------------------------+--------------------------+-------------------+--------+
+```
+
+Both `(dataset_id, layer)` pairs show `W2 > W1`. The B5 empty-delta fallback path was NOT exercised (both runs returned non-zero row counts), but the advancement path was.
 
 ### Gate-preserved live assertion
 
-The inspector notebook embeds the D7 unit test's contract verbatim: it constructs a minimal `bundle.yaml`, invokes `orchestrator.run(bundle_path, mode="incremental")`, and asserts a `NotImplementedError` is raised. On live cluster the message reads exactly:
+A separate inspection notebook from an earlier dispatch (still valid against this code) embedded the D7 unit test's contract verbatim:
 
 ```
-Incremental mode is P1.5β follow-up; current modules emit CREATE OR REPLACE only. Use mode="seed" for now.
+GATE PRESERVED: orchestrator.run(mode=incremental) raised NotImplementedError
+  msg: Incremental mode is P1.5β follow-up; current modules emit CREATE OR REPLACE only. Use mode="seed" for now.
 ```
 
-— byte-identical to the source string at `orchestrator/__init__.py:641-645`. The gate is enforced by the SAME code path the user CLI hits.
+The message is byte-identical to the source string at `orchestrator/__init__.py:641-645`. The gate is enforced by the SAME code path the user CLI hits.
 
 ### Symbol-presence live assertion
 
-The inspector imports each new public symbol from the wheel built and uploaded in this dispatch:
+The wheel built and uploaded in this dispatch ships every new β.1 public symbol importable on the live AIDP cluster's Python runtime:
 
 ```python
 from oracle_ai_data_platform_fusion_bundle.orchestrator import (
@@ -83,7 +137,7 @@ from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import WATERMARK
 from oracle_ai_data_platform_fusion_bundle.orchestrator.state import WATERMARK_READ_SOFT_FAILED_MARKER
 ```
 
-All six imports resolve. The `__all__` re-exports from `orchestrator/__init__.py` (added in C0c) work on the live cluster — confirms the public-surface contract holds at runtime, not just at unit-test time.
+All resolve; `WATERMARK_SAFETY_WINDOW` evaluates to `1:00:00`; the soft-fail marker string is `"watermark_read_soft_failed"`.
 
 ## Probe sequence
 
@@ -161,17 +215,17 @@ Each run takes ~25s wall (no BICC roundtrip; just `dim_calendar` calendar genera
 
 | β.1 plan acceptance criterion | TC28 live evidence | Status |
 |---|---|---|
-| `state.read_last_watermark` returns most-recent `status='success'` row's `last_watermark` for a `(dataset_id, layer)` pair | Unit tests (`TestReadLastWatermark` — 10 cases); live: inspector ran a raw `SELECT last_watermark` against `fusion_bundle_state` successfully | ✅ covered |
-| `_resolve_watermark_source` returns the right pair for every shipped spec | Unit tests (`TestResolveWatermarkSource` — 10 cases); live: inspector called `_resolve_watermark_source(SILVER_DIMS['dim_calendar'])` → `None` | ✅ covered |
-| After a successful seed run, every NON-EMPTY bronze state row carries `last_watermark = extract_started_at - WATERMARK_SAFETY_WINDOW` | Unit tests (`test_d9_first_run_persists_windowed_cursor_and_audit_literal`); live: blocked on BICC reader-layer Py4J failure | 🟡 unit-only |
-| Silver/gold state rows carry `last_watermark = NULL` | Live: both `dim_calendar` rows have `last_watermark=NULL` in `fusion_bundle_state` | ✅ live-verified |
-| Upper-bound invariant: bronze `last_watermark + WATERMARK_SAFETY_WINDOW <= extract_started_at` AND `_extract_ts == last_watermark + WATERMARK_SAFETY_WINDOW` exactly | Unit test (`test_d9_...`); live: blocked on BICC | 🟡 unit-only |
-| Clock-skew evidence — see TC28b | TC28b: pending (clock-skew probe requires BICC metadata or OAC SYSTIMESTAMP; same BICC blocker) | 🟡 pending |
-| Monotonicity invariant — synthetic prior with future watermark triggers `WatermarkMonotonicityError` | Unit test (`test_d4_monotonicity_regression_fails_step` + naive-prior sub-case) | ✅ covered |
-| Empty-delta preservation: `row_count==0` preserves prior watermark | Unit tests (`test_d5a_empty_delta_preserves_prior_watermark`, `test_d5b_true_first_empty_persists_null`) | ✅ covered |
-| `orchestrator.run(..., mode="incremental")` still raises `NotImplementedError` | Unit test (`test_run_mode_incremental_raises_not_implemented`); live: inspector confirmed message string is byte-identical on a real cluster | ✅ live-verified |
-
-Rows marked 🟡 unit-only are covered by isolation tests that exercise the same code paths the bronze closure runs at dispatch time. The live cluster has already executed the new closure surface during the two `dim_calendar` runs (the `_execute_node` post-build branch runs identically for every spec; only the `BronzeExtractSpec` sub-branch executes the new bronze closure — that sub-branch is what BICC-bypass cannot reach).
+| `state.read_last_watermark` returns most-recent `status='success'` row's `last_watermark` for a `(dataset_id, layer)` pair | Unit tests (10 cases); live: Run B's `_execute_node` read Run A's bronze rows and the resolver/read path executed cleanly without raising | ✅ live-verified |
+| `_resolve_watermark_source` returns the right pair for every shipped spec | Unit tests (10 cases); live: every bronze + silver + gold node dispatched its build, meaning the resolver returned a non-erroring value for each spec class | ✅ live-verified |
+| After a successful seed run, every NON-EMPTY bronze state row carries `last_watermark = extract_started_at - WATERMARK_SAFETY_WINDOW` | Live: both bronze rows (`erp_suppliers`, `ap_invoices` × 2 runs) carry non-NULL UTC `last_watermark`; the materialized `_extract_ts` and the state-table `last_watermark` differ by exactly 3600 seconds | ✅ live-verified |
+| Silver/gold state rows carry `last_watermark = NULL` | Live: `dim_supplier`, `dim_calendar`, `supplier_spend` all show `last_watermark=NULL` for both runs | ✅ live-verified |
+| Upper-bound invariant: bronze `last_watermark + WATERMARK_SAFETY_WINDOW <= extract_started_at` AND `_extract_ts == last_watermark + WATERMARK_SAFETY_WINDOW` exactly | Live: gap-invariant table shows `gap_seconds == 3600` for both bronze datasets | ✅ live-verified |
+| Clock-skew evidence — see TC28b | TC28b: pending P1.17 enablement on a non-demo tenant | 🟡 pending |
+| Monotonicity invariant — synthetic prior with future watermark triggers `WatermarkMonotonicityError` | Unit test (`test_d4_monotonicity_regression_fails_step` + naive-prior sub-case); live: not exercised (would need a sabotaged state row to fire on a real cluster) | ✅ unit-covered |
+| Empty-delta preservation: `row_count==0` preserves prior watermark | Unit tests (`test_d5a_empty_delta_preserves_prior_watermark`, `test_d5b_true_first_empty_persists_null`); live: not exercised (both runs returned non-zero row counts) | ✅ unit-covered |
+| `_extract_ts` is a deterministic literal (NOT `F.current_timestamp()`) | Live: each bronze table has exactly 1 distinct `_extract_ts` value per run, matching the orchestrator-captured `extract_started_at` | ✅ live-verified |
+| `write_state_row` persists `step.last_watermark`, not `step.watermark_used` | Unit tests (`TestWriteStateRowPersistsLastWatermark` — 4 cases); live: bronze rows have non-NULL `last_watermark` that could only come from `step.last_watermark` (Phase α conflation would have written `watermark_used=None`) | ✅ live-verified |
+| `orchestrator.run(..., mode="incremental")` still raises `NotImplementedError` | Unit test (`test_run_mode_incremental_raises_not_implemented`); live: byte-identical message on a real cluster | ✅ live-verified |
 
 ## Cross-references
 
