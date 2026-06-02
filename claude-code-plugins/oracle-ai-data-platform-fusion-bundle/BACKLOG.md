@@ -866,15 +866,16 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - Unit test: build the same dim twice from a fixed bronze snapshot; assert every surrogate value matches.
 - Docstring updated in both modules to drop the "non-stable across rebuilds" caveat.
 
-### `[ ]` P1.17c — Dropped-target preflight (silent-corruption guard for incremental mode)
-**Why**: P1.17 V1's preflight checks silver/gold cursor presence via `IncrementalCursorMissingError` but NOT target-table existence vs cursor presence. If an operator drops a target table while `fusion_bundle_state` still has a non-NULL `last_watermark`, the next incremental run silently: (1) CREATE TABLE IF NOT EXISTS auto-creates the empty target per B6c, (2) MERGE inserts only the delta rows (BICC filter with `prior_cursor` excludes everything older), (3) the full history below `prior_cursor` is permanently gone — operator doesn't notice until they query historical data. Documented as **LIMITS.md P1.17-L5**; interim mitigation is operator discipline (clear the state row before dropping). Plan calls this the **highest blast radius** of the five P1.17 follow-ups — should ship in the same release cycle as P1.17 if possible.
+### `[x]` P1.17c — Dropped-target preflight (silent-corruption guard for incremental mode)
+**Why**: P1.17 V1's preflight checked silver/gold cursor presence via `IncrementalCursorMissingError` but NOT target-table existence vs cursor presence. If an operator dropped a target table while `fusion_bundle_state` still carried a non-NULL `last_watermark`, the next incremental run silently: (1) CREATE TABLE IF NOT EXISTS auto-created the empty target per B6c, (2) MERGE inserted only the delta rows (BICC filter with `prior_cursor` excluded everything older), (3) the full history below `prior_cursor` was permanently gone — operator didn't notice until they queried historical data. This was documented as **LIMITS.md P1.17-L5** with interim operator discipline (clear the state row before dropping). P1.17c resolves the highest-blast-radius P1.17 follow-up by enforcing the check at run-level preflight.
 **Size**: S (~1 day) — extend `_preflight_incremental_cursors` in `orchestrator/preflight.py` with a target-existence check; add `IncrementalTargetMissingError` (inherits `OrchestratorConfigError` for CLI exit-2); restore the deferred `D-target-dropped` unit test.
 **Depends on**: P1.17 (shipped — `5f644d7`).
+**Resolved in**: P1.17c (PR #13, 2026-06-02). `LIMITS.md` is intentionally gitignored as a local/private limit registry, so this tracked backlog entry is the reviewable resolution record for P1.17-L5.
 **Accept**:
-- `_preflight_incremental_cursors` raises `IncrementalTargetMissingError` when any plan node has a non-NULL `last_watermark` in state but the target Delta table doesn't exist.
-- Error message names every affected `(dataset_id, layer)` + remediation (clear state row + re-run seed) per LIMITS.md P1.17-L5.
-- Unit test: mock `spark.catalog.tableExists → False` + state-row has non-NULL `last_watermark` → preflight raises before any `_execute_node` call.
-- LIMITS.md P1.17-L5 moved to §Resolved.
+- ✅ `_preflight_incremental_cursors` raises `IncrementalTargetMissingError` when any plan node has a non-NULL `last_watermark` in state but the target Delta table doesn't exist.
+- ✅ Error message names every affected `(dataset_id, layer, target)` + remediation (clear state row + re-run seed) per the P1.17-L5 recovery sequence.
+- ✅ Unit test: mock `spark.catalog.tableExists → False` + state-row has non-NULL `last_watermark` → preflight raises before any `_execute_node` call.
+- ✅ P1.17-L5 is resolved in the tracked backlog record; local `LIMITS.md` carries the same resolved note but remains ignored by design.
 
 ### `[ ]` P1.17a + P1.17b — Aggregate-mart incremental MERGE + dim-delta UNION (`supplier_spend` + `gl_balance`-dim-only)
 **Why**: V1 marks `supplier_spend.incremental_capable=False` per LIMITS.md **P1.17-L4** because its 6-column GROUP BY grain mixes a mutable fact attribute (`approval_status`) — partial-MERGE leaves both PENDING and APPROVED aggregate rows on a status flip. AND V1's `gl_balance` row-level MERGE doesn't refresh denormalized dim attributes on dim-only changes per LIMITS.md **P1.17-L3** — operator scheduled `--mode seed` weekly is the interim catch-up. Both gaps share the same SQL surface (the gold-mart renderer with affected-keys + recompute CTEs) — bundle as one PR per plan §"Out of Scope" + §"When to file these tickets" (bullet 2).
