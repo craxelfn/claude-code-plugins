@@ -194,3 +194,87 @@ Executed notebooks + raw payloads are written to `/tmp/tc27-<timestamp>/` per di
 - `LIMITS.md` §L-Resume — append-only multi-row state-table semantics (gitignored working notes).
 - TC26 evidence file — baseline pacing reference for narrow-scope timings, redaction convention.
 - PR #10 against `craxelfn/claude-code-plugins` — orchestrator + cli: P1.5α-fix21 — resume from checkpoint + chaos-test the retry classifier.
+
+---
+
+## Re-validation — TC27 on new pod / new BICC user (2026-06-02)
+
+**Why re-run**: closing P1.5α on the new pod (`saasfademo1` test variant) + the new BICC user (`natalie.salesrep`) — same credentials TC26 just validated. Reproduces the resume contract on the fresh tenant/user combination.
+
+**Phase summary**:
+
+| Phase | run_id | JobRun terminal | Wall time |
+|---|---|---|---|
+| 1 — clean baseline   | `be76a33a-…` | SUCCESS | ~317s |
+| 2 — induced failure  | `cead1282-…` | SUCCESS (cluster) / 1 failed step + 1 cascade-skipped | 217s |
+| 3 — resume           | `cead1282-…` (preserved) | SUCCESS | **158.8s** |
+
+**Δt_resume / Δt_clean = 158.8 / 317 ≈ 0.50** — resume is 2× faster than re-running from scratch on this narrow scope. (Lower amplification than 2026-05-23's 5× because Phase 3's re-run on this pod hit longer dim_supplier + supplier_spend build times — still well within the ≪ contract.)
+
+### Phase 3 — resume (per-step)
+
+```
+PHASE_3_RESUME run_id=cead1282-a384-4dac-9cb5-9e8310179a86 wall=158.8s
+
+  bronze  erp_suppliers             resumed_skipped  [resume-skip]  rows=       209  dur=0.00s
+  bronze  ap_invoices               resumed_skipped  [resume-skip]  rows=     49552  dur=0.00s
+  silver  dim_calendar              resumed_skipped  [resume-skip]  rows=      4018  dur=0.00s
+  silver  dim_supplier              success                         rows=       209  dur=42.88s
+  gold    supplier_spend            success                         rows=       309  dur=50.16s
+
+succeeded=2  failed=0  skipped=0  resumed_skipped=3
+```
+
+### State-table latest-per-(run_id, dataset_id) projection
+
+```
++--------------+------+---------------+---------+-----------+----------------+---------------+
+|dataset_id    |layer |status         |row_count|skip_reason|duration_seconds|plan_hash_short|
++--------------+------+---------------+---------+-----------+----------------+---------------+
+|ap_invoices   |bronze|resumed_skipped|49552    |resume-skip|0.0             |7383bb249334   |
+|erp_suppliers |bronze|resumed_skipped|209      |resume-skip|0.0             |7383bb249334   |
+|supplier_spend|gold  |success        |309      |NULL       |50.16           |7383bb249334   |
+|dim_calendar  |silver|resumed_skipped|4018     |resume-skip|0.0             |7383bb249334   |
+|dim_supplier  |silver|success        |209      |NULL       |42.88           |7383bb249334   |
++--------------+------+---------------+---------+-----------+----------------+---------------+
+```
+
+All 5 rows share `plan_hash_short=7383bb249334` — drift gate held across the kill-and-resume boundary.
+
+### Append-only cross-tab — full history under the resumed run_id
+
+```
++--------------+---------------+---------+
+|dataset_id    |status         |row_count|
++--------------+---------------+---------+
+|ap_invoices   |resumed_skipped|1        |
+|ap_invoices   |success        |1        |
+|dim_calendar  |resumed_skipped|1        |
+|dim_calendar  |success        |1        |
+|dim_supplier  |failed         |1        |
+|dim_supplier  |success        |1        |
+|erp_suppliers |resumed_skipped|1        |
+|erp_suppliers |success        |1        |
+|supplier_spend|skipped        |1        |
+|supplier_spend|success        |1        |
++--------------+---------------+---------+
+```
+
+Two rows per dataset under one `run_id` — confirms the state table is append-only on resume, and the latest-per-(run_id, dataset_id) projection correctly resolves to the terminal status of each.
+
+### Phase 2 marker-parse fallback (manual recovery)
+
+Phase 2 hit the known `display_data` JSON-escape-stripping issue (documented in §Known dispatcher notes above). The dispatcher exited with code 1 after Phase 2 even though the cluster-side run succeeded perfectly. Manual recovery:
+
+1. Read `/tmp/tc27-…/phase2_executed.ipynb`.
+2. Extract `run_id` from the pre-marker per-step print (`PHASE_2_INDUCED_FAIL run_id=cead1282-…`).
+3. Re-invoke dispatcher with `--phases 3 --resume-run-id cead1282-…` to skip phases 1+2 and resume directly.
+
+This recovery path is part of the dispatcher's intended UX (`--resume-run-id` flag is documented for "re-running phase 3 after a transient failure during the first attempt"). The marker-parse fragility itself is a separate follow-up.
+
+### Closes BACKLOG.md P1.5α-fix21 acceptance
+
+This re-validation, combined with the 2026-05-23 run, satisfies the acceptance criterion:
+> "deliberate kill-mid-run + `--resume` produces a complete pipeline in (resume time) ≪ (clean run time)."
+
+P1.5α-fix21 flips from `[~]` → `[x]` in BACKLOG.md.

@@ -405,3 +405,83 @@ Different failure class from the orchestrator-fix bugs caught earlier in the ses
 
 - Skills shipped alongside (next commit): `.claude/skills/aidp-rest/` (REST primitives) + `.claude/skills/fusion-tc26-run/` (TC26 dispatcher) — captures this run's tribal knowledge for next-time reuse.
 - PR shipping the underlying orchestrator fixes: craxelfn/claude-code-plugins#3
+
+---
+
+## Live evidence — TC26 fully-clean 15-node DAG (2026-06-02)
+
+**Setup**:
+- `run_id`: `00bd680f-1e85-4672-aa96-7be7417d506f`
+- `bundle.project`: `tc26-orchestrator-seed`
+- `bundle.version`: `0.2.0`
+- Bundle: `dev/bundle.tc26.yaml` — 4 real bronze + 2 deferred bronze + 3 real silver + 1 deferred silver + 3 real gold + 2 deferred gold = **15 plan nodes**
+- Tenant: `saasfademo1` demo pod (different pod URL from the 2026-05-21 run; credentials rotated to fresh BICC user via AIDP credential store entry)
+- Total wall time: **1703.8s (28.4 min)**; orchestrator-reported 1565.9s
+- Dispatched via `.claude/skills/fusion-tc26-run/dispatch.py --scope custom --bundle-path dev/bundle.tc26.yaml`
+
+**Why this run matters**: the 2026-05-21 full happy-path hit a `po_receipts` BICC-side failure (Py4JJavaError on `.load()`) before the cascade contract could be validated end-to-end on a clean DAG. This run uses a narrower bronze set (omits the problematic PVOs) and demonstrates a **fully-clean 15-node end-to-end** with all 5 expected `KNOWN_DEFERRED_*` paths exercised. First clean live evidence on the new pod/credential combination.
+
+### Per-step table
+
+```
+run_id=00bd680f-1e85-4672-aa96-7be7417d506f
+steps: 10 ok, 0 failed, 0 skipped, 5 deferred (1565.9s reported / 1703.8s wall)
+
+  bronze  erp_suppliers             success                 rows=       209  dur=66.41s
+  bronze  gl_coa                    success                 rows=     63464  dur=64.60s
+  bronze  ap_invoices               success                 rows=     49552  dur=74.15s
+  bronze  gl_period_balances        success                 rows=  11211211  dur=1160.09s
+  bronze  ap_aging_periods          deferred                rows=         -  dur=0.00s   # P1.10b SAAS_BATCH
+  bronze  hcm_worker_assignments    deferred                rows=         -  dur=0.00s   # P2.11 SAAS_BATCH
+
+  silver  dim_calendar              success                 rows=      4018  dur=11.22s
+  silver  dim_supplier              success                 rows=       209  dur=28.49s
+  silver  dim_account               success                 rows=     63464  dur=21.79s
+  silver  dim_org                   deferred                rows=         -  dur=0.00s   # P1.7
+
+  gold    ap_aging                  success                 rows=       131  dur=26.07s
+  gold    supplier_spend            success                 rows=       309  dur=23.97s
+  gold    gl_balance                success                 rows=  10184102  dur=89.11s
+  gold    ar_aging                  deferred                rows=         -  dur=0.00s   # P1.10
+  gold    po_backlog                deferred                rows=         -  dur=0.00s   # P1.11
+```
+
+### SOX-trail audit columns (cell 4 secondary verification)
+
+- `silver_run_id` matches `fusion_bundle_state.run_id` on **4018/4018** rows of `silver.dim_calendar` ✅
+- `gold_run_id` matches `fusion_bundle_state.run_id` on **131/131** rows of `gold.ap_aging` ✅
+
+### Contracts validated by this run (cumulative)
+
+| Contract | Validated by |
+|---|---|
+| **15-node DAG end-to-end on new pod/creds** | All 15 plan nodes landed exactly one row in `fusion_bundle_state` |
+| **All 3 `KNOWN_DEFERRED_*` registries fire correctly** | 2 bronze deferred + 1 silver deferred + 2 gold deferred; total 5 deferred state rows |
+| **Zero failures, zero cascade-skips** | First fully-clean end-to-end run (cascade contract validated in prior section by `po_receipts` failure) |
+| **`gl_period_balances` repeatable at scale** | 11,211,211 rows — exact byte-for-byte match to the 2026-05-21 run's bronze count |
+| **`gl_balance` repeatable at scale** | 10,184,102 rows — exact match to TC23 + the narrow probe |
+| **`silver_run_id` / `gold_run_id` audit cols on 100% of rows** | 4018/4018 + 131/131 verified via JOIN to state |
+| **Credential resolution via env-rendered ref under new pod** | `${FUSION_BICC_PASSWORD}` resolved eagerly by `schema/refs.py::render_vars` from the dispatcher-loaded env var; no `${vault:OCID}` path needed (cluster lacks `from aidputils import secrets` Python module — entry point is the runtime-injected global `aidputils.secrets.get(name=..., key=...)`) |
+
+### Closes the following BACKLOG items
+
+This run flips four items from `[~]` to `[x]`:
+
+- **P1.5** — orchestrator + notebook (main item). Live evidence requirement met.
+- **P1.5α-fix4** — Layer/dataset filter semantics. The 5 deferred state rows + 10 real success rows demonstrate intra-plan vs extra-plan dependency classification working on the live DAG.
+- **P1.5α-fix7** — CLI wiring (`bundle_path` threading, `datasets=None` default). `dispatch.py` calls `orchestrator.run(bundle_path=BUNDLE_PATH, datasets=None, layers=None)` — successful end-to-end with no filter args confirms the default-`None` path.
+- **P1.5α-fix9** — `run_id` kwarg + `<layer>_run_id` audit column. Verified by SOX-trail JOIN above.
+
+### What's NOT validated by this run
+
+- **Resume + chaos classifier (fix21)** — closes via TC27, run next.
+- **`po_receipts` PVO** — still blocked behind whatever BICC-side / PVO-schema issue surfaced 2026-05-21. Not a P1.5α concern; will surface again under P1.5β incremental + when ar_aging / po_backlog (P1.10 / P1.11) ship.
+- **Failure cascade on this DAG** — already validated 2026-05-21 by the natural `po_receipts` failure; not re-tested here.
+- **Non-`saasfademo1` tenant** — P3.7 / P3.9 blocker.
+- **Incremental mode** — Phase β follow-up.
+
+### Discoveries during this run
+
+1. **`from aidputils import secrets` is not the right path on `fusion_bundle_dev`.** The orchestrator's `_resolve_password()` tries that import for `${vault:OCID}` refs — fails with `ModuleNotFoundError: No module named 'aidputils'`. The actual entry point is the runtime-injected `aidputils.secrets.get(name=..., key=...)` global (no Python-side `from … import` resolves it). Implication for tenant onboarding: prefer `${env:VAR}` refs with the dispatcher loading the env from the credential store. The Vault-OCID path is unreliable until either (a) `aidputils` becomes a real importable module on this cluster, or (b) the orchestrator switches to the global pattern. **Follow-up candidate** — file a BACKLOG item to consolidate credential resolution on the runtime-global pattern.
+
+2. **`xxhash64` surrogate keys hold across builds.** `dim_supplier.supplier_key` and `dim_account.account_key` derive from natural keys via `xxhash64(...)` — deterministic across runs on identical bronze. Implicit re-validation of P1.19 (closed 2026-05-11).

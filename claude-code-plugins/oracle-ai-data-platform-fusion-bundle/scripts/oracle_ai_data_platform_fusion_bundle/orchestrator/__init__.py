@@ -69,11 +69,14 @@ from .runtime import (
     _safe_write_state_row,
     _utc_now,
     _VALID_MODES,
+    BRONZE_AUDIT_COLUMNS,
     enrich_bronze_audit_cols,
     load_bundle,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Iterable
+
     from pyspark.sql import DataFrame, SparkSession
 
 
@@ -404,6 +407,85 @@ def _natural_key_join_sql(
     )
 
 
+def _payload_diff_predicate_sql(
+    data_columns: "Iterable[str]",
+    *,
+    target_alias: str = "target",
+    src_alias: str = "src",
+) -> str | None:
+    """Build the P1.17e payload-diff predicate for a bronze MERGE's WHEN MATCHED clause.
+
+    Bronze incremental MERGE under V1 used unconditional
+    ``WHEN MATCHED THEN UPDATE SET *``, which rewrites every matched row's
+    ``_extract_ts`` on every cycle. For PVOs flagged ``incremental_capable=False``
+    (full re-extract every cycle — ``gl_period_balances``, ``gl_coa``,
+    ``ap_aging_periods``), the rewritten ``_extract_ts`` propagates downstream:
+    silver/gold's ``WHERE bronze_extract_ts > <prior_silver_watermark>`` source
+    predicate matches every row, forcing silver/gold MERGE to run unconditionally
+    even when nothing materially changed. See LIMITS.md §P1.17-L7.
+
+    This helper builds the predicate that gates the UPDATE: an OR-joined
+    ``IS DISTINCT FROM`` clause across every non-audit DATA column. When no
+    payload column has changed for a matched row, the predicate evaluates
+    ``false``, the UPDATE is suppressed, ``_extract_ts`` is NOT rewritten,
+    and downstream silver/gold MERGE source filters match zero rows.
+
+    Why ``IS DISTINCT FROM`` instead of ``<>``: Spark's ``<>`` is NULL-unsafe
+    (``NULL <> NULL`` → NULL, treated as false in a WHEN clause). Bronze data
+    often carries NULLs in optional columns (e.g., ``gl_period_balances``'s
+    ``BalanceTranslatedFlag`` per LIMITS.md §P1.17-L8). ``IS DISTINCT FROM``
+    is the NULL-safe inequality: ``NULL IS DISTINCT FROM NULL`` → false;
+    ``NULL IS DISTINCT FROM 1`` → true. Mirrors the NULL-safe ``<=>`` used
+    in :func:`_natural_key_join_sql` — the two helpers have a coherent
+    NULL-handling story.
+
+    Why audit columns are excluded: ``_extract_ts`` and ``_run_id`` carry
+    this run's literal values, which always differ from the prior run's
+    literals — including them in the diff would force every cycle's UPDATE,
+    defeating the whole optimization. ``_source_pvo`` and ``_watermark_used``
+    are similarly cycle-constant or cycle-distinct and contribute nothing
+    useful to a diff. The four are excluded by symbolic reference to
+    :data:`BRONZE_AUDIT_COLUMNS`.
+
+    Natural-key columns are included in the predicate even though, on a
+    matched row (where the ON predicate matched), the natural-key columns
+    are by construction NULL-safe-equal between target and src. The
+    ``target.k IS DISTINCT FROM src.k`` clause evaluates ``false`` for those
+    columns; their inclusion is harmless and keeps this helper decoupled
+    from :class:`BronzeExtractSpec` (it doesn't need to know the natural key).
+
+    Args:
+        data_columns: An iterable of bronze schema column names — typically
+            ``df.schema.names`` of the source DataFrame after audit-column
+            enrichment.
+        target_alias: SQL alias of the MERGE target. Defaults to ``"target"``.
+        src_alias: SQL alias of the MERGE source. Defaults to ``"src"``.
+
+    Returns:
+        The OR-joined ``IS DISTINCT FROM`` predicate, or ``None`` if no data
+        column remains after excluding :data:`BRONZE_AUDIT_COLUMNS`. ``None``
+        signals the caller to fall back to the V1 unconditional ``UPDATE SET *``
+        shape — defensive against a malformed bronze schema that wouldn't
+        reach this code in practice.
+
+    Examples:
+        >>> _payload_diff_predicate_sql(["SEGMENT1", "VENDORID", "_extract_ts"])
+        'target.SEGMENT1 IS DISTINCT FROM src.SEGMENT1 OR target.VENDORID IS DISTINCT FROM src.VENDORID'
+        >>> _payload_diff_predicate_sql(["_extract_ts", "_source_pvo"])
+        # → None  (all columns are audit; caller falls back to V1 shape)
+    """
+    # Preserve source order from the input iterable; do NOT sort. Source order
+    # is deterministic per (extractor, PVO) and makes golden-snapshot SQL tests
+    # trivially stable. Sorting would risk nondeterminism if a future Spark
+    # version changes column-iteration semantics.
+    data_cols = [c for c in data_columns if c not in BRONZE_AUDIT_COLUMNS]
+    if not data_cols:
+        return None
+    return " OR ".join(
+        f"{target_alias}.{c} IS DISTINCT FROM {src_alias}.{c}" for c in data_cols
+    )
+
+
 # ---------------------------------------------------------------------------
 # _execute_node — per-step dispatch with try/except + timing wrapping
 # ---------------------------------------------------------------------------
@@ -576,16 +658,35 @@ def _execute_node(
                             materialized_count = spark.table(target).count()
                         else:
                             df.createOrReplaceTempView("_p117_bronze_src")
-                            # B6 + B6d — unconditional UPDATE SET * (payload-diff
-                            # predicate DEFERRED to P1.17e). The NULL-safe `<=>`
-                            # join predicate handles composite keys with NULL
-                            # components (LIMITS.md P1.17-L8 — gl_period_balances).
+                            # B6 + B6d — payload-diff-gated UPDATE shipped per
+                            # P1.17e. The WHEN MATCHED AND (...) predicate
+                            # suppresses no-op UPDATEs when the bronze
+                            # re-extract carries the same payload (the
+                            # incremental_capable=False steady state on
+                            # gl_period_balances / gl_coa / ap_aging_periods),
+                            # which prevents _extract_ts from being rewritten
+                            # and breaks the downstream silver/gold
+                            # propagation chain. See LIMITS.md §P1.17-L7
+                            # (resolved). The NULL-safe `<=>` join predicate
+                            # handles composite keys with NULL components
+                            # (LIMITS.md P1.17-L8 — gl_period_balances).
                             natural_key_join = _natural_key_join_sql(pvo.natural_key)
+                            payload_diff = _payload_diff_predicate_sql(df.schema.names)
+                            if payload_diff is not None:
+                                when_matched_clause = (
+                                    f"WHEN MATCHED AND ({payload_diff}) THEN UPDATE SET *"
+                                )
+                            else:
+                                # Defensive — bronze schema has no non-audit
+                                # columns (shouldn't reach this path in
+                                # practice; V1 unconditional shape preserves
+                                # today's behavior under this edge).
+                                when_matched_clause = "WHEN MATCHED THEN UPDATE SET *"
                             spark.sql(f"""
                                 MERGE INTO {target} AS target
                                 USING _p117_bronze_src AS src
                                 ON {natural_key_join}
-                                WHEN MATCHED THEN UPDATE SET *
+                                {when_matched_clause}
                                 WHEN NOT MATCHED THEN INSERT *
                             """)
                             materialized_count = spark.table(target).count()
@@ -1190,4 +1291,6 @@ __all__ = [
     "OrchestratorRuntimeError",
     "WatermarkMonotonicityError",
     "MultipleUpstreamWatermarkError",
+    # P1.17e — bronze MERGE payload-diff predicate
+    "BRONZE_AUDIT_COLUMNS",
 ]

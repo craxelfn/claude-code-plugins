@@ -192,6 +192,11 @@ class _DfStub:
             MagicMock(name=name, dataType=MagicMock(simpleString=lambda t=t: t)) | _name_mock(name)
             for name, t in fields
         ]
+        # P1.17e — renderer reads `df.schema.names`; mirror PySpark's
+        # StructType.names property as a plain list derived from
+        # schema_fields (preserves source order — important for stable
+        # golden-snapshot SQL tests against `_payload_diff_predicate_sql`).
+        self.schema.names = [name for name, _ in fields]
         # writer chain
         self.write = MagicMock()
         self.write.format.return_value = self.write
@@ -304,9 +309,18 @@ class TestBronzeMergeSql:
             table_count=10,
             table_exists=True,
         )
+        # Schema must include the natural key column + an audit col so the
+        # P1.17e renderer has at least one payload column to diff.
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),
+                ("_extract_ts", "timestamp"),
+            ],
+        )
         step, _captured, _df = _execute_bronze(
             spark=spark, fake_now=fake_now, mode="incremental",
-            df_stub=_DfStub(count=5),
+            df_stub=df_stub,
         )
         assert step.status == "success"
         # Find the MERGE call in the SQL log.
@@ -317,7 +331,73 @@ class TestBronzeMergeSql:
         assert "ApInvoicesInvoiceId" in merge_sql
         # NULL-safe join operator.
         assert "<=>" in merge_sql
-        assert "WHEN MATCHED THEN UPDATE SET *" in merge_sql
+        # P1.17e — payload-diff predicate gates the UPDATE. The V1
+        # unconditional `WHEN MATCHED THEN UPDATE SET *` is now
+        # `WHEN MATCHED AND (<payload-diff>) THEN UPDATE SET *`.
+        assert "WHEN MATCHED AND (" in merge_sql
+        assert "IS DISTINCT FROM" in merge_sql
+        assert "WHEN MATCHED AND (" in merge_sql and ") THEN UPDATE SET *" in merge_sql
+        assert "WHEN NOT MATCHED THEN INSERT *" in merge_sql
+
+    def test_incremental_renders_payload_diff_predicate_excluding_audit_cols(self) -> None:
+        # E4 — restored `D-no-op-reextract` (renamed because the orchestrator
+        # never queries `DESCRIBE HISTORY` post-MERGE; engine-side metrics
+        # proof lives in TC30b). Pins **renderer wiring at the dispatch
+        # boundary** — what the orchestrator actually dispatches, NOT what
+        # Delta records about the result.
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W1,
+                    last_run_at=W1,
+                ),
+            ],
+            table_count=10,
+            table_exists=True,
+        )
+        # Schema mirrors what enrich_bronze_audit_cols produces: payload
+        # cols first, then the four audit cols last.
+        df_stub = _DfStub(
+            count=5,
+            schema_fields=[
+                ("ApInvoicesInvoiceId", "bigint"),
+                ("ApInvoicesInvoiceAmount", "decimal(38,8)"),
+                ("ApInvoicesVendorId", "bigint"),
+                ("_extract_ts", "timestamp"),
+                ("_source_pvo", "string"),
+                ("_run_id", "string"),
+                ("_watermark_used", "timestamp"),
+            ],
+        )
+        step, _captured, _df = _execute_bronze(
+            spark=spark, fake_now=fake_now, mode="incremental",
+            df_stub=df_stub,
+        )
+        assert step.status == "success"
+        merge_calls = [q for q in spark.sql_calls if "MERGE INTO" in q]
+        assert len(merge_calls) == 1
+        merge_sql = merge_calls[0]
+        # Renderer wired the gated UPDATE.
+        assert "WHEN MATCHED AND (" in merge_sql
+        # Extract the WHEN MATCHED predicate body for content checks.
+        head = merge_sql.split("WHEN MATCHED AND (", 1)[1]
+        when_matched_predicate = head.split(") THEN UPDATE SET *", 1)[0]
+        # Every payload column contributes an IS DISTINCT FROM clause.
+        for payload_col in ("ApInvoicesInvoiceId", "ApInvoicesInvoiceAmount", "ApInvoicesVendorId"):
+            assert f"target.{payload_col} IS DISTINCT FROM src.{payload_col}" in when_matched_predicate, (
+                f"payload col {payload_col!r} missing from WHEN MATCHED predicate"
+            )
+        # The four audit columns are EXCLUDED (regression guard at the
+        # dispatch boundary — complements helper-level E3 guard).
+        for audit_col in ("_extract_ts", "_source_pvo", "_run_id", "_watermark_used"):
+            assert audit_col not in when_matched_predicate, (
+                f"audit col {audit_col!r} leaked into WHEN MATCHED predicate"
+            )
+        # The INSERT clause is unchanged (regression guard — the renderer
+        # didn't accidentally gate the NOT-MATCHED branch too).
         assert "WHEN NOT MATCHED THEN INSERT *" in merge_sql
 
     def test_seed_does_not_emit_merge(self) -> None:
