@@ -80,7 +80,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Final, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
 
@@ -191,59 +192,32 @@ def _run_id_audit_sql(run_id: str | None) -> str:
     return f"'{escaped}'"
 
 
-def build_dim_account_sql(
-    *,
-    paths:        TablePaths | None = None,
-    bronze_table: str | None = None,
-    silver_table: str | None = None,
-    n_segments: int = MAX_FUSION_SEGMENTS,
-    semantic_segment_map: Mapping[int, str] | None = None,
-    run_id:       str | None = None,
+#: Projected column name (silver-side) used as the MERGE ON predicate
+#: under ``--mode incremental``. Matches ``SilverDimSpec.natural_key`` in
+#: the orchestrator registry.
+NATURAL_KEY_COLUMN: Final[str] = "account_id"
+
+
+def _projection_select_sql(
+    bronze_table: str,
+    n_segments: int,
+    semantic_segment_map: Mapping[int, str],
+    run_id: str | None,
 ) -> str:
-    """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_account``.
+    """The SELECT projection shared by seed + incremental SQL renderers.
 
-    Pure string output — no Spark required.
-
-    Plugin-portable shape:
-
-    * ``segment_01 … segment_<n_segments>`` are always emitted (default
-      ``n_segments=30``, Fusion's maximum). Consumers that need to be
-      tenant-agnostic should read these positional columns.
-    * ``code_combination`` is ``CONCAT_WS('.', …)`` across all configured
-      segments — ``CONCAT_WS`` naturally skips NULL inputs.
-    * Semantic alias columns are emitted per ``semantic_segment_map``
-      (default: the Fusion-conventional six — company / cost_center /
-      account / subaccount / product / intercompany at positions 1..6).
-      Pass an alternate dict to align with a customer's COA design;
-      pass ``{}`` to suppress aliases entirely and read only positional
-      columns.
-
-    The dedupe rule keeps the row with the most-recent ``_extract_ts``
-    per ``CodeCombinationCodeCombinationId``. Rows with NULL CCID are
-    filtered (would never join anyway).
+    P1.19 — ``account_key`` uses ``xxhash64(CCID)`` for surrogate-key
+    stability across MERGE refreshes (pre-P1.19 used
+    ``monotonically_increasing_id()``).
     """
-    if paths is None:
-        paths = DEFAULT_PATHS
-    if bronze_table is None:
-        bronze_table = paths.bronze("gl_coa")
-    if silver_table is None:
-        silver_table = paths.silver("dim_account")
-    if semantic_segment_map is None:
-        semantic_segment_map = DEFAULT_SEMANTIC_SEGMENT_MAP
-    _validate_segment_map(semantic_segment_map, n_segments)
-
     positional_lines = _segment_positional_lines(n_segments)
     code_combination = _code_combination_concat(n_segments)
     semantic_lines = _semantic_alias_lines(semantic_segment_map, n_segments)
     semantic_block = f"{semantic_lines},\n" if semantic_lines else ""
     run_id_sql = _run_id_audit_sql(run_id)
-
     return f"""\
-CREATE OR REPLACE TABLE {silver_table}
-USING DELTA
-AS
 SELECT
-  monotonically_increasing_id()                                    AS account_key,
+  xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))       AS account_key,
   CAST(CodeCombinationCodeCombinationId AS BIGINT)                 AS account_id,
   CAST(CodeCombinationChartOfAccountsId AS BIGINT)                 AS chart_of_accounts_id,
   {code_combination}                                                AS code_combination,
@@ -268,9 +242,89 @@ FROM (
     ) AS _rn
   FROM {bronze_table}
   WHERE CodeCombinationCodeCombinationId IS NOT NULL
+{{watermark_predicate}}
 )
-WHERE _rn = 1
-"""
+WHERE _rn = 1"""
+
+
+def build_dim_account_sql(
+    *,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
+    n_segments: int = MAX_FUSION_SEGMENTS,
+    semantic_segment_map: Mapping[int, str] | None = None,
+    run_id:       str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
+) -> str:
+    """Return the SQL that produces ``silver.dim_account`` in the requested mode.
+
+    Pure string output — no Spark required.
+
+    ``refresh_mode`` (P1.17):
+      * ``"seed"`` (default) — ``CREATE OR REPLACE TABLE`` Delta SQL,
+        identical pre-P1.17 shape.
+      * ``"incremental"`` — ``MERGE INTO ... ON account_id <=> src.account_id
+        WHEN MATCHED UPDATE SET * WHEN NOT MATCHED INSERT *``. The
+        source-side ``WHERE _extract_ts > <watermark>`` predicate
+        filters bronze rows the silver layer has already incorporated
+        (layer-local cursor per B8a).
+
+    ``watermark`` (P1.17 incremental only): UTC ``datetime`` of the
+    layer-local prior cursor. ``None`` is accepted only in ``"seed"``
+    mode; passing ``None`` in incremental mode raises.
+
+    Plugin-portable shape (unchanged from pre-P1.17):
+
+    * ``segment_01 … segment_<n_segments>`` are always emitted.
+    * ``code_combination`` is ``CONCAT_WS('.', …)``.
+    * Semantic alias columns are emitted per ``semantic_segment_map``.
+    """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("gl_coa")
+    if silver_table is None:
+        silver_table = paths.silver("dim_account")
+    if semantic_segment_map is None:
+        semantic_segment_map = DEFAULT_SEMANTIC_SEGMENT_MAP
+    _validate_segment_map(semantic_segment_map, n_segments)
+
+    if refresh_mode == "seed":
+        select_sql = _projection_select_sql(
+            bronze_table, n_segments, semantic_segment_map, run_id,
+        ).format(watermark_predicate="")
+        return f"CREATE OR REPLACE TABLE {silver_table}\nUSING DELTA\nAS\n{select_sql}\n"
+
+    if refresh_mode == "incremental":
+        if watermark is None:
+            raise ValueError(
+                "dim_account.build_dim_account_sql: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior cursor). "
+                "The orchestrator's _preflight_incremental_cursors should have "
+                "raised IncrementalCursorMissingError before reaching this path."
+            )
+        watermark_iso = watermark.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        select_sql = _projection_select_sql(
+            bronze_table, n_segments, semantic_segment_map, run_id,
+        ).format(
+            watermark_predicate=f"    AND _extract_ts > '{watermark_iso}'"
+        )
+        return (
+            f"MERGE INTO {silver_table} AS target\n"
+            f"USING (\n{select_sql}\n) AS src\n"
+            f"ON target.{NATURAL_KEY_COLUMN} <=> src.{NATURAL_KEY_COLUMN}\n"
+            f"WHEN MATCHED THEN UPDATE SET *\n"
+            f"WHEN NOT MATCHED THEN INSERT *\n"
+        )
+
+    raise ValueError(
+        f"dim_account.build_dim_account_sql: refresh_mode must be 'seed' or "
+        f"'incremental'; got {refresh_mode!r}"
+    )
 
 
 def detect_active_segments(
@@ -315,16 +369,17 @@ def build(
     n_segments: int = MAX_FUSION_SEGMENTS,
     semantic_segment_map: Mapping[int, str] | None = None,
     run_id:       str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_account`` from ``bronze.gl_coa``.
 
     Runs the SQL from :func:`build_dim_account_sql` against ``spark`` and
-    returns a DataFrame backed by the freshly-written silver table. All
-    knobs (``n_segments``, ``semantic_segment_map``) are forwarded to the
-    SQL builder unchanged. The semantic-alias defaults match the
-    Fusion-conventional six-segment ordering so saasfademo1 (and other
-    tenants on the conventional COA design) reproduce the pre-refactor
-    column shape exactly.
+    returns a DataFrame backed by the freshly-written silver table.
+
+    ``refresh_mode`` (P1.17) selects ``"seed"`` (``CREATE OR REPLACE``) or
+    ``"incremental"`` (``MERGE INTO``). Incremental requires ``watermark``
+    (the layer-local prior cursor).
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver
     table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
@@ -343,6 +398,8 @@ def build(
             n_segments=n_segments,
             semantic_segment_map=semantic_segment_map,
             run_id=run_id,
+            refresh_mode=refresh_mode,
+            watermark=watermark,
         )
     )
     return spark.table(silver_table)
@@ -351,6 +408,7 @@ def build(
 __all__ = [
     "DEFAULT_SEMANTIC_SEGMENT_MAP",
     "MAX_FUSION_SEGMENTS",
+    "NATURAL_KEY_COLUMN",
     "SOURCE_BRONZE_TABLE",
     "TARGET_SILVER_TABLE",
     "build",

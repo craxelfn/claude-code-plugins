@@ -85,6 +85,10 @@ class _FakeDataFrame:
         self.write.mode.return_value = self.write
         self.write.option.return_value = self.write
         self.write.saveAsTable.return_value = None
+        # Minimal schema-like object so P1.17's _ensure_target_table_exists
+        # can render CREATE TABLE on the incremental + fresh-tenant path.
+        self.schema = MagicMock()
+        self.schema.fields = []
 
     def count(self) -> int:
         return self._row_count
@@ -94,6 +98,23 @@ class _FakeDataFrame:
 
     def collect(self) -> list:
         return self._rows
+
+    def first(self):
+        # P1.17 silver/gold capture path: spark.sql("SELECT MAX(...)").first().
+        # Returns None on an empty result, matching real Spark semantics.
+        return self._rows[0] if self._rows else None
+
+    # P1.17 bronze MERGE path uses cache + temp views; the seed-path
+    # tests in this file never hit incremental, but defining these
+    # as no-ops insulates any future test that switches modes.
+    def cache(self) -> "_FakeDataFrame":
+        return self
+
+    def unpersist(self) -> None:
+        return None
+
+    def createOrReplaceTempView(self, _name: str) -> None:
+        return None
 
 
 class _FakeCatalog:
@@ -166,11 +187,17 @@ class TestModeValidation:
                 orchestrator.run(Path("/nope"), mode="seeed")
             mock_load.assert_not_called()
 
-    def test_mode_incremental_raises_not_implemented(self) -> None:
-        with patch("oracle_ai_data_platform_fusion_bundle.orchestrator.load_bundle") as mock_load:
-            with pytest.raises(NotImplementedError, match="P1.5β"):
-                orchestrator.run(Path("/nope"), mode="incremental")
-            mock_load.assert_not_called()
+    def test_mode_incremental_passes_guard_after_p117_gate_removal(self) -> None:
+        """P1.17 (C9) removed the ``NotImplementedError`` gate that β.1
+        held. The new contract: ``mode="incremental"`` now passes the
+        mode-validation guard and proceeds to ``load_bundle`` (which
+        raises ``BundleLoadError`` for the bogus path here). The β.1
+        D7 ``test_mode_incremental_raises_not_implemented`` was deleted
+        atomically with this gate removal — keeping it would have kept
+        the gate.
+        """
+        with pytest.raises(orchestrator.BundleLoadError):
+            orchestrator.run(Path("/nope"), mode="incremental")
 
     def test_mode_seed_passes_guard(self, tmp_path: Path) -> None:
         # Seed should pass the guard and proceed to load_bundle (which then fails

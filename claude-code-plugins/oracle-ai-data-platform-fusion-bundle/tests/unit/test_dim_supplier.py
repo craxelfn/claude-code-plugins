@@ -97,10 +97,20 @@ class TestSqlBuilder:
         assert SOURCE_BRONZE_TABLE in sql
         assert TARGET_SILVER_TABLE in sql
 
-    def test_supplier_key_uses_monotonically_increasing_id(self) -> None:
-        """Surrogate key contract: rebuild-fresh, not hash-stable. Downstream marts must join on supplier_number."""
-        assert "monotonically_increasing_id()" in build_dim_supplier_sql()
-        assert "AS supplier_key" in build_dim_supplier_sql()
+    def test_supplier_key_uses_xxhash64_of_natural_key(self) -> None:
+        """P1.17 / P1.19 surrogate-key contract: ``xxhash64(SEGMENT1)`` —
+        deterministic across rebuilds + stable under MERGE refreshes.
+        Pre-P1.19 used ``monotonically_increasing_id()`` (partition-local
+        + non-deterministic), which broke any downstream cache keyed on
+        the surrogate after the first incremental MERGE. Downstream
+        marts MUST still join on ``supplier_number`` (the natural key);
+        the surrogate is a join-key shortcut, not authoritative.
+        """
+        sql = build_dim_supplier_sql()
+        assert "xxhash64(CAST(SEGMENT1 AS STRING))" in sql
+        assert "AS supplier_key" in sql
+        # Old non-deterministic surrogate must be gone.
+        assert "monotonically_increasing_id" not in sql
 
 
 class TestModuleExports:

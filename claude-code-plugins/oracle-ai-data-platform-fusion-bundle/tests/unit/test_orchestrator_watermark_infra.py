@@ -510,21 +510,6 @@ gold:
 """
 
 
-class TestIncrementalGatePreserved:
-    """Coupled with the P1.17 gate removal — if a future PR removes the
-    NotImplementedError block at ``__init__.py:641-645`` WITHOUT also
-    removing this test, the test suite fails. That coupling is the
-    contract between β.1 and P1.17.
-    """
-
-    def test_run_mode_incremental_raises_not_implemented(self, tmp_path: Path) -> None:
-        bundle_path = tmp_path / "bundle.yaml"
-        bundle_path.write_text(_MIN_BUNDLE, encoding="utf-8")
-        # No Spark required — the gate fires before any I/O.
-        with pytest.raises(NotImplementedError, match="Incremental mode"):
-            orchestrator.run(bundle_path, mode="incremental")
-
-
 # ---------------------------------------------------------------------------
 # D-resume: tuple-keyed succeeded_row_counts + succeeded_last_watermarks
 # ---------------------------------------------------------------------------
@@ -735,18 +720,42 @@ class _ExecuteNodeFakeSpark:
 class _DfStub:
     """Lazy DataFrame stub for extract_pvo + enrich_bronze_audit_cols.
     Captures the kwargs passed to enrich + write.
+
+    P1.17 (C4) added cache / unpersist / count / schema usage in the
+    bronze closure; the stub honors those calls as no-ops so tests
+    exercising the seed-mode path don't break on the cache lifecycle.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, count: int = 5) -> None:
         self.enrich_kwargs: dict[str, Any] | None = None
+        self._count = count
         self.write = MagicMock()
         self.write.format.return_value = self.write
         self.write.mode.return_value = self.write
         self.write.option.return_value = self.write
         self.write.saveAsTable.return_value = None
+        # Schema with at least one field so _ensure_target_table_exists
+        # can render CREATE TABLE (incremental + fresh-tenant path).
+        self.schema = MagicMock()
+        _field = MagicMock()
+        _field.name = "_extract_ts"
+        _field.dataType.simpleString = lambda: "timestamp"
+        self.schema.fields = [_field]
 
     def withColumn(self, *a, **kw):
         return self
+
+    def cache(self):
+        return self
+
+    def unpersist(self) -> None:
+        return None
+
+    def count(self) -> int:
+        return self._count
+
+    def createOrReplaceTempView(self, _name: str) -> None:
+        return None
 
 
 def _build_bundle_for_dispatch(tmp_path: Path) -> Path:
@@ -877,6 +886,14 @@ class TestBronzeWatermarkCapture:
         """Successful run with row_count=0 must NOT regress to NULL —
         the prior W1 is preserved. ``new_wm`` is a datetime, not a
         SecretStr (D8 collision-regression check).
+
+        P1.17 (C4) — the empty-delta gate is now on **source** count
+        (``df.count()``), not target count, so we inject a zero-count
+        ``_DfStub`` rather than tweaking ``table_count``. Under MERGE
+        semantics, ``spark.table(target).count()`` returns existing
+        rows + applied delta (potentially non-zero on an empty delta
+        against a non-empty target); the source-count gate is the only
+        safe signal for "did anything arrive this cycle".
         """
         fake_now = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
         W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
@@ -887,9 +904,11 @@ class TestBronzeWatermarkCapture:
                     last_watermark=W1, last_run_at=W1,
                 ),
             ],
-            table_count=0,  # empty extract
+            table_count=0,
         )
-        step, _ = _execute_bronze(spark=spark, fake_now=fake_now)
+        step, _ = _execute_bronze(
+            spark=spark, fake_now=fake_now, extract_returns=_DfStub(count=0),
+        )
         assert step.status == "success"
         assert step.row_count == 0
         assert step.last_watermark == W1, "empty delta must preserve W1"
@@ -897,10 +916,16 @@ class TestBronzeWatermarkCapture:
         assert isinstance(step.last_watermark, datetime)
 
     def test_d5b_true_first_empty_persists_null(self, tmp_path: Path) -> None:
-        """No prior row + zero rows → last_watermark == None."""
+        """No prior row + zero rows → last_watermark == None.
+
+        P1.17: empty-delta gate is on source DataFrame count; inject a
+        zero-count stub.
+        """
         fake_now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
         spark = _ExecuteNodeFakeSpark(prior_rows=[], table_count=0)
-        step, _ = _execute_bronze(spark=spark, fake_now=fake_now)
+        step, _ = _execute_bronze(
+            spark=spark, fake_now=fake_now, extract_returns=_DfStub(count=0),
+        )
         assert step.status == "success"
         assert step.row_count == 0
         assert step.last_watermark is None

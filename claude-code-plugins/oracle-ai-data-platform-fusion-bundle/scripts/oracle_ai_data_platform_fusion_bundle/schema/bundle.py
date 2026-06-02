@@ -147,6 +147,38 @@ class NotificationsSpec(BaseModel):
     on_failure: list[str] = Field(default_factory=list, alias="onFailure")
 
 
+class IncrementalConfig(BaseModel):
+    """P1.17 — knobs for ``--mode incremental`` runs.
+
+    Today carries only ``watermark_safety_window_seconds``; future P3.x
+    fields (e.g. per-PVO override of the bronze MERGE write strategy,
+    schema-evolution policy) attach here.
+
+    ``watermark_safety_window_seconds`` is the gap subtracted from
+    ``extract_started_at`` when persisting the bronze cursor. Absorbs
+    AIDP-vs-Fusion clock skew so the next incremental BICC filter
+    doesn't drop rows at the boundary. Default ``3600`` (1h) — wider
+    than typical NTP-synced drift between OCI-hosted AIDP and Fusion
+    Cloud; matches β.1's hardcoded ``WATERMARK_SAFETY_WINDOW``.
+    Validated ``gt=0`` because zero would erase the buffer and a
+    negative value would move the cursor INTO THE FUTURE relative to
+    ``extract_started_at`` (BICC returns zero rows even when data
+    exists). See TC28b clock-skew probe.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    watermark_safety_window_seconds: int = Field(
+        default=3600,
+        gt=0,
+        alias="watermarkSafetyWindowSeconds",
+        description=(
+            "Safety window (seconds) subtracted from extract_started_at when "
+            "persisting the bronze watermark cursor. Default 3600 (1h)."
+        ),
+    )
+
+
 class OacSnapshotSpec(BaseModel):
     """Where the bundle's ``.bar`` snapshot lives in the customer's OCI tenancy."""
 
@@ -246,6 +278,7 @@ class Bundle(BaseModel):
     gold: GoldSpec = GoldSpec()
     oac: OacDashboardSpec | None = None
     notifications: NotificationsSpec = NotificationsSpec()
+    incremental: IncrementalConfig = Field(default_factory=IncrementalConfig)
 
     @model_validator(mode="after")
     def _validate_unique_dataset_ids(self) -> Self:

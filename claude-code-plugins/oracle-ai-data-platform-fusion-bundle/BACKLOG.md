@@ -834,7 +834,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 
 ## Theme: Medallion performance & incrementality (round-6 perf audit, 2026-05-11)
 
-### `[ ]` P1.17 — Switch dims + gold marts from `CREATE OR REPLACE` to `MERGE INTO` with watermark gate
+### `[x]` P1.17 — Switch dims + gold marts from `CREATE OR REPLACE` to `MERGE INTO` with watermark gate (Stage A/B docs `<plan-only>`, Stage C `5f644d7`, Stage D `f6d003a`, Stage E `76fec96`; live evidence `TC22b_TC23b_TC24b_p117_seed_regression.md` + `TC30a_p117_incremental_merge_proof.md` + `TC_E4_xxhash_surrogate_stability.md`)
 **Why**: Every silver/gold module emits `CREATE OR REPLACE TABLE … USING DELTA AS SELECT …` (`dim_account.py:223`, `dim_supplier.py:64`, `transforms/gold/supplier_spend.py:100`, `transforms/gold/gl_balance.py:248`, `transforms/gold/ap_aging.py:428`). That's a full table rewrite every refresh — the **medallion-architecture concept break**: bronze is supposed to grow incrementally, silver/gold MERGE on changed slices, but today a daily refresh of `gold.gl_balance` rewrites all 11M rows. On a tenant with 5 years of GL history (~50M rows projected), daily incremental refresh costs the same as the seed load. Same problem applies to `supplier_spend` and `ap_aging`. Cascades into three already-noted side-effects: `monotonically_increasing_id()` surrogate keys are unstable (P1.19); window-function dedupe sorts the full bronze every rebuild (`dim_account.py:243-252`, `dim_supplier.py:87-94`); `ap_aging` double-scans `bronze.ap_invoices` (P2.20). Fix the root, the rest fall out.
 **Size**: L — six modules + watermark-write contract + live re-verification of TC22 / TC23 / TC24 incremental shape.
 **Depends on**: P1.5 (orchestrator) — MERGE needs the orchestrator to advance the watermark in `fusion_bundle_state` after each successful build. Building MERGE logic on top of a not-yet-wired dispatch path is wasted work. **P1.5β.1 (state-contract infrastructure) shipped**: `read_last_watermark` real, `_resolve_watermark_source` resolver, `RunStep.last_watermark`, bronze closure captures `extract_started_at - WATERMARK_SAFETY_WINDOW`, `WatermarkMonotonicityError` + check, tuple-keyed resume carry-forward — all unit-tested. P1.17 owns: removing the `NotImplementedError` gate at `__init__.py:641-645`, threading `prior_watermark` into `extract_pvo(watermark=...)` at `__init__.py:393`, non-destructive bronze/silver/gold write strategy (MERGE), silver/gold lineage column + capture, `bundle.yaml` `incremental.watermark_safety_window_seconds` override, README update, end-to-end live evidence with delta-only extract.
@@ -856,7 +856,7 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - `dim_account`, `dim_supplier`, `dim_calendar`: no partitioning (tiny; broadcast-joinable as-is).
 - Live evidence: re-run TC23 (gl_balance) and TC24 (ap_aging) with `EXPLAIN FORMATTED` captured pre + post, showing partition-pruning + data-skipping firing for a `WHERE period_year = 2025 AND currency_code = 'USD'`-style filter.
 
-### `[ ]` P1.19 — Replace `monotonically_increasing_id()` with `xxhash64(natural_key)` for surrogate keys
+### `[x]` P1.19 — Replace `monotonically_increasing_id()` with `xxhash64(natural_key)` for surrogate keys (bundled with P1.17 Stage C `5f644d7`; live evidence `TC_E4_xxhash_surrogate_stability.md` — 209/209 supplier_key pairs match byte-for-byte across two builds)
 **Why**: `dim_account.account_key` (`dim_account.py:227`) and `dim_supplier.supplier_key` (`dim_supplier.py:68`) both use `monotonically_increasing_id()`. Partition-local, non-deterministic across rebuilds — documented in the module docstrings as "downstream marts MUST join on the natural key, never on the surrogate". Fine under today's full-rebuild pattern, but breaks under P1.17's incremental MERGE (a row's surrogate would change every refresh, invalidating any downstream cache keyed on it). Same blocker for any future Type-2 SCD variant. `dim_supplier`'s docstring already names the upgrade: `xxhash64(natural_key)`. Apply to `dim_account` (`xxhash64(CAST(CodeCombinationCodeCombinationId AS STRING))`) too.
 **Size**: S — one SQL expression per dim + a unit test asserting stability across two builds of the same bronze snapshot.
 **Depends on**: nothing for the change itself; logically pairs with P1.17 — ship together so MERGE's correctness story includes stable surrogates.
@@ -865,6 +865,53 @@ Intentionally separated from P1.5α: TC27 (live MCP-dispatch evidence) needs a w
 - `dim_supplier.supplier_key = xxhash64(SEGMENT1)`.
 - Unit test: build the same dim twice from a fixed bronze snapshot; assert every surrogate value matches.
 - Docstring updated in both modules to drop the "non-stable across rebuilds" caveat.
+
+### `[ ]` P1.17c — Dropped-target preflight (silent-corruption guard for incremental mode)
+**Why**: P1.17 V1's preflight checks silver/gold cursor presence via `IncrementalCursorMissingError` but NOT target-table existence vs cursor presence. If an operator drops a target table while `fusion_bundle_state` still has a non-NULL `last_watermark`, the next incremental run silently: (1) CREATE TABLE IF NOT EXISTS auto-creates the empty target per B6c, (2) MERGE inserts only the delta rows (BICC filter with `prior_cursor` excludes everything older), (3) the full history below `prior_cursor` is permanently gone — operator doesn't notice until they query historical data. Documented as **LIMITS.md P1.17-L5**; interim mitigation is operator discipline (clear the state row before dropping). Plan calls this the **highest blast radius** of the five P1.17 follow-ups — should ship in the same release cycle as P1.17 if possible.
+**Size**: S (~1 day) — extend `_preflight_incremental_cursors` in `orchestrator/preflight.py` with a target-existence check; add `IncrementalTargetMissingError` (inherits `OrchestratorConfigError` for CLI exit-2); restore the deferred `D-target-dropped` unit test.
+**Depends on**: P1.17 (shipped — `5f644d7`).
+**Accept**:
+- `_preflight_incremental_cursors` raises `IncrementalTargetMissingError` when any plan node has a non-NULL `last_watermark` in state but the target Delta table doesn't exist.
+- Error message names every affected `(dataset_id, layer)` + remediation (clear state row + re-run seed) per LIMITS.md P1.17-L5.
+- Unit test: mock `spark.catalog.tableExists → False` + state-row has non-NULL `last_watermark` → preflight raises before any `_execute_node` call.
+- LIMITS.md P1.17-L5 moved to §Resolved.
+
+### `[ ]` P1.17a + P1.17b — Aggregate-mart incremental MERGE + dim-delta UNION (`supplier_spend` + `gl_balance`-dim-only)
+**Why**: V1 marks `supplier_spend.incremental_capable=False` per LIMITS.md **P1.17-L4** because its 6-column GROUP BY grain mixes a mutable fact attribute (`approval_status`) — partial-MERGE leaves both PENDING and APPROVED aggregate rows on a status flip. AND V1's `gl_balance` row-level MERGE doesn't refresh denormalized dim attributes on dim-only changes per LIMITS.md **P1.17-L3** — operator scheduled `--mode seed` weekly is the interim catch-up. Both gaps share the same SQL surface (the gold-mart renderer with affected-keys + recompute CTEs) — bundle as one PR per plan §"Out of Scope" + §"When to file these tickets" (bullet 2).
+**Size**: M (~2 days). Five components must ship together for correctness:
+- `merge_key_columns` + `slice_key_columns` fields on `GoldMartSpec`.
+- `fact_delta_keys` + `dim_<dim>_delta_keys` UNION CTE (covers dim-only refresh case from P1.17a too).
+- `recomputed` CTE with `JOIN affected_slices`.
+- MERGE on `merge_key` with explicit UPDATE column list.
+- Follow-up `DELETE` for orphan grain rows (handles `approval_status` flip).
+**Depends on**: P1.17 (shipped — `5f644d7`).
+**Accept**:
+- `supplier_spend.incremental_capable` flipped to `True`.
+- `gl_balance` MERGE source predicate adds `UNION (dim-side delta-mapped-to-fact-grain)` so dim-only changes refresh `gl_balance`'s denormalized hierarchy columns.
+- Restored D-aggregate-merge-correctness + D-dim-rename-no-orphan + D-fact-grain-move + D-dim-only-a/b/c tests pin the SQL contract.
+- Live evidence: vendor V1 with 3 invoices (100/200/300); inject delta `I2.amount=250`; assert post-incremental `supplier_spend.V1.total_spend == 650` (NOT 700 from leftover old row); `DESCRIBE HISTORY` shows a MERGE commit (not CREATE OR REPLACE).
+- LIMITS.md P1.17-L3 + P1.17-L4 moved to §Resolved.
+
+### `[ ]` P1.17e — Bronze MERGE payload-diff predicate (downstream cost optimization)
+**Why**: V1's bronze MERGE uses unconditional `WHEN MATCHED THEN UPDATE SET *` — rewrites every matched row's `_extract_ts` on every cycle. For PVOs flagged `incremental_capable=False` (full re-extract every cycle — `gl_period_balances`, `gl_coa`, `ap_aging_periods`), this means downstream silver/gold's `WHERE bronze_extract_ts > prior_silver_watermark` predicate matches every row → downstream MERGE runs on every cycle even when nothing materially changed. Documented as **LIMITS.md P1.17-L7**; cost ≈ silver/gold seed-mode cost on every incremental cycle for the affected chain (`dim_account` + `gl_balance`). Cost optimization NOT correctness — produces correct results, just wasted compute. Plan ranks this as bullet 3 in the sequencing recommendation — "quick win once metrics confirm the cost hit is real."
+**Size**: S (~1 day) — `WHEN MATCHED AND (target.<col> IS DISTINCT FROM src.<col> OR ...) THEN UPDATE SET *` predicate generated from the bronze schema (excluding audit columns).
+**Depends on**: P1.17 (shipped — `5f644d7`).
+**Accept**:
+- Bronze MERGE SQL emits `IS DISTINCT FROM`-gated UPDATE clause over data columns (excluding `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`).
+- Restored D-payload-diff + D-no-op-reextract unit tests.
+- Live evidence: incremental run on `gl_period_balances` after a no-change bronze cycle → `DESCRIBE HISTORY gold.gl_balance` shows NO new MERGE commit (matched-but-no-payload-change path didn't propagate).
+- LIMITS.md P1.17-L7 moved to §Resolved.
+
+### `[ ]` P1.17d — Schema evolution under MERGE (ALTER TABLE ADD COLUMNS helper)
+**Why**: V1's bronze MERGE assumes the target's schema matches the source DataFrame's schema exactly. If BICC adds a column to a PVO between cycles, the MERGE fails with a Spark `AnalysisException` naming the new column. Documented as **LIMITS.md P1.17-L6**; interim mitigation is manual `ALTER TABLE ADD COLUMNS` + re-run. Plan ranks this as bullet 4 in the sequencing recommendation — "pair with the next BICC drift incident; not urgent until a real schema change hits." Pairs naturally with BACKLOG L1 (BICC schema drift) / P2.16 (drift-detection tooling).
+**Size**: M (~2 days) — `_ensure_target_schema_for_merge(spark, target, source_schema)` helper + call site in `_do_bronze` incremental branch + each silver/gold incremental branch + 3 sub-cases of D-schema test (source-wider, target-wider, type-conflict).
+**Depends on**: P1.17 (shipped — `5f644d7`).
+**Accept**:
+- `_ensure_target_schema_for_merge` DESCRIBE-TABLEs the target, computes the source∖target diff, emits `ALTER TABLE ADD COLUMNS (<diff>)` for source-wider cases.
+- Explicit column-list MERGE syntax for target-wider cases (target has extra columns source lacks — INSERT * would fail).
+- Restored D-schema-a/b/c unit tests.
+- Live evidence: simulate BICC adding a column to `bronze.ap_invoices` between Run A and Run B; Run B succeeds without operator intervention; new column populated for delta rows, NULL for prior rows.
+- LIMITS.md P1.17-L6 moved to §Resolved.
 
 ### `[ ]` P1.20 — Implement Type-2 SCD on dim tables (`dim_supplier`, `dim_account`)
 **Why**: Today's dims overwrite on every rebuild — no history. A supplier's name change, a payment-terms revision, a COA account re-mapping, all silently mutate dim rows in place. Downstream marts joining on the natural key see "as-of-now" only; historical fact rows lose their original dim context (the GL balance from FY23 joins to the *current* account hierarchy, not the FY23 one). SOX trail and any "what did this look like at period close" question are unanswerable. Named as a future blocker in P1.17 and P1.19 but never tracked as its own deliverable. Reference shape exists at `oracle-aidp-samples/data-engineering/transformation/scd/slowly_changing_dimension_template.ipynb` — Jinja2-templated two-step MERGE+INSERT (expire matched-but-differing current row, then insert new version). Needs adaptation: replace `current_date()` with the orchestrator's run timestamp, add `xxhash64(natural_key || effective_start_date)` surrogate for the *version key* (separate from the natural-key surrogate from P1.19), wire `_extract_ts` / `_run_id` audit columns, templatize the PK (the sample hardcodes `customer_id`).

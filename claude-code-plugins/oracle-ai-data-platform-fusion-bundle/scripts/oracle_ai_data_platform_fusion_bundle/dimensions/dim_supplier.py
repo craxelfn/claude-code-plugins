@@ -36,7 +36,8 @@ Design notes
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Final, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
 
@@ -65,45 +66,31 @@ def _run_id_audit_sql(run_id: str | None) -> str:
     return f"'{escaped}'"
 
 
-def build_dim_supplier_sql(
-    *,
-    paths:        TablePaths | None = None,
-    bronze_table: str | None = None,
-    silver_table: str | None = None,
-    run_id:       str | None = None,
-) -> str:
-    """Return the CREATE-OR-REPLACE Delta SQL that produces ``silver.dim_supplier``.
+#: Projected column name (silver-side) used as the MERGE ON predicate
+#: under ``--mode incremental``. Matches ``SilverDimSpec.natural_key`` in
+#: the orchestrator registry; pinned here so the module and the spec
+#: cannot drift.
+NATURAL_KEY_COLUMN: Final[str] = "supplier_number"
 
-    Pure string output — no Spark required. Used by unit tests to verify
-    the projection shape; called by :func:`build` to materialize the table.
 
-    The dedupe rule keeps the row with the most-recent ``_extract_ts`` per
-    ``SEGMENT1``. NULL ``SEGMENT1`` rows are filtered (real data-quality issue
-    if seen; bundle treats it as an error to surface, not silently quarantine).
+def _projection_select_sql(bronze_table: str, run_id: str | None) -> str:
+    """The SELECT projection shared by seed + incremental SQL renderers.
 
-    Resolution order for table paths: explicit ``bronze_table`` / ``silver_table``
-    kwargs win, else ``paths.bronze("erp_suppliers")`` / ``paths.silver("dim_supplier")``
-    when ``paths`` is set, else ``DEFAULT_PATHS`` (matches the pre-P1.5b
-    ``Final[str]`` constant values byte-for-byte).
+    Emits the 14-column silver-side projection from the deduped bronze
+    subquery. The dedupe rule (ROW_NUMBER over SEGMENT1) keeps the
+    most-recent ``_extract_ts`` per supplier; NULL ``SEGMENT1`` rows
+    are filtered (real DQ issue if seen).
 
-    ``run_id`` (§3.5a B3) — when set by the orchestrator, embedded as the
-    ``silver_run_id`` audit column literal so silver rows join back to
-    ``fusion_bundle_state.run_id`` for SOX trail. When None (standalone),
-    the column is NULL.
+    P1.19 — ``supplier_key`` uses ``xxhash64(SEGMENT1)`` for surrogate-key
+    stability across MERGE refreshes; pre-P1.19 used
+    ``monotonically_increasing_id()`` which was partition-local +
+    non-deterministic and would silently invalidate any downstream
+    cache keyed on it after the first incremental MERGE.
     """
-    if paths is None:
-        paths = DEFAULT_PATHS
-    if bronze_table is None:
-        bronze_table = paths.bronze("erp_suppliers")
-    if silver_table is None:
-        silver_table = paths.silver("dim_supplier")
     run_id_sql = _run_id_audit_sql(run_id)
     return f"""\
-CREATE OR REPLACE TABLE {silver_table}
-USING DELTA
-AS
 SELECT
-  monotonically_increasing_id()                                    AS supplier_key,
+  xxhash64(CAST(SEGMENT1 AS STRING))                               AS supplier_key,
   SEGMENT1                                                         AS supplier_number,
   COALESCE(
     NULLIF(AlternateNamePartyName, ''),
@@ -129,9 +116,89 @@ FROM (
     ROW_NUMBER() OVER (PARTITION BY SEGMENT1 ORDER BY _extract_ts DESC) AS _rn
   FROM {bronze_table}
   WHERE SEGMENT1 IS NOT NULL
+{{watermark_predicate}}
 )
-WHERE _rn = 1
-"""
+WHERE _rn = 1"""
+
+
+def build_dim_supplier_sql(
+    *,
+    paths:        TablePaths | None = None,
+    bronze_table: str | None = None,
+    silver_table: str | None = None,
+    run_id:       str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
+) -> str:
+    """Return the SQL that produces ``silver.dim_supplier`` in the requested mode.
+
+    Pure string output — no Spark required. Used by unit tests to verify
+    the projection shape; called by :func:`build` to materialize the table.
+
+    ``refresh_mode`` (P1.17):
+      * ``"seed"`` (default) — ``CREATE OR REPLACE TABLE`` Delta SQL,
+        identical pre-P1.17 shape. The dedupe rule keeps the row with
+        the most-recent ``_extract_ts`` per ``SEGMENT1``.
+      * ``"incremental"`` — ``MERGE INTO ... ON supplier_number <=>
+        src.supplier_number WHEN MATCHED UPDATE SET * WHEN NOT MATCHED
+        INSERT *``. The source-side ``WHERE _extract_ts > <watermark>``
+        predicate filters bronze rows the silver layer has already
+        incorporated (the layer-local cursor — NOT the upstream bronze
+        windowed cursor — per B8a).
+
+    ``watermark`` (P1.17 incremental only): UTC ``datetime`` of the
+    layer-local prior ``last_watermark`` read from
+    ``fusion_bundle_state``. ``None`` is accepted only in ``"seed"``
+    mode; passing ``None`` in incremental mode raises (the orchestrator's
+    ``_preflight_incremental_cursors`` should have caught this).
+
+    Resolution order for table paths: explicit ``bronze_table`` / ``silver_table``
+    kwargs win, else ``paths.bronze("erp_suppliers")`` / ``paths.silver("dim_supplier")``
+    when ``paths`` is set, else ``DEFAULT_PATHS``.
+
+    ``run_id`` (§3.5a B3) — when set by the orchestrator, embedded as
+    the ``silver_run_id`` audit column literal.
+    """
+    if paths is None:
+        paths = DEFAULT_PATHS
+    if bronze_table is None:
+        bronze_table = paths.bronze("erp_suppliers")
+    if silver_table is None:
+        silver_table = paths.silver("dim_supplier")
+
+    if refresh_mode == "seed":
+        # Seed-mode predicate is empty — no watermark filter.
+        select_sql = _projection_select_sql(bronze_table, run_id).format(
+            watermark_predicate=""
+        )
+        return f"CREATE OR REPLACE TABLE {silver_table}\nUSING DELTA\nAS\n{select_sql}\n"
+
+    if refresh_mode == "incremental":
+        if watermark is None:
+            raise ValueError(
+                "dim_supplier.build_dim_supplier_sql: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior cursor). "
+                "The orchestrator's _preflight_incremental_cursors should have "
+                "raised IncrementalCursorMissingError before reaching this path."
+            )
+        watermark_iso = watermark.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        select_sql = _projection_select_sql(bronze_table, run_id).format(
+            watermark_predicate=f"    AND _extract_ts > '{watermark_iso}'"
+        )
+        return (
+            f"MERGE INTO {silver_table} AS target\n"
+            f"USING (\n{select_sql}\n) AS src\n"
+            f"ON target.{NATURAL_KEY_COLUMN} <=> src.{NATURAL_KEY_COLUMN}\n"
+            f"WHEN MATCHED THEN UPDATE SET *\n"
+            f"WHEN NOT MATCHED THEN INSERT *\n"
+        )
+
+    raise ValueError(
+        f"dim_supplier.build_dim_supplier_sql: refresh_mode must be 'seed' or "
+        f"'incremental'; got {refresh_mode!r}"
+    )
 
 
 def build(
@@ -141,17 +208,21 @@ def build(
     bronze_table: str | None = None,
     silver_table: str | None = None,
     run_id:       str | None = None,
+    refresh_mode: Literal["seed", "incremental"] = "seed",
+    watermark:    datetime | None = None,
 ) -> DataFrame:
     """Materialize ``silver.dim_supplier`` from ``bronze.erp_suppliers``.
 
     Runs the SQL from :func:`build_dim_supplier_sql` against ``spark`` and
     returns a DataFrame backed by the freshly-written silver table.
 
+    ``refresh_mode`` (P1.17) selects ``"seed"`` (``CREATE OR REPLACE``) or
+    ``"incremental"`` (``MERGE INTO``). Incremental requires ``watermark``
+    (the layer-local prior cursor — see :func:`build_dim_supplier_sql`).
+
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the bronze/silver
     table identifiers from the tenant's ``bundle.yaml.aidp.*`` config.
-    Explicit per-table kwargs win over ``paths``. ``run_id`` (§3.5a B3)
-    threads the orchestrator's run identifier into the ``silver_run_id``
-    audit column; None when called standalone.
+    Explicit per-table kwargs win over ``paths``.
     """
     if paths is None:
         paths = DEFAULT_PATHS
@@ -163,6 +234,8 @@ def build(
         bronze_table=bronze_table,
         silver_table=silver_table,
         run_id=run_id,
+        refresh_mode=refresh_mode,
+        watermark=watermark,
     ))
     return spark.table(silver_table)
 
@@ -192,6 +265,7 @@ def id_populated_pct(
 
 
 __all__ = [
+    "NATURAL_KEY_COLUMN",
     "SOURCE_BRONZE_TABLE",
     "TARGET_SILVER_TABLE",
     "build",
