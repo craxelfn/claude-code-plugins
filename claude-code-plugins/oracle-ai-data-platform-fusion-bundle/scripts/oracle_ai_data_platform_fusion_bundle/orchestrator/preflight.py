@@ -402,17 +402,54 @@ def _preflight_incremental_cursors(
     plan: "list",
     paths: "TablePaths",
 ) -> None:
-    """Raise :class:`IncrementalCursorMissingError` if any silver/gold node
-    in ``plan`` lacks a prior ``last_watermark`` in ``fusion_bundle_state``.
+    """Two-check incremental preflight gate (P1.17 B4b + P1.17c).
 
     Runs at run-level (caller: :func:`orchestrator.run`) AFTER
     ``ensure_state_table`` + BEFORE the dispatch loop, ONLY when
-    ``mode == "incremental"``. A single consolidated error lists every
-    affected dataset → operator sees the full remediation list at once.
+    ``mode == "incremental"``. Two consolidated checks, evaluated in
+    order:
 
-    Skipped node classes (per B4b):
-      * :class:`BronzeExtractSpec` — bronze tolerates null prior cursor
-        (full extract → MERGE-by-natural-key inserts every row).
+    1. **Cursor-presence check** (P1.17 V1) — every silver/gold node
+       in ``plan`` must have a prior ``last_watermark`` in
+       ``fusion_bundle_state``. A NULL cursor means the layer has
+       never run a successful seed, and its MERGE source predicate
+       ``WHERE bronze_extract_ts > <cursor>`` would become empty →
+       permanently-stuck mart. Bronze tolerates a NULL prior cursor
+       (full extract fallback), so it's exempt from this check.
+       Raises :class:`IncrementalCursorMissingError` listing every
+       affected ``(dataset_id, layer)``.
+
+    2. **Target-existence check** (P1.17c — silent-corruption guard) —
+       for every in-scope node whose cursor is non-NULL, the target
+       Delta table must still exist on disk
+       (``spark.catalog.tableExists`` returns True). If an operator
+       drops a target out from under a non-NULL cursor, the next
+       incremental run would silently lose history below the cursor
+       (auto-CREATE empty target + MERGE only delta slice; rows below
+       the cursor are filtered out by BICC / the silver-gold source
+       predicate and never written back). Bronze IS in scope for this
+       check: bronze has a safe NULL-cursor fallback but NO safe
+       fallback when its target is dropped under a non-NULL cursor.
+       Raises :class:`IncrementalTargetMissingError` listing every
+       affected ``(dataset_id, layer, target)``.
+
+    The two checks run in order so a fresh tenant sees the cursor
+    message ("run seed") instead of a target-missing message
+    ("clear state row + re-seed") — the former is the right
+    remediation when seed has never run, the latter when the
+    operator has dropped a table out from under a working state.
+
+    Strict state reads (P1.17c). State-row presence is read via
+    :func:`state.read_last_watermark_strict`, NOT the soft variant.
+    Preflight is a gate; gates fail closed. A transient metastore
+    flake during the read raises :class:`StateReadFailedError`
+    (also an :class:`OrchestratorConfigError` → CLI exit 2) instead
+    of being absorbed into a misleading cursor-missing message —
+    operators get the accurate remediation (investigate state-table
+    accessibility) instead of being told to re-run seed against an
+    unreadable state table.
+
+    Skipped node classes (universal across both checks):
       * :class:`DeferredSpec` — never dispatched.
       * ``dim_calendar`` :class:`SilverDimSpec` — parameter-driven,
         resolver returns ``None``, no source watermark.
@@ -420,31 +457,38 @@ def _preflight_incremental_cursors(
         always emits seed-shape regardless of mode (supplier_spend,
         ap_aging).
 
-    Bronze is excluded because its empty-cursor degradation is safe and
-    documented (extract-pvo with ``watermark=None`` returns the full
-    PVO). Silver/gold can't do the same because their MERGE source
-    predicate ``WHERE bronze_extract_ts > <watermark>`` becomes empty
-    under ``watermark=None`` → permanently-stuck mart.
-
-    P1.17c will extend this helper to ALSO check target-table existence
-    (raises ``IncrementalTargetMissingError`` when target missing AND
-    prior cursor non-null — the dropped-target silent-corruption guard).
-    NOT in V1; documented as LIMITS.md P1.17-L5.
+    :class:`BronzeExtractSpec` is selectively exempt: included in
+    the target check (bronze can be silently corrupted by a dropped
+    target under non-NULL cursor) but excluded from the cursor-
+    presence check (bronze tolerates NULL cursor via full extract).
+    The selective exemption is recorded per-node via the
+    ``bronze_tolerates_null_cursor`` flag in the single-pass loop
+    below.
     """
+    # Local imports keep this helper's module-import cost zero outside
+    # the incremental codepath, and avoid a hard dependency cycle
+    # against ``runtime.py`` (which imports preflight transitively via
+    # the orchestrator package's ``__init__``).
     from . import state
-    from .errors import IncrementalCursorMissingError
+    from .errors import IncrementalCursorMissingError, IncrementalTargetMissingError
     from .registry import (
         BronzeExtractSpec,
         DeferredSpec,
         GoldMartSpec,
         SilverDimSpec,
         _layer_for_spec,
+        _resolve_target_table,
     )
 
+    # Single-pass collection of per-node (cursor, target-applicability)
+    # so the two checks below can iterate over the same pre-computed
+    # list without re-reading state. The cursor read uses the strict
+    # variant: a transient state-read failure raises StateReadFailedError
+    # immediately, before any node-level decisions are made.
     missing_cursors: list[tuple[str, str]] = []
+    node_cursors: list[tuple[object, str, "datetime | None", bool]] = []
+
     for node in plan:
-        if isinstance(node, BronzeExtractSpec):
-            continue
         if isinstance(node, DeferredSpec):
             continue
         if isinstance(node, SilverDimSpec) and node.dataset_id == "dim_calendar":
@@ -452,12 +496,33 @@ def _preflight_incremental_cursors(
         if isinstance(node, GoldMartSpec) and not getattr(node, "incremental_capable", True):
             continue
         layer = _layer_for_spec(node)
-        cursor = state.read_last_watermark(spark, paths, node.dataset_id, layer)
-        if cursor is None:
+        # Strict read — raises StateReadFailedError on metastore
+        # exception (P1.17c), bubbling up to the CLI exit-2 path.
+        cursor = state.read_last_watermark_strict(
+            spark, paths, node.dataset_id, layer,
+        )
+        bronze_tolerates_null_cursor = isinstance(node, BronzeExtractSpec)
+        if cursor is None and not bronze_tolerates_null_cursor:
             missing_cursors.append((node.dataset_id, layer))
+        node_cursors.append((node, layer, cursor, bronze_tolerates_null_cursor))
 
     if missing_cursors:
         raise IncrementalCursorMissingError(missing=missing_cursors)
+
+    # P1.17c target-existence pass. Bronze IS in scope; the
+    # ``cursor is None`` early-continue preserves the documented
+    # bronze fresh-tenant fallback (NULL cursor + missing target is
+    # the normal first-seed state, not silent corruption).
+    missing_targets: list[tuple[str, str, str]] = []
+    for node, layer, cursor, _bronze in node_cursors:
+        if cursor is None:
+            continue
+        target = _resolve_target_table(node, paths)
+        if not spark.catalog.tableExists(target):
+            missing_targets.append((node.dataset_id, layer, target))
+
+    if missing_targets:
+        raise IncrementalTargetMissingError(missing=missing_targets)
 
 
 __all__ = [

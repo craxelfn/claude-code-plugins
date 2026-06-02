@@ -38,6 +38,8 @@ from oracle_ai_data_platform_fusion_bundle.orchestrator import (
 )
 from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
     IncrementalCursorMissingError,
+    IncrementalTargetMissingError,
+    StateReadFailedError,
 )
 from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight import (
     _preflight_incremental_cursors,
@@ -108,7 +110,10 @@ class _DispatchSpark:
       * everything else → empty result
 
     `table(...).count()` returns `table_count`. `catalog.tableExists(...)`
-    returns `table_exists` (default True).
+    returns `table_exists` (default True). `state_read_raises=True`
+    (P1.17c) makes ``read_last_watermark``/``read_last_watermark_strict``
+    queries fail with a synthetic RuntimeError so the strict-fail
+    preflight gate can be exercised under unit-test conditions.
     """
 
     def __init__(
@@ -118,11 +123,13 @@ class _DispatchSpark:
         silver_gold_wm: datetime | None = None,
         table_count: int = 0,
         table_exists: bool = True,
+        state_read_raises: bool = False,
     ) -> None:
         self.prior_rows = prior_rows or []
         self.silver_gold_wm = silver_gold_wm
         self.table_count = table_count
         self.table_exists = table_exists
+        self.state_read_raises = state_read_raises
         self.sql_calls: list[str] = []
         self.catalog = MagicMock()
         self.catalog.tableExists.side_effect = lambda *_a, **_kw: self.table_exists
@@ -131,6 +138,12 @@ class _DispatchSpark:
         self.sql_calls.append(query)
         # read_last_watermark
         if "SELECT last_watermark" in query and "fusion_bundle_state" in query:
+            if self.state_read_raises:
+                # P1.17c — simulate a metastore failure during the
+                # preflight state read so read_last_watermark_strict
+                # surfaces StateReadFailedError. The soft variant
+                # would swallow this and return None.
+                raise RuntimeError("simulated metastore failure for test")
             return _DfFromRows(self._read_last_watermark(query))
         # MAX(bronze_extract_ts) capture (silver/gold post-build)
         if "MAX(bronze_extract_ts)" in query:
@@ -901,3 +914,208 @@ class TestPreflightIncrementalCursors:
         missing = exc_info.value.missing
         assert ("dim_account", "silver") in missing
         assert ("dim_supplier", "silver") not in missing
+
+    # -----------------------------------------------------------------
+    # P1.17c — target-existence preflight (the dropped-target guard)
+    # -----------------------------------------------------------------
+
+    def test_target_missing_with_non_null_cursor_raises(self) -> None:
+        # D3 — single dropped silver dim. Prior cursor exists in state;
+        # target Delta table doesn't exist on disk. Preflight raises
+        # IncrementalTargetMissingError listing that one node.
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
+            _resolve_target_table,
+        )
+        W = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="dim_supplier", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+            ],
+            table_exists=False,
+        )
+        plan = [SILVER_DIMS["dim_supplier"]]
+        expected_target = _resolve_target_table(SILVER_DIMS["dim_supplier"], _TEST_PATHS)
+        with pytest.raises(IncrementalTargetMissingError) as exc_info:
+            _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+        assert ("dim_supplier", "silver", expected_target) in exc_info.value.missing
+        # Message names the dataset, layer, and target.
+        message = str(exc_info.value)
+        assert "dim_supplier" in message
+        assert "silver" in message
+        assert "silently lose history" in message
+        assert "P1.17-L5" in message
+
+    def test_consolidated_target_missing_lists_all_affected(self) -> None:
+        # D4 — three dropped targets spanning all three layers. Each has
+        # a non-NULL prior cursor in state; none of the targets exist on
+        # disk. Preflight raises ONE IncrementalTargetMissingError
+        # listing every affected (dataset_id, layer, target).
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
+            _resolve_target_table,
+        )
+        W = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="ap_invoices", layer="bronze",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="dim_supplier", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="gl_balance", layer="gold",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+            ],
+            table_exists=False,
+        )
+        plan = [
+            BRONZE_EXTRACTS["ap_invoices"],
+            SILVER_DIMS["dim_supplier"],
+            GOLD_MARTS["gl_balance"],
+        ]
+        with pytest.raises(IncrementalTargetMissingError) as exc_info:
+            _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+        missing = exc_info.value.missing
+        bronze_target = _resolve_target_table(BRONZE_EXTRACTS["ap_invoices"], _TEST_PATHS)
+        silver_target = _resolve_target_table(SILVER_DIMS["dim_supplier"], _TEST_PATHS)
+        gold_target = _resolve_target_table(GOLD_MARTS["gl_balance"], _TEST_PATHS)
+        assert ("ap_invoices", "bronze", bronze_target) in missing
+        assert ("dim_supplier", "silver", silver_target) in missing
+        assert ("gl_balance", "gold", gold_target) in missing
+        # Message contains every dataset_id (operator can scan one
+        # error to see the full remediation list).
+        message = str(exc_info.value)
+        assert "ap_invoices" in message
+        assert "dim_supplier" in message
+        assert "gl_balance" in message
+
+    def test_target_exists_with_non_null_cursor_no_raise(self) -> None:
+        # D5 — false-positive guard. Prior cursors exist for every
+        # plan node; targets all exist on disk. No raise.
+        W = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="dim_supplier", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="dim_account", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="gl_balance", layer="gold",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+            ],
+            table_exists=True,  # explicit — default is True too
+        )
+        plan = [
+            SILVER_DIMS["dim_supplier"],
+            SILVER_DIMS["dim_account"],
+            GOLD_MARTS["gl_balance"],
+        ]
+        # No raise.
+        _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+
+    def test_cursor_check_takes_precedence_over_target_check(self) -> None:
+        # D6 — precedence guard. Cursor is NULL for the silver/gold
+        # node AND target is missing. Preflight must raise
+        # IncrementalCursorMissingError (NOT IncrementalTargetMissingError)
+        # so the operator's remediation is "run seed", not
+        # "clear state row + re-seed".
+        spark = _DispatchSpark(
+            prior_rows=[],  # no cursor → cursor check trips first
+            table_exists=False,  # would trip target check if we got there
+        )
+        plan = [SILVER_DIMS["dim_supplier"]]
+        with pytest.raises(IncrementalCursorMissingError):
+            _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+
+    def test_bronze_state_read_failure_with_table_missing_raises_strict(self) -> None:
+        # D8 (v2 — blocking-issue coverage) — proves the strict-read
+        # guard fails closed even when the metastore is flaky on a
+        # bronze node. Soft-fail would have let this slip past.
+        spark = _DispatchSpark(
+            prior_rows=[],
+            state_read_raises=True,  # synthetic metastore failure
+            table_exists=False,      # ignored — we shouldn't reach here
+        )
+        plan = [BRONZE_EXTRACTS["ap_invoices"]]
+        with pytest.raises(StateReadFailedError) as exc_info:
+            _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+        assert exc_info.value.dataset_id == "ap_invoices"
+        assert exc_info.value.layer == "bronze"
+        assert isinstance(exc_info.value.cause, RuntimeError)
+        assert exc_info.value.__cause__ is exc_info.value.cause
+        # Critical: the strict-read raises BEFORE the target check
+        # loop runs, so spark.catalog.tableExists must NOT have been
+        # called. This is the load-bearing assertion — it proves the
+        # dropped-target check can't be bypassed by a metastore flake
+        # masquerading as a missing cursor.
+        spark.catalog.tableExists.assert_not_called()
+
+    def test_skip_list_target_check_not_invoked_for_excluded_specs(self) -> None:
+        # D9 (v2 — should-fix coverage #1) — pins the skip-list as a
+        # contract. Inject a non-NULL cursor for every excluded node
+        # AND set table_exists=False. None of the targets are checked
+        # (DeferredSpec.target would raise; incremental_capable=False
+        # and dim_calendar should silently skip). No raise expected.
+        W = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+        deferred = DeferredSpec("dim_org", layer="silver", reason="P1.7")
+        spark = _DispatchSpark(
+            prior_rows=[
+                _FakeRow(
+                    dataset_id="dim_calendar", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="supplier_spend", layer="gold",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="ap_aging", layer="gold",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+                _FakeRow(
+                    dataset_id="dim_org", layer="silver",
+                    status="success", last_watermark=W, last_run_at=W,
+                ),
+            ],
+            table_exists=False,  # would trigger raise if any of these reached the target check
+        )
+        plan = [
+            SILVER_DIMS["dim_calendar"],
+            GOLD_MARTS["supplier_spend"],
+            GOLD_MARTS["ap_aging"],
+            deferred,
+        ]
+        # No raise — every node is in the skip-list. An over-eager
+        # refactor that called _resolve_target_table(DeferredSpec)
+        # would raise RuntimeError (per registry.py); an
+        # implementation that ignored the incremental_capable=False
+        # / dim_calendar guards would raise IncrementalTargetMissingError.
+        # Both bugs are caught by this test.
+        _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
+
+    def test_bronze_target_missing_but_cursor_absent_no_raise(self) -> None:
+        # D10 (v2 — should-fix coverage #2) — preserves the fresh-tenant
+        # bronze fallback. Bronze with NULL cursor + missing target is
+        # the normal first-seed state, NOT silent corruption. An
+        # implementation that dropped the `cursor is None: continue`
+        # guard in the target loop (e.g. mistakenly applied the
+        # silver/gold "cursor required" rule to bronze) would raise
+        # IncrementalTargetMissingError here.
+        spark = _DispatchSpark(
+            prior_rows=[],         # no prior state row anywhere
+            table_exists=False,    # bronze target doesn't exist on disk
+        )
+        plan = [BRONZE_EXTRACTS["ap_invoices"]]
+        # No raise.
+        _preflight_incremental_cursors(spark, plan, _TEST_PATHS)  # type: ignore[arg-type]
