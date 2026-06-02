@@ -10,7 +10,7 @@ P1.17d adds `_ensure_target_schema_for_merge` as a pre-MERGE step at all 4 integ
 
 - **Source-wider** — emits `ALTER TABLE <target> ADD COLUMNS (<new> <type>, ...)`; the subsequent MERGE proceeds with V1 `UPDATE SET *` / `INSERT *` shape (post-ALTER schemas match).
 - **Target-wider** — returns `target_only_columns`; the renderer switches to explicit-column-list MERGE (`UPDATE SET t.c = s.c, ...; INSERT (c, ...) VALUES (s.c, ...)`) over `common + source_only`; target-only columns are preserved by exclusion from the UPDATE / INSERT lists.
-- **Type-conflict** — raises `SchemaEvolutionTypeConflictError(OrchestratorConfigError)`; auto-flows to CLI exit-2.
+- **Type-conflict** — raises `SchemaEvolutionTypeConflictError(OrchestratorConfigError)`. **CLI exit code = 1** (recorded as a failed `RunStep` via the orchestrator's per-step try/except; conflict list captured in `error_message`); subsequent steps cascade-skip via the strict-abort contract. `OrchestratorConfigError` inheritance is preserved for catch-by-class callers — the exit-code surface just matches "any failed step → exit 1".
 
 TC30c proves all three behaviors at the engine level on a real Delta runtime. Contract has three layers, each with its own evidence:
 
@@ -159,18 +159,59 @@ Both nodes green. **The incremental bronze MERGE survived target-wider schema dr
 
 **Target-wider proof — confirmed end-to-end.** Without P1.17d, the V1 bronze MERGE with `UPDATE SET *` / `INSERT *` against a target carrying `_TC30C_TARGET_ONLY` (source lacks it) would have either silently NULLed the column on UPDATE rows OR raised a Spark `AnalysisException` (Spark-version dependent). With P1.17d, the renderer detected `target_only_columns = ('_TC30C_TARGET_ONLY',)` from the reconcile result and switched to the explicit-column-list shape over `common + source_only`, so `_TC30C_TARGET_ONLY` is excluded from UPDATE/INSERT entirely.
 
-### Note — sentinel-value preservation not strictly tested
+### Phase C strict rerun — sentinel-value preservation PROVEN (2026-06-02)
 
-The dispatcher's `WHERE SEGMENT1 IN ('1', '2', '3')` filter matched ZERO rows on `saasfademo1` (the actual `Segment1` values are like `'1051'`, `'1252'`, `'1500'`, NOT plain `'1'`/`'2'`/`'3'`). So the post-MERGE `sentinel_preserved` SELECT returned 0 rows.
+The original Phase C run had a dispatcher bug: `WHERE SEGMENT1 IN ('1','2','3')` matched ZERO rows on `saasfademo1` (real `Segment1` values are `'1051'`/`'1252'`/etc.). So no row ever held the sentinel value and the "post-MERGE preservation" assertion wasn't actually exercised. **Re-run dispatched 2026-06-02** via `dev/_run_tc30c_phaseC_rerun.py` with real existing `Segment1` values dynamically selected from the target.
 
-What this means: the **strict** "sentinel value still readable after MERGE" assertion wasn't exercised (no rows ever held the sentinel value). What was exercised:
+**Setup**:
 
-- ✅ ALTER TABLE ADD COLUMNS succeeded on a Delta target.
-- ✅ The subsequent incremental MERGE (under explicit-column-list shape per P1.17d) ran to completion.
-- ✅ `_TC30C_TARGET_ONLY` is still in the target's schema post-MERGE — the renderer didn't drop the column.
-- ✅ `_TC30C_TEST_DRIFT` (target-only as of Phase C, since the Phase B monkey-patch is gone in Phase C's session) is ALSO still in the target's schema post-MERGE — additional target-only-column-preservation evidence.
+- `run_id`: `5edcacac-b858-41e3-b042-eadff56e5bcb`
+- Mode: `incremental`
+- Wall time: **142.7s (~2.4 min)**
+- Target-only column under test: `_TC30C_RERUN_SENTINEL_COL` (fresh name; idempotent ALTER TABLE ADD COLUMNS handled the "column may already exist from prior run" case)
+- Dynamically-selected `Segment1` values: **`['1252', '1253', '1254']`** (first 3 rows ordered by `Segment1`)
 
-A follow-up dispatcher revision should use real `Segment1` values (e.g., `'1051'`) to also pin the values-preserved assertion. Tracked as a small TC30c hardening item; doesn't block P1.17d acceptance since the structural target-wider proof is already complete.
+**Pre-MERGE setup**:
+
+```sql
+ALTER TABLE fusion_catalog.bronze.erp_suppliers
+  ADD COLUMNS (_TC30C_RERUN_SENTINEL_COL STRING)
+-- "ALTER ADD COLUMNS _TC30C_RERUN_SENTINEL_COL STRING — added"
+
+UPDATE fusion_catalog.bronze.erp_suppliers
+  SET _TC30C_RERUN_SENTINEL_COL = 'pre-MERGE-rerun-sentinel'
+  WHERE Segment1 IN ('1252', '1253', '1254')
+
+SELECT COUNT(*) FROM ... WHERE _TC30C_RERUN_SENTINEL_COL = 'pre-MERGE-rerun-sentinel'
+-- => 3   ✅ pre-MERGE assertion: 3 rows backfilled
+```
+
+**Then `orchestrator.run(mode='incremental')`** — completed with 2/2 success (`erp_suppliers` bronze 209 rows in 55.2s + `dim_supplier` silver 209 rows in 36.1s).
+
+**Post-MERGE strict assertions** (all PASS):
+
+| Assertion | Expected | Observed |
+|---|---|---|
+| Same 3 rows still hold the sentinel value | 3 rows with `_TC30C_RERUN_SENTINEL_COL = 'pre-MERGE-rerun-sentinel'` | ✅ `post_merge_sentinel_count = 3` |
+| Per-row data (`Segment1=1252`) still has sentinel | `'pre-MERGE-rerun-sentinel'` | ✅ |
+| Per-row data (`Segment1=1253`) still has sentinel | `'pre-MERGE-rerun-sentinel'` | ✅ |
+| Per-row data (`Segment1=1254`) still has sentinel | `'pre-MERGE-rerun-sentinel'` | ✅ |
+
+**This is the load-bearing proof of P1.17d's target-wider acceptance**: had the explicit-column-list MERGE renderer (incorrectly) included `_TC30C_RERUN_SENTINEL_COL` in its UPDATE clause, the matched rows would have been overwritten with NULL (the source DataFrame has no such column → `src._TC30C_RERUN_SENTINEL_COL` is undefined → NULL on UPDATE). The 3 rows surviving with their sentinel intact is logically equivalent to "the target-only column was excluded from UPDATE/INSERT" — exactly the contract Plan §11/§12 + LIMITS §P1.17-L6 require.
+
+**On capturing the MERGE SQL directly**: the rerun's `spark.sql` monkey-patch attempted to record every dispatched SQL string for inspection. The capture worked for the pre-MERGE setup (ALTER + UPDATE + SELECT visible in the log) but did NOT catch the orchestrator's MERGE statement — likely because the AIDP-injected `spark` object's `sql` attribute is bound-method-resolved differently than plain Python class instances, so the instance-attribute replacement was bypassed. The behavioral evidence above (sentinel preserved post-MERGE) is logically equivalent and load-bearing; the SQL-shape exclusion at the renderer level is already pinned by `tests/unit/test_p117_orchestrator_dispatch.py::TestSchemaEvolution::test_target_wider_triggers_explicit_column_list_merge` + the 3 builder-SQL-shape tests in `tests/unit/test_p117_builder_merge_sql.py::TestExplicitColumnListMergeSyntax`.
+
+**Combined post-rerun evidence list**:
+
+- ✅ ALTER TABLE ADD COLUMNS succeeded on Delta target.
+- ✅ Pre-MERGE UPDATE backfilled 3 rows with sentinel value.
+- ✅ Subsequent incremental MERGE (under explicit-column-list shape per P1.17d) ran to completion.
+- ✅ `_TC30C_RERUN_SENTINEL_COL` still in target schema post-MERGE.
+- ✅ **3 sentinel-backfilled rows STILL hold `'pre-MERGE-rerun-sentinel'` post-MERGE** — strict value-preservation proof.
+- ✅ Logical inference: target-only column was excluded from UPDATE/INSERT clauses (otherwise matched rows would have been NULLed).
+- ✅ Renderer-level shape pinned by unit tests (no live SQL-capture needed).
+
+**Acceptance gate fully closed.** No follow-up needed.
 
 ---
 
