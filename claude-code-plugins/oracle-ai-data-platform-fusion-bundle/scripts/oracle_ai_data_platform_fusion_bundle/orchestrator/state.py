@@ -203,9 +203,20 @@ def _ensure_target_table_exists(
 
     ``schema`` is a Spark ``StructType`` from the source DataFrame; columns
     are emitted in the SAME order, each with the ``simpleString()`` form
-    of its data type. NOTE: V1 ships ONLY the simple create path — the
-    dropped-target silent-corruption guard (target missing AND prior
-    cursor non-null) ships in P1.17c as ``IncrementalTargetMissingError``.
+    of its data type.
+
+    Safety net moved up the call stack (P1.17c). This helper still ships
+    only the simple "create if missing" path — the dropped-target silent-
+    corruption guard now lives in
+    :func:`oracle_ai_data_platform_fusion_bundle.orchestrator.preflight._preflight_incremental_cursors`
+    as ``IncrementalTargetMissingError``. Run-level preflight blocks the
+    unsafe operator-dropped-target sequence (target missing AND prior
+    cursor non-null) BEFORE any node dispatch can reach this helper, so
+    by the time this is called, either (a) the target legitimately
+    doesn't exist on disk because the layer's prior cursor is NULL
+    (fresh-tenant first-seed bronze) and we should create it, OR (b) the
+    target exists and this is a no-op. The unsafe (c) "target missing
+    AND cursor non-null" path is unreachable.
     """
     if spark.catalog.tableExists(target):
         return
@@ -419,6 +430,58 @@ def write_state_row(
     )
 
 
+def _build_last_watermark_query(
+    paths: TablePaths,
+    dataset_id: str,
+    layer: str,
+) -> "tuple[str, str]":
+    """Construct the ``SELECT last_watermark FROM fusion_bundle_state``
+    query shared by :func:`read_last_watermark` (soft-fail) and
+    :func:`read_last_watermark_strict` (strict-fail).
+
+    Returns ``(table_path, query)`` so callers can include the path in
+    failure messages without re-computing it. User-controlled
+    identifiers are escaped via the same single-quote-doubling pattern
+    used elsewhere in this module (see ``write_state_row``'s local
+    ``_q``).
+
+    Factored out so the two read variants can't drift — both must
+    issue byte-identical SQL so their behavior differs only in the
+    failure-mode contract, not in what gets returned on success.
+    """
+    def _q(s: str | None) -> str:
+        if s is None:
+            return "CAST(NULL AS STRING)"
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+
+    table_path = _state_table_path(paths)
+    query = f"""
+        SELECT last_watermark
+        FROM {table_path}
+        WHERE dataset_id = {_q(dataset_id)}
+          AND layer = {_q(layer)}
+          AND status = 'success'
+        ORDER BY last_run_at DESC, last_watermark DESC NULLS LAST
+        LIMIT 1
+    """
+    return table_path, query
+
+
+def _extract_watermark_from_rows(rows: "list") -> "datetime | None":
+    """Convert the rows returned by the last-watermark query into an
+    aware UTC ``datetime`` or ``None``. Shared by both read variants.
+
+    Returns ``None`` when no rows came back (no ``status='success'``
+    row for the pair) OR when the row's ``last_watermark`` field is
+    SQL NULL. Both cases are legitimate ("no prior cursor") and the
+    callers treat them identically.
+    """
+    if not rows:
+        return None
+    return _normalize_to_utc(rows[0]["last_watermark"])
+
+
 def read_last_watermark(
     spark: "SparkSession",
     paths: TablePaths,
@@ -448,10 +511,11 @@ def read_last_watermark(
     Read is issued via ``spark.sql(...)`` (matching Phase α's
     ``read_resumable_state`` convention so the same in-memory
     ``_FakeSpark`` test harness works); user-controlled identifiers
-    (``dataset_id``, ``layer``) are escaped via :func:`_q` to defeat
-    apostrophe-bearing strings without falling through to the
-    DataFrame API (which would require pyspark at import time and
-    break the unit-test environment).
+    (``dataset_id``, ``layer``) are escaped via the helper inside
+    :func:`_build_last_watermark_query` to defeat apostrophe-bearing
+    strings without falling through to the DataFrame API (which would
+    require pyspark at import time and break the unit-test
+    environment).
 
     Failure semantics: a Spark/SQL exception logs a structured WARN
     carrying ``dataset_id``, ``layer``, ``repr(exc)`` and the stable
@@ -459,26 +523,17 @@ def read_last_watermark(
     :data:`WATERMARK_READ_SOFT_FAILED_MARKER`), then returns ``None``.
     Operators monitor for the marker to detect the documented
     empty-delta + read-failure regression (LIMITS.md F6).
-    """
-    def _q(s: str | None) -> str:
-        # Mirrors the helper defined locally inside ``write_state_row``
-        # for the same escaping contract; defined here too so the read
-        # path doesn't reach into the write helper's local scope.
-        if s is None:
-            return "CAST(NULL AS STRING)"
-        escaped = s.replace("'", "''")
-        return f"'{escaped}'"
 
-    table_path = _state_table_path(paths)
-    query = f"""
-        SELECT last_watermark
-        FROM {table_path}
-        WHERE dataset_id = {_q(dataset_id)}
-          AND layer = {_q(layer)}
-          AND status = 'success'
-        ORDER BY last_run_at DESC, last_watermark DESC NULLS LAST
-        LIMIT 1
+    See also — :func:`read_last_watermark_strict`. P1.17c added a
+    strict-fail variant of this read for use in preflight gate
+    contexts where a transient metastore failure must NOT be confused
+    with "no prior cursor" (the soft return value ``None`` is
+    ambiguous between the two). Dispatch-path callers keep using
+    this soft variant — its swallow-and-continue contract is
+    load-bearing for transient-flake tolerance during a long
+    medallion run (see module docstring lines 7-13).
     """
+    _table_path, query = _build_last_watermark_query(paths, dataset_id, layer)
     try:
         rows = spark.sql(query).collect()
     except Exception as exc:
@@ -491,9 +546,56 @@ def read_last_watermark(
         )
         return None
 
-    if not rows:
-        return None
-    return _normalize_to_utc(rows[0]["last_watermark"])
+    return _extract_watermark_from_rows(rows)
+
+
+def read_last_watermark_strict(
+    spark: "SparkSession",
+    paths: TablePaths,
+    dataset_id: str,
+    layer: Literal["bronze", "silver", "gold"] = "bronze",
+) -> "datetime | None":
+    """Strict-fail variant of :func:`read_last_watermark` for
+    preflight gates (P1.17c).
+
+    Returns the same value as the soft variant on success: a
+    ``datetime`` for an existing ``status='success'`` row with a
+    non-NULL ``last_watermark``, or ``None`` for "no row found" /
+    "row exists but ``last_watermark`` IS NULL". Differs only in
+    failure semantics — on a Spark/metastore exception this raises
+    :class:`StateReadFailedError` (chaining the underlying exception
+    via ``raise ... from cause``) instead of logging WARN and
+    returning ``None``.
+
+    **Caller contract** — preflight gates only. The soft variant's
+    swallow-and-continue semantics are load-bearing for the dispatch
+    path's transient-flake tolerance (see module docstring lines
+    7-13). Do NOT call this from per-step dispatch code; a transient
+    metastore hiccup would cascade-skip downstream nodes for the cost
+    of one minor flake.
+
+    The query is byte-identical to :func:`read_last_watermark` — both
+    delegate to :func:`_build_last_watermark_query`, so their
+    return-value contracts can't drift. Only the exception handling
+    differs.
+    """
+    # Local import to avoid a module-import cycle (errors → state):
+    # state.py is imported by orchestrator/__init__.py BEFORE errors.py
+    # in some bootstrap paths.
+    from .errors import StateReadFailedError
+
+    table_path, query = _build_last_watermark_query(paths, dataset_id, layer)
+    try:
+        rows = spark.sql(query).collect()
+    except Exception as exc:
+        raise StateReadFailedError(
+            dataset_id=dataset_id,
+            layer=layer,
+            table_path=table_path,
+            cause=exc,
+        ) from exc
+
+    return _extract_watermark_from_rows(rows)
 
 
 # ---------------------------------------------------------------------------

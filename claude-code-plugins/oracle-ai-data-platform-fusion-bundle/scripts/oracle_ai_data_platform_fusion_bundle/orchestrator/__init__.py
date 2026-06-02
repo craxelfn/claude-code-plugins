@@ -32,8 +32,10 @@ from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
 from . import registry, state
 from .errors import (
     IncrementalCursorMissingError,
+    IncrementalTargetMissingError,
     MissingDependencyError,
     OrchestratorConfigError,
+    StateReadFailedError,
     UnsupportedModeError,
     WatermarkMonotonicityError,
 )
@@ -1181,6 +1183,9 @@ __all__ = [
     # P1.17 — new config errors
     "IncrementalCursorMissingError",
     "MultipleNaturalKeyError",
+    # P1.17c — dropped-target preflight + strict state read
+    "IncrementalTargetMissingError",
+    "StateReadFailedError",
     # P1.5β.1 runtime errors
     "OrchestratorRuntimeError",
     "WatermarkMonotonicityError",

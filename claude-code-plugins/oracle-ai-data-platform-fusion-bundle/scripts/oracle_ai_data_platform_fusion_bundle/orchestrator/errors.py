@@ -283,6 +283,64 @@ class IncrementalCursorMissingError(OrchestratorConfigError):
         )
 
 
+class IncrementalTargetMissingError(OrchestratorConfigError):
+    """One or more in-scope plan nodes have a non-NULL ``last_watermark``
+    in ``fusion_bundle_state`` but their target Delta table is missing
+    on disk — running ``--mode incremental`` would silently lose
+    history below the prior cursor.
+
+    Raised by ``_preflight_incremental_cursors`` (P1.17c) at run-level,
+    AFTER the cursor-presence check passes and BEFORE the dispatch
+    loop. Single consolidated error lists every affected
+    ``(dataset_id, layer, target_table)`` so the operator sees the
+    full remediation list at once.
+
+    Failure scenario: operator drops a bronze/silver/gold target
+    (recovery, schema reset, accidental ``DROP TABLE`` via Spark SQL
+    outside the orchestrator) without clearing the matching state
+    row. The next incremental run would (1) auto-create the empty
+    target via ``CREATE TABLE IF NOT EXISTS`` (per B6c), (2) MERGE
+    only the delta slice (BICC filter / silver-gold source predicate
+    excludes everything older than the still-non-NULL prior cursor),
+    (3) lose every row whose lineage timestamp is below the cursor —
+    permanently, without any "failed" status in state.
+
+    The check covers bronze, silver, and gold; honors the same
+    skip-list as the cursor check (``DeferredSpec``, ``dim_calendar``,
+    ``GoldMartSpec`` with ``incremental_capable=False``). Bronze IS
+    in scope here even though it's skipped by the cursor check —
+    bronze has a safe NULL-cursor fallback (full extract) but NO
+    safe fallback when its target is dropped under a non-NULL cursor.
+
+    Inherits from :class:`OrchestratorConfigError` so the CLI's
+    ``_run_inline`` exit-2 catch fires it cleanly — no traceback, no
+    partial dispatch, no half-materialized state.
+
+    See LIMITS.md §P1.17-L5 (resolved by P1.17c) for the full
+    failure-mode write-up + the historical interim mitigation.
+    """
+
+    def __init__(self, *, missing: list[tuple[str, str, str]]) -> None:
+        self.missing = missing
+        bullets = "\n".join(
+            f"  - {ds} ({layer}): {target}" for ds, layer, target in missing
+        )
+        super().__init__(
+            f"{len(missing)} target Delta table(s) are missing on disk "
+            f"but fusion_bundle_state still carries a non-NULL "
+            f"last_watermark — running --mode incremental would silently "
+            f"lose history below the prior cursor:\n"
+            f"{bullets}\n"
+            f"Remediation: for each (dataset_id, layer) above, clear the "
+            f"matching state row via `DELETE FROM <bronze_schema>."
+            f"fusion_bundle_state WHERE dataset_id = '<X>' AND layer = "
+            f"'<Y>'`, then re-run `aidp-fusion-bundle run --mode seed "
+            f"--datasets <X>` to recreate the target. Only then is "
+            f"--mode incremental safe to resume. See LIMITS.md "
+            f"§P1.17-L5 for the full sequence."
+        )
+
+
 class MultipleNaturalKeyError(OrchestratorConfigError):
     """A spec's natural_key was overridden in a way that conflicts with
     the catalog's natural_key for the same upstream PVO.
@@ -316,6 +374,73 @@ class BronzeSchemaProbeError(OrchestratorConfigError):
         self.failures = failures or []
 
 
+class StateReadFailedError(OrchestratorConfigError):
+    """A preflight-context read of ``fusion_bundle_state`` raised
+    underneath ``read_last_watermark_strict``.
+
+    Distinct from :class:`IncrementalCursorMissingError`: that error
+    fires when the read succeeds but no ``status='success'`` row exists
+    (or the row exists but ``last_watermark IS NULL``). This error fires
+    when the read itself raised — metastore unreachable, catalog ACL
+    drift, Delta-log corruption, schema rename out from under the table
+    path, etc. We cannot determine whether a prior cursor exists, so
+    preflight refuses to run ``--mode incremental``.
+
+    Why preflight needs a strict variant (P1.17c):
+        :func:`oracle_ai_data_platform_fusion_bundle.orchestrator.state.read_last_watermark`
+        intentionally soft-fails (logs ``watermark_read_soft_failed``
+        WARN + returns ``None``) so a transient metastore flake during
+        a long medallion run doesn't cascade-skip downstream nodes.
+        That contract is load-bearing for the dispatch path. But the
+        same swallow-and-continue semantics in a preflight gate would
+        mask the dropped-target check on bronze nodes (None looks like
+        "no cursor → skip target check") and let the silent-corruption
+        sequence through. Preflight switches to
+        :func:`read_last_watermark_strict`, which raises this error.
+
+    Remediation: investigate state-table accessibility before
+    re-running. From a notebook:
+    ``spark.sql("DESCRIBE <state_table>").show()``. Do NOT run
+    ``--mode seed`` blind — if the state table itself is unreadable,
+    seed's own ``read_last_watermark_strict`` call (via preflight)
+    will surface the same error class. Fix the root cause (catalog
+    ACL, metastore connectivity, etc.) first.
+
+    The original exception is chained via ``raise ... from cause`` so
+    operators see both the high-level reason and the Spark/Hive root
+    cause in the traceback.
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        table_path: str,
+        cause: BaseException,
+    ) -> None:
+        self.dataset_id = dataset_id
+        self.layer = layer
+        self.table_path = table_path
+        self.cause = cause
+        # Best-effort short summary of the underlying exception — first
+        # line only, truncated, since Spark/Hive tracebacks are often
+        # multi-paragraph and the full thing reaches the operator
+        # through Python's __cause__ chain anyway.
+        cause_summary = str(cause).splitlines()[0][:300] if str(cause) else repr(cause)
+        super().__init__(
+            f"could not read fusion_bundle_state for "
+            f"dataset_id={dataset_id!r}, layer={layer!r} "
+            f"(table_path={table_path!r}); preflight cannot determine "
+            f"whether a prior cursor exists, refusing to run --mode "
+            f"incremental. Underlying error: "
+            f"{type(cause).__name__}: {cause_summary}. Investigate "
+            f"state-table accessibility (try "
+            f"`spark.sql('DESCRIBE {table_path}').show()` from a "
+            f"notebook) before re-running."
+        )
+
+
 __all__ = [
     "OrchestratorConfigError",
     "BundleLoadError",
@@ -327,6 +452,8 @@ __all__ = [
     "CredentialResolutionError",
     "BronzeSchemaProbeError",
     "IncrementalCursorMissingError",
+    "IncrementalTargetMissingError",
+    "StateReadFailedError",
     "MultipleNaturalKeyError",
     # Resume failure modes
     "ResumeRunNotFoundError",
