@@ -445,3 +445,82 @@ class TestBronzeMergePayloadDiffSQLShape:
         # Audit cols excluded.
         for audit in BRONZE_AUDIT_COLUMNS:
             assert audit not in predicate
+
+
+# ---------------------------------------------------------------------------
+# P1.17d — explicit-column-list MERGE syntax (restored D-schema-a/b/c tests)
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitColumnListMergeSyntax:
+    """P1.17d — each silver/gold ``build_<X>_sql`` renders the explicit-
+    column-list MERGE shape when ``target_only_columns`` is non-empty
+    (target carries cols the source lacks). Pure-string tests; no Spark.
+    """
+
+    def test_dim_supplier_explicit_list_when_target_wider(self) -> None:
+        sql = build_dim_supplier_sql(
+            refresh_mode="incremental",
+            watermark=_WATERMARK,
+            target_only_columns=("_TC_LEGACY",),
+            source_columns=("supplier_key", "supplier_number", "silver_run_id"),
+        )
+        # Explicit UPDATE list over source cols only.
+        assert "UPDATE SET target.supplier_key = src.supplier_key" in sql
+        assert "target.supplier_number = src.supplier_number" in sql
+        assert "target.silver_run_id = src.silver_run_id" in sql
+        # Explicit INSERT list — same cols, parenthesized.
+        assert "INSERT (supplier_key, supplier_number, silver_run_id)" in sql
+        assert "VALUES (src.supplier_key, src.supplier_number, src.silver_run_id)" in sql
+        # _TC_LEGACY is NOT mentioned anywhere (preserved by exclusion).
+        assert "_TC_LEGACY" not in sql
+        # NULL-safe `<=>` is still in the ON predicate (not affected by
+        # explicit-list change).
+        assert "target.supplier_number <=> src.supplier_number" in sql
+        # missing source_columns raises a clear error.
+        with pytest.raises(ValueError, match="source_columns kwarg MUST be provided"):
+            build_dim_supplier_sql(
+                refresh_mode="incremental",
+                watermark=_WATERMARK,
+                target_only_columns=("_TC_LEGACY",),
+            )
+
+    def test_dim_account_explicit_list_when_target_wider(self) -> None:
+        sql = build_dim_account_sql(
+            refresh_mode="incremental",
+            watermark=_WATERMARK,
+            target_only_columns=("_TC_LEGACY_ACC",),
+            source_columns=("account_key", "account_id", "segment_01"),
+        )
+        assert "UPDATE SET target.account_key = src.account_key" in sql
+        assert "INSERT (account_key, account_id, segment_01)" in sql
+        assert "_TC_LEGACY_ACC" not in sql
+        # ON predicate uses the silver-projection natural key.
+        assert "target.account_id <=> src.account_id" in sql
+
+    def test_gl_balance_explicit_list_when_target_wider(self) -> None:
+        sql = build_gl_balance_sql(
+            refresh_mode="incremental",
+            watermark=_WATERMARK,
+            target_only_columns=("_TC_LEGACY_DIM_ATTR",),
+            source_columns=(
+                "ledger_id", "account_id", "period_year", "period_num",
+                "currency_code", "actual_flag", "translated_flag",
+                "ending_balance",
+            ),
+        )
+        # Explicit UPDATE list covers every source column.
+        assert "UPDATE SET target.ledger_id = src.ledger_id" in sql
+        assert "target.ending_balance = src.ending_balance" in sql
+        # Explicit INSERT list mirrors.
+        assert "INSERT (ledger_id, account_id, period_year, period_num, currency_code, actual_flag, translated_flag, ending_balance)" in sql
+        # Target-only column NOT mentioned in either clause.
+        assert "_TC_LEGACY_DIM_ATTR" not in sql
+        # ON predicate retains the composite NULL-safe key (unchanged
+        # by P1.17d — the explicit-list change is in WHEN MATCHED /
+        # WHEN NOT MATCHED only).
+        for natural_key_col in (
+            "ledger_id", "account_id", "period_year", "period_num",
+            "currency_code", "actual_flag", "translated_flag",
+        ):
+            assert f"target.{natural_key_col} <=> src.{natural_key_col}" in sql

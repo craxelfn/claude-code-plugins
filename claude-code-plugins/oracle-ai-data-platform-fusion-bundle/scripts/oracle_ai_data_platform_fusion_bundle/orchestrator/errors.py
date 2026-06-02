@@ -341,6 +341,92 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
         )
 
 
+class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
+    """One or more columns shared between source and target Delta tables
+    have incompatible data types — incremental MERGE cannot proceed.
+
+    Raised by ``_ensure_target_schema_for_merge`` (P1.17d) when its
+    DESCRIBE-TABLE-vs-source-schema comparison finds at least one
+    column whose ``simpleString()`` data type differs between source
+    (current run's DataFrame) and target (existing Delta table).
+
+    Auto-type-promotion is out of scope. Type changes vary in safety:
+    ``int → bigint`` is widening and safe; ``decimal(10,2) →
+    decimal(12,2)`` is widening with rounding caveats; ``string → int``
+    is destructive (Spark casts NULL-on-failure, silently truncating
+    every existing row). Only the operator knows which case applies,
+    so P1.17d raises rather than guessing.
+
+    Remediation choices:
+      (a) Manually ``ALTER TABLE <target> ALTER COLUMN <col> TYPE
+          <new_type>`` if the change is safe + Spark/Delta-supported.
+      (b) Drop & re-seed if the change is destructive or the cleanest
+          path: ``DELETE FROM <state_table> WHERE dataset_id = '<X>'``
+          + ``DROP TABLE <target>`` + ``--mode seed --datasets <X>``.
+      (c) Revert the source projection if the source-side type change
+          was unintended.
+
+    Inherits from :class:`OrchestratorConfigError` so callers that
+    catch by class (e.g., custom dispatchers that want config-error
+    handling distinct from runtime-error handling) get a stable
+    type to switch on.
+
+    CLI exit-code surface depends on WHERE this exception is raised:
+
+      - **Raised inside per-node dispatch** (the documented P1.17d
+        path — ``_ensure_target_schema_for_merge`` runs during a
+        builder's silver/gold ``build()`` or during the bronze
+        renderer's pre-MERGE reconcile): caught by ``_execute_node``'s
+        per-step try/except, recorded as a ``RunStep(status='failed',
+        error_message=<full conflict list>)``, and the orchestrator's
+        strict-abort cascade (P1.5α-fix3 / fix4) then cascade-skips
+        all remaining steps in the same run. ``commands/run.py``
+        returns **exit code 1** for the resulting "any failed step"
+        run summary. The full conflict list is durably captured in
+        ``fusion_bundle_state.error_message`` for audit.
+
+      - **Raised before** ``orchestrator.run()`` **returns** (i.e.,
+        from a pre-dispatch helper invoked at run-level — none of
+        P1.17d's current call sites do this, but hypothetical future
+        callers that invoke the helper from preflight would qualify):
+        propagates uncaught up to ``commands/run.py``'s ``except
+        OrchestratorConfigError`` catch, which yields **exit code 2**.
+        ``IncrementalCursorMissingError`` /
+        ``IncrementalTargetMissingError`` follow this path (raised
+        by ``_preflight_incremental_cursors`` before any node
+        dispatch).
+
+    For P1.17d's documented integration sites, the exit code is **1**.
+    Do not assume exit 2 without verifying the call site is
+    pre-dispatch.
+
+    See LIMITS.md §P1.17-L6 (resolved by P1.17d) for the full
+    failure-mode write-up.
+    """
+
+    def __init__(
+        self, *, target: str, conflicts: list[tuple[str, str, str]]
+    ) -> None:
+        self.target = target
+        self.conflicts = conflicts
+        bullets = "\n".join(
+            f"  - {col}: source={source_type!r} vs target={target_type!r}"
+            for col, source_type, target_type in conflicts
+        )
+        super().__init__(
+            f"{len(conflicts)} column type conflict(s) detected between "
+            f"source DataFrame and target Delta table {target!r} — "
+            f"incremental MERGE refuses to proceed (auto-type-promotion "
+            f"is out of scope; operator must decide):\n"
+            f"{bullets}\n"
+            f"Remediation: (a) ALTER TABLE {target} ALTER COLUMN <col> "
+            f"TYPE <new_type> manually if the change is widening + safe; "
+            f"(b) DROP TABLE {target} + re-seed if destructive or "
+            f"cleanest; (c) revert the source-side projection if the "
+            f"type change was unintended. See LIMITS.md §P1.17-L6."
+        )
+
+
 class MultipleNaturalKeyError(OrchestratorConfigError):
     """A spec's natural_key was overridden in a way that conflicts with
     the catalog's natural_key for the same upstream PVO.
@@ -454,6 +540,8 @@ __all__ = [
     "IncrementalCursorMissingError",
     "IncrementalTargetMissingError",
     "StateReadFailedError",
+    # P1.17d — schema evolution under MERGE
+    "SchemaEvolutionTypeConflictError",
     "MultipleNaturalKeyError",
     # Resume failure modes
     "ResumeRunNotFoundError",

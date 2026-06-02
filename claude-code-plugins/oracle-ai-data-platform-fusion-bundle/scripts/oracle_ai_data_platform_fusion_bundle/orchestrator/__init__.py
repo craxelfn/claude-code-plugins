@@ -30,11 +30,17 @@ from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
 from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
 
 from . import registry, state
+from .merge_sql import (
+    build_explicit_when_matched_clause,
+    build_explicit_when_not_matched_clause,
+)
+from .state import SchemaReconcileResult
 from .errors import (
     IncrementalCursorMissingError,
     IncrementalTargetMissingError,
     MissingDependencyError,
     OrchestratorConfigError,
+    SchemaEvolutionTypeConflictError,
     StateReadFailedError,
     UnsupportedModeError,
     WatermarkMonotonicityError,
@@ -651,6 +657,16 @@ def _execute_node(
                         # whose first incremental run extracts zero
                         # rows (B6c).
                         state._ensure_target_table_exists(spark, target, df.schema)
+                        # P1.17d — reconcile target schema with source BEFORE
+                        # the MERGE. Auto-ALTERs in any source-wider columns;
+                        # returns the column list to use for explicit-list
+                        # MERGE when target-wider columns exist (preserves
+                        # them by exclusion from UPDATE/INSERT). Raises
+                        # SchemaEvolutionTypeConflictError on incompatible
+                        # type drift. See LIMITS.md §P1.17-L6 (resolved).
+                        reconcile = state._ensure_target_schema_for_merge(
+                            spark, target, df.schema.names, df.schema,
+                        )
                         if source_delta_count == 0:
                             # P1.17 short-circuit: empty source → no MERGE.
                             # Avoids a wasted MERGE plan AND prevents
@@ -670,24 +686,45 @@ def _execute_node(
                             # (resolved). The NULL-safe `<=>` join predicate
                             # handles composite keys with NULL components
                             # (LIMITS.md P1.17-L8 — gl_period_balances).
+                            #
+                            # P1.17d — when target-wider columns exist (target
+                            # carries cols the source lacks), switch from
+                            # `UPDATE SET *` / `INSERT *` (which would NULL
+                            # those target-only cols on UPDATE or trip Spark
+                            # AnalysisException on INSERT) to explicit-column-
+                            # list MERGE over (common ∪ source_only). The
+                            # payload-diff predicate continues to gate the
+                            # explicit UPDATE — both optimizations compose.
                             natural_key_join = _natural_key_join_sql(pvo.natural_key)
                             payload_diff = _payload_diff_predicate_sql(df.schema.names)
-                            if payload_diff is not None:
+                            if reconcile.target_only_columns:
+                                merge_cols = (
+                                    reconcile.common_columns + reconcile.source_only_columns
+                                )
+                                when_matched_clause = build_explicit_when_matched_clause(
+                                    merge_cols, payload_diff=payload_diff,
+                                )
+                                when_not_matched_clause = build_explicit_when_not_matched_clause(
+                                    merge_cols,
+                                )
+                            elif payload_diff is not None:
                                 when_matched_clause = (
                                     f"WHEN MATCHED AND ({payload_diff}) THEN UPDATE SET *"
                                 )
+                                when_not_matched_clause = "WHEN NOT MATCHED THEN INSERT *"
                             else:
                                 # Defensive — bronze schema has no non-audit
                                 # columns (shouldn't reach this path in
                                 # practice; V1 unconditional shape preserves
                                 # today's behavior under this edge).
                                 when_matched_clause = "WHEN MATCHED THEN UPDATE SET *"
+                                when_not_matched_clause = "WHEN NOT MATCHED THEN INSERT *"
                             spark.sql(f"""
                                 MERGE INTO {target} AS target
                                 USING _p117_bronze_src AS src
                                 ON {natural_key_join}
                                 {when_matched_clause}
-                                WHEN NOT MATCHED THEN INSERT *
+                                {when_not_matched_clause}
                             """)
                             materialized_count = spark.table(target).count()
                 finally:
@@ -1293,4 +1330,7 @@ __all__ = [
     "MultipleUpstreamWatermarkError",
     # P1.17e — bronze MERGE payload-diff predicate
     "BRONZE_AUDIT_COLUMNS",
+    # P1.17d — schema evolution under MERGE
+    "SchemaEvolutionTypeConflictError",
+    "SchemaReconcileResult",
 ]

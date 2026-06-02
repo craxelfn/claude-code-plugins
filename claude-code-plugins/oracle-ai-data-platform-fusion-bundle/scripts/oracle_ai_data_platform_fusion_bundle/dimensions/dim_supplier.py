@@ -129,6 +129,8 @@ def build_dim_supplier_sql(
     run_id:       str | None = None,
     refresh_mode: Literal["seed", "incremental"] = "seed",
     watermark:    datetime | None = None,
+    target_only_columns: tuple[str, ...] = (),
+    source_columns: tuple[str, ...] | None = None,
 ) -> str:
     """Return the SQL that produces ``silver.dim_supplier`` in the requested mode.
 
@@ -187,12 +189,33 @@ def build_dim_supplier_sql(
         select_sql = _projection_select_sql(bronze_table, run_id).format(
             watermark_predicate=f"    AND _extract_ts > '{watermark_iso}'"
         )
+        # P1.17d — render explicit-column-list MERGE when target has
+        # columns the source lacks; preserves target-only columns by
+        # omitting them from UPDATE/INSERT lists. Otherwise V1 shape.
+        if target_only_columns:
+            if source_columns is None:
+                raise ValueError(
+                    "build_dim_supplier_sql: when target_only_columns is "
+                    "non-empty (explicit-column-list MERGE shape), the "
+                    "source_columns kwarg MUST be provided (the list of "
+                    "columns the source DataFrame emits). The orchestrator's "
+                    "build() supplies this from spark.sql(<select>).schema."
+                )
+            from oracle_ai_data_platform_fusion_bundle.orchestrator.merge_sql import (
+                build_explicit_when_matched_clause,
+                build_explicit_when_not_matched_clause,
+            )
+            when_matched_clause = build_explicit_when_matched_clause(source_columns)
+            when_not_matched_clause = build_explicit_when_not_matched_clause(source_columns)
+        else:
+            when_matched_clause = "WHEN MATCHED THEN UPDATE SET *"
+            when_not_matched_clause = "WHEN NOT MATCHED THEN INSERT *"
         return (
             f"MERGE INTO {silver_table} AS target\n"
             f"USING (\n{select_sql}\n) AS src\n"
             f"ON target.{NATURAL_KEY_COLUMN} <=> src.{NATURAL_KEY_COLUMN}\n"
-            f"WHEN MATCHED THEN UPDATE SET *\n"
-            f"WHEN NOT MATCHED THEN INSERT *\n"
+            f"{when_matched_clause}\n"
+            f"{when_not_matched_clause}\n"
         )
 
     raise ValueError(
@@ -230,12 +253,66 @@ def build(
         bronze_table = paths.bronze("erp_suppliers")
     if silver_table is None:
         silver_table = paths.silver("dim_supplier")
+
+    # P1.17d — under incremental, reconcile target schema with source
+    # projection BEFORE the MERGE. Skips under seed (CREATE OR REPLACE
+    # handles drift natively via overwriteSchema=true).
+    target_only_columns: tuple[str, ...] = ()
+    source_columns: tuple[str, ...] | None = None
+    if refresh_mode == "incremental":
+        # P1.17d v5 — VALIDATE INCREMENTAL PRECONDITIONS BEFORE running
+        # _ensure_target_schema_for_merge (which can emit ALTER TABLE
+        # ADD COLUMNS on the production target). Without this guard,
+        # a debug call like `build(refresh_mode='incremental',
+        # watermark=None)` would (1) introspect the source schema,
+        # (2) ALTER the target if source-wider, (3) only THEN raise
+        # the missing-watermark ValueError from build_dim_supplier_sql
+        # — leaving the target half-mutated. The same check lives in
+        # build_dim_supplier_sql for direct callers; duplicating it
+        # here is the cheapest fail-fast guard at the dispatch boundary.
+        if watermark is None:
+            raise ValueError(
+                "dim_supplier.build: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior "
+                "cursor). The orchestrator's _preflight_incremental_"
+                "cursors should have raised IncrementalCursorMissing"
+                "Error before reaching this path."
+            )
+        # Lazy local imports — avoid circular at module-load time
+        # (orchestrator.state is independent of the dimensions package,
+        # but the orchestrator package itself imports registry which
+        # imports this module; staying lazy is symmetric with the
+        # SchemaEvolutionTypeConflictError lazy import in state.py).
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+        # Don't apply the watermark filter here — schema is the same
+        # with or without it; we just need the projected column list.
+        inner_select = _projection_select_sql(bronze_table, run_id).format(
+            watermark_predicate=""
+        )
+        source_schema = spark.sql(
+            f"SELECT * FROM ({inner_select}) WHERE 1=0"
+        ).schema
+        reconcile = _state._ensure_target_schema_for_merge(
+            spark, silver_table, source_schema.names, source_schema,
+        )
+        if reconcile.target_only_columns:
+            target_only_columns = reconcile.target_only_columns
+            # The explicit-list MERGE renders over the source projection
+            # (the post-ALTER target carries all source cols + the
+            # target-only cols; UPDATE/INSERT lists name only the source
+            # cols, preserving target-only cols on UPDATE and leaving
+            # them NULL/default on INSERT).
+            source_columns = tuple(source_schema.names)
+
     spark.sql(build_dim_supplier_sql(
         bronze_table=bronze_table,
         silver_table=silver_table,
         run_id=run_id,
         refresh_mode=refresh_mode,
         watermark=watermark,
+        target_only_columns=target_only_columns,
+        source_columns=source_columns,
     ))
     return spark.table(silver_table)
 
