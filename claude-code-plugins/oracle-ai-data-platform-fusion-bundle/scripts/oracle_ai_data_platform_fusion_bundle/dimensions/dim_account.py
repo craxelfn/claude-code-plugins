@@ -423,6 +423,19 @@ def build(
     target_only_columns: tuple[str, ...] = ()
     source_columns: tuple[str, ...] | None = None
     if refresh_mode == "incremental":
+        # P1.17d v5 — VALIDATE INCREMENTAL PRECONDITIONS BEFORE running
+        # _ensure_target_schema_for_merge (which can emit ALTER TABLE
+        # ADD COLUMNS on the production target). See dim_supplier.build
+        # for the full rationale; duplicating the validation here is
+        # the cheapest fail-fast guard at the dispatch boundary.
+        if watermark is None:
+            raise ValueError(
+                "dim_account.build: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior "
+                "cursor). The orchestrator's _preflight_incremental_"
+                "cursors should have raised IncrementalCursorMissing"
+                "Error before reaching this path."
+            )
         from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
 
         inner_select = _projection_select_sql(

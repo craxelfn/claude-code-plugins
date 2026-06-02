@@ -1628,3 +1628,88 @@ class TestSchemaEvolution:
         assert "SchemaEvolutionTypeConflictError" in (step.error_message or "")
         # No MERGE was dispatched (raise pre-MERGE).
         assert not any("MERGE INTO" in q for q in spark.sql_calls)
+
+
+class TestBuilderValidationBeforeReconcile:
+    """P1.17d v5 — builders MUST validate incremental preconditions
+    (missing watermark, invalid actual_flag_filter) BEFORE running
+    _ensure_target_schema_for_merge. Without this ordering guard, a
+    debug call with invalid args could ALTER the production target
+    schema and only THEN raise the original ValueError — leaving the
+    target half-mutated.
+
+    Each test patches the orchestrator state module so we can capture
+    whether spark.sql is invoked with an ALTER TABLE before the
+    expected ValueError fires.
+    """
+
+    def test_dim_supplier_no_alter_when_watermark_is_none(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.dimensions import dim_supplier
+
+        spark = _DispatchSpark(table_exists=True)
+        with pytest.raises(ValueError, match="requires a non-None watermark"):
+            dim_supplier.build(
+                spark=spark,  # type: ignore[arg-type]
+                refresh_mode="incremental",
+                watermark=None,
+            )
+        # No DESCRIBE TABLE call (reconcile didn't run).
+        # No ALTER TABLE call (helper never reached).
+        for q in spark.sql_calls:
+            assert "DESCRIBE TABLE" not in q, (
+                "validation should fail BEFORE reconcile introspects "
+                "the target schema"
+            )
+            assert "ALTER TABLE" not in q, (
+                "validation must fail BEFORE any ALTER TABLE can "
+                "mutate the production target"
+            )
+
+    def test_dim_account_no_alter_when_watermark_is_none(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.dimensions import dim_account
+
+        spark = _DispatchSpark(table_exists=True)
+        with pytest.raises(ValueError, match="requires a non-None watermark"):
+            dim_account.build(
+                spark=spark,  # type: ignore[arg-type]
+                refresh_mode="incremental",
+                watermark=None,
+            )
+        for q in spark.sql_calls:
+            assert "DESCRIBE TABLE" not in q
+            assert "ALTER TABLE" not in q
+
+    def test_gl_balance_no_alter_when_watermark_is_none(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold import gl_balance
+
+        spark = _DispatchSpark(table_exists=True)
+        with pytest.raises(ValueError, match="requires a non-None watermark"):
+            gl_balance.build(
+                spark=spark,  # type: ignore[arg-type]
+                refresh_mode="incremental",
+                watermark=None,
+            )
+        for q in spark.sql_calls:
+            assert "DESCRIBE TABLE" not in q
+            assert "ALTER TABLE" not in q
+
+    def test_gl_balance_no_alter_when_actual_flag_filter_invalid(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold import gl_balance
+
+        W1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+        spark = _DispatchSpark(table_exists=True)
+        with pytest.raises(ValueError, match="actual_flag_filter must be one of"):
+            gl_balance.build(
+                spark=spark,  # type: ignore[arg-type]
+                refresh_mode="incremental",
+                watermark=W1,
+                actual_flag_filter="BOGUS",
+            )
+        # Even though watermark IS valid, the actual_flag_filter check
+        # also fires pre-reconcile.
+        for q in spark.sql_calls:
+            assert "DESCRIBE TABLE" not in q, (
+                "validation should fail BEFORE reconcile when "
+                "actual_flag_filter is invalid"
+            )
+            assert "ALTER TABLE" not in q

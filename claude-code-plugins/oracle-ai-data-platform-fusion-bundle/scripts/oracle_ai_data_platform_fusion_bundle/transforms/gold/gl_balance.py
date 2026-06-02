@@ -444,6 +444,28 @@ def build(
     target_only_columns: tuple[str, ...] = ()
     source_columns: tuple[str, ...] | None = None
     if refresh_mode == "incremental":
+        # P1.17d v5 — VALIDATE INCREMENTAL PRECONDITIONS BEFORE running
+        # _ensure_target_schema_for_merge (which can emit ALTER TABLE
+        # ADD COLUMNS on the production target). gl_balance has TWO
+        # incremental preconditions (watermark + actual_flag_filter);
+        # both must be validated here pre-reconcile. The same checks
+        # live in build_gl_balance_sql for direct callers; duplicating
+        # them here is the cheapest fail-fast guard at the dispatch
+        # boundary.
+        if watermark is None:
+            raise ValueError(
+                "gl_balance.build: refresh_mode='incremental' requires "
+                "a non-None watermark (the layer-local prior cursor). "
+                "The orchestrator's _preflight_incremental_cursors "
+                "should have raised IncrementalCursorMissingError "
+                "before reaching this path."
+            )
+        if actual_flag_filter is not None and actual_flag_filter not in {"A", "E", "B"}:
+            raise ValueError(
+                "gl_balance.build: actual_flag_filter must be one of "
+                "'A' (actuals), 'E' (encumbrance), 'B' (budget), or "
+                f"None to disable; got {actual_flag_filter!r}"
+            )
         from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
 
         if actual_flag_filter is None:

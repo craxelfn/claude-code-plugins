@@ -260,6 +260,24 @@ def build(
     target_only_columns: tuple[str, ...] = ()
     source_columns: tuple[str, ...] | None = None
     if refresh_mode == "incremental":
+        # P1.17d v5 — VALIDATE INCREMENTAL PRECONDITIONS BEFORE running
+        # _ensure_target_schema_for_merge (which can emit ALTER TABLE
+        # ADD COLUMNS on the production target). Without this guard,
+        # a debug call like `build(refresh_mode='incremental',
+        # watermark=None)` would (1) introspect the source schema,
+        # (2) ALTER the target if source-wider, (3) only THEN raise
+        # the missing-watermark ValueError from build_dim_supplier_sql
+        # — leaving the target half-mutated. The same check lives in
+        # build_dim_supplier_sql for direct callers; duplicating it
+        # here is the cheapest fail-fast guard at the dispatch boundary.
+        if watermark is None:
+            raise ValueError(
+                "dim_supplier.build: refresh_mode='incremental' "
+                "requires a non-None watermark (the layer-local prior "
+                "cursor). The orchestrator's _preflight_incremental_"
+                "cursors should have raised IncrementalCursorMissing"
+                "Error before reaching this path."
+            )
         # Lazy local imports — avoid circular at module-load time
         # (orchestrator.state is independent of the dimensions package,
         # but the orchestrator package itself imports registry which
@@ -267,10 +285,6 @@ def build(
         # SchemaEvolutionTypeConflictError lazy import in state.py).
         from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
 
-        # Introspect source projection's schema via SELECT 0-row plan.
-        watermark_iso = watermark.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        ) if watermark is not None else ""
         # Don't apply the watermark filter here — schema is the same
         # with or without it; we just need the projected column list.
         inner_select = _projection_select_sql(bronze_table, run_id).format(
