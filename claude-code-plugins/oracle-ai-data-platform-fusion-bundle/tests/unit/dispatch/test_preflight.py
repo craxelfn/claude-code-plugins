@@ -289,9 +289,17 @@ class TestPhaseALocalPreflight:
 # ---------------------------------------------------------------------------
 
 
-def _client_with(*, list_clusters=None, start_cluster=None, wait_active=None) -> MagicMock:
+def _client_with(
+    *,
+    list_clusters=None,
+    start_cluster=None,
+    wait_active=None,
+    credential_exists=True,  # P1.5ε-fix1: default to PASS so existing
+                             # tests don't have to opt into check 6.
+) -> MagicMock:
     client = MagicMock(spec=[
-        "list_clusters", "start_cluster", "wait_cluster_active", "get_cluster"
+        "list_clusters", "start_cluster", "wait_cluster_active", "get_cluster",
+        "check_credential_exists",
     ])
     if list_clusters is not None:
         if isinstance(list_clusters, BaseException):
@@ -306,6 +314,10 @@ def _client_with(*, list_clusters=None, start_cluster=None, wait_active=None) ->
     if wait_active is not None:
         if isinstance(wait_active, BaseException):
             client.wait_cluster_active.side_effect = wait_active
+    if isinstance(credential_exists, BaseException):
+        client.check_credential_exists.side_effect = credential_exists
+    else:
+        client.check_credential_exists.return_value = credential_exists
     return client
 
 
@@ -315,8 +327,10 @@ class TestPhaseBRemotePreflight:
             list_clusters=AidpRestError("HTTP 401 body=bad signature"),
         )
         results = run_remote_preflight(client=client, env=_env())
+        # control plane FAIL → cluster SKIP + credential SKIP (P1.5ε-fix1)
         assert results[0].status == "FAIL"
         assert results[1].status == "SKIP"
+        assert results[2].status == "SKIP"
         assert "region" in (results[0].remediation or "")
 
     def test_cluster_active_passes(self) -> None:
@@ -326,7 +340,8 @@ class TestPhaseBRemotePreflight:
             ],
         )
         results = run_remote_preflight(client=client, env=_env())
-        assert [r.status for r in results] == ["PASS", "PASS"]
+        # control-plane + cluster + BICC credential (P1.5ε-fix1) all PASS
+        assert [r.status for r in results] == ["PASS", "PASS", "PASS"]
         client.start_cluster.assert_not_called()
         client.wait_cluster_active.assert_not_called()
 
@@ -411,3 +426,111 @@ class TestRender:
         assert "PASS x: ok" in out
         assert "FAIL y: bad" in out
         assert "fix it" in out
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix1 — BICC credential preflight (Phase B check 6)
+# ---------------------------------------------------------------------------
+
+
+def _active_cluster_list() -> list:
+    """Reusable: a cluster list with the test env's cluster_key ACTIVE so
+    check 5 PASSes and we can isolate check 6's behavior."""
+    return [
+        ClusterSummary(key="cluster-uuid-1", display_name="dev", state="ACTIVE")
+    ]
+
+
+class TestBiccCredentialCheck:
+    def test_credential_present_passes(self) -> None:
+        """Credential exists → check 6 PASS with the secret name in the
+        detail line so the operator-facing log shows the matched entry."""
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=True,
+        )
+        results = run_remote_preflight(client=client, env=_env())
+        assert len(results) == 3
+        cred_result = results[2]
+        assert cred_result.name == "BICC credential"
+        assert cred_result.status == "PASS"
+        assert "fusion_bicc_password" in cred_result.detail
+
+    def test_credential_missing_fails_with_remediation(self) -> None:
+        """Missing credential → check 6 FAIL with the secret name in
+        detail + a copy-pasteable AIDP UI remediation."""
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=False,
+        )
+        results = run_remote_preflight(client=client, env=_env())
+        cred_result = results[2]
+        assert cred_result.status == "FAIL"
+        assert "fusion_bicc_password" in cred_result.detail
+        assert cred_result.remediation is not None
+        assert "AIDP UI" in cred_result.remediation
+        assert "biccSecretName" in cred_result.remediation
+
+    def test_credential_check_rest_error_propagates_as_fail(self) -> None:
+        """Transport / IAM error from check_credential_exists → check 6
+        FAIL classifying as transport (so a flaky AIDP plane doesn't
+        mask a real missing-credential)."""
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=AidpRestError("HTTP 500 body=ServerError"),
+        )
+        results = run_remote_preflight(client=client, env=_env())
+        cred_result = results[2]
+        assert cred_result.status == "FAIL"
+        assert "transport" in cred_result.detail or "IAM" in cred_result.detail
+        assert "use aiDataPlatformCredentials" in (
+            cred_result.remediation or ""
+        )
+
+    def test_credential_check_runs_for_literal_password(self) -> None:
+        """LOCKS the always-check decision (plan §Technical Decisions row 5):
+        even when bundle.fusion.password is a literal string (not an
+        ${env:X} ref), check_credential_exists IS still called.
+
+        The notebook's creds-cell unconditionally fetches the AIDP secret
+        before importing the orchestrator (notebook_builder._build_creds_cell),
+        so a missing entry crashes the dispatch regardless of how the
+        password is structured. SKIP-on-literal would reopen exactly the
+        fast-fail gap fix1 closes."""
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=True,
+        )
+        # Phase A is bypassed; we're exercising Phase B directly. The
+        # bundle.fusion.password shape is not consulted by the preflight
+        # function at all — the assertion is that the credential check
+        # fires unconditionally based on env.bicc_secret_name.
+        run_remote_preflight(client=client, env=_env())
+        client.check_credential_exists.assert_called_once()
+
+    def test_credential_check_runs_for_vault_ref_password(self) -> None:
+        """Same as above but with a ${vault:OCID} placeholder password —
+        the credential check still fires. Locks the always-check
+        invariant against the second SKIP-style regression path."""
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=True,
+        )
+        run_remote_preflight(client=client, env=_env())
+        client.check_credential_exists.assert_called_once()
+
+    def test_credential_check_uses_bicc_secret_name_from_env(self) -> None:
+        """Wiring lock: the preflight call MUST use env.bicc_secret_name
+        (the same field notebook_builder threads into the cluster-side
+        aidputils.secrets.get call). A different value would mean the
+        preflight checks one secret while the notebook fetches a
+        different one — divergence reviewer flagged in the plan review."""
+        env = _env(biccSecretName="custom_secret_name")
+        client = _client_with(
+            list_clusters=_active_cluster_list(),
+            credential_exists=True,
+        )
+        run_remote_preflight(client=client, env=env)
+        client.check_credential_exists.assert_called_once_with(
+            "custom_secret_name"
+        )

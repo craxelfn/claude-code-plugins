@@ -111,7 +111,9 @@ The notebook's creds-cell calls `aidputils.secrets.get(name=<biccSecretName>, ke
 - **Key**: `password` (or `biccSecretKey`)
 - **Value**: your Fusion BICC user's password
 
-> **Limitation (P1.5ε)**: preflight does NOT yet verify that this entry exists — a missing credential surfaces mid-notebook (~4 min into dispatch) instead of at preflight (~300ms). Tracked as `P1.5ε-fix1`. Until then, double-check the entry exists before your first run.
+> **Verified by preflight check 6 (P1.5ε-fix1, 2026-06-03)**: the dispatcher verifies this entry exists in the AIDP credential store before any wheel build, notebook upload, or job submission. A missing entry fails fast in ~300ms with the offending secret name + a remediation hint pointing at the AIDP UI and `environments.<env>.biccSecretName` in `aidp.config.yaml`. See `tests/live/TC29_rest_dispatch.md` §"Probe 6" for the live evidence.
+>
+> The credential store is **per-AIDP / per-data-lake**, NOT per-workspace — all workspaces under the same `aiDataPlatformId` share one store. Operators with multiple workspaces against the same AIDP only need to register the entry once.
 
 ## First run
 
@@ -160,8 +162,9 @@ For now: the AIDP console's Job Runs tab carries the same executed-notebook view
 ## Cross-references
 
 - Plan: `docs/features/p1.5e-cli-rest-dispatch/plan.md`
+- Post-ship UX bundle (`--poll-timeout`, diagnose-on-timeout, credential preflight): `docs/features/p1.5e-postship-dispatch-ux/plan.md`
 - Skill: `.claude/skills/fusion-tc26-run/` — the empirical-probe harness this CLI productizes
 - REST contract: `.claude/skills/aidp-rest/SKILL.md` — the gotchas baked into `AidpRestClient`
 - Auth mode (`vault` deferred): tracked as `P1.5ε-fix6`
-- BICC credential preflight (deferred): tracked as `P1.5ε-fix1`
+- BICC credential preflight: **shipped** as `P1.5ε-fix1` (2026-06-03)
 - REST-dispatch `--resume` (deferred): tracked as `P1.5ε-fix5`

@@ -137,6 +137,58 @@ Validates:
 - **Cluster-side creds + bundle write**: `aidputils.secrets.get(name="fusion_bicc_password", key="password")` returned a non-empty value (length=8); `BUNDLE_PATH.write_text(...)` succeeded; `from oracle_ai_data_platform_fusion_bundle import orchestrator` succeeded.
 - **`DISPATCH_TIMEOUT` boundary contract**: `poll_run`'s default `timeout_s=1800` deadline fired correctly; `AidpRestError("poll_run(...): deadline exceeded")` was message-classified by `dispatch_via_rest` and re-raised as `DispatchPollTimeoutError` with the right `DISPATCH_TIMEOUT` code. Exit 2, no traceback.
 
+## Probe 6 — BICC credential preflight fast-fail (P1.5ε-fix1, 2026-06-03)
+
+Added by `P1.5ε-fix1` post-ship follow-up. Captures the new Phase B check 6 firing live against `playground` when the configured `biccSecretName` doesn't match any entry in the AIDP credential store.
+
+**Step 0 prerequisite confirmed live**: the credential REST endpoint is `GET /aiDataPlatforms/<aidp-id>/credentials` (data-lake scope, NOT workspace-scoped). Full shape captured in `dev/RESEARCH_aidp_rest_api_probe_results.md` §11. The single-resource `GET /credentials/<key>` endpoint expects a UUID — looking up by display name 400s. So `check_credential_exists(name)` LISTs and walks `items[]`.
+
+**6a. Happy path (credential present)** — sanity check that the new check 6 PASSes when the configured secret matches an existing entry:
+
+```text
+PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
+PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+PASS OCI profile: API-key profile 'DEFAULT' loaded
+PASS AIDP control plane: reachable; 8 cluster(s) visible
+PASS cluster state: cluster '<REDACTED>' ACTIVE
+PASS BICC credential: credential 'fusion_bicc_password' present in AIDP store
+dry-run requested — skipping wheel build + upload + dispatch
+EXIT_CODE: 0
+```
+
+Latency: 6 sequential preflight checks complete in ~3-5s end-to-end (credential check itself is ~300ms — one signed LIST against a ~2-item collection).
+
+**6b. Missing-credential fast-fail (the load-bearing case)** — pointed `biccSecretName` at `this_entry_does_not_exist_in_aidp` (intentionally nonexistent):
+
+```text
+PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
+PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+PASS OCI profile: API-key profile 'DEFAULT' loaded
+PASS AIDP control plane: reachable; 8 cluster(s) visible
+PASS cluster state: cluster '<REDACTED>' ACTIVE
+FAIL BICC credential: AIDP credential entry 'this_entry_does_not_exist_in_aidp'
+not found in the data-lake credential store
+   → add a credential named 'this_entry_does_not_exist_in_aidp' (key 'password')
+     via the AIDP UI before running, OR change environments.<env>.biccSecretName
+     in aidp.config.yaml to match an existing entry
+
+[DISPATCH_PREFLIGHT_FAILED] BICC credential: AIDP credential entry
+'this_entry_does_not_exist_in_aidp' not found in the data-lake credential store;
+→ add a credential named 'this_entry_does_not_exist_in_aidp' (key 'password')
+via the AIDP UI before running, OR change environments.<env>.biccSecretName in
+aidp.config.yaml to match an existing entry
+
+WALL: 4.77s
+EXIT: 2
+```
+
+Validates (the entire `P1.5ε-fix1` acceptance):
+
+- ✅ Fast-fail wall: **4.77s end-to-end** (1.5s into the wall, 3.27s for the cluster-state PASS which is the dominant cost — credential check itself ran in the residual ~200ms after cluster state). Beats the planned `<2s for the check itself` claim with margin. Compared to the pre-fix1 behavior (cluster cold-start + wheel build + notebook upload + job submit + cluster ramp + cluster-side creds-cell failure = ~4 minutes), this is two orders of magnitude faster.
+- ✅ Typed `DISPATCH_PREFLIGHT_FAILED` code prefix in the operator-facing red line — matches the existing taxonomy contract.
+- ✅ Remediation hint names BOTH the offending secret name AND the `environments.<env>.biccSecretName` config field — operator can fix without re-reading docs.
+- ✅ Exit code 2 (dispatch-layer error), no traceback.
+
 ## What's NOT in this evidence
 
 - **Marker payload round-trip on a successful run.** The cluster-side BICC extract for `erp_suppliers` ran past the laptop-side 1800s `poll_run` deadline on this tenant (still RUNNING when laptop timed out at 30:33 wall). BICC latency for `SupplierExtractPVO` against `saasfademo1` is independent of the dispatch layer; the marker-parse + `RunSummary.from_marker_dict` round-trip is covered exhaustively by the in-process unit tests in `tests/unit/dispatch/test_dispatch_via_rest.py` (synthetic marker payloads exercise every shape and edge case).
