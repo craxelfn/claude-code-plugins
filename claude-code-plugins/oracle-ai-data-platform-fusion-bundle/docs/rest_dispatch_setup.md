@@ -111,7 +111,7 @@ The notebook's creds-cell calls `aidputils.secrets.get(name=<biccSecretName>, ke
 - **Key**: `password` (or `biccSecretKey`)
 - **Value**: your Fusion BICC user's password
 
-> **Verified by preflight check 6 (P1.5ε-fix1, 2026-06-03)**: the dispatcher verifies this entry exists in the AIDP credential store before any wheel build, notebook upload, or job submission. A missing entry fails fast in ~300ms with the offending secret name + a remediation hint pointing at the AIDP UI and `environments.<env>.biccSecretName` in `aidp.config.yaml`. See `tests/live/TC29_rest_dispatch.md` §"Probe 6" for the live evidence.
+> **Verified by preflight check 5 (P1.5ε-fix1, 2026-06-03)**: the dispatcher verifies this entry exists in the AIDP credential store before any wheel build, notebook upload, job submission, **or cluster start**. The check sits AHEAD of the cluster-state check so a missing credential fast-fails in ~300ms without paying ~5min cluster cold-start. A missing entry surfaces with the offending secret name + the configured `biccSecretKey` + a remediation hint pointing at the AIDP UI and `environments.<env>.biccSecretName` in `aidp.config.yaml`. See `tests/live/TC29_rest_dispatch.md` §"Probe 6" for the live evidence (6a happy path, 6b missing-credential fast-fail, 6c custom-key remediation).
 >
 > The credential store is **per-AIDP / per-data-lake**, NOT per-workspace — all workspaces under the same `aiDataPlatformId` share one store. Operators with multiple workspaces against the same AIDP only need to register the entry once.
 
@@ -123,6 +123,7 @@ $ aidp-fusion-bundle run --mode seed --env dev
 [preflight] PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
 [preflight] PASS OCI profile: session-token profile 'AIDP_SESSION' valid
 [preflight] PASS AIDP control plane: reachable; 2 cluster(s) visible
+[preflight] PASS BICC credential: credential 'fusion_bicc_password' present in AIDP store
 [preflight] PASS cluster state: cluster '...' ACTIVE
 [dispatch] wheel cache hit
 [dispatch] notebook uploaded to /Workspace/Shared/aidp-fusion-bundle-<project>/run.ipynb
