@@ -111,20 +111,20 @@ def run(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
         )
-    if resume_run_id is not None:
-        # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
-        # The dispatcher's notebook builder hardcodes resume_run_id=None;
-        # the orchestrator-side resume code path requires in-process state
-        # access that doesn't surface cleanly over the marker channel.
-        # Tracked as follow-up P1.5ε-fix5.
+    # P1.5ε-fix5: REST-dispatch resume is supported — the notebook
+    # builder injects resume_run_id into the run cell as a repr()-quoted
+    # literal, so orchestrator.run(resume_run_id=...) runs cluster-side.
+    # Banner gated on `not dry_run`: dispatch short-circuits before any
+    # resume work happens under --dry-run, so a "Resuming run X" banner
+    # there would mislead the operator.
+    if resume_run_id is not None and not dry_run:
         console.print(
-            "[red]--resume requires --inline; REST-dispatch resume is "
-            "tracked as BACKLOG P1.5ε-fix5[/red]"
+            f"[bold cyan]Resuming run[/bold cyan] [dim]{resume_run_id}[/dim] — "
+            f"reading fusion_bundle_state, computing reattempt plan…"
         )
-        return 2
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
-        dry_run, poll_timeout_s, console,
+        resume_run_id, dry_run, poll_timeout_s, console,
     )
 
 
@@ -188,6 +188,7 @@ def _run_via_aidp_dispatch(
     datasets: list[str] | None,
     layers: list[str] | None,
     mode: str,
+    resume_run_id: str | None,
     dry_run: bool,
     poll_timeout_s: int,
     console: Console,
@@ -202,9 +203,13 @@ def _run_via_aidp_dispatch(
     Same exit-code contract as :func:`_run_inline`: 0 on success, 1 if any
     step failed, 2 on any dispatch-layer error (config, preflight, network).
 
-    ``resume_run_id`` is not accepted on the REST-dispatch path — the
-    caller guards in :func:`run` so this function never sees a resume
-    request. Tracked as ``P1.5ε-fix5`` follow-up.
+    ``resume_run_id`` (P1.5ε-fix5): threaded into ``dispatch_via_rest``
+    which injects it into the run-cell as a ``repr()``-quoted literal.
+    Bad run_ids surface as cell-3 ``ResumeRunNotFoundError`` /
+    ``ResumeRunNotResumableError`` / ``ResumeBundleMismatchError`` —
+    enriched into ``DispatchRunFailedError``'s message by
+    ``dispatch_via_rest`` so the operator sees the typed orchestrator
+    exception class without opening the executed notebook.
     """
     from ._config_helpers import env_or_error, load_aidp_config
     from ..dispatch import dispatch_via_rest
@@ -222,6 +227,7 @@ def _run_via_aidp_dispatch(
             mode=mode,  # type: ignore[arg-type]
             datasets=datasets,
             layers=layers,
+            resume_run_id=resume_run_id,
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),

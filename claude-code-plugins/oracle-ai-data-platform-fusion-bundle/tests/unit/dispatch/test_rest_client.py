@@ -17,6 +17,7 @@ import oci
 import pytest
 
 from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+    AidpRestClient,
     AidpRestError,
     _build_signer,
 )
@@ -232,3 +233,242 @@ class TestFetchOutputTimeout:
             client.fetch_output("task-run-key-1")
         _, kwargs = spy.call_args
         assert kwargs.get("timeout") is None
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — parse_marker regex fallback for the TC27 trap
+# ---------------------------------------------------------------------------
+# Background (TC27 known fragility): the orchestrator emits its marker via
+# print(json.dumps(...)) on the cluster. When the run includes a failed
+# step, the payload contains error_message=repr(exc) (= 'RuntimeError("…")'
+# with nested quotes). AIDP's notebook runtime captures stdout into
+# display_data text/plain and strips JSON-escape backslashes from those
+# nested quotes, producing invalid JSON. parse_marker's regex fallback
+# recovers run_id so the operator can resume via --resume <id>.
+
+
+_MARKER_BEGIN = "AIDP_LIVE_TEST_RESULT_BEGIN"
+_MARKER_END = "AIDP_LIVE_TEST_RESULT_END"
+
+
+def _make_executed_notebook(body: str) -> dict:
+    """Wrap a marker body in a minimal executed-notebook dict shaped like
+    AIDP's fetchOutput response (text channel — bypasses display_data so
+    we control the body bytes exactly)."""
+    return {
+        "cells": [
+            {
+                "outputs": [
+                    {
+                        "text": f"{_MARKER_BEGIN} {body} {_MARKER_END}\n",
+                    }
+                ]
+            }
+        ]
+    }
+
+
+class TestParseMarkerRegexFallback:
+    def test_parse_marker_clean_json_unaffected(self) -> None:
+        """Regression lock — the fallback only activates after
+        ``json.loads`` fails. Clean JSON returns the parsed dict
+        directly (existing pre-fix5 behavior)."""
+        body = '{"run_id":"clean-abc","steps":[]}'
+        nb = _make_executed_notebook(body)
+        marker = AidpRestClient.parse_marker(
+            nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+        )
+        assert marker == {"run_id": "clean-abc", "steps": []}
+        assert marker is not None
+        assert "_marker_parse_failed" not in marker
+
+    def test_parse_marker_recovers_run_id_from_malformed_json(self) -> None:
+        """TC27-shaped trap — AIDP stripped the JSON-escape backslashes
+        from a failed step's error_message=repr(exc). The body is no
+        longer parseable JSON but still contains "run_id": "<id>". The
+        regex fallback recovers the run_id; the synthetic sentinel
+        signals the dispatcher to raise DispatchMarkerDegradedError."""
+        body = (
+            '{"run_id":"recovered-xyz","steps":['
+            '{"error_message":"RuntimeError("induced fail")"}'
+            ']}'
+        )
+        nb = _make_executed_notebook(body)
+        marker = AidpRestClient.parse_marker(
+            nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+        )
+        assert marker is not None
+        assert marker["run_id"] == "recovered-xyz"
+        assert marker["_marker_parse_failed"] is True
+        assert "RuntimeError" in marker["_raw_marker"]
+
+    def test_parse_marker_malformed_with_no_run_id_still_raises(self) -> None:
+        """If the regex also can't find a run_id, the original
+        ``json.JSONDecodeError`` propagates — the dispatcher's caller
+        still converts to ``DispatchMarkerMissingError`` (existing
+        behavior preserved for the unrecoverable case)."""
+        import json as _json
+
+        body = '{"steps":[{"error_message":"RuntimeError("oh no")"}]}'
+        nb = _make_executed_notebook(body)
+        with pytest.raises(_json.JSONDecodeError):
+            AidpRestClient.parse_marker(
+                nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+            )
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — extract_cell_errors handles AIDP's stderr-stream tracebacks
+# ---------------------------------------------------------------------------
+# Background (TC29b live finding): AIDP's notebook runtime captures cell
+# exceptions as output_type="stream", name="stderr" with the Python
+# traceback inline as text — NOT as the documented output_type="error".
+# The productized extract_cell_errors regex-matches the final
+# "ExceptionClass: message" line so the cell-error enrichment path in
+# dispatch_via_rest fires on real cluster output.
+
+
+class TestExtractCellErrorsStderrStream:
+    def test_canonical_error_output_still_extracted(self) -> None:
+        """Regression lock — output_type=error is still the primary
+        shape (nbconvert, vanilla Jupyter kernels). Must continue to
+        work even after the stderr-stream extension."""
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {
+                        "output_type": "error",
+                        "ename": "ResumeRunNotFoundError",
+                        "evalue": "--resume: no rows for run_id='x'",
+                        "traceback": ["line 1", "line 2"],
+                    }
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert len(errors) == 1
+        assert errors[0]["cell_index"] == 0
+        assert errors[0]["ename"] == "ResumeRunNotFoundError"
+        assert errors[0]["evalue"] == "--resume: no rows for run_id='x'"
+
+    def test_stderr_stream_with_traceback_extracted(self) -> None:
+        """AIDP shape — a stderr stream containing a Python traceback
+        ending with ``ExceptionClass: message``. The final exception
+        line is regex-matched and surfaced as the canonical
+        ename/evalue pair so dispatch_via_rest's enrichment can append
+        it to DispatchRunFailedError's message."""
+        # Shape captured verbatim from a live TC29b Phase 4 run against
+        # fusion_bundle_dev (run_id='tc29b-not-a-real-id'). Multi-line
+        # Python traceback in a single stream/stderr output.
+        traceback_text = (
+            "---------------------------------------------------------\n"
+            "ResumeRunNotFoundError                    Traceback (most recent call last)\n"
+            "Cell In[17], line 3\n"
+            "      1 import json, time\n"
+            "      2 _tstart = time.time()\n"
+            "----> 3 summary = orchestrator.run(\n"
+            "File /tmp/.../orchestrator/__init__.py:876, in run(...)\n"
+            "    875 state.ensure_state_table(spark, paths)\n"
+            "--> 876 resume_context = state.read_resumable_state(...)\n"
+            "File /tmp/.../orchestrator/state.py:954, in read_resumable_state(...)\n"
+            "    953 if not rows:\n"
+            "--> 954     raise ResumeRunNotFoundError(\n"
+            "ResumeRunNotFoundError: --resume: no rows in fusion_bundle_state for run_id='tc29b-not-a-real-id'. "
+            "Check the value (operator typo?) or use `aidp-fusion-bundle status` to list recent run_ids."
+        )
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {"output_type": "stream", "name": "stderr",
+                     "text": traceback_text},
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert len(errors) == 1
+        assert errors[0]["cell_index"] == 0
+        assert errors[0]["ename"] == "ResumeRunNotFoundError"
+        # Verbatim from state.py:954-955.
+        assert "--resume: no rows in fusion_bundle_state" in errors[0]["evalue"]
+        assert "'tc29b-not-a-real-id'" in errors[0]["evalue"]
+
+    def test_stderr_stream_with_no_traceback_ignored(self) -> None:
+        """Stderr streams without a recognized exception pattern (e.g.,
+        a Spark INFO log captured to stderr) must not produce false
+        positives."""
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {"output_type": "stream", "name": "stderr",
+                     "text": "Setting default log level to WARN.\n"
+                             "Some other Spark noise\n"},
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert errors == []
+
+    def test_stderr_stream_picks_outermost_exception_on_chained(self) -> None:
+        """When the stderr contains a chained ``During handling of the
+        above exception, another exception occurred`` traceback, the
+        outermost (last) exception is what propagated — that's the one
+        the operator wants enriched into the dispatch error message."""
+        chained = (
+            "Traceback (most recent call last):\n"
+            "  File 'a.py', line 1\n"
+            "ValueError: original cause\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            "  File 'b.py', line 1\n"
+            "RuntimeError: wrapped failure"
+        )
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {"output_type": "stream", "name": "stderr",
+                     "text": chained},
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert len(errors) == 1
+        # The OUTERMOST exception is what propagated past the cell.
+        assert errors[0]["ename"] == "RuntimeError"
+        assert "wrapped failure" in errors[0]["evalue"]
+
+    def test_stdout_streams_never_extracted(self) -> None:
+        """Only stderr streams are scanned — stdout might legitimately
+        contain text like ``RuntimeError: x`` inside a debug print,
+        and we must not false-positive on it."""
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {"output_type": "stream", "name": "stdout",
+                     "text": "debug: caught RuntimeError: x\n"},
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert errors == []
+
+    def test_stderr_text_as_list_joined_correctly(self) -> None:
+        """Some kernels emit ``text`` as a list of strings instead of
+        a single string. Join + extract must still work."""
+        nb = {
+            "cells": [
+                {"outputs": [
+                    {"output_type": "stream", "name": "stderr",
+                     "text": [
+                         "Traceback (most recent call last):\n",
+                         "  File 'x.py', line 1\n",
+                         "ValueError: split-list shape\n",
+                     ]},
+                ]},
+            ]
+        }
+        errors = AidpRestClient.extract_cell_errors(nb)
+        assert len(errors) == 1
+        assert errors[0]["ename"] == "ValueError"
+        assert errors[0]["evalue"] == "split-list shape"

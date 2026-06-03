@@ -11,6 +11,7 @@ Empirically-confirmed REST shapes baked in. See
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -537,7 +538,22 @@ class AidpRestClient:
         end: str,
     ) -> dict[str, Any] | None:
         """Walk ``cells[*].outputs[*]`` of an executed notebook for a stdout
-        marker block. Returns the parsed JSON or None if absent."""
+        marker block. Returns the parsed JSON or None if absent.
+
+        P1.5ε-fix5 hardening: on ``json.JSONDecodeError`` against the
+        ``BEGIN..END`` body, attempt a regex extraction of ``run_id`` and
+        return a sentinel payload
+        ``{"run_id": "<id>", "_marker_parse_failed": True, "_raw_marker": ...}``
+        so the dispatcher can surface a typed
+        ``DispatchMarkerDegradedError`` carrying the resume handle.
+        Triggered by AIDP's ``display_data text/plain`` capture
+        stripping JSON escapes from failed-step ``repr(exc)`` (TC27).
+        Regex matches against the already-sliced ``BEGIN..END`` body
+        only — no false-positive surface beyond the marker block.
+        If the regex also can't find a ``run_id``, the original
+        ``json.JSONDecodeError`` propagates unchanged (caller still
+        raises ``DispatchMarkerMissingError``).
+        """
         for cell in executed_notebook.get("cells", []):
             for output in cell.get("outputs", []):
                 for src in ("text", "data"):
@@ -551,17 +567,65 @@ class AidpRestClient:
                     if begin in value:
                         b = value.index(begin) + len(begin)
                         e = value.index(end, b)
-                        return json.loads(value[b:e].strip())
+                        body = value[b:e].strip()
+                        try:
+                            return json.loads(body)
+                        except json.JSONDecodeError:
+                            m = re.search(
+                                r'"run_id"\s*:\s*"([^"]+)"', body,
+                            )
+                            if m is None:
+                                raise
+                            return {
+                                "run_id": m.group(1),
+                                "_marker_parse_failed": True,
+                                "_raw_marker": body[:2000],
+                            }
         return None
+
+    # Pattern for "ExceptionClass: message" lines in a Python traceback
+    # emitted by AIDP's notebook runtime as an stderr stream (TC29b live
+    # finding: AIDP does NOT use output_type=error for cell exceptions
+    # — it emits the full traceback into output_type=stream,
+    # name=stderr instead). Single-line ($ end-of-line, no dotall) so
+    # chained exceptions ("During handling of the above exception…")
+    # produce separate matches; the LAST match is the outermost
+    # exception that propagated. Anchored on the start of a
+    # non-indented line so we don't false-match "Exception:" inside a
+    # stack frame body. Ename must be a Python identifier (dots
+    # allowed for module-path enames like aidputils.errors.X).
+    _STDERR_TRACEBACK_PATTERN = re.compile(
+        r"(?m)^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+        r"(?:Error|Exception|Warning|Interrupt|Exit|Timeout|Failure)):"
+        r"[ \t]*(.*)$"
+    )
 
     @staticmethod
     def extract_cell_errors(
         executed_notebook: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """Walk executed-notebook cells for exception-shaped outputs.
+
+        Recognizes two shapes:
+
+        1. **Canonical Jupyter error output** (``output_type="error"``) —
+           the documented shape for cells that raised. Produced by
+           ``nbconvert`` and most kernels.
+
+        2. **AIDP stderr-stream tracebacks** (TC29b live finding) — AIDP's
+           notebook runtime captures cell exceptions as
+           ``output_type="stream", name="stderr"`` with the Python
+           traceback in ``text``. The final ``ExceptionClass: message``
+           line is regex-matched and surfaced as
+           ``{"ename": ..., "evalue": ...}``. This is what makes
+           dispatch_via_rest's cell-error enrichment fire on real cluster
+           output (P1.5ε-fix5).
+        """
         errors: list[dict[str, Any]] = []
         for i, cell in enumerate(executed_notebook.get("cells", [])):
             for output in cell.get("outputs", []):
-                if output.get("output_type") == "error":
+                ot = output.get("output_type")
+                if ot == "error":
                     errors.append(
                         {
                             "cell_index": i,
@@ -570,6 +634,29 @@ class AidpRestClient:
                             "traceback": output.get("traceback", []),
                         }
                     )
+                elif ot == "stream" and output.get("name") == "stderr":
+                    text = output.get("text", "")
+                    if isinstance(text, list):
+                        text = "".join(text)
+                    # Search across the whole stream — multiple
+                    # tracebacks in one stderr output is possible
+                    # (chained exception). The LAST match is the
+                    # outermost exception that propagated.
+                    matches = list(
+                        AidpRestClient._STDERR_TRACEBACK_PATTERN.finditer(text)
+                    )
+                    if matches:
+                        m = matches[-1]
+                        ename = m.group(1)
+                        evalue = m.group(2).strip()
+                        errors.append(
+                            {
+                                "cell_index": i,
+                                "ename": ename,
+                                "evalue": evalue,
+                                "traceback": text.splitlines(),
+                            }
+                        )
         return errors
 
 
