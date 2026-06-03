@@ -237,9 +237,24 @@ def dispatch_via_rest(
             f"fetchOutput failed: {str(exc).splitlines()[0][:200]}"
         ) from exc
 
-    executed_notebook = (
-        json.loads(executed_notebook_json) if executed_notebook_json else {}
-    )
+    # Decode + marker-parse defense (reviewer-driven): a truncated AIDP
+    # output or a partial marker (BEGIN without END) would otherwise raise
+    # raw json.JSONDecodeError / ValueError out of parse_marker — the CLI's
+    # `except (DispatchError, OrchestratorConfigError)` clause wouldn't
+    # catch those, so the operator would see a Python traceback instead of
+    # exit 2 with DISPATCH_MARKER_MISSING. Wrap both the JSON decode AND
+    # the marker walk so every malformed-output failure mode lands in the
+    # typed taxonomy with jobRunKey context.
+    try:
+        executed_notebook = (
+            json.loads(executed_notebook_json) if executed_notebook_json else {}
+        )
+    except json.JSONDecodeError as exc:
+        raise DispatchMarkerMissingError(
+            f"executed notebook JSON decode failed (jobRunKey={job_run_key}); "
+            f"evidence-capture failure — underlying: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
 
     if result.status != "SUCCESS":
         raise DispatchRunFailedError(
@@ -247,9 +262,21 @@ def dispatch_via_rest(
             f"{result.status!r}; see AIDP console / executed notebook for details"
         )
 
-    marker = AidpRestClient.parse_marker(
-        executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
-    )
+    try:
+        marker = AidpRestClient.parse_marker(
+            executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        # ValueError covers `value.index(end, b)` failure (BEGIN found but
+        # no END — truncated stdout); JSONDecodeError covers the inner
+        # `json.loads(value[b:e])` blowing up on a malformed payload that
+        # happens to sit between valid BEGIN/END delimiters.
+        raise DispatchMarkerMissingError(
+            f"marker parse failed (jobRunKey={job_run_key}); "
+            f"evidence-capture failure — underlying: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+
     if marker is None:
         raise DispatchMarkerMissingError(
             f"job reported SUCCESS but no marker found in executed notebook "
@@ -260,7 +287,7 @@ def dispatch_via_rest(
         summary = RunSummary.from_marker_dict(marker)
     except ValueError as exc:
         raise DispatchMarkerMissingError(
-            f"marker payload malformed: {exc}"
+            f"marker payload malformed (jobRunKey={job_run_key}): {exc}"
         ) from exc
 
     log(f"orchestrator run_id={summary.run_id}")

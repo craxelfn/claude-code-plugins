@@ -460,6 +460,101 @@ class TestErrorWrapping:
                 layers=None,
             )
 
+    def test_truncated_marker_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BEGIN delimiter present but no matching END (truncated AIDP
+        output) — parse_marker raises ValueError from `value.index(end)`.
+        Must surface as DISPATCH_MARKER_MISSING with jobRunKey, NOT a raw
+        ValueError traceback."""
+        client = _stub_client(monkeypatch)
+        # Stdout contains the BEGIN delimiter but the matching END was
+        # cut off (cluster output truncated, or operator-killed mid-emit).
+        truncated_text = (
+            'AIDP_LIVE_TEST_RESULT_BEGIN {"schema_version": 1, "run_id": "x", '
+            '"started_at": "2026-06-03T14:00:00Z", "finished_at"'
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": truncated_text}]}]}
+        )
+        self._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(
+            DispatchMarkerMissingError, match="marker parse failed"
+        ) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        # Operator-actionable: jobRunKey is in the message so they can
+        # correlate with the AIDP console.
+        assert "job-run-key-1" in str(exc_info.value)
+        # Underlying cause is preserved for --verbose / debug users.
+        assert exc_info.value.__cause__ is not None
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_malformed_executed_notebook_json_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fetchOutput returned a 200 with a body that's not valid JSON
+        (truncated transport, server-side bug). The json.loads call must
+        be wrapped — raw JSONDecodeError would escape the CLI taxonomy
+        catch as an unhandled traceback."""
+        client = _stub_client(monkeypatch)
+        # Genuinely-malformed JSON — looks like the start of a notebook
+        # response that got cut mid-stream.
+        client.fetch_output.return_value = '{"cells": [{"cell_type": "code"'
+        self._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(
+            DispatchMarkerMissingError, match="JSON decode failed"
+        ) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        assert "job-run-key-1" in str(exc_info.value)
+        assert exc_info.value.__cause__ is not None
+        assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+
+    def test_malformed_marker_payload_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BEGIN + END delimiters present but the JSON between them
+        doesn't parse — parse_marker raises json.JSONDecodeError from
+        the inner `json.loads(value[b:e])`. Same DISPATCH_MARKER_MISSING
+        landing per the wrapped (ValueError, JSONDecodeError) clause."""
+        client = _stub_client(monkeypatch)
+        bad_marker_text = (
+            "AIDP_LIVE_TEST_RESULT_BEGIN {not-valid-json-here} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": bad_marker_text}]}]}
+        )
+        self._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(
+            DispatchMarkerMissingError, match="marker parse failed"
+        ) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        assert "job-run-key-1" in str(exc_info.value)
+
     def test_no_aidp_rest_error_escapes(
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
