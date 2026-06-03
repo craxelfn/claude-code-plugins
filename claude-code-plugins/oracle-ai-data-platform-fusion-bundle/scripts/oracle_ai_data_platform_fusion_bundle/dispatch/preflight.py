@@ -356,20 +356,32 @@ def _check_cluster_state(
 def _check_bicc_credential(
     client: AidpRestClient,
     secret_name: str,
+    secret_key: str,
 ) -> PreflightResult:
     """P1.5ε-fix1 — Phase B check 6.
 
     The cluster-side notebook's creds-cell at
     ``notebook_builder._build_creds_cell`` unconditionally calls
-    ``aidputils.secrets.get(name=env.bicc_secret_name, key=...)`` BEFORE
-    writing the bundle or importing the orchestrator. A missing
-    credential surfaces mid-notebook ~4 min into dispatch (wheel build
-    + upload + job submit + cluster ramp). This check fast-fails the
-    same condition in ~300ms.
+    ``aidputils.secrets.get(name=env.bicc_secret_name, key=env.bicc_secret_key)``
+    BEFORE writing the bundle or importing the orchestrator. A missing
+    credential entry surfaces mid-notebook ~4 min into dispatch (wheel
+    build + upload + job submit + cluster ramp). This check fast-fails
+    the same condition in ~300ms.
 
     Per §Technical Decisions row 5: **always check, regardless of
     bundle.fusion.password shape**. The notebook's secret fetch is
     independent of how the password is referenced.
+
+    ``secret_key`` is used ONLY for the operator-facing remediation
+    hint so they can register the entry with the right key the notebook
+    will look up — the credential REST endpoint can't validate individual
+    keys (it lists/looks-up credential ENTRIES by displayName, not
+    key contents). If `biccSecretKey` is the default ``"password"`` the
+    AIDP UI default also matches, but for `biccSecretKey: custom_key`
+    the remediation must say `custom_key` or the operator creates the
+    entry with the wrong key and the next preflight runs PASS while
+    the cluster-side notebook still fails mid-flight. (Reviewer-driven —
+    fix1 originally hardcoded "key 'password'" in the remediation.)
     """
     try:
         exists = client.check_credential_exists(secret_name)
@@ -395,10 +407,10 @@ def _check_bicc_credential(
                 "data-lake credential store"
             ),
             remediation=(
-                f"add a credential named {secret_name!r} (key 'password') "
-                "via the AIDP UI before running, OR change "
-                f"environments.<env>.biccSecretName in aidp.config.yaml to "
-                "match an existing entry"
+                f"add a credential named {secret_name!r} with key "
+                f"{secret_key!r} via the AIDP UI before running, OR "
+                f"change environments.<env>.biccSecretName in "
+                f"aidp.config.yaml to match an existing entry"
             ),
         )
     return PreflightResult(
@@ -417,16 +429,23 @@ def run_remote_preflight(
 ) -> list[PreflightResult]:
     """Run Phase-B checks that require an AIDP control-plane round-trip.
 
-    Order (cheapest-first, each gate independent of the next):
-      4. AIDP control plane reachable (list_clusters probe)
-      5. Cluster state ACTIVE (or auto-start if STOPPED) — can take ~5 min
-      6. BICC credential entry exists in AIDP credential store
-         (P1.5ε-fix1) — ~300ms
+    Order (cheapest-first; cluster check moved to LAST because it can
+    auto-start a STOPPED cluster + block in ``wait_cluster_active`` for
+    up to 10 min — reviewer-driven correction: blocking on a 5-min cold
+    start before the ~300ms credential check would negate fix1's
+    fast-fail promise when the operator has both a stopped cluster AND
+    a missing credential):
 
-    Check 6 runs even when check 5 SKIPped/FAILed: the credential check
-    is independent of cluster state and giving the operator both pieces
-    of information up front is more useful than gating on the most
-    expensive check.
+      4. AIDP control plane reachable (``list_clusters`` probe) — ~300ms
+      5. BICC credential entry exists in AIDP credential store
+         (P1.5ε-fix1) — ~300ms
+      6. Cluster state ACTIVE (or auto-start if STOPPED) — can take
+         ~5 min; SKIPped when check 5 FAILed (no point starting compute
+         the dispatch could never use)
+
+    Check 5 runs even when check 4 (control plane) FAILed → SKIP both
+    5 + 6. Check 6 SKIPs when check 5 FAILs (avoid paying cluster
+    startup for a dispatch that's guaranteed to fail).
     """
     results: list[PreflightResult] = []
     plane_result, clusters = _check_aidp_control_plane(client)
@@ -434,16 +453,36 @@ def run_remote_preflight(
     if plane_result.status != "PASS":
         results.append(
             PreflightResult(
-                name="cluster state",
+                name="BICC credential",
                 status="SKIP",
                 detail="skipped — control-plane check failed",
             )
         )
         results.append(
             PreflightResult(
-                name="BICC credential",
+                name="cluster state",
                 status="SKIP",
                 detail="skipped — control-plane check failed",
+            )
+        )
+        return results
+
+    # Check 5 — credential preflight runs BEFORE cluster check 6 so a
+    # missing credential fast-fails without paying ~5 min of cluster
+    # cold-start cost.
+    credential_result = _check_bicc_credential(
+        client, env.bicc_secret_name, env.bicc_secret_key
+    )
+    results.append(credential_result)
+
+    if credential_result.status != "PASS":
+        # Dispatch is guaranteed to fail with a missing/unreachable
+        # credential; don't spend compute starting the cluster.
+        results.append(
+            PreflightResult(
+                name="cluster state",
+                status="SKIP",
+                detail="skipped — BICC credential check failed",
             )
         )
         return results
@@ -458,9 +497,6 @@ def run_remote_preflight(
             log=log,
         )
     )
-    # Check 6 fires regardless of cluster-state outcome — fast (~300ms)
-    # and operator-actionable even if the cluster check failed.
-    results.append(_check_bicc_credential(client, env.bicc_secret_name))
     return results
 
 

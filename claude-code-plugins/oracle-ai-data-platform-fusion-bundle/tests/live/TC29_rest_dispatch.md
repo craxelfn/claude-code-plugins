@@ -158,7 +158,9 @@ EXIT_CODE: 0
 
 Latency: 6 sequential preflight checks complete in ~3-5s end-to-end (credential check itself is ~300ms — one signed LIST against a ~2-item collection).
 
-**6b. Missing-credential fast-fail (the load-bearing case)** — pointed `biccSecretName` at `this_entry_does_not_exist_in_aidp` (intentionally nonexistent):
+**6b. Missing-credential fast-fail (the load-bearing case)** — pointed `biccSecretName` at `this_entry_does_not_exist_in_aidp` (intentionally nonexistent).
+
+After reviewer-driven ordering correction (credential check moved to check 5, BEFORE cluster-state check 6 — see the dispatch/preflight.py `run_remote_preflight` docstring): when both the credential is missing AND the cluster is STOPPED, the dispatcher fast-fails on the credential without paying ~5min cluster cold-start. Wall went from 4.77s (cluster check ran ahead) → **2.53s** on this probe (cluster check SKIPpped). With a STOPPED cluster the savings would be ~5min vs the original ordering.
 
 ```text
 PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
