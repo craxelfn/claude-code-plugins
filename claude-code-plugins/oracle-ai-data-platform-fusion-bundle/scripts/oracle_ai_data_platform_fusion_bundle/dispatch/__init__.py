@@ -167,9 +167,26 @@ def dispatch_via_rest(
         raise DispatchPreflightError(_format_preflight_failure(remote_results))
 
     # ---- Dry-run short-circuit -------------------------------------------
+    # P1.5ε-fix9 — resolve the plan laptop-side from neutral schema
+    # metadata so the renderer can show "Would dispatch" + "Extra-plan
+    # prerequisites" Rich tables (same shape the --inline --dry-run path
+    # produces today). The bundle YAML was already validated by Phase A
+    # check 1; load_bundle here is a sub-millisecond re-parse with no
+    # Spark involvement.
     if dry_run:
+        from ..schema.bundle import load_bundle
+        from ..schema.plan_resolver import resolve_dry_run_plan
+
+        bundle, paths = load_bundle(bundle_path)
+        plan_nodes, prereq_nodes = resolve_dry_run_plan(
+            bundle, paths,
+            datasets=datasets, layers=layers,
+        )
         log("dry-run requested — skipping wheel build + upload + dispatch")
-        return RunSummary.empty(bundle_project=config.project, mode=mode)
+        return RunSummary.empty(
+            bundle_project=config.project, mode=mode,
+            plan=plan_nodes, prereqs=prereq_nodes,
+        )
 
     # ---- Build wheel -----------------------------------------------------
     checkout = plugin_checkout or _detect_plugin_checkout()

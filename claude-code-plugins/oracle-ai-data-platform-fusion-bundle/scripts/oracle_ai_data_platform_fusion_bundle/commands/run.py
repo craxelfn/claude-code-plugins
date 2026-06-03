@@ -257,16 +257,8 @@ def _render_summary(console: Console, summary) -> None:
             plan_table = Table(title="Would dispatch", show_lines=False)
             plan_table.add_column("dataset_id", style="cyan")
             plan_table.add_column("layer")
-            for spec in summary.plan:
-                layer = getattr(spec, "layer", None)
-                if layer is None:
-                    # BronzeExtractSpec / SilverDimSpec / GoldMartSpec — derive
-                    # via the registry helper.
-                    from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-                        _layer_for_spec,
-                    )
-                    layer = _layer_for_spec(spec)
-                plan_table.add_row(spec.dataset_id, layer)
+            for node in summary.plan:
+                plan_table.add_row(node.dataset_id, node.layer)
             console.print(plan_table)
         if summary.prereqs:
             prereqs_table = Table(title="Extra-plan prerequisites (must exist on disk)")

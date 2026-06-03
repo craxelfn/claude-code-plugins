@@ -154,6 +154,30 @@ aidp-fusion-bundle run --mode seed --env dev --dry-run
 aidp-fusion-bundle validate
 ```
 
+Sample `--dry-run` output (P1.5ε-fix9 lands the laptop-side plan rendering — pre-fix9 the REST path returned `Empty plan` even for non-empty bundles):
+
+```text
+ PASS bundle.yaml: loaded ./bundle.yaml
+ PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+ PASS OCI profile: API-key profile 'DEFAULT' loaded
+ PASS AIDP control plane: reachable; 8 cluster(s) visible
+ PASS BICC credential: credential '<your-secret-name>' present in AIDP store
+ PASS cluster state: cluster '<your-cluster-uuid>' ACTIVE
+dry-run requested — skipping wheel build + upload + dispatch
+Dry-run plan for project <your-project> (mode=seed):
+        Would dispatch
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ dataset_id         ┃ layer  ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ erp_suppliers      │ bronze │
+│ ap_invoices        │ bronze │
+│ dim_supplier       │ silver │
+│ supplier_spend     │ gold   │
+└────────────────────┴────────┘
+```
+
+Pass `--layers gold` to surface the `Extra-plan prerequisites` table — bronze + silver upstreams of in-plan gold marts that must exist on disk before the dispatch runs. Plan-resolution is mode-neutral (the same plan renders for `--mode seed` and `--mode incremental` — only per-step dispatch behavior differs).
+
 ## Diagnosing failures
 
 The dispatcher saves the executed notebook for offline diagnosis on every run (success or failure). Look under `~/.aidp/dispatch/<run_id>/` if the dispatcher writes there (P3.x polish — not yet auto-emitted in this PR).
