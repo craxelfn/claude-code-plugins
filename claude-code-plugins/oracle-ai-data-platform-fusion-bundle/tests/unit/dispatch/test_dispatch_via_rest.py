@@ -187,7 +187,7 @@ def _stub_client(monkeypatch, **overrides):
     client_mock.upload_notebook.return_value = "/Workspace/Shared/x/run.ipynb"
     client_mock.create_notebook_job.return_value = "job-key-1"
     client_mock.submit_run.return_value = "job-run-key-1"
-    raw = {"taskToTaskRunMap": {"orchestrator-run": "task-run-key-1"}}
+    raw = {"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}}
     client_mock.poll_run.return_value = RunResult(status="SUCCESS", raw=raw)
     client_mock.fetch_output.return_value = _executed_notebook_with_marker(
         _make_marker_payload()
@@ -427,7 +427,7 @@ class TestErrorWrapping:
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = _stub_client(monkeypatch)
-        raw = {"taskToTaskRunMap": {"orchestrator-run": "task-run-key-1"}}
+        raw = {"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}}
         client.poll_run.return_value = RunResult(status="FAILED", raw=raw)
         self._setup_happy_path_dispatch(monkeypatch)
         with pytest.raises(DispatchRunFailedError, match="'FAILED'"):

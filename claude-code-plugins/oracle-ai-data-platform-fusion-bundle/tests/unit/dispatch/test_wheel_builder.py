@@ -121,7 +121,13 @@ class TestBuildWheelCache:
         with self._patch_build_subprocess() as mock_run:
             wheel = build_wheel(plugin_checkout=checkout, cache_dir=cache_dir)
         assert wheel.exists()
-        assert wheel.parent == cache_dir
+        # Cache layout: <cache_dir>/<hash>/<original-wheel-name>.whl
+        # Per-hash subdirectory preserves the PEP-427-conformant wheel
+        # filename pip's installer requires; a renamed wheel like
+        # `<name>-<hash>.whl` would be rejected with "Invalid wheel
+        # filename (wrong number of parts)".
+        assert wheel.parent.parent == cache_dir
+        assert wheel.name.endswith(".whl")
         assert mock_run.call_count == 1
 
     def test_second_build_uses_cache(self, tmp_path: Path) -> None:

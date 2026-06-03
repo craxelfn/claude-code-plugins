@@ -89,14 +89,19 @@ def build_wheel(
     cache_dir = cache_dir if cache_dir is not None else _DEFAULT_CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Namespace the cache by content hash via a per-hash subdirectory; keep
+    # the wheel's original filename inside. Pip's wheel filename grammar
+    # (PEP 427) requires `name-version-py_tag-abi-platform.whl` — if we
+    # rename the wheel to embed the hash directly, `pip install --target`
+    # rejects it with "Invalid wheel filename (wrong number of parts)".
     source_hash = _compute_source_hash(plugin_checkout)
-    cached_wheel = cache_dir / (
-        f"oracle_ai_data_platform_fusion_bundle-{source_hash}.whl"
-    )
+    hash_dir = cache_dir / source_hash
 
-    if cached_wheel.exists() and not force_rebuild:
-        log(f"wheel cache hit: {cached_wheel.name}")
-        return cached_wheel
+    if hash_dir.exists() and not force_rebuild:
+        cached_wheels = sorted(hash_dir.glob("*.whl"))
+        if cached_wheels:
+            log(f"wheel cache hit: {source_hash}/{cached_wheels[0].name}")
+            return cached_wheels[0]
 
     log(f"wheel cache miss (hash={source_hash}); running `python -m build`")
     with tempfile.TemporaryDirectory(prefix="aidp-wheel-build-") as tmpdir:
@@ -121,8 +126,10 @@ def build_wheel(
                 f"`python -m build` returned rc=0 but no .whl found in {outdir}"
             )
         # `python -m build` produces exactly one wheel per --wheel run.
+        hash_dir.mkdir(parents=True, exist_ok=True)
+        cached_wheel = hash_dir / built_wheels[0].name
         shutil.copy2(built_wheels[0], cached_wheel)
-        log(f"wheel cached: {cached_wheel.name}")
+        log(f"wheel cached: {source_hash}/{cached_wheel.name}")
         return cached_wheel
 
 

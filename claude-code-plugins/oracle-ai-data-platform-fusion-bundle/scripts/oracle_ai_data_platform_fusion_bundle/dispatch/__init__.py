@@ -188,8 +188,13 @@ def dispatch_via_rest(
     log(f"notebook uploaded to {notebook_path}")
 
     # ---- Create job + submit run ----------------------------------------
-    job_name = f"aidp-fusion-bundle-{config.project}-{env_name}-{int(time.time())}"
-    task_key = "orchestrator-run"
+    # AIDP job-name rule (empirical): letters, underscores, slashes only.
+    # No hyphens, no dots. Sanitize the project + env tokens; suffix with
+    # epoch seconds so resubmits don't collide.
+    _safe_proj = "".join(c if c.isalnum() or c == "_" else "_" for c in config.project)
+    _safe_env = "".join(c if c.isalnum() or c == "_" else "_" for c in env_name)
+    job_name = f"aidp_fusion_bundle_{_safe_proj}_{_safe_env}_{int(time.time())}"
+    task_key = "orchestrator_run"
     try:
         job_key = client.create_notebook_job(
             name=job_name,
