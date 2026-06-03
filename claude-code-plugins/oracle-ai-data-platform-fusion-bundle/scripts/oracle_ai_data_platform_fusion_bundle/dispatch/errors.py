@@ -101,6 +101,25 @@ class DispatchMarkerMissingError(DispatchError):
     code: ClassVar[str] = "DISPATCH_MARKER_MISSING"
 
 
+class DispatchMarkerDegradedError(DispatchError):
+    """Marker delimiters found in the executed notebook but the body
+    failed ``json.loads`` (typically the TC27 trap — AIDP's
+    ``display_data text/plain`` capture strips JSON escapes from
+    failed-step ``repr(exc)``). ``parse_marker`` recovered a run_id via
+    regex fallback so the operator can pass ``--resume <id>`` back to
+    the same CLI without grepping the executed notebook.
+
+    ``recovered_run_id`` is also surfaced in the message so it appears
+    in the CLI's red error block.
+    """
+
+    code: ClassVar[str] = "DISPATCH_MARKER_DEGRADED"
+
+    def __init__(self, message: str, *, recovered_run_id: str) -> None:
+        super().__init__(message)
+        self.recovered_run_id = recovered_run_id
+
+
 __all__ = [
     "DispatchAuthError",
     "DispatchClusterNotActiveError",
@@ -108,6 +127,7 @@ __all__ = [
     "DispatchError",
     "DispatchFetchOutputError",
     "DispatchJobSubmitError",
+    "DispatchMarkerDegradedError",
     "DispatchMarkerMissingError",
     "DispatchPollTimeoutError",
     "DispatchPreflightError",

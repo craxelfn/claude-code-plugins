@@ -11,8 +11,10 @@ Differences from the TC26 template:
   ``summary.to_marker_dict()`` (NOT a hand-rolled subset dict —
   hand-rolled dicts drift from the schema and break
   ``RunSummary.from_marker_dict`` laptop-side).
-- ``resume_run_id`` is NOT a parameter — it's hardcoded to ``None`` in
-  the run cell. Resume-over-REST is tracked as ``P1.5ε-fix5`` follow-up.
+- ``resume_run_id`` is a ``str | None`` parameter on ``build_notebook``,
+  injected into the run cell as a ``repr()``-quoted literal (same shape
+  as ``mode`` / ``datasets`` / ``layers``). ``None`` means a fresh run;
+  a string is the run_id to resume against ``fusion_bundle_state``.
 
 The notebook contract is the **only** boundary between the laptop-side
 dispatcher and the cluster-side orchestrator. Adding a new orchestrator
@@ -108,6 +110,7 @@ def _build_run_cell(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
+    resume_run_id: str | None,
 ) -> str:
     return (
         f"import json, time\n"
@@ -119,7 +122,7 @@ def _build_run_cell(
         f"    datasets={datasets!r},\n"
         f"    layers={layers!r},\n"
         f"    dry_run=False,\n"
-        f"    resume_run_id=None,\n"
+        f"    resume_run_id={resume_run_id!r},\n"
         f")\n"
         f"_twall = time.time() - _tstart\n"
         f'print(f"run_id={{summary.run_id}}")\n'
@@ -194,6 +197,7 @@ def build_notebook(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
+    resume_run_id: str | None = None,
     bicc_secret_name: str = "fusion_bicc_password",
     bicc_secret_key: str = "password",
     title: str = "P1.5ε dispatch",
@@ -210,9 +214,10 @@ def build_notebook(
       4. **verify** — query ``fusion_bundle_state`` + count silver/gold
          audit-col matches for the run_id.
 
-    The run cell injects ``mode`` / ``datasets`` / ``layers`` as literals
-    (via ``repr()``). ``resume_run_id`` is hardcoded to ``None`` — REST-
-    dispatch resume is out of scope in this PR.
+    The run cell injects ``mode`` / ``datasets`` / ``layers`` /
+    ``resume_run_id`` as literals (via ``repr()``). ``resume_run_id``
+    defaults to ``None`` (fresh run); pass the operator-supplied run_id
+    to resume against the cluster-side ``fusion_bundle_state``.
 
     Returns an nbformat-4 dict ready to pass to
     :meth:`AidpRestClient.upload_notebook`.
@@ -228,7 +233,10 @@ def build_notebook(
             )
         ),
         _code_cell(
-            _build_run_cell(mode=mode, datasets=datasets, layers=layers)
+            _build_run_cell(
+                mode=mode, datasets=datasets, layers=layers,
+                resume_run_id=resume_run_id,
+            )
         ),
         _code_cell(_build_verify_cell()),
     ]

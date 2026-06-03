@@ -27,6 +27,7 @@ from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
     DispatchAuthError,
     DispatchFetchOutputError,
     DispatchJobSubmitError,
+    DispatchMarkerDegradedError,
     DispatchMarkerMissingError,
     DispatchPreflightError,
     DispatchRunFailedError,
@@ -141,6 +142,27 @@ def _executed_notebook_with_marker(payload: dict) -> str:
     return json.dumps(notebook)
 
 
+def _executed_notebook_with_malformed_marker_body(body: str) -> str:
+    """P1.5ε-fix5: build a JSON-string fetchOutput response carrying a
+    raw (pre-AIDP-display_data-stripping) malformed marker body. Used
+    to exercise parse_marker's regex fallback through dispatch_via_rest
+    end-to-end."""
+    marker_text = (
+        f"AIDP_LIVE_TEST_RESULT_BEGIN {body} AIDP_LIVE_TEST_RESULT_END"
+    )
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "outputs": [
+                    {"output_type": "stream", "name": "stdout", "text": marker_text}
+                ],
+            }
+        ]
+    }
+    return json.dumps(notebook)
+
+
 @pytest.fixture(autouse=True)
 def _stub_preflight_and_oci(monkeypatch: pytest.MonkeyPatch):
     """All-pass Phase A by default — individual tests can override."""
@@ -202,6 +224,7 @@ def _stub_client(monkeypatch, **overrides):
     factory = MagicMock(return_value=client_mock)
     factory.parse_marker = RealAidpRestClient.parse_marker
     factory.resolve_task_run_key = RealAidpRestClient.resolve_task_run_key
+    factory.extract_cell_errors = RealAidpRestClient.extract_cell_errors
     monkeypatch.setattr(
         "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient",
         factory,
@@ -410,6 +433,383 @@ class TestHappyPath:
         client.submit_run.assert_called_once()
         client.poll_run.assert_called_once()
         client.fetch_output.assert_called_once_with("task-run-key-1")
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — resume_run_id threading
+# ---------------------------------------------------------------------------
+
+
+class TestResumeRunIdThreading:
+    def test_dispatch_via_rest_threads_resume_run_id_into_build_notebook(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5ε-fix5: dispatch_via_rest forwards resume_run_id into
+        build_notebook so the run-cell can inject it as a repr()-quoted
+        literal. Verified via a MagicMock that captures the kwarg."""
+        _stub_client(monkeypatch)
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            lambda **_: Path("/tmp/fake.whl"),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_build_notebook(**kwargs):
+            captured.update(kwargs)
+            return {"cells": [], "nbformat": 4, "nbformat_minor": 5}
+
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            fake_build_notebook,
+        )
+
+        dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="phase-2-abc-123",
+        )
+        assert captured.get("resume_run_id") == "phase-2-abc-123"
+
+    def test_dispatch_via_rest_dry_run_with_resume_run_id_no_op(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5ε-fix5: dry_run short-circuits before notebook generation,
+        so resume_run_id is accepted (kwarg shape) but never reaches
+        build_notebook. The CLI-level test_dry_run_with_resume_omits_banner
+        locks the banner-omission side; this test locks the dispatch-side
+        short-circuit ordering."""
+        _stub_client(monkeypatch)
+        build_nb_mock = MagicMock(
+            side_effect=AssertionError(
+                "build_notebook must not be called in dry-run"
+            )
+        )
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            build_nb_mock,
+        )
+        summary = dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="some-id",
+            dry_run=True,
+        )
+        # short-circuit before notebook generation
+        build_nb_mock.assert_not_called()
+        # dry-run still produces a RunSummary.empty(...) with plan nodes
+        assert isinstance(summary, RunSummary)
+        assert summary.steps == ()
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — DispatchMarkerDegradedError (regex fallback end-to-end)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerDegradedHandling:
+    def _setup_happy_path_dispatch(self, monkeypatch):
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            lambda **_: Path("/tmp/fake.whl"),
+        )
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            lambda **_: {"cells": [], "nbformat": 4, "nbformat_minor": 5},
+        )
+
+    def test_dispatch_via_rest_marker_degraded_raises_typed_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """TC27-shaped trap end-to-end: fetchOutput returns an executed
+        notebook with a marker whose body is unparseable JSON (failed
+        step's repr(exc) with AIDP-stripped quote escapes) but still
+        contains a regex-recoverable ``run_id``. dispatch_via_rest
+        raises DispatchMarkerDegradedError carrying the recovered
+        run_id in the message + ``.recovered_run_id`` attr."""
+        client = _stub_client(monkeypatch)
+        self._setup_happy_path_dispatch(monkeypatch)
+        # Malformed body matching the TC27 narrative — nested unescaped
+        # quotes inside an error_message field.
+        malformed_body = (
+            '{"run_id":"phase-2-recovered","steps":['
+            '{"error_message":"RuntimeError("induced fail")"}'
+            ']}'
+        )
+        client.fetch_output.return_value = (
+            _executed_notebook_with_malformed_marker_body(malformed_body)
+        )
+        with pytest.raises(DispatchMarkerDegradedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        assert exc_info.value.recovered_run_id == "phase-2-recovered"
+        msg = str(exc_info.value)
+        assert "DISPATCH_MARKER_DEGRADED" in msg
+        assert "phase-2-recovered" in msg
+        assert "--resume phase-2-recovered" in msg
+
+    def test_dispatch_via_rest_marker_unrecoverable_raises_missing_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the marker body is unparseable AND the regex can't find
+        a run_id, fall through to ``DispatchMarkerMissingError`` —
+        existing pre-fix5 behavior preserved for the unrecoverable
+        case."""
+        client = _stub_client(monkeypatch)
+        self._setup_happy_path_dispatch(monkeypatch)
+        # Malformed body with no run_id field.
+        malformed_body = (
+            '{"steps":[{"error_message":"RuntimeError("induced fail")"}]}'
+        )
+        client.fetch_output.return_value = (
+            _executed_notebook_with_malformed_marker_body(malformed_body)
+        )
+        with pytest.raises(DispatchMarkerMissingError):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 Step 8 — cell-error enrichment on non-SUCCESS terminal status
+# ---------------------------------------------------------------------------
+# When orchestrator.run(...) raises (e.g., bad --resume id), the run cell
+# fails before marker emit. dispatch_via_rest hits the
+# `result.status != "SUCCESS"` branch and previously surfaced a generic
+# DispatchRunFailedError. fix5 enriches that message with the cell-3
+# ename/evalue extracted via AidpRestClient.extract_cell_errors so the
+# operator sees the typed orchestrator exception class directly.
+#
+# Test evalue strings are copied verbatim from the orchestrator-side
+# raise sites:
+#   - state.py:954-955  → ResumeRunNotFoundError
+#   - state.py:964-972  → ResumeRunNotResumableError
+#   - resume.py:221 (via orchestrator/__init__.py:1040)
+#                       → ResumeBundleMismatchError
+
+
+def _executed_notebook_with_cell3_error(ename: str, evalue: str) -> str:
+    """Build a fetchOutput-shaped JSON string with a cell-3 error
+    output mimicking what AIDP produces when orchestrator.run raises."""
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "outputs": []},
+            {"cell_type": "code", "outputs": []},  # install (1)
+            {"cell_type": "code", "outputs": []},  # creds (2)
+            {
+                "cell_type": "code",
+                "outputs": [
+                    {
+                        "output_type": "error",
+                        "ename": ename,
+                        "evalue": evalue,
+                        "traceback": [],
+                    }
+                ],
+            },
+        ]
+    }
+    return json.dumps(notebook)
+
+
+class TestRunFailedCellErrorEnrichment:
+    def _setup(self, monkeypatch):
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            lambda **_: Path("/tmp/fake.whl"),
+        )
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            lambda **_: {"cells": [], "nbformat": 4, "nbformat_minor": 5},
+        )
+
+    def test_run_failed_enriched_with_resume_run_not_found_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """state.py:954-955 — `--resume: no rows in fusion_bundle_state
+        for run_id='bad-id'.` This is the primary bad-`--resume` UX
+        path that fix5 unblocks."""
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = _executed_notebook_with_cell3_error(
+            "ResumeRunNotFoundError",
+            "--resume: no rows in fusion_bundle_state for run_id='bad-id'. ",
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+                resume_run_id="bad-id",
+            )
+        msg = str(exc_info.value)
+        assert "ResumeRunNotFoundError" in msg
+        assert "--resume: no rows in fusion_bundle_state" in msg
+        assert "'bad-id'" in msg
+
+    def test_run_failed_enriched_with_resume_not_resumable_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """state.py:964-972 — `--resume: run_id='bad-id' is not
+        resumable — ...` (distinct from ResumeBundleMismatchError
+        which is raised from orchestrator/__init__.py:1040 via
+        resume.render_drift_error)."""
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = _executed_notebook_with_cell3_error(
+            "ResumeRunNotResumableError",
+            "--resume: run_id='bad-id' is not resumable — ",
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+                resume_run_id="bad-id",
+            )
+        msg = str(exc_info.value)
+        assert "ResumeRunNotResumableError" in msg
+        assert "--resume: run_id='bad-id' is not resumable" in msg
+
+    def test_run_failed_enriched_with_resume_bundle_mismatch_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """resume.py:221 → `--resume: bundle drift detected against
+        run_id='bad-id'. Either re-run from scratch...`. Distinct from
+        ResumeRunNotResumableError — different message shape, different
+        raise site."""
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = _executed_notebook_with_cell3_error(
+            "ResumeBundleMismatchError",
+            "--resume: bundle drift detected against run_id='bad-id'. "
+            "Either re-run from scratch with the current bundle, or "
+            "revert the bundle to match the original run.",
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+                resume_run_id="bad-id",
+            )
+        msg = str(exc_info.value)
+        assert "ResumeBundleMismatchError" in msg
+        assert "bundle drift detected against run_id='bad-id'" in msg
+
+    def test_run_failed_no_cell_error_falls_back_to_generic_message(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Defensive — if the executed notebook has no cell-3 error
+        (shouldn't happen for terminal FAILED, but the enricher must
+        not crash), the original generic ``reached terminal status``
+        message shape is preserved."""
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        # Notebook with empty cell outputs — no cell errors anywhere.
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"outputs": []} for _ in range(5)]}
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        assert "reached terminal status" in msg
+        assert "'FAILED'" in msg
+        # No `cell 3 error:` suffix when no cell error was found.
+        assert "cell 3 error:" not in msg
+
+    def test_run_failed_extract_cell_errors_raises_falls_back_silently(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Best-effort: any exception thrown by extract_cell_errors is
+        swallowed so the original DispatchRunFailedError surface stays
+        intact. Same pattern as fix8's _diagnose_partial_progress."""
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = json.dumps({"cells": []})
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient.extract_cell_errors",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                RuntimeError("diagnostic blew up")
+            ),
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        # Generic message intact — enrichment failure didn't mask the
+        # underlying DISPATCH_RUN_FAILED surface.
+        msg = str(exc_info.value)
+        assert "reached terminal status" in msg
+        assert "diagnostic blew up" not in msg
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
     DispatchError,
     DispatchFetchOutputError,
     DispatchJobSubmitError,
+    DispatchMarkerDegradedError,
     DispatchMarkerMissingError,
     DispatchPollTimeoutError,
     DispatchPreflightError,
@@ -81,8 +82,37 @@ def test_all_subclasses_are_dispatch_error() -> None:
         DispatchRunFailedError,
         DispatchFetchOutputError,
         DispatchMarkerMissingError,
+        DispatchMarkerDegradedError,
     ]:
         assert issubclass(cls, DispatchError)
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — DispatchMarkerDegradedError code + str shape
+# ---------------------------------------------------------------------------
+# Separate test because the ctor requires keyword-only ``recovered_run_id``
+# (the parametrize lists above call ``cls("anything")``, which doesn't fit).
+
+
+def test_marker_degraded_code_stability() -> None:
+    """SemVer contract — DISPATCH_MARKER_DEGRADED is grepped by operator
+    tooling and the typed error class is constructed by
+    ``dispatch_via_rest`` on the TC27 marker-parse trap path."""
+    assert DispatchMarkerDegradedError.code == "DISPATCH_MARKER_DEGRADED"
+    err = DispatchMarkerDegradedError(
+        "the message body", recovered_run_id="abc-123",
+    )
+    assert err.code == "DISPATCH_MARKER_DEGRADED"
+    assert err.recovered_run_id == "abc-123"
+
+
+def test_marker_degraded_str_prefixes_code() -> None:
+    err = DispatchMarkerDegradedError(
+        "the message body", recovered_run_id="abc-123",
+    )
+    s = str(err)
+    assert s.startswith("[DISPATCH_MARKER_DEGRADED]")
+    assert "the message body" in s
 
 
 def test_dispatch_error_is_not_a_value_error() -> None:

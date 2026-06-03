@@ -17,6 +17,7 @@ import oci
 import pytest
 
 from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+    AidpRestClient,
     AidpRestError,
     _build_signer,
 )
@@ -232,3 +233,85 @@ class TestFetchOutputTimeout:
             client.fetch_output("task-run-key-1")
         _, kwargs = spy.call_args
         assert kwargs.get("timeout") is None
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix5 — parse_marker regex fallback for the TC27 trap
+# ---------------------------------------------------------------------------
+# Background (TC27 known fragility): the orchestrator emits its marker via
+# print(json.dumps(...)) on the cluster. When the run includes a failed
+# step, the payload contains error_message=repr(exc) (= 'RuntimeError("…")'
+# with nested quotes). AIDP's notebook runtime captures stdout into
+# display_data text/plain and strips JSON-escape backslashes from those
+# nested quotes, producing invalid JSON. parse_marker's regex fallback
+# recovers run_id so the operator can resume via --resume <id>.
+
+
+_MARKER_BEGIN = "AIDP_LIVE_TEST_RESULT_BEGIN"
+_MARKER_END = "AIDP_LIVE_TEST_RESULT_END"
+
+
+def _make_executed_notebook(body: str) -> dict:
+    """Wrap a marker body in a minimal executed-notebook dict shaped like
+    AIDP's fetchOutput response (text channel — bypasses display_data so
+    we control the body bytes exactly)."""
+    return {
+        "cells": [
+            {
+                "outputs": [
+                    {
+                        "text": f"{_MARKER_BEGIN} {body} {_MARKER_END}\n",
+                    }
+                ]
+            }
+        ]
+    }
+
+
+class TestParseMarkerRegexFallback:
+    def test_parse_marker_clean_json_unaffected(self) -> None:
+        """Regression lock — the fallback only activates after
+        ``json.loads`` fails. Clean JSON returns the parsed dict
+        directly (existing pre-fix5 behavior)."""
+        body = '{"run_id":"clean-abc","steps":[]}'
+        nb = _make_executed_notebook(body)
+        marker = AidpRestClient.parse_marker(
+            nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+        )
+        assert marker == {"run_id": "clean-abc", "steps": []}
+        assert marker is not None
+        assert "_marker_parse_failed" not in marker
+
+    def test_parse_marker_recovers_run_id_from_malformed_json(self) -> None:
+        """TC27-shaped trap — AIDP stripped the JSON-escape backslashes
+        from a failed step's error_message=repr(exc). The body is no
+        longer parseable JSON but still contains "run_id": "<id>". The
+        regex fallback recovers the run_id; the synthetic sentinel
+        signals the dispatcher to raise DispatchMarkerDegradedError."""
+        body = (
+            '{"run_id":"recovered-xyz","steps":['
+            '{"error_message":"RuntimeError("induced fail")"}'
+            ']}'
+        )
+        nb = _make_executed_notebook(body)
+        marker = AidpRestClient.parse_marker(
+            nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+        )
+        assert marker is not None
+        assert marker["run_id"] == "recovered-xyz"
+        assert marker["_marker_parse_failed"] is True
+        assert "RuntimeError" in marker["_raw_marker"]
+
+    def test_parse_marker_malformed_with_no_run_id_still_raises(self) -> None:
+        """If the regex also can't find a run_id, the original
+        ``json.JSONDecodeError`` propagates — the dispatcher's caller
+        still converts to ``DispatchMarkerMissingError`` (existing
+        behavior preserved for the unrecoverable case)."""
+        import json as _json
+
+        body = '{"steps":[{"error_message":"RuntimeError("oh no")"}]}'
+        nb = _make_executed_notebook(body)
+        with pytest.raises(_json.JSONDecodeError):
+            AidpRestClient.parse_marker(
+                nb, begin=_MARKER_BEGIN, end=_MARKER_END,
+            )

@@ -11,6 +11,7 @@ Empirically-confirmed REST shapes baked in. See
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -537,7 +538,22 @@ class AidpRestClient:
         end: str,
     ) -> dict[str, Any] | None:
         """Walk ``cells[*].outputs[*]`` of an executed notebook for a stdout
-        marker block. Returns the parsed JSON or None if absent."""
+        marker block. Returns the parsed JSON or None if absent.
+
+        P1.5ε-fix5 hardening: on ``json.JSONDecodeError`` against the
+        ``BEGIN..END`` body, attempt a regex extraction of ``run_id`` and
+        return a sentinel payload
+        ``{"run_id": "<id>", "_marker_parse_failed": True, "_raw_marker": ...}``
+        so the dispatcher can surface a typed
+        ``DispatchMarkerDegradedError`` carrying the resume handle.
+        Triggered by AIDP's ``display_data text/plain`` capture
+        stripping JSON escapes from failed-step ``repr(exc)`` (TC27).
+        Regex matches against the already-sliced ``BEGIN..END`` body
+        only — no false-positive surface beyond the marker block.
+        If the regex also can't find a ``run_id``, the original
+        ``json.JSONDecodeError`` propagates unchanged (caller still
+        raises ``DispatchMarkerMissingError``).
+        """
         for cell in executed_notebook.get("cells", []):
             for output in cell.get("outputs", []):
                 for src in ("text", "data"):
@@ -551,7 +567,20 @@ class AidpRestClient:
                     if begin in value:
                         b = value.index(begin) + len(begin)
                         e = value.index(end, b)
-                        return json.loads(value[b:e].strip())
+                        body = value[b:e].strip()
+                        try:
+                            return json.loads(body)
+                        except json.JSONDecodeError:
+                            m = re.search(
+                                r'"run_id"\s*:\s*"([^"]+)"', body,
+                            )
+                            if m is None:
+                                raise
+                            return {
+                                "run_id": m.group(1),
+                                "_marker_parse_failed": True,
+                                "_raw_marker": body[:2000],
+                            }
         return None
 
     @staticmethod

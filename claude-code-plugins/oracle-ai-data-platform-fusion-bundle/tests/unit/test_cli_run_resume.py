@@ -44,21 +44,29 @@ def test_resume_option_appears_in_help() -> None:
     assert "run_id" in result.output.lower() or "run id" in result.output.lower()
 
 
-def test_resume_without_inline_exits_2_with_clear_message(
+def test_resume_without_inline_threads_through_to_dispatch(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """The non-inline (REST dispatch) path is a stub; ``--resume`` is
-    only meaningful with ``--inline`` today. The CLI must reject
-    ``--resume`` without ``--inline`` with a clear message rather than
-    silently dispatching a non-resuming run."""
+    """P1.5ε-fix5: ``--resume`` is supported on the REST-dispatch path.
+    Previously rejected with exit 2 + "--inline required" hint. Now
+    threaded through to ``dispatch_via_rest(resume_run_id=...)`` and
+    the cyan ``Resuming run`` banner is printed before dispatching.
+    """
+    from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
     monkeypatch.chdir(tmp_path)
     _init_minimal_bundle(monkeypatch)
-    result = CliRunner().invoke(cli.main, [
-        "run", "--mode", "seed", "--resume", "some-run-id",
-    ])
-    assert result.exit_code == 2
-    assert "--resume" in result.output
-    assert "--inline" in result.output
+    with patch(
+        "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+        return_value=RunSummary.empty("test", "seed"),
+    ) as mock_dispatch:
+        result = CliRunner().invoke(cli.main, [
+            "run", "--mode", "seed", "--resume", "some-run-id",
+        ])
+    assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
+    assert mock_dispatch.call_args.kwargs["resume_run_id"] == "some-run-id"
+    assert "Resuming run" in result.output
+    assert "some-run-id" in result.output
 
 
 def test_resume_run_not_found_exits_2_no_traceback(
