@@ -137,6 +137,75 @@ Validates:
 - **Cluster-side creds + bundle write**: `aidputils.secrets.get(name="fusion_bicc_password", key="password")` returned a non-empty value (length=8); `BUNDLE_PATH.write_text(...)` succeeded; `from oracle_ai_data_platform_fusion_bundle import orchestrator` succeeded.
 - **`DISPATCH_TIMEOUT` boundary contract**: `poll_run`'s default `timeout_s=1800` deadline fired correctly; `AidpRestError("poll_run(...): deadline exceeded")` was message-classified by `dispatch_via_rest` and re-raised as `DispatchPollTimeoutError` with the right `DISPATCH_TIMEOUT` code. Exit 2, no traceback.
 
+## Probe 6 — BICC credential preflight fast-fail (P1.5ε-fix1, 2026-06-03)
+
+Added by `P1.5ε-fix1` post-ship follow-up. Captures the new Phase B check 6 firing live against `playground` when the configured `biccSecretName` doesn't match any entry in the AIDP credential store.
+
+**Step 0 prerequisite confirmed live**: the credential REST endpoint is `GET /aiDataPlatforms/<aidp-id>/credentials` (data-lake scope, NOT workspace-scoped). Full shape captured in `dev/RESEARCH_aidp_rest_api_probe_results.md` §11. The single-resource `GET /credentials/<key>` endpoint expects a UUID — looking up by display name 400s. So `check_credential_exists(name)` LISTs and walks `items[]`.
+
+**Preflight ordering** (reviewer-driven correction landed in commit `f577862`): credential check is **check 5** (runs BEFORE the cluster check) so a missing credential fast-fails without paying cluster cold-start. Cluster state is **check 6** and SKIPs when check 5 FAILs. The Probe 6a / 6b output below reflects this order — credential before cluster-state on every line.
+
+**6a. Happy path (credential present)** — sanity check that the new credential check PASSes when the configured secret matches an existing entry:
+
+```text
+PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
+PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+PASS OCI profile: API-key profile 'DEFAULT' loaded
+PASS AIDP control plane: reachable; 8 cluster(s) visible
+PASS BICC credential: credential 'fusion_bicc_password' present in AIDP store
+PASS cluster state: cluster '<REDACTED>' ACTIVE
+dry-run requested — skipping wheel build + upload + dispatch
+EXIT_CODE: 0
+```
+
+Latency: 6 sequential preflight checks complete in ~3-5s end-to-end (credential check itself is ~300ms — one signed LIST against a ~2-item collection).
+
+**6b. Missing-credential fast-fail (the load-bearing case)** — pointed `biccSecretName` at `this_entry_does_not_exist_in_aidp` (intentionally nonexistent). Re-captured after the credential-before-cluster reordering: cluster SKIPs once credential FAILs, so neither `start_cluster` nor `wait_cluster_active` is invoked even when the target cluster is STOPPED. Wall: **2.53s** (down from 4.77s in the pre-reorder draft of this evidence; with a STOPPED cluster the savings vs the original ordering would be ~5min).
+
+```text
+PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
+PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+PASS OCI profile: API-key profile 'DEFAULT' loaded
+PASS AIDP control plane: reachable; 8 cluster(s) visible
+FAIL BICC credential: AIDP credential entry 'this_entry_does_not_exist_in_aidp'
+not found in the data-lake credential store
+   → add a credential named 'this_entry_does_not_exist_in_aidp' with key 'password'
+     via the AIDP UI before running, OR change environments.<env>.biccSecretName
+     in aidp.config.yaml to match an existing entry
+SKIP cluster state: skipped — BICC credential check failed
+
+[DISPATCH_PREFLIGHT_FAILED] BICC credential: AIDP credential entry
+'this_entry_does_not_exist_in_aidp' not found in the data-lake credential store;
+→ add a credential named 'this_entry_does_not_exist_in_aidp' with key 'password'
+via the AIDP UI before running, OR change environments.<env>.biccSecretName in
+aidp.config.yaml to match an existing entry
+
+WALL: 2.53s
+EXIT: 2
+```
+
+**6c. Custom-key remediation** — same setup with `biccSecretKey: my_app_key` (locks the reviewer round-3 should-fix that the remediation must reference the configured key, not hardcoded `'password'`):
+
+```text
+FAIL BICC credential: AIDP credential entry 'this_does_not_exist' not found
+in the data-lake credential store
+   → add a credential named 'this_does_not_exist' with key 'my_app_key'
+     via the AIDP UI before running, OR change environments.<env>.biccSecretName
+     in aidp.config.yaml to match an existing entry
+SKIP cluster state: skipped — BICC credential check failed
+EXIT: 2
+```
+
+The `'my_app_key'` substring locks the wiring between `EnvSpec.bicc_secret_key` and the operator-facing hint — the credential REST endpoint can't validate individual keys (it lists/looks-up by displayName), so the remediation hint is the only signal the operator gets about which key to register.
+
+Validates (the entire `P1.5ε-fix1` acceptance, including reviewer round-3 corrections):
+
+- ✅ Fast-fail wall: **2.53s end-to-end** (down from 4.77s in the pre-reorder draft). Beats the planned `<2s for the check itself` claim — the check itself is ~300ms; the rest is the four cheaper Phase A + Phase B-check-4 probes that precede it. With a STOPPED cluster, the savings vs the original ordering is ~5min (cluster cold-start completely avoided since cluster SKIPs after credential FAIL).
+- ✅ Typed `DISPATCH_PREFLIGHT_FAILED` code prefix in the operator-facing red line — matches the existing taxonomy contract.
+- ✅ Remediation hint names the offending secret name AND the configured `biccSecretKey` AND the `environments.<env>.biccSecretName` config field — operator can fix without re-reading docs.
+- ✅ Exit code 2 (dispatch-layer error), no traceback.
+- ✅ Cluster check SKIPs cleanly when credential FAILs — no `start_cluster` / `wait_cluster_active` invoked. Locked in unit tests by `test_missing_credential_skips_cluster_check_and_does_not_start_stopped_cluster`.
+
 ## What's NOT in this evidence
 
 - **Marker payload round-trip on a successful run.** The cluster-side BICC extract for `erp_suppliers` ran past the laptop-side 1800s `poll_run` deadline on this tenant (still RUNNING when laptop timed out at 30:33 wall). BICC latency for `SupplierExtractPVO` against `saasfademo1` is independent of the dispatch layer; the marker-parse + `RunSummary.from_marker_dict` round-trip is covered exhaustively by the in-process unit tests in `tests/unit/dispatch/test_dispatch_via_rest.py` (synthetic marker payloads exercise every shape and edge case).

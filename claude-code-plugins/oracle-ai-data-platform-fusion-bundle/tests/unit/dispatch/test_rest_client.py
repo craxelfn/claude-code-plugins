@@ -150,3 +150,85 @@ class TestBuildSignerSessionTokenProfile:
         # Token actually got read despite the ~-relative config value.
         args, _ = mock_signer.call_args
         assert args[0] == "real-token"
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix8 — per-call timeout kwarg on get_run + fetch_output
+# ---------------------------------------------------------------------------
+#
+# The underlying _request(..., timeout=...) already supports it; these tests
+# lock that the public methods plumb the kwarg through cleanly so the
+# diagnose-on-timeout enrichment in dispatch_via_rest can bound each
+# diagnostic HTTP call. Without the kwarg, time.monotonic() budgets are
+# meaningless against a blocking requests call.
+
+
+def _make_client():
+    """Build a client without touching ~/.oci/config."""
+    from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+        AidpRestClient,
+    )
+
+    with (
+        patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.rest_client.oci.config.from_file",
+            return_value={
+                "tenancy": "t",
+                "user": "u",
+                "fingerprint": "f",
+                "key_file": "/tmp/k",
+            },
+        ),
+        patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.rest_client.oci.signer.Signer",
+            return_value=MagicMock(),
+        ),
+    ):
+        return AidpRestClient(
+            region="us-ashburn-1",
+            aidp_id="ocid1.datalake.oc1.iad.test",
+            workspace_key="00000000-0000-0000-0000-000000000000",
+        )
+
+
+class TestGetRunTimeout:
+    def test_get_run_forwards_timeout_to_underlying_request(self) -> None:
+        client = _make_client()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"state": {"status": "RUNNING"}}
+        with patch.object(client, "_request", return_value=mock_resp) as spy:
+            client.get_run("run-key-1", timeout=5)
+        _, kwargs = spy.call_args
+        assert kwargs.get("timeout") == 5
+
+    def test_get_run_default_timeout_is_none(self) -> None:
+        """Locks the back-compat contract: no `timeout=` → `None` forwarded
+        so `_request` falls back to ``self.request_timeout_s``. Existing
+        callers (`poll_run`, skill consumers) keep today's behavior."""
+        client = _make_client()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"state": {"status": "RUNNING"}}
+        with patch.object(client, "_request", return_value=mock_resp) as spy:
+            client.get_run("run-key-1")
+        _, kwargs = spy.call_args
+        assert kwargs.get("timeout") is None
+
+
+class TestFetchOutputTimeout:
+    def test_fetch_output_forwards_timeout_to_underlying_request(self) -> None:
+        client = _make_client()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"data": [{"value": '{"cells":[]}'}]}
+        with patch.object(client, "_request", return_value=mock_resp) as spy:
+            client.fetch_output("task-run-key-1", timeout=5)
+        _, kwargs = spy.call_args
+        assert kwargs.get("timeout") == 5
+
+    def test_fetch_output_default_timeout_is_none(self) -> None:
+        client = _make_client()
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"data": [{"value": '{"cells":[]}'}]}
+        with patch.object(client, "_request", return_value=mock_resp) as spy:
+            client.fetch_output("task-run-key-1")
+        _, kwargs = spy.call_args
+        assert kwargs.get("timeout") is None

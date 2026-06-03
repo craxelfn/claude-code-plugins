@@ -221,6 +221,42 @@ class AidpRestClient:
                 )
         raise AidpRestError(f"no workspace with displayName={display_name!r}")
 
+    # ---- Credential store (P1.5ε-fix1 — Phase B preflight check 6) -------
+
+    def check_credential_exists(
+        self,
+        display_name: str,
+        *,
+        timeout: int | None = None,
+    ) -> bool:
+        """Return True iff a credential with the given ``display_name``
+        exists in the AIDP credential store for the current data-lake.
+
+        **Per-AIDP scope, NOT per-workspace** (empirically confirmed
+        2026-06-03 — see ``dev/RESEARCH_aidp_rest_api_probe_results.md``
+        §11). All workspaces under the same ``aiDataPlatformId`` share
+        one credential store.
+
+        Implementation note: the per-resource ``GET /credentials/<key>``
+        endpoint expects a UUID, not a display name (it 400s with
+        ``Invalid credentialV2Key`` on names). So this primitive LISTs
+        and walks ``items[]``. Today's tenant has ~2 entries — LIST cost
+        is dominated by network RTT, not body size.
+
+        Future pagination: if AIDP downstream adds a ``nextPage`` token,
+        follow it transparently. No paginated response observed today.
+
+        Raises :class:`AidpRestError` on any non-2xx (transport / IAM /
+        endpoint-shape regression). Distinct from "credential not found"
+        which returns ``False`` cleanly.
+        """
+        r = self._request(
+            "GET", f"{self.datalake_base}/credentials", timeout=timeout
+        )
+        body = self._ok(r, context="list_credentials")
+        items = body.get("items", []) if isinstance(body, dict) else []
+        return any(it.get("displayName") == display_name for it in items)
+
     def list_clusters(self) -> list[ClusterSummary]:
         r = self._request("GET", f"{self.base}/clusters")
         d = self._ok(r, context="list_clusters")
@@ -386,8 +422,18 @@ class AidpRestClient:
         self._log("jobRun_submitted", jobRunKey=run_key)
         return run_key
 
-    def get_run(self, run_key: str) -> dict[str, Any]:
-        r = self._request("GET", f"{self.base}/jobRuns/{run_key}")
+    def get_run(
+        self, run_key: str, *, timeout: int | None = None
+    ) -> dict[str, Any]:
+        """``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
+        timeout override; default ``None`` falls back to
+        ``self.request_timeout_s`` (today's behavior). Used by
+        ``dispatch_via_rest``'s post-timeout enrichment to bound the
+        diagnostic round-trip; existing call sites pass nothing → no
+        behavior change."""
+        r = self._request(
+            "GET", f"{self.base}/jobRuns/{run_key}", timeout=timeout
+        )
         return self._ok(r, context=f"get_run({run_key})")
 
     TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -445,17 +491,30 @@ class AidpRestClient:
             f"taskRunSummaryMap keys={list(summary_map.keys())}"
         )
 
-    def fetch_output(self, task_run_key: str, *, output_key: str = "") -> str:
+    def fetch_output(
+        self,
+        task_run_key: str,
+        *,
+        output_key: str = "",
+        timeout: int | None = None,
+    ) -> str:
         """Fetch the executed-notebook JSON string for a task run.
 
         ``output_key`` must be ``""`` (empty string) for notebook tasks —
         ``"main"`` returns a misleading 404. The notebook JSON lands at
         ``data[0].value`` (NOT ``data[0].content``).
+
+        ``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
+        timeout override; default ``None`` falls back to
+        ``self.request_timeout_s`` (today's behavior). Used by
+        ``dispatch_via_rest``'s post-timeout enrichment to bound the
+        diagnostic round-trip.
         """
         r = self._request(
             "POST",
             f"{self.base}/taskRuns/{task_run_key}/actions/fetchOutput",
             json_body={"outputKey": output_key},
+            timeout=timeout,
         )
         if r.status_code != 200:
             raise AidpRestError(

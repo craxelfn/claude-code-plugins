@@ -143,9 +143,23 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "plane, cluster state) and returns an empty RunSummary. No wheel "
          "build, no notebook upload, no job submission.",
 )
+@click.option(
+    "--poll-timeout", "poll_timeout_s",
+    type=click.IntRange(60, 14400),
+    default=3600,
+    show_default=True,
+    help="Seconds to wait for the dispatched cluster job to reach a terminal "
+         "status before raising DISPATCH_TIMEOUT. Default 3600 (1h) covers "
+         "cold-cache BICC extracts on slow tenants — the 1800s (30m) default "
+         "from P1.5ε was insufficient per TC29 evidence on saasfademo1. Bump "
+         "to 14400 (4h) for first-time seed runs against especially slow "
+         "Fusion pods. Below 60s rejected at parse — anything that short is "
+         "operator error. Only meaningful for REST dispatch (no --inline).",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
-        inline: bool, resume_run_id: str | None, dry_run: bool) -> None:
+        inline: bool, resume_run_id: str | None, dry_run: bool,
+        poll_timeout_s: int) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -158,6 +172,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline=inline,
         resume_run_id=resume_run_id,
         dry_run=dry_run,
+        poll_timeout_s=poll_timeout_s,
         console=console,
     ))
 

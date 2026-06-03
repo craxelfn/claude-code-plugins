@@ -48,6 +48,7 @@ def run(
     inline: bool = False,
     resume_run_id: str | None = None,
     dry_run: bool = False,
+    poll_timeout_s: int = 3600,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -123,7 +124,7 @@ def run(
         return 2
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
-        dry_run, console,
+        dry_run, poll_timeout_s, console,
     )
 
 
@@ -188,6 +189,7 @@ def _run_via_aidp_dispatch(
     layers: list[str] | None,
     mode: str,
     dry_run: bool,
+    poll_timeout_s: int,
     console: Console,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
@@ -221,6 +223,7 @@ def _run_via_aidp_dispatch(
             datasets=datasets,
             layers=layers,
             dry_run=dry_run,
+            poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
         )
     except (DispatchError, OrchestratorConfigError) as exc:

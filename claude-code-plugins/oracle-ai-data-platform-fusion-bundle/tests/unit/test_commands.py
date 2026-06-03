@@ -211,6 +211,90 @@ class TestRun:
         assert kwargs["datasets"] == ["erp_suppliers"]
         assert kwargs["env_name"] == "dev"
 
+    # ------------------------------------------------------------------
+    # P1.5ε-fix7 — --poll-timeout flag
+    # ------------------------------------------------------------------
+
+    def test_poll_timeout_default_is_3600(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No --poll-timeout flag → default 3600 (1 h) propagated to
+        dispatch_via_rest. Bumped from P1.5ε's 1800 per TC29 evidence."""
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            return_value=RunSummary.empty("test", "seed"),
+        ) as mock_dispatch:
+            CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+        assert mock_dispatch.call_args.kwargs["poll_timeout_s"] == 3600
+
+    def test_poll_timeout_override_propagated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--poll-timeout 7200 reaches dispatch_via_rest(poll_timeout_s=7200)."""
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            return_value=RunSummary.empty("test", "seed"),
+        ) as mock_dispatch:
+            CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed", "--poll-timeout", "7200"]
+            )
+        assert mock_dispatch.call_args.kwargs["poll_timeout_s"] == 7200
+
+    def test_poll_timeout_below_min_rejected_at_click_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--poll-timeout 30 < 60 (min) → Click parse error, exits 2."""
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(
+            cli.main, ["run", "--mode", "seed", "--poll-timeout", "30"]
+        )
+        assert result.exit_code == 2
+        # Click's range-rejection message names the bound.
+        assert "60" in result.output
+
+    def test_poll_timeout_above_max_rejected_at_click_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--poll-timeout 99999 > 14400 (max) → Click parse error, exits 2."""
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(
+            cli.main, ["run", "--mode", "seed", "--poll-timeout", "99999"]
+        )
+        assert result.exit_code == 2
+        assert "14400" in result.output
+
+    def test_poll_timeout_help_text_mentions_default_and_slow_tenant(
+        self,
+    ) -> None:
+        """Locks the BACKLOG acceptance criterion that --poll-timeout's help
+        text mentions the default + the slow-tenant use case — not just a
+        bare flag declaration. Operator-actionable."""
+        result = CliRunner().invoke(cli.main, ["run", "--help"])
+        assert result.exit_code == 0
+        # Default value present (Click renders default via show_default=True).
+        assert "3600" in result.output
+        # Operator-meaningful context — covers BICC / slow / cold-cache /
+        # tenant. The plan asks for the slow-tenant rationale; any of these
+        # tokens evidences it.
+        assert any(
+            tok in result.output.lower()
+            for tok in ("slow", "tenant", "cold-cache", "bicc")
+        )
+
     def test_run_dispatch_error_exits_2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

@@ -577,3 +577,257 @@ class TestErrorWrapping:
                 datasets=None,
                 layers=None,
             )
+
+
+# ---------------------------------------------------------------------------
+# P1.5ε-fix8 — Partial-progress diagnose-on-timeout
+# ---------------------------------------------------------------------------
+
+
+def _executed_notebook_with_partial_progress() -> str:
+    """Return the JSON-string AIDP fetchOutput would yield for a run
+    where cells 1-2 have completed but cell 3 (orchestrator.run) is in
+    flight — matches the cluster-side shape captured live in TC29 Probe 4.
+    """
+    return json.dumps(
+        {
+            "cells": [
+                {"cell_type": "markdown", "outputs": [], "source": "# title"},
+                {
+                    "cell_type": "code",
+                    "outputs": [
+                        {
+                            "output_type": "display_data",
+                            "data": {
+                                "text/plain": "pip rc=0\nplugin installed to /tmp/x"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "cell_type": "code",
+                    "outputs": [
+                        {
+                            "output_type": "display_data",
+                            "data": {
+                                "text/plain": "FUSION_BICC_PASSWORD loaded (length=8)\norchestrator loaded"
+                            },
+                        }
+                    ],
+                },
+                # cell 3 — run cell, in flight (no outputs yet)
+                {"cell_type": "code", "outputs": []},
+                {"cell_type": "code", "outputs": []},
+            ]
+        }
+    )
+
+
+class TestDiagnoseOnTimeout:
+    def test_poll_timeout_with_partial_progress_enriches_message(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A poll_run deadline triggers opportunistic enrichment via
+        get_run + fetch_output. The DispatchPollTimeoutError message body
+        includes 'Partial progress at timeout:' plus per-cell summary
+        lines so the operator sees where the cluster job is stuck without
+        dropping into `oci raw-request`."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPollTimeoutError,
+        )
+
+        client = _stub_client(monkeypatch)
+        client.poll_run.side_effect = AidpRestError(
+            "poll_run(job-run-key-1): deadline exceeded after 60s"
+        )
+        client.fetch_output.return_value = _executed_notebook_with_partial_progress()
+        TestErrorWrapping()._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(DispatchPollTimeoutError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        assert "Partial progress at timeout:" in msg
+        # Per-cell summary takes the LAST non-empty output line so the
+        # operator sees the most recent print before things stopped
+        # flowing (e.g. "plugin installed to /tmp/x" is more actionable
+        # than the earlier "pip rc=0").
+        assert "cell 1:" in msg
+        assert "plugin installed" in msg
+        assert "cell 2:" in msg
+        assert "orchestrator loaded" in msg
+        # cell 3 (run cell) in flight — placeholder appears
+        assert "cell 3:" in msg
+        assert "<in flight or no output>" in msg
+
+    def test_poll_timeout_diagnostic_calls_use_bounded_timeout(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LOCKS the reviewer-driven invariant: each diagnostic HTTP call
+        passes a non-None ``timeout=`` kwarg <= _DIAG_BUDGET_S and >= 1.
+        Without per-call timeouts, a blocking HTTP call during enrichment
+        could consume `self.request_timeout_s` (60s default) regardless
+        of how much budget is "left" on the monotonic clock."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch import _DIAG_BUDGET_S
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPollTimeoutError,
+        )
+
+        client = _stub_client(monkeypatch)
+        client.poll_run.side_effect = AidpRestError(
+            "poll_run(job-run-key-1): deadline exceeded after 60s"
+        )
+        # Capture the kwargs each diagnostic call received.
+        get_run_calls: list[dict] = []
+        fetch_output_calls: list[dict] = []
+        client.get_run.side_effect = lambda *args, **kwargs: (
+            get_run_calls.append(kwargs)
+            or {"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}}
+        )
+        client.fetch_output.side_effect = lambda *args, **kwargs: (
+            fetch_output_calls.append(kwargs)
+            or _executed_notebook_with_partial_progress()
+        )
+        TestErrorWrapping()._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(DispatchPollTimeoutError):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        # Both diagnostic primitives must have been invoked.
+        assert len(get_run_calls) == 1, (
+            f"expected get_run called exactly once during enrichment; got {len(get_run_calls)}"
+        )
+        assert len(fetch_output_calls) == 1, (
+            f"expected fetch_output called exactly once during enrichment; got {len(fetch_output_calls)}"
+        )
+        # The invariant: both calls bounded by _DIAG_BUDGET_S, and >= 1
+        # (requests rejects timeout=0).
+        for call_kwargs in [get_run_calls[0], fetch_output_calls[0]]:
+            timeout = call_kwargs.get("timeout")
+            assert timeout is not None, (
+                f"diagnostic call missing `timeout=` kwarg; would block past "
+                f"_DIAG_BUDGET_S on a slow AIDP plane. kwargs={call_kwargs!r}"
+            )
+            assert 1 <= timeout <= _DIAG_BUDGET_S, (
+                f"diagnostic timeout out of bounds: {timeout} not in "
+                f"[1, {_DIAG_BUDGET_S}]"
+            )
+
+    def test_poll_timeout_with_get_run_timeout_failure_surfaces_clean(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Enrichment's get_run call raising (e.g. requests ReadTimeout
+        because the bounded `timeout=` fired) must NOT mask the original
+        DispatchPollTimeoutError. The diagnostic is best-effort."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPollTimeoutError,
+        )
+
+        client = _stub_client(monkeypatch)
+        client.poll_run.side_effect = AidpRestError(
+            "poll_run(job-run-key-1): deadline exceeded after 60s"
+        )
+        import requests as _requests
+
+        client.get_run.side_effect = _requests.exceptions.ReadTimeout(
+            "diagnostic call timed out"
+        )
+        TestErrorWrapping()._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(DispatchPollTimeoutError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        # Original deadline message preserved.
+        assert "deadline exceeded" in msg
+        # No "Partial progress" section — diagnostic failed, fall back clean.
+        assert "Partial progress at timeout:" not in msg
+        # No raw traceback / requests error masking the original signal.
+        assert "ReadTimeout" not in msg
+
+    def test_poll_timeout_with_fetch_output_failure_surfaces_clean(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same shape but the failure is in the second diagnostic call
+        (fetch_output). Original timeout still surfaces clean."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPollTimeoutError,
+        )
+
+        client = _stub_client(monkeypatch)
+        client.poll_run.side_effect = AidpRestError(
+            "poll_run(job-run-key-1): deadline exceeded after 60s"
+        )
+        client.get_run.return_value = {
+            "taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}
+        }
+        import requests as _requests
+
+        client.fetch_output.side_effect = _requests.exceptions.ReadTimeout(
+            "diagnostic call timed out"
+        )
+        TestErrorWrapping()._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(DispatchPollTimeoutError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        assert "deadline exceeded" in msg
+        assert "Partial progress at timeout:" not in msg
+
+    def test_poll_timeout_with_no_partial_output_still_surfaces(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fetch_output returns empty (notebook had no flushed outputs
+        yet). Don't emit a stray 'Partial progress' header with nothing
+        under it — just surface the clean DispatchPollTimeoutError."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPollTimeoutError,
+        )
+
+        client = _stub_client(monkeypatch)
+        client.poll_run.side_effect = AidpRestError(
+            "poll_run(job-run-key-1): deadline exceeded after 60s"
+        )
+        client.get_run.return_value = {
+            "taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}
+        }
+        client.fetch_output.return_value = ""
+        TestErrorWrapping()._setup_happy_path_dispatch(monkeypatch)
+        with pytest.raises(DispatchPollTimeoutError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        assert "deadline exceeded" in msg
+        assert "Partial progress at timeout:" not in msg
