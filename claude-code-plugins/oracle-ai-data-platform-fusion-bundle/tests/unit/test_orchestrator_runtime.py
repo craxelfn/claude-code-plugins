@@ -419,6 +419,34 @@ class TestRegistryInvariants:
             entry = get(spec.pvo_id)  # raises KeyError if missing
             assert entry.id == spec.pvo_id
 
+    def test_silver_dim_spec_includes_builder_from_dimensions_module(self) -> None:
+        """P1.5ε-fix9 — locks that the metadata+builder join in
+        ``orchestrator/registry.py`` wires each silver dim to the correct
+        builder. A typo in the ``_SILVER_BUILDERS`` dict (e.g. mapping
+        ``dim_supplier`` to ``dim_account.build``) silently produces a
+        broken pipeline at runtime; this test catches the misroute at
+        unit-test time.
+        """
+        from oracle_ai_data_platform_fusion_bundle.dimensions import (
+            dim_account,
+            dim_calendar,
+            dim_supplier,
+        )
+        assert registry.SILVER_DIMS["dim_supplier"].builder is dim_supplier.build
+        assert registry.SILVER_DIMS["dim_account"].builder is dim_account.build
+        assert registry.SILVER_DIMS["dim_calendar"].builder is dim_calendar.build
+
+    def test_gold_mart_spec_includes_builder_from_transforms_module(self) -> None:
+        """P1.5ε-fix9 — same builder-wiring lock for gold marts."""
+        from oracle_ai_data_platform_fusion_bundle.transforms.gold import (
+            ap_aging,
+            gl_balance,
+            supplier_spend,
+        )
+        assert registry.GOLD_MARTS["supplier_spend"].builder is supplier_spend.build
+        assert registry.GOLD_MARTS["gl_balance"].builder is gl_balance.build
+        assert registry.GOLD_MARTS["ap_aging"].builder is ap_aging.build
+
 
 # ---------------------------------------------------------------------------
 # _resolve_password (§4.9 + B5 + R3)

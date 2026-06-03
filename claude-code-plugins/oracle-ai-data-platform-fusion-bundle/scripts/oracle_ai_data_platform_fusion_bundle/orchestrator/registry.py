@@ -33,6 +33,14 @@ from oracle_ai_data_platform_fusion_bundle.schema.fusion_catalog import (
     CATALOG,
     PvoKind,
 )
+from oracle_ai_data_platform_fusion_bundle.schema.registry_metadata import (
+    BRONZE_EXTRACT_METADATA,
+    GOLD_MART_METADATA,
+    KNOWN_DEFERRED_DATASETS,
+    KNOWN_DEFERRED_DIMS,
+    KNOWN_DEFERRED_MARTS,
+    SILVER_DIM_METADATA,
+)
 from oracle_ai_data_platform_fusion_bundle.transforms.gold import (
     ap_aging,
     gl_balance,
@@ -156,7 +164,12 @@ class DeferredSpec:
 # Shipped registries — runnable today
 # ---------------------------------------------------------------------------
 
-# Hardcoded registries — append a new entry when shipping a new module.
+# Runnable registries — derived from ``schema.registry_metadata`` (the
+# neutral half of the data/behavior split) joined with the engine-side
+# builder callables. Adding a new shipped module means: (1) extend the
+# matching map in ``schema/registry_metadata.py``, (2) wire its builder
+# into ``_SILVER_BUILDERS`` / ``_GOLD_BUILDERS`` below, and (3) update
+# the snapshot test in ``tests/unit/schema/test_registry_metadata.py``.
 #
 # Bronze extracts are generic in *shape* (no build() function required), but
 # NOT every catalog entry is wireable here. Two constraints apply:
@@ -166,118 +179,56 @@ class DeferredSpec:
 #       entries with kind=PvoKind.OTBI are refused entirely.
 #   (b) The §8 invariant lint asserts every EXTRACT_PVO catalog entry is in
 #       BRONZE_EXTRACTS OR KNOWN_DEFERRED_DATASETS — catches drift at import.
+
 BRONZE_EXTRACTS: dict[str, BronzeExtractSpec] = {
-    "erp_suppliers":      BronzeExtractSpec("erp_suppliers",      "erp_suppliers"),
-    "ap_invoices":        BronzeExtractSpec("ap_invoices",        "ap_invoices"),
-    "ap_payments":        BronzeExtractSpec("ap_payments",        "ap_payments"),
-    "ar_invoices":        BronzeExtractSpec("ar_invoices",        "ar_invoices"),
-    "ar_receipts":        BronzeExtractSpec("ar_receipts",        "ar_receipts"),
-    "gl_coa":             BronzeExtractSpec("gl_coa",             "gl_coa"),
-    "gl_journal_lines":   BronzeExtractSpec("gl_journal_lines",   "gl_journal_lines"),
-    "gl_period_balances": BronzeExtractSpec("gl_period_balances", "gl_period_balances"),
-    "po_orders":          BronzeExtractSpec("po_orders",          "po_orders"),
-    "po_receipts":        BronzeExtractSpec("po_receipts",        "po_receipts"),
-    "scm_items":          BronzeExtractSpec("scm_items",          "scm_items"),
+    name: BronzeExtractSpec(dataset_id=md.dataset_id, pvo_id=md.pvo_id)
+    for name, md in BRONZE_EXTRACT_METADATA.items()
+}
+
+
+_SILVER_BUILDERS: dict[str, Callable[..., "DataFrame"]] = {
+    "dim_supplier": dim_supplier.build,
+    "dim_account":  dim_account.build,
+    "dim_calendar": dim_calendar.build,
 }
 
 SILVER_DIMS: dict[str, SilverDimSpec] = {
-    "dim_supplier": SilverDimSpec(
-        "dim_supplier",
-        builder=dim_supplier.build,
-        depends_on_bronze=("erp_suppliers",),
-        # Silver-side projection name (dim_supplier.py:107 emits
-        # `SEGMENT1 AS supplier_number`). MERGE ON clause matches against
-        # this column, not the bronze-side `SEGMENT1`.
-        natural_key="supplier_number",
-    ),
-    "dim_account": SilverDimSpec(
-        "dim_account",
-        builder=dim_account.build,
-        depends_on_bronze=("gl_coa",),
-        # Silver-side projection name (dim_account.py:247 emits
-        # `CAST(CodeCombinationCodeCombinationId AS BIGINT) AS account_id`).
-        natural_key="account_id",
-    ),
-    "dim_calendar": SilverDimSpec(
-        "dim_calendar",
-        builder=dim_calendar.build,
-        depends_on_bronze=(),  # calendar is parameter-driven, not bronze-driven
-        # Exempt — resolver returns None; never reaches the MERGE branch.
-        natural_key="",
-    ),
+    name: SilverDimSpec(
+        dataset_id=md.dataset_id,
+        builder=_SILVER_BUILDERS[name],
+        depends_on_bronze=md.depends_on_bronze,
+        natural_key=md.natural_key,
+    )
+    for name, md in SILVER_DIM_METADATA.items()
+}
+
+
+_GOLD_BUILDERS: dict[str, Callable[..., "DataFrame"]] = {
+    "supplier_spend": supplier_spend.build,
+    "gl_balance":     gl_balance.build,
+    "ap_aging":       ap_aging.build,
 }
 
 GOLD_MARTS: dict[str, GoldMartSpec] = {
-    "supplier_spend": GoldMartSpec(
-        "supplier_spend",
-        builder=supplier_spend.build,
-        depends_on_bronze=("ap_invoices",),
-        depends_on_silver=("dim_supplier",),
-        # P1.17 A1 verified 6-col grain at supplier_spend.py:157-163.
-        # Unused under V1 (incremental_capable=False routes through
-        # seed-shape); recorded for P1.17b's affected-keys + MERGE pattern.
-        natural_key=(
-            "vendor_id", "currency_code", "supplier_number",
-            "supplier_name", "business_relationship", "approval_status",
-        ),
-        incremental_capable=False,  # P1.17b will flip True
-    ),
-    "gl_balance": GoldMartSpec(
-        "gl_balance",
-        builder=gl_balance.build,
-        depends_on_bronze=("gl_period_balances",),
-        depends_on_silver=("dim_account",),
-        # Gold-side projection names matching gl_balance.py:291-300 grain
-        # (composite — TC23 verified). `translated_flag` is NULL on
-        # saasfademo1 (TC23 row 151) — see LIMITS.md P1.17-L8 for the
-        # NULL-component MERGE caveat. Builder uses NULL-safe `<=>` on
-        # this column in the incremental MERGE ON predicate.
-        natural_key=(
-            "ledger_id", "account_id", "period_year", "period_num",
-            "currency_code", "actual_flag", "translated_flag",
-        ),
-        incremental_capable=True,  # row-level, V1 ships incremental MERGE
-    ),
-    "ap_aging": GoldMartSpec(
-        "ap_aging",
-        builder=ap_aging.build,
-        depends_on_bronze=("ap_invoices",),
-        depends_on_silver=("dim_supplier",),
-        # P1.17 A1 verified 6-col grain at ap_aging.py:495-501. Unused
-        # under V1 (incremental_capable=False routes through seed-shape
-        # per B3b — CURRENT_DATE()-anchored buckets age daily).
-        natural_key=(
-            "vendor_id", "currency_code", "supplier_number",
-            "supplier_name", "business_relationship", "aging_bucket",
-        ),
-        incremental_capable=False,  # CURRENT_DATE()-anchored buckets; post-P1.17 P3.x
-    ),
+    name: GoldMartSpec(
+        dataset_id=md.dataset_id,
+        builder=_GOLD_BUILDERS[name],
+        depends_on_bronze=md.depends_on_bronze,
+        depends_on_silver=md.depends_on_silver,
+        natural_key=md.natural_key,
+        incremental_capable=md.incremental_capable,
+    )
+    for name, md in GOLD_MART_METADATA.items()
 }
 
 
 # ---------------------------------------------------------------------------
-# Deferred registries — names that resolve to DeferredSpec
+# Deferred registries — re-exported from schema.registry_metadata so
+# orchestrator-side importers see them at the original location.
 # ---------------------------------------------------------------------------
-
-KNOWN_DEFERRED_DATASETS: dict[str, str] = {
-    # Catalog entries with kind != PvoKind.EXTRACT_PVO (extractor not shipped).
-    # The §8 catalog↔registry invariant lint catches drift.
-    "hcm_worker_assignments": "BACKLOG P2.11 — saas-batch REST extractor (kind=SAAS_BATCH), not BICC",
-    "ap_aging_periods": (
-        "BACKLOG P1.10b — bronze for AgingPeriodHeader bucket configs; "
-        "gold ap_aging mart computed downstream from ap_invoices + ap_payments + bucket configs"
-    ),
-}
-
-KNOWN_DEFERRED_DIMS: dict[str, str] = {
-    "dim_org":  "P1.7 — HCM org dim, blocked on customer HCM pod (P3.8)",
-    "dim_item": "P1.6 — inventory item dim, no shipped consumer yet",
-}
-
-KNOWN_DEFERRED_MARTS: dict[str, str] = {
-    "ar_aging":   "P1.10 — accounts-receivable aging gold mart, not yet shipped",
-    "po_backlog": "P1.11 — open POs by supplier × due date, not yet shipped",
-}
+#
+# KNOWN_DEFERRED_DATASETS / KNOWN_DEFERRED_DIMS / KNOWN_DEFERRED_MARTS are
+# imported above and re-exported via __all__ at the bottom of this module.
 
 
 # ---------------------------------------------------------------------------
