@@ -132,10 +132,20 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "medallion _run_id audit invariant). Scope is reconstructed from the "
          "stored plan_snapshot when --datasets/--layers are omitted. Drift "
          "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
-         "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch.",
+         "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch. "
+         "Requires --inline in P1.5ε; REST-dispatch resume is BACKLOG P1.5ε-fix5.",
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, default=False,
+    help="Resolve the plan + run preflight, then exit 0 without dispatching. "
+         "On --inline: returns the orchestrator's dry-run summary. On REST "
+         "dispatch: runs Phase A + B preflight (bundle, config, OCI, AIDP "
+         "plane, cluster state) and returns an empty RunSummary. No wheel "
+         "build, no notebook upload, no job submission.",
 )
 @click.pass_context
-def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None, inline: bool, resume_run_id: str | None) -> None:
+def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
+        inline: bool, resume_run_id: str | None, dry_run: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -147,6 +157,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         layers=layers,
         inline=inline,
         resume_run_id=resume_run_id,
+        dry_run=dry_run,
         console=console,
     ))
 

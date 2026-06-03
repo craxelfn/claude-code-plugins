@@ -8,7 +8,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig, Bundle
+from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig, Bundle, EnvSpec
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -190,6 +190,49 @@ class TestAidpConfigSchema:
         assert config.api_version == "aidp-fusion-bundle/v1"
         assert "dev" in config.environments
         assert "prod" in config.environments
-        # dev uses profile mode (default), prod uses vault mode
+        # P1.5ε: both envs use profile mode now — vault mode is rejected
+        # at preflight until P1.5ε-fix6 (cloud-side signer support) ships.
         assert config.environments["dev"].auth.mode == "profile"
-        assert config.environments["prod"].auth.mode == "vault"
+        assert config.environments["prod"].auth.mode == "profile"
+        # P1.5ε: both envs declare dispatch coords (aiDataPlatformId,
+        # clusterKey, clusterName) so `aidp-fusion-bundle run` (no --inline)
+        # works once the operator fills in the placeholders.
+        assert config.environments["dev"].ai_data_platform_id is not None
+        assert config.environments["dev"].cluster_key is not None
+        assert config.environments["dev"].cluster_name == "fusion_bundle_dev"
+        assert config.environments["prod"].cluster_name == "fusion_bundle_prod"
+
+    def test_envspec_dispatch_fields_optional(self) -> None:
+        # P1.5ε — operators who only run --inline don't have to populate
+        # the dispatch coords. EnvSpec parses with just the legacy fields.
+        env = EnvSpec.model_validate({"workspaceKey": "wk-123"})
+        assert env.ai_data_platform_id is None
+        assert env.cluster_key is None
+        assert env.cluster_name is None
+        # Secret-name fields have defaults — they're always present.
+        assert env.bicc_secret_name == "fusion_bicc_password"
+        assert env.bicc_secret_key == "password"
+
+    def test_envspec_dispatch_fields_accepted(self) -> None:
+        # P1.5ε — all five new fields round-trip via their aliases.
+        env = EnvSpec.model_validate(
+            {
+                "workspaceKey": "wk-123",
+                "aiDataPlatformId": "ocid1.datalake.oc1.iad.example",
+                "clusterKey": "cluster-uuid",
+                "clusterName": "fusion_bundle_dev",
+                "biccSecretName": "custom_secret",
+                "biccSecretKey": "secret_key",
+            }
+        )
+        assert env.ai_data_platform_id == "ocid1.datalake.oc1.iad.example"
+        assert env.cluster_key == "cluster-uuid"
+        assert env.cluster_name == "fusion_bundle_dev"
+        assert env.bicc_secret_name == "custom_secret"
+        assert env.bicc_secret_key == "secret_key"
+
+    def test_envspec_rejects_unknown_field(self) -> None:
+        # extra="forbid" must still hold — guards against typos like
+        # ``clustreKey`` slipping through silently.
+        with pytest.raises(ValidationError):
+            EnvSpec.model_validate({"workspaceKey": "wk-123", "clustreKey": "typo"})

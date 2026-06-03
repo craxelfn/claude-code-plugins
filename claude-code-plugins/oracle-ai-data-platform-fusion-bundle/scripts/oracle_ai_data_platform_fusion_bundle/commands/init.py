@@ -50,8 +50,10 @@ def init(template: str, *, force: bool, console: Console | None = None) -> int:
         "\n[bold]Next steps:[/bold]\n"
         "  1. Fill in [cyan]variables.team[/cyan] + ${FUSION_*} env vars + ${vault:OCID} refs\n"
         "  2. Set workspace coords in [cyan]aidp.config.yaml[/cyan] (workspaceKey, dataLakeOcid, region)\n"
-        "  3. Run [cyan]aidp-fusion-bundle validate[/cyan] to schema-check\n"
-        "  4. Run [cyan]aidp-fusion-bundle bootstrap[/cyan] to probe live prereqs\n"
+        "  3. Set dispatch coords for laptop CLI: [cyan]aiDataPlatformId, clusterKey, clusterName[/cyan]\n"
+        "     (only needed for [cyan]aidp-fusion-bundle run[/cyan] without --inline; see docs/rest_dispatch_setup.md)\n"
+        "  4. Run [cyan]aidp-fusion-bundle validate[/cyan] to schema-check\n"
+        "  5. Run [cyan]aidp-fusion-bundle bootstrap[/cyan] to probe live prereqs\n"
     )
     return 0
 

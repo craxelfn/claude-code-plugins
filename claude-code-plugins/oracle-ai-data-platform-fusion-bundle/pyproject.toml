@@ -36,7 +36,14 @@ dependencies = [
   "pyyaml>=6.0",
   "requests>=2.31",
   "oci>=2.130",
-  "rich>=13.0"
+  "rich>=13.0",
+  # P1.5ε — `aidp-fusion-bundle run` (no --inline) shells out to
+  # `python -m build` to materialize the plugin wheel for cluster-side
+  # install. The build backend MUST be available at runtime, not just
+  # in dev extras — operators install via `pip install
+  # oracle-ai-data-platform-fusion-bundle` and expect dispatch to work
+  # without separately installing the dev tooling.
+  "build>=1.0"
 ]
 
 [project.optional-dependencies]
@@ -49,7 +56,6 @@ test = [
 dev = [
   "ruff>=0.4",
   "mypy>=1.8",
-  "build>=1.0",
   "twine>=5.0"
 ]
 
