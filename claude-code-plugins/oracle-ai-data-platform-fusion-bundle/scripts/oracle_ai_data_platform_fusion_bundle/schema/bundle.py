@@ -1,10 +1,24 @@
-"""Pydantic v2 models for ``bundle.yaml`` and ``aidp.config.yaml``."""
+"""Pydantic v2 models for ``bundle.yaml`` and ``aidp.config.yaml``.
+
+P1.5ε §Step 1d — ``load_bundle`` lives here too. It used to live at
+``orchestrator/runtime.py:354`` but doing three pure-schema-level operations
+(YAML parse → env-var render → Pydantic validate) on schema-level objects;
+keeping it under ``orchestrator/`` forced the dispatch package and the
+schema-level plan resolver to pull engine internals just to load a bundle.
+``orchestrator/runtime.py`` re-exports the name for back-compat — identity
+is preserved.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from .errors import BundleLoadError, BundleVersionMismatchError
+from .refs import render_vars
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +51,15 @@ class EnvSpec(BaseModel):
     region: str | None = None
     oci_profile: str | None = Field(default="DEFAULT", alias="ociProfile")
     auth: AuthSpec = AuthSpec()
+
+    # P1.5ε — dispatch coords for ``aidp-fusion-bundle run`` (no --inline).
+    # Optional on the model because validate/bootstrap/status do not need
+    # them; the dispatch layer enforces presence in preflight.
+    ai_data_platform_id: str | None = Field(default=None, alias="aiDataPlatformId")
+    cluster_key: str | None = Field(default=None, alias="clusterKey")
+    cluster_name: str | None = Field(default=None, alias="clusterName")
+    bicc_secret_name: str = Field(default="fusion_bicc_password", alias="biccSecretName")
+    bicc_secret_key: str = Field(default="password", alias="biccSecretKey")
 
 
 class Defaults(BaseModel):
@@ -288,3 +311,132 @@ class Bundle(BaseModel):
                 raise ValueError(f"duplicate dataset id: {ds.id}")
             seen.add(ds.id)
         return self
+
+
+# ---------------------------------------------------------------------------
+# Bundle loader (P1.5ε §Step 1d — moved from orchestrator/runtime.py:354)
+# ---------------------------------------------------------------------------
+#
+# Lives at the schema layer because every step is a pure schema-level
+# operation: YAML parse, generic ``${VAR}`` env-var rendering, Pydantic
+# validation, TablePaths identifier check. ``${env:VAR}`` and
+# ``${vault:OCID}`` references are preserved literally — they're credential
+# markers resolved later by ``orchestrator.runtime._resolve_password``.
+
+
+def _render_env_vars(node: Any) -> Any:
+    """Recursively expand ``${VAR}`` env-var refs in a parsed-YAML structure.
+
+    Leaves ``${vault:OCID}`` and ``${env:VAR}`` references untouched (handled
+    by the negative-lookahead in ``schema.refs.render_vars``). Raises
+    ``BundleLoadError`` naming the missing variable when an env-var ref
+    cannot be resolved — bare ``KeyError`` never bubbles through.
+    """
+    if isinstance(node, dict):
+        return {k: _render_env_vars(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_render_env_vars(v) for v in node]
+    if isinstance(node, str):
+        try:
+            return render_vars(node)
+        except KeyError as e:
+            raise BundleLoadError(
+                f"Missing env var {e.args[0]!r} referenced in bundle.yaml. "
+                f"Set it before running, or override on the CLI."
+            ) from e
+    return node  # int, float, bool, None — pass through
+
+
+def load_bundle(bundle_path: Path) -> tuple["Bundle", "TablePaths"]:
+    """Load and validate a bundle.yaml, returning the parsed model + resolved paths.
+
+    Single entry point that wraps EVERY config-load failure mode into
+    ``BundleLoadError`` so the CLI's exit-2 path catches them all (no
+    bare tracebacks for malformed YAML, missing env var, schema
+    violations, or bad ``aidp.*`` identifiers).
+
+    Failure modes:
+      1. File-not-found / permission / IsADirectoryError / OSError
+      2. yaml.YAMLError (malformed YAML)
+      3. _render_env_vars KeyError (missing env var) — already wrapped
+      4. pydantic.ValidationError (schema violation) — version-specific
+         re-raised as ``BundleVersionMismatchError``
+      5. TypeError/ValueError from TablePaths._validate_identifier
+
+    Exception chain preserved via ``raise ... from e``.
+    """
+    # Local import to avoid an import cycle if anyone ever points
+    # ``config.paths`` at schema-level helpers. TablePaths is pure
+    # (no engine imports), so this is purely a hygiene measure.
+    from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+
+    bundle_path = Path(bundle_path)
+
+    # 1. File read.
+    try:
+        text = bundle_path.read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        raise BundleLoadError(f"Bundle file not found: {bundle_path}") from e
+    except IsADirectoryError as e:
+        raise BundleLoadError(
+            f"Bundle path is a directory, not a file: {bundle_path}"
+        ) from e
+    except PermissionError as e:
+        raise BundleLoadError(
+            f"Cannot read bundle {bundle_path}: permission denied"
+        ) from e
+    except OSError as e:
+        raise BundleLoadError(
+            f"Cannot read bundle {bundle_path}: {e.strerror or e}"
+        ) from e
+
+    # 2. YAML parse.
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        loc = f" at line {mark.line + 1} col {mark.column + 1}" if mark else ""
+        problem = getattr(e, "problem", str(e))
+        raise BundleLoadError(
+            f"Malformed YAML in {bundle_path}{loc}: {problem}"
+        ) from e
+
+    if not isinstance(raw, dict):
+        raise BundleLoadError(
+            f"Bundle {bundle_path} must be a YAML mapping at the top level, "
+            f"got {type(raw).__name__}"
+        )
+
+    # 3. Env-var expansion.
+    rendered = _render_env_vars(raw)
+
+    # 4. Pydantic validation — hoist version errors into the specific class.
+    try:
+        bundle = Bundle.model_validate(rendered)
+    except ValidationError as e:
+        version_errs = [err for err in e.errors() if err["loc"] == ("version",)]
+        if version_errs:
+            offending = version_errs[0].get("input", "<unknown>")
+            raise BundleVersionMismatchError(
+                f"Bundle {bundle_path} declares version={offending!r}; "
+                f"this plugin supports version='0.2.0'. "
+                f"Run `aidp-fusion-bundle migrate-bundle "
+                f"--from {offending} --to 0.2.0`."
+            ) from e
+        details = "\n".join(
+            f"  - {'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+            for err in e.errors()
+        )
+        raise BundleLoadError(
+            f"Bundle {bundle_path} failed schema validation:\n{details}"
+        ) from e
+
+    # 5. TablePaths identifier validation.
+    try:
+        paths = TablePaths.from_bundle(bundle.model_dump(by_alias=True))
+    except (TypeError, ValueError) as e:
+        raise BundleLoadError(
+            f"Bundle {bundle_path} has invalid aidp.* identifier: {e}"
+        ) from e
+
+    return bundle, paths
