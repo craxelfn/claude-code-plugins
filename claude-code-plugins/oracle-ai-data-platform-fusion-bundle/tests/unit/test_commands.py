@@ -139,33 +139,147 @@ class TestBootstrap:
 
 
 class TestRun:
-    def test_dispatch_without_inline_points_to_rest_path(
+    def test_dispatch_without_inline_runs_real_preflight(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Pre-P1.5ε: `run` without `--inline` exits 2 with a stub message
-        listing the three execution surfaces (inline / MCP / REST). The
-        REST path is BACKLOG P1.5ε — empirically validated, not yet
-        wired into the CLI. Will become 0 once P1.5ε ships."""
+        """P1.5ε §Step 7b: ``run`` without ``--inline`` is no longer a stub —
+        it actually runs the dispatch preflight. With the minimal init
+        template (no env vars set, no dispatch coords filled in), Phase A
+        preflight fails and the CLI exits 2 with a structured DISPATCH_*
+        error code in the message.
+        """
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
         assert result.exit_code == 2
-        # Stub message points operators at the three execution surfaces.
-        assert "REST dispatch" in result.output or "P1.5ε" in result.output
-        assert "--inline" in result.output
+        # The new dispatch path raises a DispatchError; the code is
+        # rendered as [DISPATCH_*] in the error message.
+        assert "DISPATCH_" in result.output
 
-    def test_dataset_filter_with_rest_stub(
+    def test_dataset_filter_threaded_through_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The `--datasets` filter is parsed by the CLI and threaded through
-        to the REST-dispatch stub (today exits 2; tomorrow P1.5ε wires it
-        to actual job submission)."""
+        """The ``--datasets`` filter is parsed by the CLI and reaches
+        the dispatch entry point. Confirmed indirectly: the dispatch
+        layer still exits 2 (preflight failure on minimal template), but
+        the CLI accepted the flag and didn't error at Click parse."""
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "seed", "--datasets", "gl_journal_lines",
         ])
         assert result.exit_code == 2
+
+    def test_resume_without_inline_exits_2_with_fix5_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P1.5ε §3.1 scope boundary: ``--resume`` requires ``--inline``
+        in this PR. The non-inline path rejects it with a hint pointing
+        at the follow-up ticket."""
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        result = CliRunner().invoke(cli.main, [
+            "run", "--mode", "seed", "--resume", "some-run-id",
+        ])
+        assert result.exit_code == 2
+        assert "--inline" in result.output
+        assert "fix5" in result.output.lower()
+
+    def test_run_dispatch_invokes_dispatch_via_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The non-inline path threads CLI flags through to
+        ``dispatch_via_rest(...)`` with the correct kwarg shape."""
+        from unittest.mock import MagicMock, patch
+
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        fake_summary = RunSummary.empty("test", "seed")
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            return_value=fake_summary,
+        ) as mock_dispatch:
+            result = CliRunner().invoke(cli.main, [
+                "run", "--mode", "seed", "--datasets", "erp_suppliers",
+            ])
+        assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
+        assert mock_dispatch.called
+        kwargs = mock_dispatch.call_args.kwargs
+        assert kwargs["mode"] == "seed"
+        assert kwargs["datasets"] == ["erp_suppliers"]
+        assert kwargs["env_name"] == "dev"
+
+    def test_run_dispatch_error_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A DispatchError raised from dispatch_via_rest surfaces as a
+        red one-liner and exits 2 (no traceback)."""
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchPreflightError,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            side_effect=DispatchPreflightError("synthetic preflight fail"),
+        ):
+            result = CliRunner().invoke(
+                cli.main, ["run", "--mode", "seed"]
+            )
+        assert result.exit_code == 2
+        assert "DISPATCH_PREFLIGHT_FAILED" in result.output
+        assert "synthetic preflight fail" in result.output
+        # No Python traceback.
+        assert "Traceback" not in result.output
+
+    def test_run_dispatch_failed_steps_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A RunSummary with ``failed > 0`` exits 1, not 2 — same
+        contract as ``_run_inline``. Exit 2 is reserved for
+        dispatch-layer errors (config, preflight, network)."""
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            RunStep,
+            RunSummary,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        # Build a RunSummary with one failed step.
+        from datetime import datetime, timezone
+
+        failed_step = RunStep(
+            run_id="x",
+            dataset_id="ap_invoices",
+            layer="bronze",
+            mode="seed",
+            status="failed",
+            row_count=None,
+            duration_seconds=1.0,
+            error_message="boom",
+            watermark_used=None,
+        )
+        summary = RunSummary(
+            run_id="x",
+            started_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            bundle_project="test",
+            mode="seed",
+            steps=(failed_step,),
+        )
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            return_value=summary,
+        ):
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+        assert result.exit_code == 1, f"got {result.exit_code}: {result.output}"
 
     def test_run_inline_invokes_orchestrator_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

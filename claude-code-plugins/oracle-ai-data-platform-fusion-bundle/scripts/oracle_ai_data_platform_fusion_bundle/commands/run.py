@@ -47,6 +47,7 @@ def run(
     layers: str | None = None,
     inline: bool = False,
     resume_run_id: str | None = None,
+    dry_run: bool = False,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -105,20 +106,24 @@ def run(
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
         # Pydantic validation, and that step needs the raw YAML text.
-        return _run_inline(bundle_path, mode, dataset_filter, layer_filter, resume_run_id, console)
+        return _run_inline(
+            bundle_path, mode, dataset_filter, layer_filter,
+            resume_run_id, dry_run, console,
+        )
     if resume_run_id is not None:
-        # The non-inline path is a stub today (P1.5ε is unblocked but
-        # the client wrapper hasn't shipped). --resume is only
-        # meaningful inside an AIDP notebook session where the
-        # orchestrator can actually read fusion_bundle_state.
+        # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
+        # The dispatcher's notebook builder hardcodes resume_run_id=None;
+        # the orchestrator-side resume code path requires in-process state
+        # access that doesn't surface cleanly over the marker channel.
+        # Tracked as follow-up P1.5ε-fix5.
         console.print(
-            f"[red]--resume is only supported with --inline today. "
-            f"P1.5ε REST dispatch will plumb resume through the client "
-            f"wrapper.[/red]"
+            "[red]--resume requires --inline; REST-dispatch resume is "
+            "tracked as BACKLOG P1.5ε-fix5[/red]"
         )
         return 2
     return _run_via_aidp_dispatch(
-        bundle_path, config_path, env_name, dataset_filter, layer_filter, mode, console,
+        bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
+        dry_run, console,
     )
 
 
@@ -128,6 +133,7 @@ def _run_inline(
     datasets: list[str] | None,
     layers: list[str] | None,
     resume_run_id: str | None,
+    dry_run: bool,
     console: Console,
 ) -> int:
     """Run the orchestrator in-process.
@@ -161,6 +167,7 @@ def _run_inline(
             datasets=datasets,
             layers=layers,
             resume_run_id=resume_run_id,
+            dry_run=dry_run,
         )
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
@@ -180,36 +187,48 @@ def _run_via_aidp_dispatch(
     datasets: list[str] | None,
     layers: list[str] | None,
     mode: str,
+    dry_run: bool,
     console: Console,
 ) -> int:
-    """Submit the bundle to AIDP via the REST job API.
+    """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
-    Today this is a stub — BACKLOG P1.5ε wires it to
-    `dispatch/aidp_rest.py` (the empirical probe already validated
-    every step: create_job + jobRuns + poll + fetchOutput). The
-    exit-2 message points operators at the available execution
-    surfaces.
+    Loads ``aidp.config.yaml``, runs preflight, builds the wheel, generates
+    the orchestrator notebook, uploads it, creates a job, submits a run,
+    polls to terminal status, fetches the executed notebook, parses the
+    ``AIDP_LIVE_TEST_RESULT`` marker, and renders the RunSummary.
 
-    P1.5α-fix13: ``layers`` is plumbed through the signature even
-    though the body is stubbed today, so future P1.5ε wiring picks
-    up the filter without a second signature change.
+    Same exit-code contract as :func:`_run_inline`: 0 on success, 1 if any
+    step failed, 2 on any dispatch-layer error (config, preflight, network).
+
+    ``resume_run_id`` is not accepted on the REST-dispatch path — the
+    caller guards in :func:`run` so this function never sees a resume
+    request. Tracked as ``P1.5ε-fix5`` follow-up.
     """
-    console.print(
-        f"[yellow]REST dispatch is not wired in P1.5α (tracked as BACKLOG P1.5ε).[/yellow]\n"
-        f"\n"
-        f"Three ways to run the orchestrator today:\n"
-        f"  - In an AIDP notebook session:\n"
-        f"      [cyan]aidp-fusion-bundle run --inline --mode {mode}[/cyan]\n"
-        f"  - Via Claude Code MCP (BACKLOG P1.5δ — may be cancelled after P1.5ε):\n"
-        f"      [cyan]/aidp-fusion-bundle run[/cyan]\n"
-        f"  - From a laptop terminal via REST (BACKLOG P1.5ε — unblocked,\n"
-        f"    empirically validated; client wrapper still to ship)."
-    )
-    if datasets or layers:
-        console.print(
-            f"\nWould have run: mode={mode}, datasets={datasets}, layers={layers}"
+    from ._config_helpers import env_or_error, load_aidp_config
+    from ..dispatch import dispatch_via_rest
+    from ..dispatch.errors import DispatchError
+    from ..schema.errors import OrchestratorConfigError
+
+    try:
+        config = load_aidp_config(config_path)
+        env = env_or_error(config, env_name)
+        summary = dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=config,
+            env=env,
+            env_name=env_name,
+            mode=mode,  # type: ignore[arg-type]
+            datasets=datasets,
+            layers=layers,
+            dry_run=dry_run,
+            log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
         )
-    return 2
+    except (DispatchError, OrchestratorConfigError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+
+    _render_summary(console, summary)
+    return 0 if summary.failed == 0 else 1
 
 
 def _render_summary(console: Console, summary) -> None:

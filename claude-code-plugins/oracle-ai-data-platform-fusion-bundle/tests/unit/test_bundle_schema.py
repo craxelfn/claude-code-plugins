@@ -190,9 +190,17 @@ class TestAidpConfigSchema:
         assert config.api_version == "aidp-fusion-bundle/v1"
         assert "dev" in config.environments
         assert "prod" in config.environments
-        # dev uses profile mode (default), prod uses vault mode
+        # P1.5ε: both envs use profile mode now — vault mode is rejected
+        # at preflight until P1.5ε-fix6 (cloud-side signer support) ships.
         assert config.environments["dev"].auth.mode == "profile"
-        assert config.environments["prod"].auth.mode == "vault"
+        assert config.environments["prod"].auth.mode == "profile"
+        # P1.5ε: both envs declare dispatch coords (aiDataPlatformId,
+        # clusterKey, clusterName) so `aidp-fusion-bundle run` (no --inline)
+        # works once the operator fills in the placeholders.
+        assert config.environments["dev"].ai_data_platform_id is not None
+        assert config.environments["dev"].cluster_key is not None
+        assert config.environments["dev"].cluster_name == "fusion_bundle_dev"
+        assert config.environments["prod"].cluster_name == "fusion_bundle_prod"
 
     def test_envspec_dispatch_fields_optional(self) -> None:
         # P1.5ε — operators who only run --inline don't have to populate

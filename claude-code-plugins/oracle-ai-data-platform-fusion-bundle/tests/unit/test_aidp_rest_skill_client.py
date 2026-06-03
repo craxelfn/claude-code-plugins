@@ -26,12 +26,19 @@ sys.path.insert(0, str(_SKILL_DIR))
 from client import AidpRestClient, AidpRestError  # noqa: E402
 
 
+# Canonical patch target — the skill's ``client`` module is a re-export shim
+# that imports from ``oracle_ai_data_platform_fusion_bundle.dispatch.rest_client``
+# (P1.5ε §Step 2). The ``oci`` module is imported by the canonical module,
+# not by the shim — patch it where it's looked up.
+_REST_CLIENT_MOD = "oracle_ai_data_platform_fusion_bundle.dispatch.rest_client"
+
+
 @pytest.fixture
 def client():
     """Build a client without touching ~/.oci/config — patch the signer."""
-    with patch("client.oci.config.from_file", return_value={
+    with patch(f"{_REST_CLIENT_MOD}.oci.config.from_file", return_value={
         "tenancy": "t", "user": "u", "fingerprint": "f", "key_file": "/tmp/k",
-    }), patch("client.oci.signer.Signer", return_value=MagicMock()):
+    }), patch(f"{_REST_CLIENT_MOD}.oci.signer.Signer", return_value=MagicMock()):
         return AidpRestClient(
             region="us-ashburn-1",
             aidp_id="ocid1.datalake.oc1.iad.aaaa",
