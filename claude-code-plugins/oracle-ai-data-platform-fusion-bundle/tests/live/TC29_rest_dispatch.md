@@ -225,6 +225,128 @@ Both fixes landed before commit. Unit-test counts stayed at 91 / 91 for the disp
 - **`P1.5ε-fix7` (new)** — bump `poll_run`'s default `timeout_s` from 30 min → 60 min, OR surface as `--poll-timeout` CLI flag. The TC26 baseline suggested narrow runs finish in ~6 min, but slow tenants legitimately exceed 30 min for a single BICC extract.
 - **`P1.5ε-fix8` (new)** — partial-progress diagnose-on-timeout: when `DispatchPollTimeoutError` fires, the dispatcher should opportunistically fetch the partial executed-notebook + print cell-level progress so operators don't have to drop into `oci raw-request` to see where the cluster job is stuck.
 
+## Probe 7 — Dry-run plan rendering (P1.5ε-fix9, 2026-06-03)
+
+Validates the laptop-side plan-resolution that closes the original P1.5ε §Step 1c deferred work. Three sub-captures: (A) a narrow single-bronze bundle, (B) a full bundle showing the topo-sorted DAG, (C) the same full bundle with `--layers gold` exercising the "Extra-plan prerequisites" Rich table.
+
+### Probe 7-A — Narrow bundle (single bronze, no marts)
+
+```text
+$ aidp-fusion-bundle --bundle /tmp/bundle.p15e.yaml \
+    --config /tmp/aidp.config.p15e.yaml --env dev \
+    run --mode seed --dry-run
+
+ PASS bundle.yaml: loaded /tmp/bundle.p15e.yaml
+ PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+ PASS OCI profile: API-key profile 'DEFAULT' loaded
+cluster '<REDACTED-CLUSTER-UUID>' STOPPED — auto-starting (~5 min)…
+ cluster_wait state=STARTING
+ cluster_wait state=ACTIVE
+ PASS AIDP control plane: reachable; 8 cluster(s) visible
+ PASS BICC credential: credential '<REDACTED-SECRET-NAME>' present in AIDP store
+ PASS cluster state: cluster '<REDACTED-CLUSTER-UUID>' auto-started to ACTIVE
+dry-run requested — skipping wheel build + upload + dispatch
+Dry-run plan for project <REDACTED-PROJECT> (mode=seed):
+      Would dispatch
+┏━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ dataset_id    ┃ layer  ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ erp_suppliers │ bronze │
+└───────────────┴────────┘
+EXIT_CODE: 0
+```
+
+Pre-fix9 the REST path returned `RunSummary.empty()` with `plan=None`, so this table never appeared — the operator saw the preflight PASS lines and then nothing. Post-fix9 the dispatcher's dry-run branch calls `schema.plan_resolver.resolve_dry_run_plan` laptop-side and threads the resulting `PlanNode` tuple into `RunSummary.empty(plan=…)`, which the renderer (`commands/run.py:_render_summary`) renders identically to the `--inline --dry-run` path.
+
+### Probe 7-B — Full bundle (4 bronze + 3 silver + 3 gold), all layers in scope
+
+```text
+$ aidp-fusion-bundle --bundle /tmp/bundle.p15e-fix9.yaml \
+    --config /tmp/aidp.config.p15e.yaml --env dev \
+    run --mode seed --dry-run
+
+ PASS bundle.yaml: loaded /tmp/bundle.p15e-fix9.yaml
+ PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+ PASS OCI profile: API-key profile 'DEFAULT' loaded
+ PASS AIDP control plane: reachable; 8 cluster(s) visible
+ PASS BICC credential: credential '<REDACTED-SECRET-NAME>' present in AIDP store
+ PASS cluster state: cluster '<REDACTED-CLUSTER-UUID>' ACTIVE
+dry-run requested — skipping wheel build + upload + dispatch
+Dry-run plan for project <REDACTED-PROJECT> (mode=seed):
+        Would dispatch
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ dataset_id         ┃ layer  ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ erp_suppliers      │ bronze │
+│ gl_coa             │ bronze │
+│ gl_period_balances │ bronze │
+│ ap_invoices        │ bronze │
+│ dim_calendar       │ silver │
+│ dim_supplier       │ silver │
+│ dim_account        │ silver │
+│ supplier_spend     │ gold   │
+│ ap_aging           │ gold   │
+│ gl_balance         │ gold   │
+└────────────────────┴────────┘
+EXIT_CODE: 0
+```
+
+Plan is topo-sorted: every bronze precedes its silver consumer (`erp_suppliers` → `dim_supplier`, `gl_coa` → `dim_account`), every silver precedes its gold consumer (`dim_supplier` → `supplier_spend` + `ap_aging`, `dim_account` → `gl_balance`). The cluster is now ACTIVE from Probe 7-A so the auto-start lines don't reappear.
+
+### Probe 7-C — `--layers gold` surfaces the "Extra-plan prerequisites" table
+
+```text
+$ aidp-fusion-bundle --bundle /tmp/bundle.p15e-fix9.yaml \
+    --config /tmp/aidp.config.p15e.yaml --env dev \
+    run --mode seed --dry-run --layers gold
+
+ PASS bundle.yaml: loaded /tmp/bundle.p15e-fix9.yaml
+ PASS aidp.config.yaml dispatch coords: all dispatch coords present for env='dev'
+ PASS OCI profile: API-key profile 'DEFAULT' loaded
+ PASS AIDP control plane: reachable; 8 cluster(s) visible
+ PASS BICC credential: credential '<REDACTED-SECRET-NAME>' present in AIDP store
+ PASS cluster state: cluster '<REDACTED-CLUSTER-UUID>' ACTIVE
+dry-run requested — skipping wheel build + upload + dispatch
+Dry-run plan for project <REDACTED-PROJECT> (mode=seed):
+      Would dispatch
+┏━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ dataset_id     ┃ layer ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ ap_aging       │ gold  │
+│ supplier_spend │ gold  │
+│ gl_balance     │ gold  │
+└────────────────┴───────┘
+                 Extra-plan prerequisites (must exist on disk)
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ dataset_id         ┃ layer  ┃ consumer   ┃ table path                        ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ ap_invoices        │ bronze │ ap_aging   │ fusion_catalog.bronze_p15e_fix9_… │
+│                    │        │            │ ap_invoices                       │
+│ dim_supplier       │ silver │ ap_aging   │ fusion_catalog.silver_p15e_fix9_… │
+│                    │        │            │ dim_supplier                      │
+│ gl_period_balances │ bronze │ gl_balance │ fusion_catalog.bronze_p15e_fix9_… │
+│                    │        │            │ gl_period_balances                │
+│ dim_account        │ silver │ gl_balance │ fusion_catalog.silver_p15e_fix9_… │
+│                    │        │            │ dim_account                       │
+└────────────────────┴────────┴────────────┴───────────────────────────────────┘
+EXIT_CODE: 0
+```
+
+The prereqs table renders the 3-part `catalog.schema.table` identifier built from `bundle.aidp.{catalog, bronzeSchema, silverSchema}` — verifies the reviewer round 1 blocking lock that `resolve_dry_run_plan` takes `paths: TablePaths` positionally and threads it through to `PrereqNode.table_path`. A regression where the resolver fell back to default paths would surface here as `default_catalog.bronze.…` instead of the bundle-declared `fusion_catalog.bronze_p15e_fix9_….` prefix.
+
+### Probe 7 validates
+
+- ✅ Dispatch dry-run renders the "Would dispatch" Rich table (the original P1.5ε §Step 1c acceptance criterion).
+- ✅ Topo-sort across bronze → silver → gold is preserved through the schema-side resolver.
+- ✅ `--layers gold` filter populates the "Extra-plan prerequisites" table with tenant-aware 3-part table identifiers.
+- ✅ `--dry-run` short-circuits after Phase B PASS — no wheel build, no upload, no job submission, no cluster runtime.
+- ✅ Cluster-state PASS reused from Probe 7-A across B + C (cluster ACTIVE, not re-started) — Phase B preflight remains a side-effect-free observation when the cluster's already running.
+- ✅ Exit code 0 contract preserved.
+
+### Probe 7 boundary lock confirmation
+
+The dispatch package's `tests/unit/dispatch/test_imports.py` ran clean on every probe (subprocess-isolated assertion that `import dispatch` plus the in-process `_render_summary(PlanNode(...))` call do NOT pull `orchestrator/*` / `dimensions/*` / `transforms/*` / `extractors/*` into `sys.modules`). The §4.3 separation survived the resolver move — `schema.plan_resolver` + `schema.registry_metadata` are now in the explicit allow-list.
+
 ## Redaction note
 
 All identifiers (AIDP host, `aiDataPlatformId`, workspace key, cluster key, job/run/task UUIDs, BICC username, Fusion pod URL, external-storage profile name) redacted per the workspace memory rule on sensitive identifiers. The non-redacted strings in this file (`fusion_bundle_dev`, `saasfademo1`, `playground`, hash prefixes, `oracle_ai_data_platform_fusion_bundle-0.1.0a0-py3-none-any.whl`) appear in prior public TC* evidence + plugin source docstrings.
