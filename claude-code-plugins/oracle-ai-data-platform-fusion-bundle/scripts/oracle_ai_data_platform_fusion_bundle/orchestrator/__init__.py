@@ -28,6 +28,13 @@ from oracle_ai_data_platform_fusion_bundle import extractors
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
 from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
 from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+from oracle_ai_data_platform_fusion_bundle.schema.plan_resolver import (
+    resolve_dry_run_plan,
+)
+from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+    PlanNode,
+    PrereqNode,
+)
 
 from . import registry, state
 from .merge_sql import (
@@ -115,250 +122,50 @@ def resolve_plan(
     *,
     paths: TablePaths,
 ) -> tuple[list[Spec], tuple[ExternalDep, ...]]:
-    """Classify every name from ``bundle.{datasets,dimensions.build,gold.marts}``
-    across the six registries and topo-sort the in-plan nodes.
+    """Engine-side wrapper around :func:`schema.plan_resolver.resolve_dry_run_plan`.
 
-    Args:
-        bundle: the parsed bundle.yaml.
-        datasets: ``--datasets`` CSV filter, classified by name (across
-            BRONZE / SILVER / GOLD namespaces). ``None`` = include all.
-        layers: ``--layers`` filter (e.g. ``["gold"]``). ``None`` = include all.
-        paths: tenant-aware ``TablePaths`` for external-dep table-path resolution.
+    P1.5ε-fix9 moved the classification + filter + topo-sort logic to the
+    neutral ``schema.plan_resolver`` so the dispatch package can render
+    dry-run plans without importing the orchestrator. The engine-side
+    wrapper here reconstructs ``Spec`` instances + ``ExternalDep`` from
+    the DTOs the schema resolver returns — the rest of the orchestrator
+    (per-step dispatch, watermark capture, MERGE generation) needs spec
+    objects with their ``builder`` callables, not neutral DTOs.
 
-    Returns:
-        ``(plan, extra_deps)``:
-        - ``plan`` — topo-sorted list of Spec instances to dispatch.
-        - ``extra_deps`` — tuple of ``ExternalDep`` for in-plan consumers
-          whose upstream was filtered out (preflighted on disk before any
-          module dispatch by ``_preflight_external_deps``).
-
-    Raises:
-        MissingDependencyError: any bundle name unknown to every registry,
-            OR an in-plan node depends on a name that doesn't exist anywhere.
+    The deferred-name branch is load-bearing: deferred names
+    (``dim_org``, ``ar_aging``, ``hcm_worker_assignments``, …) are NOT
+    in ``BRONZE_EXTRACTS`` / ``SILVER_DIMS`` / ``GOLD_MARTS``, so a
+    naive dict lookup would ``KeyError`` on them.
     """
-    # 1. Resolve every bundle name into a spec (raises MissingDependencyError on typo).
-    # P1.5α-fix15: honor DatasetSpec.enabled=false — disabled entries are
-    # excluded from all_specs (so downstream consumers see them as "not in
-    # the bundle plan"). The id is tracked separately in `disabled_datasets`
-    # so the error builders below can emit disabled-specific remediation
-    # ("set enabled: true") instead of the misleading generic message
-    # ("add it to bundle.datasets" — which is wrong because the entry IS
-    # already there, just disabled).
-    all_specs: dict[str, Spec] = {}
-    disabled_datasets: set[str] = set()
-    for ds in bundle.datasets:
-        if not ds.enabled:
-            disabled_datasets.add(ds.id)
-            continue
-        all_specs[ds.id] = _resolve_bronze(ds.id)
-    for dim_name in bundle.dimensions.build:
-        all_specs[dim_name] = _resolve_dim(dim_name)
-    for mart_name in bundle.gold.marts:
-        all_specs[mart_name] = _resolve_mart(mart_name)
-
-    # 1a. Validate filter inputs BEFORE applying them. Without this guard, a
-    #     typoed --datasets / --layers name silently produces an empty plan
-    #     and the run exits 0 — an operator would believe a scoped refresh
-    #     ran while no table changed. P1.5α-fix12 (post-α blocking bug).
-    if datasets is not None:
-        unknown_datasets = sorted(set(datasets) - set(all_specs))
-        if unknown_datasets:
-            # P1.5α-fix15: distinguish disabled-in-bundle from never-declared,
-            # so the operator doesn't add a duplicate entry. Two distinct
-            # remediations — "set enabled: true" vs "edit bundle.yaml first".
-            disabled_in_filter = [
-                d for d in unknown_datasets if d in disabled_datasets
-            ]
-            truly_unknown = [
-                d for d in unknown_datasets if d not in disabled_datasets
-            ]
-            msg_parts: list[str] = []
-            if disabled_in_filter:
-                msg_parts.append(
-                    f"--datasets references disabled name(s): "
-                    f"{disabled_in_filter}. "
-                    f"Either set `enabled: true` in bundle.datasets for "
-                    f"those entries, or remove them from --datasets."
-                )
-            if truly_unknown:
-                msg_parts.append(
-                    f"--datasets contains name(s) not in the bundle plan: "
-                    f"{truly_unknown}. "
-                    f"Available names from bundle.yaml: {sorted(all_specs)}. "
-                    f"--datasets is a filter over the bundle's declared "
-                    f"datasets / dimensions / marts; to add a new name, edit "
-                    f"bundle.yaml first."
-                )
-            raise MissingDependencyError("\n".join(msg_parts))
-    if layers is not None:
-        unknown_layers = sorted(set(layers) - _VALID_LAYERS)
-        if unknown_layers:
-            raise MissingDependencyError(
-                f"--layers contains unknown layer(s): {unknown_layers}. "
-                f"Valid layers: {sorted(_VALID_LAYERS)}."
+    plan_nodes, prereq_nodes = resolve_dry_run_plan(
+        bundle, paths,
+        datasets=datasets, layers=layers,
+    )
+    spec_plan: list[Spec] = []
+    for node in plan_nodes:
+        if node.status == "deferred":
+            spec_plan.append(DeferredSpec(
+                dataset_id=node.dataset_id,
+                layer=node.layer,
+                reason=node.reason or "",
+            ))
+        elif node.layer == "bronze":
+            spec_plan.append(BRONZE_EXTRACTS[node.dataset_id])
+        elif node.layer == "silver":
+            spec_plan.append(SILVER_DIMS[node.dataset_id])
+        elif node.layer == "gold":
+            spec_plan.append(GOLD_MARTS[node.dataset_id])
+        else:  # pragma: no cover — defensive (resolver validates layers)
+            raise OrchestratorRuntimeError(
+                f"PlanNode.layer={node.layer!r} not in {{bronze, silver, gold}}"
             )
-
-    # 2. Determine which names are "in plan" given the (now-validated) filters.
-    def _matches_filter(name: str, spec: Spec) -> bool:
-        if datasets is not None and name not in datasets:
-            return False
-        if layers is not None:
-            if _layer_for_spec(spec) not in layers:
-                return False
-        return True
-
-    in_plan_names: set[str] = {
-        name for name, spec in all_specs.items() if _matches_filter(name, spec)
-    }
-
-    # 3. Identify extra-plan dependencies for in-plan consumers.
-    #    Bronze nodes have no dependencies (extractor-only); silver/gold do.
-    #    Deferred nodes have no dependencies (no module to run).
-    extra_deps_list: list[ExternalDep] = []
-    seen_extra: set[tuple[str, str]] = set()  # (dataset_id, layer)
-
-    def _add_extra(dep_name: str, dep_layer: Literal["bronze", "silver", "gold"], consumer: str) -> None:
-        key = (dep_name, dep_layer)
-        if key in seen_extra:
-            return
-        # Resolve the table path for the dep.
-        if dep_layer == "bronze":
-            # bronze table name lives in the catalog
-            pvo_id = BRONZE_EXTRACTS[dep_name].pvo_id if dep_name in BRONZE_EXTRACTS else dep_name
-            pvo = fusion_catalog.get(pvo_id)
-            table_path = paths.bronze(pvo.bronze_table_name)
-        elif dep_layer == "silver":
-            table_path = paths.silver(dep_name)
-        else:
-            table_path = paths.gold(dep_name)
-        extra_deps_list.append(
-            ExternalDep(
-                dataset_id=dep_name,
-                layer=dep_layer,
-                consumer=consumer,
-                table_path=table_path,
-            )
-        )
-        seen_extra.add(key)
-
-    def _check_dep_exists_or_raise(dep_name: str, dep_layer: str, consumer: str) -> None:
-        """Dep must exist in the corresponding registry OR be deferred — never unknown."""
-        if dep_layer == "bronze":
-            if dep_name not in BRONZE_EXTRACTS and dep_name not in registry.KNOWN_DEFERRED_DATASETS:
-                raise MissingDependencyError(
-                    f"Gold/silver consumer {consumer!r} depends on bronze {dep_name!r}, "
-                    f"but that name is not in BRONZE_EXTRACTS or KNOWN_DEFERRED_DATASETS. "
-                    f"Add the entry to schema/fusion_catalog.py + registry."
-                )
-        elif dep_layer == "silver":
-            if dep_name not in SILVER_DIMS and dep_name not in KNOWN_DEFERRED_DIMS:
-                raise MissingDependencyError(
-                    f"Gold consumer {consumer!r} depends on silver {dep_name!r}, "
-                    f"but that name is not in SILVER_DIMS or KNOWN_DEFERRED_DIMS."
-                )
-
-    # P1.5α-fix14: undeclared upstreams must raise, not silently become ExternalDeps.
-    # Collect across the whole consumer-loop so one error names every offender —
-    # the operator who forgot N upstreams shouldn't have to fix-rerun N times.
-    # Distinct from `_check_dep_exists_or_raise` above: that's a registry-consistency
-    # check (orchestrator bug if it fires). This check is bundle-declaration —
-    # "did the operator opt in via bundle.yaml?" Both must pass.
-    #
-    # The dep is "declared" iff dep_name appears in all_specs (which is built
-    # from bundle.{datasets, dimensions.build, gold.marts}). If the operator
-    # declared the upstream and just filtered it out via --datasets/--layers,
-    # all_specs still contains it — so case (A) (declared-but-filtered) keeps
-    # the ExternalDep path correctly. Case (B) (never declared at all) is the
-    # one this check catches.
-    # P1.5α-fix15: tuple widened with consumer_layer (4-axis instead of 3-axis)
-    # so the error builder below can name the correct bundle.yaml section to
-    # remove the consumer from. Derived via _layer_for_spec(all_specs[consumer]) —
-    # consumer is always in_plan_names, so always in all_specs.
-    undeclared_deps: list[tuple[str, str, str, str]] = []
-    # (consumer, consumer_layer, dep_layer, dep_name)
-
-    def _is_declared(dep_name: str) -> bool:
-        return dep_name in all_specs
-
-    for name in in_plan_names:
-        spec = all_specs[name]
-        consumer_layer = _layer_for_spec(spec)
-        if isinstance(spec, SilverDimSpec):
-            for b in spec.depends_on_bronze:
-                _check_dep_exists_or_raise(b, "bronze", name)
-                if not _is_declared(b):
-                    undeclared_deps.append((name, consumer_layer, "bronze", b))
-                    continue
-                if b not in in_plan_names:
-                    _add_extra(b, "bronze", name)
-        elif isinstance(spec, GoldMartSpec):
-            for b in spec.depends_on_bronze:
-                _check_dep_exists_or_raise(b, "bronze", name)
-                if not _is_declared(b):
-                    undeclared_deps.append((name, consumer_layer, "bronze", b))
-                    continue
-                if b not in in_plan_names:
-                    _add_extra(b, "bronze", name)
-            for s in spec.depends_on_silver:
-                _check_dep_exists_or_raise(s, "silver", name)
-                if not _is_declared(s):
-                    undeclared_deps.append((name, consumer_layer, "silver", s))
-                    continue
-                if s not in in_plan_names:
-                    _add_extra(s, "silver", name)
-        # BronzeExtractSpec + DeferredSpec — no upstream dispatch deps
-
-    if undeclared_deps:
-        # Consolidated error: one raise listing every undeclared upstream + which
-        # bundle.yaml section to act on. Matches the per-layer remediation
-        # established by P1.5α-fix12 (--datasets typo guard).
-        #
-        # P1.5α-fix15: two wording branches — disabled-specific (the upstream
-        # IS in bundle.datasets, just disabled — tell the operator to flip the
-        # flag) vs generic undeclared (truly missing — tell the operator to
-        # add a new entry). The generic message would mislead the operator
-        # into adding a duplicate entry; the disabled-specific message points
-        # at the actual fix.
-        _BUNDLE_SECTION = {
-            "bronze": "bundle.datasets",
-            "silver": "bundle.dimensions.build",
-            "gold":   "bundle.gold.marts",
-        }
-        lines = [
-            f"bundle.yaml is missing {len(undeclared_deps)} upstream "
-            f"declaration(s) — refusing to run with undeclared "
-            f"dependencies (which would silently rebuild from stale "
-            f"on-disk tables or trigger a misleading PrerequisiteError):"
-        ]
-        for consumer, consumer_layer, dep_layer, dep_name in undeclared_deps:
-            if dep_name in disabled_datasets:
-                lines.append(
-                    f"  • {dep_layer} {dep_name!r} is disabled in bundle.datasets "
-                    f"(required by {consumer!r}) — set `enabled: true` "
-                    f"or remove {consumer!r} from {_BUNDLE_SECTION[consumer_layer]}"
-                )
-            else:
-                lines.append(
-                    f"  • {dep_layer} {dep_name!r} (required by {consumer!r}) — "
-                    f"add it to {_BUNDLE_SECTION[dep_layer]}"
-                )
-        raise MissingDependencyError("\n".join(lines))
-
-    # 4. Topo-sort the in-plan names.
-    ts: TopologicalSorter[str] = TopologicalSorter()
-    for name in in_plan_names:
-        spec = all_specs[name]
-        deps_in_plan: set[str] = set()
-        if isinstance(spec, SilverDimSpec):
-            deps_in_plan.update(d for d in spec.depends_on_bronze if d in in_plan_names)
-        elif isinstance(spec, GoldMartSpec):
-            deps_in_plan.update(d for d in spec.depends_on_bronze if d in in_plan_names)
-            deps_in_plan.update(d for d in spec.depends_on_silver if d in in_plan_names)
-        ts.add(name, *deps_in_plan)
-
-    ordered_names = list(ts.static_order())
-    plan = [all_specs[name] for name in ordered_names]
-    return plan, tuple(extra_deps_list)
+    extra_deps = tuple(
+        ExternalDep(
+            dataset_id=pn.dataset_id, layer=pn.layer,
+            consumer=pn.consumer, table_path=pn.table_path,
+        ) for pn in prereq_nodes
+    )
+    return spec_plan, extra_deps
 
 
 # ---------------------------------------------------------------------------
@@ -1086,10 +893,31 @@ def run(
         return RunSummary.empty(bundle.project, mode)
 
     # 3. Dry-run: return the would-run plan + prereqs, no work.
+    #    P1.5ε-fix9 coerces specs → PlanNode and ExternalDep → PrereqNode
+    #    BEFORE building RunSummary.empty, so the renderer sees the same
+    #    DTO types on both the --inline path (here) and the REST dispatch
+    #    path. _render_summary no longer needs a `_layer_for_spec` fallback.
     if dry_run:
+        plan_nodes = tuple(
+            PlanNode(
+                dataset_id=spec.dataset_id,
+                layer=(
+                    spec.layer if isinstance(spec, DeferredSpec)
+                    else _layer_for_spec(spec)
+                ),
+                status="deferred" if isinstance(spec, DeferredSpec) else "eligible",
+                reason=spec.reason if isinstance(spec, DeferredSpec) else None,
+            ) for spec in plan
+        )
+        prereq_nodes = tuple(
+            PrereqNode(
+                dataset_id=dep.dataset_id, layer=dep.layer,
+                consumer=dep.consumer, table_path=dep.table_path,
+            ) for dep in extra_deps
+        )
         return RunSummary.empty(
             bundle.project, mode,
-            plan=tuple(plan), prereqs=extra_deps,
+            plan=plan_nodes, prereqs=prereq_nodes,
         )
 
     # 3.5. Credential preflight (B5 + Blocker-5 reorder) — runs BEFORE

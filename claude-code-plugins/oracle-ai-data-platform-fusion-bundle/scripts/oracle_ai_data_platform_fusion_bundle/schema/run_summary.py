@@ -99,6 +99,28 @@ class PlanNode:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class PrereqNode:
+    """Cross-boundary representation of an extra-plan prerequisite — an
+    in-plan consumer whose upstream is filtered out via ``--datasets`` /
+    ``--layers``. Mirrors :class:`orchestrator.runtime.ExternalDep` but
+    lives in the neutral schema namespace so the dispatch package can
+    populate prereqs laptop-side under ``--dry-run`` without importing the
+    engine.
+
+    The engine-side ``--inline`` path still constructs ``ExternalDep``
+    instances for ``_preflight_external_deps`` (which calls
+    ``spark.catalog.tableExists(...)``). The two DTOs have identical
+    shape; the dispatch dry-run path does not check existence — it just
+    declares which tables WOULD be required.
+    """
+
+    dataset_id: str
+    layer: Literal["bronze", "silver", "gold"]
+    consumer: str
+    table_path: str
+
+
 # ---------------------------------------------------------------------------
 # RunStep + RunSummary
 # ---------------------------------------------------------------------------
@@ -499,6 +521,7 @@ class RunSummary:
 __all__ = [
     "MARKER_SCHEMA_VERSION",
     "PlanNode",
+    "PrereqNode",
     "RunStep",
     "RunSummary",
     "_ABORT_MSG_TMPL",

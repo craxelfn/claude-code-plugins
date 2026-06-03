@@ -15,7 +15,11 @@ modules):
 - ``schema.bundle`` (AidpConfig, EnvSpec, Bundle, load_bundle)
 - ``schema.errors`` (OrchestratorConfigError + cross-boundary subclasses)
 - ``schema.refs`` (env-var rendering)
-- ``schema.run_summary`` (RunStep, RunSummary, PlanNode, marker serializers)
+- ``schema.run_summary`` (RunStep, RunSummary, PlanNode, PrereqNode, marker serializers)
+- ``schema.registry_metadata`` (P1.5ε-fix9 — neutral bronze/silver/gold metadata
+  consumed by ``schema.plan_resolver``)
+- ``schema.plan_resolver`` (P1.5ε-fix9 — dry-run plan resolver consumed by
+  ``dispatch.dispatch_via_rest`` under ``--dry-run``)
 """
 
 from __future__ import annotations
@@ -107,18 +111,60 @@ def test_schema_imports_are_permitted() -> None:
     """Sanity check — the schema-level imports the dispatch package
     relies on are reachable from the same clean subprocess. If this test
     fails the boundary tests above are likely false-passing because the
-    schema packages themselves got renamed."""
+    schema packages themselves got renamed.
+
+    P1.5ε-fix9 adds ``schema.plan_resolver`` + ``schema.registry_metadata``
+    to the allow-list — both are consumed by ``dispatch_via_rest`` on
+    the dry-run path and must remain clean of engine imports.
+    """
     loaded = _modules_loaded_by(
         "from oracle_ai_data_platform_fusion_bundle import dispatch\n"
         "from oracle_ai_data_platform_fusion_bundle.schema import "
-        "bundle, errors, refs, run_summary"
+        "bundle, errors, refs, run_summary, registry_metadata, plan_resolver"
     )
     expected = {
         "oracle_ai_data_platform_fusion_bundle.schema.bundle",
         "oracle_ai_data_platform_fusion_bundle.schema.errors",
         "oracle_ai_data_platform_fusion_bundle.schema.refs",
         "oracle_ai_data_platform_fusion_bundle.schema.run_summary",
+        "oracle_ai_data_platform_fusion_bundle.schema.registry_metadata",
+        "oracle_ai_data_platform_fusion_bundle.schema.plan_resolver",
     }
     assert expected.issubset(loaded), (
         f"expected schema modules not loaded: missing={expected - loaded}"
+    )
+
+
+def test_render_summary_with_plan_nodes_does_not_import_orchestrator_registry() -> None:
+    """P1.5ε-fix9 — locks the ``_layer_for_spec`` lazy-import fallback
+    removal in ``commands/run.py:_render_summary``. Renders a RunSummary
+    whose ``plan`` is a tuple of ``PlanNode`` instances, and asserts the
+    in-process render path did NOT pull ``orchestrator.registry`` (or any
+    other engine module) into ``sys.modules``.
+
+    Runs in a fresh subprocess because the test runner already has
+    ``orchestrator.registry`` loaded from earlier engine-side tests —
+    in-process the assertion would be order-dependent and trivially pass
+    even if ``_render_summary`` accidentally imported engine code.
+    """
+    spec = (
+        "from oracle_ai_data_platform_fusion_bundle.schema.run_summary import "
+        "RunSummary, PlanNode\n"
+        "from oracle_ai_data_platform_fusion_bundle.commands.run import "
+        "_render_summary\n"
+        "from rich.console import Console\n"
+        "import io\n"
+        "summary = RunSummary.empty(\n"
+        "    bundle_project='x', mode='seed',\n"
+        "    plan=(PlanNode(dataset_id='ap_invoices', layer='bronze'),),\n"
+        "    prereqs=(),\n"
+        ")\n"
+        "_render_summary(Console(file=io.StringIO()), summary)"
+    )
+    loaded = _modules_loaded_by(spec)
+    forbidden = {m for m in loaded if any(m.startswith(p) for p in FORBIDDEN_PREFIXES)}
+    assert not forbidden, (
+        f"_render_summary leaked engine imports: {forbidden}. "
+        "The `_layer_for_spec` lazy-import fallback was supposed to be "
+        "removed in P1.5ε-fix9 Step 6 — check commands/run.py."
     )

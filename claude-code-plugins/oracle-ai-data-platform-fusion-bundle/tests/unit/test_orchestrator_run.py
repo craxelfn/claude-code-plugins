@@ -212,669 +212,86 @@ class TestModeValidation:
 
 
 class TestResolvePlan:
-    def test_basic_topo_sort(self, tmp_path: Path) -> None:
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        plan, extra_deps = orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        # Every bronze comes before any silver that depends on it.
-        plan_names = [s.dataset_id for s in plan]
-        assert plan_names.index("erp_suppliers") < plan_names.index("dim_supplier")
-        assert plan_names.index("dim_supplier") < plan_names.index("supplier_spend")
-        # ap_invoices is a dep of supplier_spend AND ap_aging
-        assert plan_names.index("ap_invoices") < plan_names.index("supplier_spend")
-        assert plan_names.index("ap_invoices") < plan_names.index("ap_aging")
-        assert extra_deps == ()  # nothing filtered out
+    """P1.5ε-fix9 — TestResolvePlan shrank to two engine-side smokes after
+    the bulk of behavior tests relocated to
+    ``tests/unit/schema/test_plan_resolver.py``. The remaining tests lock
+    the engine-side wrapper contract: ``resolve_plan`` still returns
+    ``Spec`` instances + ``ExternalDep``, and the deferred-name branch
+    reconstructs ``DeferredSpec`` instead of KeyError-ing on a registry
+    miss.
+    """
 
-    def test_layer_filter_creates_extra_deps(self, tmp_path: Path) -> None:
-        """With `layers=['gold']`, bronze + silver get filtered out; gold
-        marts list their upstream as extra-plan deps for the preflight."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        plan, extra_deps = orchestrator.resolve_plan(bundle, None, ["gold"], paths=paths)
-        plan_names = {s.dataset_id for s in plan}
-        # Only gold marts in plan
-        assert plan_names == {"supplier_spend", "gl_balance", "ap_aging"}
-        # Extras include the consumed bronze + silver
-        dep_ids = {(d.dataset_id, d.layer) for d in extra_deps}
-        assert ("ap_invoices", "bronze") in dep_ids
-        assert ("dim_supplier", "silver") in dep_ids
-        assert ("gl_period_balances", "bronze") in dep_ids
-        assert ("dim_account", "silver") in dep_ids
-
-    def test_datasets_filter_targets_specific_names(self, tmp_path: Path) -> None:
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        plan, extra_deps = orchestrator.resolve_plan(
-            bundle, ["dim_supplier"], None, paths=paths,
-        )
-        plan_names = [s.dataset_id for s in plan]
-        assert plan_names == ["dim_supplier"]
-        # erp_suppliers is a bronze dep, now extra-plan
-        assert any(d.dataset_id == "erp_suppliers" and d.layer == "bronze" for d in extra_deps)
-
-    def test_typo_in_dim_raises_missing_dependency(self, tmp_path: Path) -> None:
-        """Branch A: bundle.yaml typo → unknown REQUESTED name. The resolver
-        looks up ``dim_typo`` in SILVER_DIMS / KNOWN_DEFERRED_DIMS and finds
-        nothing, raising MissingDependencyError at the bundle-name-→-spec
-        boundary. Distinct from Branch B (registry-inconsistency,
-        ``_check_dep_exists_or_raise``)."""
-        bad = _MIN_BUNDLE.replace("dim_supplier", "dim_typo")
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bad))
-        with pytest.raises(MissingDependencyError, match="dim_typo"):
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-
-    def test_inplan_consumer_with_unknown_dependency_raises_missing_dependency(
+    def test_resolve_plan_back_compat_returns_specs_and_external_deps(
         self, tmp_path: Path,
     ) -> None:
-        """Branch B (registry-inconsistency guardrail at
-        ``_check_dep_exists_or_raise``, __init__.py:168): a valid in-plan
-        consumer (gold mart present in bundle.gold.marts AND in GOLD_MARTS)
-        whose ``depends_on_bronze`` references a name absent from
-        BRONZE_EXTRACTS + KNOWN_DEFERRED_DATASETS must raise
-        MissingDependencyError naming the missing dep — NOT
-        PrerequisiteError (which would imply the bad reference leaked
-        through to disk-state-checking) and NOT KeyError / bare ValueError
-        (which would imply the check was bypassed).
-
-        Future-proofs against a contributor adding a GoldMartSpec with a
-        typo or stale name in its depends_on_bronze and getting a
-        misleading error class downstream — or worse, a refactor that
-        builds extras lazily and silently constructs a malformed
-        ExternalDep.
+        """Engine-side import surface lock — anything that did
+        ``from oracle_ai_data_platform_fusion_bundle.orchestrator import resolve_plan``
+        keeps working unchanged. Returns a topo-sorted list of Spec
+        instances + ExternalDep prereqs, same as pre-fix9.
         """
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-
-        # Bundle whose gold.marts references a real mart name —
-        # consumer-side resolution succeeds; only the dependency is bogus.
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: registry-inconsistency-test
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-    mode: full
-dimensions:
-  build:
-    - dim_supplier
-gold:
-  marts:
-    - supplier_spend
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-
-        # Replace the real supplier_spend GoldMartSpec with one whose
-        # depends_on_bronze points at a name NOT in BRONZE_EXTRACTS or
-        # KNOWN_DEFERRED_DATASETS. dataset_id stays valid (still in
-        # bundle.gold.marts and in GOLD_MARTS dict key).
-        real_spec = registry.GOLD_MARTS["supplier_spend"]
-        bogus_spec = registry.GoldMartSpec(
-            dataset_id=real_spec.dataset_id,
-            builder=real_spec.builder,
-            depends_on_bronze=("nonexistent_pvo",),  # ← the bad dependency
-            depends_on_silver=real_spec.depends_on_silver,
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import (
+            ExternalDep,
+            load_bundle,
         )
-
-        with patch.dict(
-            registry.GOLD_MARTS,
-            {"supplier_spend": bogus_spec},
-        ):
-            with pytest.raises(MissingDependencyError) as exc_info:
-                orchestrator.resolve_plan(bundle, None, None, paths=paths)
-
-        msg = str(exc_info.value)
-        assert "nonexistent_pvo" in msg, (
-            f"MissingDependencyError must name the absent dependency; got: {msg!r}"
-        )
-        # Load-bearing: must be MissingDependencyError, NOT PrerequisiteError.
-        # PrerequisiteError would mean the bad reference leaked into the extras
-        # list and got tableExists-checked at preflight time — the wrong error
-        # class for the registry-inconsistency root cause.
-        assert not isinstance(exc_info.value, PrerequisiteError), (
-            "registry inconsistency must raise MissingDependencyError, "
-            "NOT PrerequisiteError — preflight is for disk state, not "
-            "registry coherence"
-        )
-
-    def test_deferred_dim_resolves_to_deferred_spec(self, tmp_path: Path) -> None:
-        bundle_with_deferred = _MIN_BUNDLE.replace(
-            "    - dim_supplier", "    - dim_supplier\n    - dim_org",
-        )
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_with_deferred))
-        plan, _ = orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        dim_org_spec = next(s for s in plan if s.dataset_id == "dim_org")
-        assert isinstance(dim_org_spec, registry.DeferredSpec)
-        assert dim_org_spec.layer == "silver"
-
-    def test_typoed_datasets_filter_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """P1.5α-fix12 — silent-empty-plan guardrail.
-
-        A typoed ``--datasets`` value (here ``ap_invoies``, a real typo of
-        ``ap_invoices``) must hard-fail with MissingDependencyError —
-        not silently produce an empty plan + exit 0, which would let an
-        operator believe a scoped refresh ran while no table changed.
-
-        The error message must name the unknown filter value AND list the
-        available bundle names so the operator can self-correct.
-        """
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
         bundle, paths = load_bundle(_bundle_file(tmp_path))
-
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(
-                bundle, ["ap_invoies"], None, paths=paths,
-            )
-        msg = str(exc_info.value)
-        # Typoed name surfaced
-        assert "ap_invoies" in msg, (
-            f"error must name the unknown --datasets value; got: {msg!r}"
-        )
-        # Available names listed for self-correction (at least one real bundle
-        # name appears — e.g., the actual ap_invoices is in _MIN_BUNDLE)
-        assert "ap_invoices" in msg, (
-            f"error must list available bundle names for self-correction; "
-            f"got: {msg!r}"
-        )
-
-    def test_typoed_datasets_filter_with_mixed_valid_and_invalid(
-        self, tmp_path: Path,
-    ) -> None:
-        """Mixed valid/invalid --datasets list: presence of even one valid
-        name does NOT excuse the invalid one. All unknown names are listed.
-        """
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(
-                bundle,
-                ["dim_supplier", "bogus_name_1", "bogus_name_2"],
-                None,
-                paths=paths,
-            )
-        msg = str(exc_info.value)
-        assert "bogus_name_1" in msg and "bogus_name_2" in msg, (
-            f"all unknown filter names must surface; got: {msg!r}"
-        )
-
-    def test_typoed_layers_filter_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """P1.5α-fix12 — same guardrail for the layers= filter.
-
-        A typoed ``--layers`` value (here ``gols``, typo of ``gold``) must
-        hard-fail with MissingDependencyError naming the offender and
-        listing the valid layer enum.
-        """
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(
-                bundle, None, ["gols"], paths=paths,
-            )
-        msg = str(exc_info.value)
-        assert "gols" in msg, (
-            f"error must name the unknown --layers value; got: {msg!r}"
-        )
-        # Valid layer enum surfaced for self-correction
-        for valid in ("bronze", "silver", "gold"):
-            assert valid in msg, (
-                f"error must list valid layers; missing {valid!r} in: {msg!r}"
-            )
-
-    # ----------------------------------------------------------------------
-    # P1.5α-fix14 — undeclared upstreams must raise, not silently become
-    # ExternalDeps. The check distinguishes:
-    #   (A) declared-but-filtered  → legitimate ExternalDep (case A preserved)
-    #   (B) never declared at all  → MissingDependencyError naming the
-    #       offender(s) + which bundle.yaml section to add to
-    # ----------------------------------------------------------------------
-
-    def test_undeclared_bronze_upstream_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """Bundle declares a gold mart whose bronze upstream is missing from
-        ``bundle.datasets`` → ``MissingDependencyError`` naming the consumer,
-        the upstream name, AND ``bundle.datasets`` as the section to add it to.
-
-        Distinct from ``test_typoed_datasets_filter_raises_missing_dependency``
-        (P1.5α-fix12 — covers filter-input typos, not bundle omission) and
-        from ``test_inplan_consumer_with_unknown_dependency_raises_missing_dependency``
-        (P1.5α-fix14 fires on a name that IS in the registry but missing from
-        the bundle — registry vs bundle-declaration are orthogonal contracts).
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: []
-gold:
-  marts: [ap_aging]
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Names the gold consumer
-        assert "ap_aging" in msg, f"error must name consumer; got {msg!r}"
-        # Names the bronze upstream that ap_aging depends on (ap_invoices)
-        assert "ap_invoices" in msg, (
-            f"error must name the undeclared bronze upstream; got {msg!r}"
-        )
-        # Remediation: tells operator WHERE in bundle.yaml to add it
-        assert "bundle.datasets" in msg, (
-            f"error must point at the bundle.yaml section to fix; got {msg!r}"
-        )
-
-    def test_declared_bronze_filtered_out_becomes_external_dep(
-        self, tmp_path: Path,
-    ) -> None:
-        """Regression for case (A): operator DECLARED the upstream in
-        bundle.yaml then filtered it out via --layers/--datasets. This is the
-        legitimate ExternalDep path — fix14 must NOT break it.
-
-        Bundle declares ap_invoices + ap_aging + a stub silver dim, then we
-        filter to --layers=['gold']. ap_invoices stays declared but gets
-        filtered out of in_plan_names → becomes a legitimate ExternalDep,
-        no error raised.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-declared-but-filtered
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    mode: full
-dimensions:
-  build: [dim_supplier, dim_calendar]
-gold:
-  marts: [ap_aging]
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        # --layers=['gold'] filters bronze + silver out. ap_invoices is
-        # declared (case A) — must become an ExternalDep, NOT raise.
         plan, extra_deps = orchestrator.resolve_plan(
             bundle, None, ["gold"], paths=paths,
         )
         plan_names = {s.dataset_id for s in plan}
-        assert plan_names == {"ap_aging"}, (
-            f"only gold mart should be in plan; got {plan_names}"
-        )
-        dep_keys = {(d.dataset_id, d.layer) for d in extra_deps}
-        assert ("ap_invoices", "bronze") in dep_keys, (
-            f"declared-but-filtered ap_invoices must become ExternalDep; "
-            f"got {dep_keys}"
-        )
+        assert plan_names == {"supplier_spend", "gl_balance", "ap_aging"}
+        # Plan entries are Spec instances (not PlanNode) — the engine
+        # consumes ``spec.builder`` per step.
+        for s in plan:
+            assert isinstance(s, (registry.GoldMartSpec, registry.SilverDimSpec, registry.BronzeExtractSpec, registry.DeferredSpec))
+        # Prereqs are ExternalDep — engine-side preflight calls
+        # ``spark.catalog.tableExists`` on the ``table_path``.
+        for d in extra_deps:
+            assert isinstance(d, ExternalDep)
 
-    def test_multiple_undeclared_upstreams_accumulated_in_one_error(
+    def test_resolve_plan_wrapper_returns_deferred_spec_for_deferred_names(
         self, tmp_path: Path,
     ) -> None:
-        """Operator who forgot multiple upstreams shouldn't have to
-        fix-rerun-fix-rerun. Single MissingDependencyError lists every
-        offender. Validates the accumulate-vs-fail-fast decision documented
-        in plan.md.
-
-        Bundle: supplier_spend depends on bronze ap_invoices + silver
-        dim_supplier; declare NEITHER bronze nor silver → one error names
-        BOTH undeclared upstreams.
+        """Reviewer round 1 blocking lock — deferred names like
+        ``dim_org`` / ``ar_aging`` / ``hcm_worker_assignments`` are NOT in
+        ``BRONZE_EXTRACTS`` / ``SILVER_DIMS`` / ``GOLD_MARTS``. A naive
+        registry-dict lookup in the wrapper would KeyError. The wrapper
+        must branch on ``PlanNode.status == "deferred"`` and reconstruct
+        ``DeferredSpec`` from the PlanNode fields.
         """
         bundle_yaml = """
 apiVersion: aidp-fusion-bundle/v1
-project: fix14-multi-undeclared
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: []
-gold:
-  marts: [supplier_spend]
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Both undeclared upstreams must appear in the SAME error message
-        assert "ap_invoices" in msg, (
-            f"first undeclared upstream must be named; got {msg!r}"
-        )
-        assert "dim_supplier" in msg, (
-            f"second undeclared upstream must be named; got {msg!r}"
-        )
-        # Each line carries the right remediation section
-        assert "bundle.datasets" in msg
-        assert "bundle.dimensions.build" in msg
-
-    def test_undeclared_bronze_upstream_for_silver_dim_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """Reviewer catch #2: ``test_undeclared_bronze_upstream_raises_missing_dependency``
-        covers a GoldMartSpec.depends_on_bronze miss, but ``resolve_plan`` walks
-        ``SilverDimSpec.depends_on_bronze`` at ``__init__.py:227`` SEPARATELY.
-        Without this test, a future refactor that breaks ONLY the
-        SilverDim → bronze branch could let ``dim_supplier``'s undeclared
-        ``erp_suppliers`` upstream silently coerce into an ``ExternalDep``
-        while the gold-side tests still pass.
-
-        Bundle: declare ``dim_supplier`` in ``dimensions.build``, omit its
-        bronze upstream ``erp_suppliers`` from ``datasets``. No gold marts —
-        isolates the silver branch.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-bronze-for-silver-dim
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: []
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Names the silver consumer
-        assert "dim_supplier" in msg, (
-            f"error must name the silver consumer; got {msg!r}"
-        )
-        # Names the undeclared BRONZE upstream the silver depends on
-        assert "erp_suppliers" in msg, (
-            f"error must name the undeclared bronze upstream of the silver dim; got {msg!r}"
-        )
-        # Remediation: bronze section, not silver/gold
-        assert "bundle.datasets" in msg, (
-            f"error must point at bundle.datasets (the bronze section); got {msg!r}"
-        )
-
-    def test_undeclared_silver_upstream_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """Reviewer catch: the bug is symmetric across SilverDimSpec.depends_on_bronze
-        AND GoldMartSpec.depends_on_silver — without this test, an
-        implementation could plug the bronze hole at line 213/218 but leave
-        the silver path at line 222 still silently coercing dim_supplier into
-        an ExternalDep against a stale Delta table.
-
-        Bundle declares bronze deps (so the bronze undeclared check does NOT
-        fire — isolating the silver-only failure), but omits the silver dim
-        the gold mart depends on. supplier_spend depends on bronze
-        ap_invoices + bronze erp_suppliers + silver dim_supplier; declare
-        the bronzes but NOT the silver.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-silver
+project: fix9-deferred-reconstruction
 fusion:
   serviceUrl: https://x
   username: u
   password: literal-pw
   externalStorage: oci://b@n/p
 datasets:
-  - id: ap_invoices
-    mode: full
-  - id: erp_suppliers
-    mode: full
+  - id: hcm_worker_assignments
 dimensions:
-  build: []
+  build:
+    - dim_org
 gold:
-  marts: [supplier_spend]
+  marts:
+    - ar_aging
 """
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import (
+            load_bundle,
+        )
         bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Names the gold consumer
-        assert "supplier_spend" in msg, f"error must name consumer; got {msg!r}"
-        # Names the undeclared SILVER upstream
-        assert "dim_supplier" in msg, (
-            f"error must name the undeclared silver upstream; got {msg!r}"
-        )
-        # Remediation: tells operator WHERE in bundle.yaml to add it
-        assert "bundle.dimensions.build" in msg, (
-            f"error must point at the silver section of bundle.yaml; got {msg!r}"
-        )
-        # Bronze deps are declared — so the message should NOT also flag them
-        # (this verifies the check only fires on truly undeclared, not on
-        # the entire dependency set).
-        assert "bundle.datasets" not in msg, (
-            f"declared bronze deps must not appear in the error; got {msg!r}"
-        )
-
-    # ----------------------------------------------------------------------
-    # P1.5α-fix15 — honor DatasetSpec.enabled=false + disabled-specific
-    # wording on the consumer-upstream (fix14) AND filter-input (fix12) paths.
-    # All four tests use fully-explicit minimal YAML to suppress schema
-    # defaults that would otherwise inject undeclared upstreams and pollute
-    # the error-message assertions.
-    # ----------------------------------------------------------------------
-
-    def test_disabled_dataset_excluded_from_plan(self, tmp_path: Path) -> None:
-        """Happy path: a `enabled: false` dataset is absent from BOTH the
-        plan and extra_deps (locks the contract that disabled-without-
-        consumers does NOT silently become an ExternalDep).
-
-        Explicit empty `dimensions.build` and `gold.marts` suppress the
-        4-dim + 4-mart defaults — otherwise they'd inject undeclared
-        consumers and crash the test for unrelated reasons.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-happy-path-disabled-excluded
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: []
-gold:
-  marts: []
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        plan, extra_deps = orchestrator.resolve_plan(
+        plan, _ = orchestrator.resolve_plan(
             bundle, None, None, paths=paths,
         )
-        plan_names = {s.dataset_id for s in plan}
-        assert plan_names == {"erp_suppliers"}, (
-            f"only enabled bronze must be in plan; got {plan_names}"
-        )
-        assert extra_deps == (), (
-            f"disabled-without-consumers must not become an ExternalDep; "
-            f"got extra_deps={extra_deps}"
-        )
-        # Defensive: disabled id absent from BOTH paths
-        assert not any(d.dataset_id == "ap_invoices" for d in extra_deps), (
-            "disabled bronze must NOT surface via extra_deps"
-        )
-
-    def test_disabled_dataset_with_gold_consumer_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        """Gold-consumer path — `_BUNDLE_SECTION[gold] = bundle.gold.marts`.
-
-        Asserts disabled-specific wording (set enabled: true; remove from
-        bundle.gold.marts) is emitted instead of the generic
-        "add to bundle.datasets" message (which would mislead the operator
-        into adding a duplicate entry — ap_invoices IS already declared,
-        just disabled).
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-gold-consumer-disabled-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: [supplier_spend]
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Names the disabled dep + the consumer
-        assert "ap_invoices" in msg
-        assert "supplier_spend" in msg
-        # Disabled-specific wording present
-        assert "disabled" in msg, (
-            f"error must contain 'disabled' for the disabled-state path; got {msg!r}"
-        )
-        assert "enabled: true" in msg, (
-            f"error must point at the `enabled: true` remediation; got {msg!r}"
-        )
-        # Correct consumer-layer section (gold → bundle.gold.marts)
-        assert "bundle.gold.marts" in msg, (
-            f"error must point at bundle.gold.marts for a gold consumer; got {msg!r}"
-        )
-        # NOT the misleading generic remediation (would send operator to add
-        # a duplicate entry, since ap_invoices IS already in bundle.datasets)
-        assert "add it to bundle.datasets" not in msg, (
-            f"disabled wording must NOT contain misleading "
-            f"'add it to bundle.datasets'; got {msg!r}"
-        )
-
-    def test_disabled_dataset_with_silver_consumer_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        """Silver-consumer path — `_BUNDLE_SECTION[silver] = bundle.dimensions.build`.
-
-        Without consumer_layer derivation in undeclared_deps, this test fails
-        because the wrong section would be named (bundle.gold.marts for a
-        silver consumer). Locks the contract that the wording uses the
-        consumer's layer, not a hardcoded mapping.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-silver-consumer-disabled-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-    enabled: false
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: []
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(bundle, None, None, paths=paths)
-        msg = str(exc_info.value)
-        # Names the disabled bronze dep + the silver consumer
-        assert "erp_suppliers" in msg
-        assert "dim_supplier" in msg
-        # Disabled-specific wording
-        assert "disabled" in msg
-        assert "enabled: true" in msg
-        # CORRECT section: silver consumer → bundle.dimensions.build,
-        # NOT bundle.gold.marts (would dead-end the operator).
-        assert "bundle.dimensions.build" in msg, (
-            f"silver-consumer remediation must point at bundle.dimensions.build; "
-            f"got {msg!r}"
-        )
-        assert "bundle.gold.marts" not in msg, (
-            f"silver consumer must NOT be told to remove from bundle.gold.marts; "
-            f"got {msg!r}"
-        )
-
-    def test_datasets_filter_with_disabled_id_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        """Filter-input path — `--datasets ap_invoices` where ap_invoices is
-        disabled in bundle.datasets. fix12's generic message would say "not
-        in the bundle plan, edit bundle.yaml first" — but the entry IS in
-        the bundle.
-
-        Locks fix12's new branch that consults disabled_datasets BEFORE the
-        generic unknown-dataset error.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-filter-input-disabled
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: []
-gold:
-  marts: []
-"""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import load_bundle
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            orchestrator.resolve_plan(
-                bundle, datasets=["ap_invoices"], layers=None, paths=paths,
-            )
-        msg = str(exc_info.value)
-        # Names the disabled filter-input id
-        assert "ap_invoices" in msg
-        # Disabled-specific wording present
-        assert "disabled" in msg, (
-            f"error must contain 'disabled' on the filter-input path; got {msg!r}"
-        )
-        assert "enabled: true" in msg, (
-            f"error must point at `enabled: true` remediation; got {msg!r}"
-        )
-        # Generic remediation must NOT be the ONLY message — would send the
-        # operator to "edit bundle.yaml" which they already did (it's disabled).
-        # We allow "not in the bundle plan" to appear if there's ALSO a truly-
-        # unknown name in the filter, but here there's only the disabled one.
-        assert "not in the bundle plan" not in msg, (
-            f"pure-disabled filter must NOT use the generic "
-            f"'not in the bundle plan' wording; got {msg!r}"
-        )
+        deferred = {s.dataset_id: s for s in plan if isinstance(s, registry.DeferredSpec)}
+        assert set(deferred) == {"hcm_worker_assignments", "dim_org", "ar_aging"}
+        assert deferred["hcm_worker_assignments"].layer == "bronze"
+        assert deferred["dim_org"].layer == "silver"
+        assert deferred["ar_aging"].layer == "gold"
+        # Reason strings are operator-facing — must be preserved verbatim
+        # through the PlanNode→DeferredSpec hop.
+        assert "P2.11" in deferred["hcm_worker_assignments"].reason
+        assert "P1.7" in deferred["dim_org"].reason
+        assert "P1.10" in deferred["ar_aging"].reason
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +311,51 @@ class TestRunDryRun:
         assert summary.steps == ()
         assert summary.plan is not None and len(summary.plan) > 0
         assert summary.run_id.startswith("empty-")
+
+    def test_inline_dry_run_returns_plan_nodes_only(self, tmp_path: Path) -> None:
+        """P1.5ε-fix9 reviewer round 1 blocking lock — the --inline
+        dry-run path must coerce engine Specs → PlanNode AND ExternalDep
+        → PrereqNode BEFORE building RunSummary.empty, so the renderer
+        sees the same DTO types regardless of execution surface
+        (--inline or REST dispatch). After Step 6's
+        ``_layer_for_spec`` lazy-import fallback removal in
+        ``_render_summary``, any spec that leaks through would break
+        plan rendering.
+        """
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            PlanNode,
+            PrereqNode,
+        )
+
+        with patch("oracle_ai_data_platform_fusion_bundle.orchestrator._bootstrap_spark"), \
+             patch("oracle_ai_data_platform_fusion_bundle.orchestrator._resolve_password"):
+            summary = orchestrator.run(
+                _bundle_file(tmp_path), mode="seed", dry_run=True,
+                layers=["gold"],  # forces silver/bronze into prereqs
+            )
+        assert summary.plan is not None
+        assert isinstance(summary.plan, tuple)
+        assert all(isinstance(n, PlanNode) for n in summary.plan), (
+            f"every plan entry must be a PlanNode; got "
+            f"{[type(n).__name__ for n in summary.plan]}"
+        )
+        assert summary.prereqs is not None
+        assert isinstance(summary.prereqs, tuple)
+        assert all(isinstance(n, PrereqNode) for n in summary.prereqs), (
+            f"every prereq entry must be a PrereqNode; got "
+            f"{[type(n).__name__ for n in summary.prereqs]}"
+        )
+        # Render-summary round-trip: must not raise on a tuple of
+        # PlanNode/PrereqNode (catches a regression where a spec leaks
+        # through and node.layer lookup fails).
+        from io import StringIO
+
+        from rich.console import Console
+
+        from oracle_ai_data_platform_fusion_bundle.commands.run import (
+            _render_summary,
+        )
+        _render_summary(Console(file=StringIO()), summary)
 
 
 class TestRunCredentialPreflight:

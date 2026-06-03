@@ -58,6 +58,10 @@ fusion:
   externalStorage: storage-1
 datasets:
   - id: erp_suppliers
+dimensions:
+  build: []
+gold:
+  marts: []
 """
 
 
@@ -287,6 +291,86 @@ class TestDryRun:
         client.upload_notebook.assert_not_called()
         client.create_notebook_job.assert_not_called()
         client.submit_run.assert_not_called()
+
+    def test_dry_run_populates_plan_nodes(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5ε-fix9 — dispatch dry-run must resolve the bundle plan
+        laptop-side and populate ``RunSummary.plan`` with PlanNode
+        entries (not None, not engine spec objects). Without this,
+        ``commands/run.py:_render_summary`` shows "Empty plan" instead
+        of the would-dispatch DAG.
+        """
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            PlanNode,
+        )
+
+        _stub_client(monkeypatch)
+        summary = dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            dry_run=True,
+        )
+        assert summary.plan is not None
+        assert len(summary.plan) > 0
+        assert all(isinstance(n, PlanNode) for n in summary.plan)
+        # erp_suppliers is the sole bundle dataset → exactly one bronze node
+        assert summary.plan[0].dataset_id == "erp_suppliers"
+        assert summary.plan[0].layer == "bronze"
+
+    def test_dry_run_populates_prereqs_when_layer_filter_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1.5ε-fix9 — with ``--layers gold``, the bronze + silver
+        upstreams of in-plan gold marts must surface as PrereqNode
+        entries so the renderer can show the "Extra-plan prerequisites"
+        table the operator needs to verify before dispatching.
+        """
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            PrereqNode,
+        )
+
+        layer_filter_bundle = """
+apiVersion: aidp-fusion-bundle/v1
+project: test-dispatch
+fusion:
+  serviceUrl: https://fusion.example.com
+  username: user
+  password: not-a-secret
+  externalStorage: storage-1
+datasets:
+  - id: ap_invoices
+  - id: erp_suppliers
+dimensions:
+  build: [dim_supplier, dim_calendar]
+gold:
+  marts: [ap_aging]
+"""
+        bp = tmp_path / "bundle.yaml"
+        bp.write_text(layer_filter_bundle)
+
+        _stub_client(monkeypatch)
+        summary = dispatch_via_rest(
+            bundle_path=bp,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="seed",
+            datasets=None,
+            layers=["gold"],
+            dry_run=True,
+        )
+        assert summary.prereqs is not None
+        assert len(summary.prereqs) > 0
+        assert all(isinstance(d, PrereqNode) for d in summary.prereqs)
+        prereq_keys = {(d.dataset_id, d.layer) for d in summary.prereqs}
+        assert ("ap_invoices", "bronze") in prereq_keys
+        assert ("dim_supplier", "silver") in prereq_keys
 
 
 # ---------------------------------------------------------------------------
