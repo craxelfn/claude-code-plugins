@@ -18,12 +18,19 @@ if it grows too large. Tracked as a P3.x polish item.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+# Canonical taxonomy class lives in dispatch.errors so the CLI's
+# `except (DispatchError, OrchestratorConfigError)` catch covers wheel-
+# build failures with the stable DISPATCH_WHEEL_BUILD_FAILED code (no
+# raw RuntimeError traceback for the operator).
+from .errors import DispatchWheelBuildError
 
 
 _DEFAULT_CACHE_DIR = Path.home() / ".aidp" / "wheels"
@@ -40,11 +47,6 @@ _HASH_EXCLUDE_SUBSTRINGS: tuple[str, ...] = (
     "/__pycache__/",
     "/tests/",
 )
-
-
-class DispatchWheelBuildError(RuntimeError):
-    """``python -m build`` returned non-zero. Carries stdout/stderr in the
-    message for operator diagnosis without re-running."""
 
 
 def _compute_source_hash(plugin_checkout: Path) -> str:
@@ -103,6 +105,19 @@ def build_wheel(
             log(f"wheel cache hit: {source_hash}/{cached_wheels[0].name}")
             return cached_wheels[0]
 
+    # Fast-fail BEFORE spawning the subprocess so a missing `build`
+    # backend surfaces with an actionable remediation instead of pip's
+    # less-helpful "No module named build". Lazy importlib.util check —
+    # avoids actually importing build at module-import time (saves
+    # ~200ms on the dispatch hot path when the wheel cache is warm).
+    if importlib.util.find_spec("build") is None:
+        raise DispatchWheelBuildError(
+            "`build` package is not installed; required by the REST dispatch "
+            "wheel-build step. Install with `pip install build`, or reinstall "
+            "the plugin which pulls `build>=1.0` as a runtime dependency. "
+            "Skip this step entirely with --inline (notebook-side execution)."
+        )
+
     log(f"wheel cache miss (hash={source_hash}); running `python -m build`")
     with tempfile.TemporaryDirectory(prefix="aidp-wheel-build-") as tmpdir:
         outdir = Path(tmpdir)
@@ -134,6 +149,6 @@ def build_wheel(
 
 
 __all__ = [
-    "DispatchWheelBuildError",
+    "DispatchWheelBuildError",  # re-exported from dispatch.errors for back-compat
     "build_wheel",
 ]

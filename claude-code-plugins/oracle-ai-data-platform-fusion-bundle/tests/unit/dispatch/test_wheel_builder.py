@@ -15,6 +15,22 @@ from oracle_ai_data_platform_fusion_bundle.dispatch.wheel_builder import (
 )
 
 
+def test_wheel_builder_reuses_canonical_dispatch_error() -> None:
+    """``dispatch.wheel_builder.DispatchWheelBuildError`` MUST be the same
+    class as ``dispatch.errors.DispatchWheelBuildError`` (a DispatchError
+    subclass) so the CLI's ``except (DispatchError, OrchestratorConfigError)``
+    catch covers wheel-build failures with the stable DISPATCH_* code instead
+    of letting a raw RuntimeError escape as a traceback to the operator."""
+    from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+        DispatchError,
+        DispatchWheelBuildError as CanonicalError,
+    )
+
+    assert DispatchWheelBuildError is CanonicalError
+    assert issubclass(DispatchWheelBuildError, DispatchError)
+    assert DispatchWheelBuildError.code == "DISPATCH_WHEEL_BUILD_FAILED"
+
+
 def _make_checkout(root: Path) -> Path:
     """Build a minimal plugin-checkout layout the hash function can walk."""
     root.mkdir(parents=True, exist_ok=True)
@@ -175,6 +191,29 @@ class TestBuildWheelCache:
         cache_dir = tmp_path / "cache"
         with self._patch_build_subprocess(rc=0, produce_wheel=False):
             with pytest.raises(DispatchWheelBuildError, match="no .whl found"):
+                build_wheel(plugin_checkout=checkout, cache_dir=cache_dir)
+
+    def test_missing_build_package_fails_fast_with_install_hint(
+        self, tmp_path: Path
+    ) -> None:
+        """A vanilla install without `build` must NOT shell out to a
+        subprocess that prints `No module named build`. The pre-spawn
+        importlib check surfaces a copy-pasteable `pip install build`
+        remediation through the canonical DISPATCH_WHEEL_BUILD_FAILED
+        code, and `subprocess.run` is never invoked."""
+        checkout = _make_checkout(tmp_path / "checkout")
+        cache_dir = tmp_path / "cache"
+        with (
+            patch(
+                "oracle_ai_data_platform_fusion_bundle.dispatch.wheel_builder.importlib.util.find_spec",
+                return_value=None,  # simulate `build` not installed
+            ),
+            patch(
+                "oracle_ai_data_platform_fusion_bundle.dispatch.wheel_builder.subprocess.run",
+                side_effect=AssertionError("subprocess.run must not be reached"),
+            ),
+        ):
+            with pytest.raises(DispatchWheelBuildError, match="pip install build"):
                 build_wheel(plugin_checkout=checkout, cache_dir=cache_dir)
 
     def test_log_callback_invoked(self, tmp_path: Path) -> None:

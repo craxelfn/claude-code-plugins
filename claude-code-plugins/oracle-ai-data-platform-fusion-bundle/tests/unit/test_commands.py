@@ -237,6 +237,35 @@ class TestRun:
         # No Python traceback.
         assert "Traceback" not in result.output
 
+    def test_run_dispatch_wheel_build_error_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A wheel-build failure must surface as DISPATCH_WHEEL_BUILD_FAILED
+        through the CLI's `except DispatchError` catch — not as a raw
+        RuntimeError traceback. Catches a regression where a future
+        refactor reintroduces a local exception class in wheel_builder
+        that doesn't inherit from DispatchError.
+        """
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchWheelBuildError,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            side_effect=DispatchWheelBuildError("`python -m build` failed: rc=1"),
+        ):
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+        assert result.exit_code == 2
+        assert "DISPATCH_WHEEL_BUILD_FAILED" in result.output
+        assert "python -m build" in result.output
+        # No traceback — wheel build errors must round-trip through the
+        # taxonomy, not escape as raw RuntimeError.
+        assert "Traceback" not in result.output
+
     def test_run_dispatch_failed_steps_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
