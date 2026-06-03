@@ -23,9 +23,18 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import oci
+
+# P1.5ε-fix8 — diagnose-on-timeout enrichment budget. Total wall time the
+# dispatcher spends fetching the partial executed-notebook + walking cell
+# outputs before re-raising DispatchPollTimeoutError. The operator already
+# waited --poll-timeout seconds; another 10s for diagnostic enrichment is
+# fine. Each diagnostic HTTP call passes ``timeout=_remaining()`` so
+# requests itself bounds the per-call latency — `time.monotonic()` alone
+# can't cancel a blocking HTTP call (reviewer-caught invariant).
+_DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
 from ..schema.run_summary import RunSummary
@@ -78,6 +87,7 @@ def dispatch_via_rest(
     dry_run: bool = False,
     plugin_checkout: Path | None = None,
     auto_start_cluster: bool = True,
+    poll_timeout_s: int = 3600,
     log: Callable[[str], None] = lambda msg: None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
@@ -216,12 +226,24 @@ def dispatch_via_rest(
     try:
         result = client.poll_run(
             job_run_key,
+            timeout_s=poll_timeout_s,
             on_status_change=lambda status: log(f"status={status}"),
         )
     except AidpRestError as exc:
         msg = str(exc)
         if "deadline exceeded" in msg:
-            raise DispatchPollTimeoutError(msg) from exc
+            # P1.5ε-fix8 — opportunistically enrich the timeout with the
+            # cluster-side partial-progress snapshot so operators don't have
+            # to drop into `oci raw-request` to see where the job is stuck.
+            enriched = _diagnose_partial_progress(
+                client, job_run_key, task_key, log
+            )
+            full_msg = (
+                f"{msg}\nPartial progress at timeout:\n{enriched}"
+                if enriched
+                else msg
+            )
+            raise DispatchPollTimeoutError(full_msg) from exc
         # Some other transport failure during polling — treat as fetch-level
         # since we can't tell whether the cluster work completed.
         raise DispatchFetchOutputError(
@@ -307,6 +329,93 @@ def _detect_plugin_checkout() -> Path:
         "could not auto-detect plugin checkout root; pass plugin_checkout="
         " explicitly to dispatch_via_rest"
     )
+
+
+def _diagnose_partial_progress(
+    client: AidpRestClient,
+    job_run_key: str,
+    task_key: str,
+    log: Callable[[str], None],
+) -> str:
+    """P1.5ε-fix8 — fetch the partial executed notebook + return a
+    per-cell progress summary, bounded by ``_DIAG_BUDGET_S`` total wall.
+
+    Best-effort: any exception in the diagnostic path is swallowed and
+    we return ``""`` so the caller emits the original
+    ``DispatchPollTimeoutError`` clean. The operator already waited
+    ``--poll-timeout`` seconds; the diagnostic must NOT mask that signal.
+
+    Each underlying HTTP call passes ``timeout=_remaining()`` so
+    ``requests`` itself bounds the per-call latency — ``time.monotonic()``
+    alone can't cancel a blocking HTTP call.
+    """
+    t0 = time.monotonic()
+
+    def _remaining() -> int:
+        # Never less than 1 — `requests` rejects `timeout=0` and
+        # negative numbers raise immediately, which would crash the
+        # diagnostic path instead of best-effort failing.
+        return max(1, int(_DIAG_BUDGET_S - (time.monotonic() - t0)))
+
+    try:
+        run = client.get_run(job_run_key, timeout=_remaining())
+        task_run_key = AidpRestClient.resolve_task_run_key(run, task_key)
+        executed_notebook_json = client.fetch_output(
+            task_run_key, timeout=_remaining()
+        )
+        if not executed_notebook_json:
+            return ""
+        executed_notebook = json.loads(executed_notebook_json)
+        return _format_cell_progress(executed_notebook)
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment
+        log(
+            f"diagnostic enrichment failed (swallowed): "
+            f"{type(exc).__name__}: {str(exc)[:120]}"
+        )
+        return ""
+
+
+def _format_cell_progress(executed_notebook: dict[str, Any]) -> str:
+    """Walk ``executed_notebook.cells[*]`` and return a per-cell summary
+    line so the operator can see where the cluster job is stuck.
+
+    Output shape (one line per code cell):
+        cell 1: pip rc=0 plugin installed to /tmp/...
+        cell 2: FUSION_BICC_PASSWORD loaded (length=8)
+        cell 3: <in flight or no output>
+    """
+    lines: list[str] = []
+    for i, cell in enumerate(executed_notebook.get("cells", [])):
+        if cell.get("cell_type") != "code":
+            continue
+        outputs = cell.get("outputs", [])
+        err_output = next(
+            (o for o in outputs if o.get("output_type") == "error"),
+            None,
+        )
+        if err_output is not None:
+            lines.append(
+                f"cell {i}: ERR {err_output.get('ename')}: "
+                f"{str(err_output.get('evalue', ''))[:100]}"
+            )
+            continue
+        text = ""
+        for o in outputs:
+            t = o.get("text", "")
+            if t:
+                text += t if isinstance(t, str) else "".join(t)
+            else:
+                d = o.get("data", {})
+                tp = d.get("text/plain", "")
+                text += tp if isinstance(tp, str) else "".join(tp)
+        # Last non-empty line — that's the most recent print before things
+        # stopped flowing. Truncate to keep the message body readable.
+        last_line = next(
+            (ln for ln in reversed(text.splitlines()) if ln.strip()),
+            "<in flight or no output>",
+        )
+        lines.append(f"cell {i}: {last_line[:200]}")
+    return "\n".join(lines)
 
 
 __all__ = [

@@ -386,8 +386,18 @@ class AidpRestClient:
         self._log("jobRun_submitted", jobRunKey=run_key)
         return run_key
 
-    def get_run(self, run_key: str) -> dict[str, Any]:
-        r = self._request("GET", f"{self.base}/jobRuns/{run_key}")
+    def get_run(
+        self, run_key: str, *, timeout: int | None = None
+    ) -> dict[str, Any]:
+        """``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
+        timeout override; default ``None`` falls back to
+        ``self.request_timeout_s`` (today's behavior). Used by
+        ``dispatch_via_rest``'s post-timeout enrichment to bound the
+        diagnostic round-trip; existing call sites pass nothing → no
+        behavior change."""
+        r = self._request(
+            "GET", f"{self.base}/jobRuns/{run_key}", timeout=timeout
+        )
         return self._ok(r, context=f"get_run({run_key})")
 
     TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -445,17 +455,30 @@ class AidpRestClient:
             f"taskRunSummaryMap keys={list(summary_map.keys())}"
         )
 
-    def fetch_output(self, task_run_key: str, *, output_key: str = "") -> str:
+    def fetch_output(
+        self,
+        task_run_key: str,
+        *,
+        output_key: str = "",
+        timeout: int | None = None,
+    ) -> str:
         """Fetch the executed-notebook JSON string for a task run.
 
         ``output_key`` must be ``""`` (empty string) for notebook tasks —
         ``"main"`` returns a misleading 404. The notebook JSON lands at
         ``data[0].value`` (NOT ``data[0].content``).
+
+        ``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
+        timeout override; default ``None`` falls back to
+        ``self.request_timeout_s`` (today's behavior). Used by
+        ``dispatch_via_rest``'s post-timeout enrichment to bound the
+        diagnostic round-trip.
         """
         r = self._request(
             "POST",
             f"{self.base}/taskRuns/{task_run_key}/actions/fetchOutput",
             json_body={"outputKey": output_key},
+            timeout=timeout,
         )
         if r.status_code != 200:
             raise AidpRestError(
