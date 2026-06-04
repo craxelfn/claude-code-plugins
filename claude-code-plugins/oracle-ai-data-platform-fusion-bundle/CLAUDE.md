@@ -11,7 +11,7 @@ The fusion-bundle plugin must run on **any Fusion ERP/HCM/SCM tenant**, not just
 This plugin is **mid-migration to v2 content-pack architecture**. Both layers live in the tree simultaneously:
 
 - **v1 runtime (active today)**: hardcoded silver/gold Python modules under `scripts/.../dimensions/dim_*.py` and `scripts/.../transforms/gold/*.py`. Drive every shipped `--mode seed` and `--mode incremental` run. Frozen as **reference implementations** during the migration; new functionality does NOT land here.
-- **v2 content packs (shipped Phase 1, consumed Phase 2+)**: `scripts/.../content_packs/fusion-finance-starter/` declares the same nodes as YAML + (future) SQL templates, with `implementation.type: python_legacy` + `migrationTarget` pointing at the SQL replacement. Schema layer (`schema/medallion_pack.py`, `schema/dashboard_pack.py`) and loader/validators (`orchestrator/content_pack*.py`) load these without changing runtime behaviour.
+- **v2 content packs (shipped Phase 1, runner shipped Phase 2)**: `scripts/.../content_packs/fusion-finance-starter/` declares the same nodes as YAML + (future) SQL templates, with `implementation.type: python_legacy` + `migrationTarget` pointing at the SQL replacement. Schema layer (`schema/medallion_pack.py`, `schema/dashboard_pack.py`) and loader/validators (`orchestrator/content_pack*.py`) load these without changing runtime behaviour. Phase 2 added the generic SQL runner (`orchestrator/sql_runner.py`) behind the opt-in `--execution-backend content-pack` flag — default backend stays `legacy-python` until Phase 4's dual-runner parity gate proves equivalence.
 
 **Where new work goes:**
 
