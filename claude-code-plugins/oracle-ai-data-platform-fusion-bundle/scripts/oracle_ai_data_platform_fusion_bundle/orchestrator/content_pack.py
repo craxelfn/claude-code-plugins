@@ -177,6 +177,90 @@ def _canonicalise(value: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 — promoted public helpers (Step 12c.bis)
+# ---------------------------------------------------------------------------
+#
+# The Phase 2 generated REST notebook imports load_full_chain from this
+# module. Phase 1 had this as a CLI-private helper in
+# commands/content_pack.py; promoting it here makes it orchestrator-owned
+# and available to both CLI code AND the cluster-side notebook body
+# without crossing the dispatch import boundary.
+
+
+def make_filesystem_base_resolver(pack_path: Path):
+    """Build a base resolver for :func:`resolve_overlay_chain` (Phase 2 promotion).
+
+    Looks up referenced base packs in two places, in order:
+
+    1. Sibling directory of ``pack_path`` with the matching pack id —
+       the common workflow during development.
+    2. Under the installed-pack directory (Oracle-shipped packs).
+
+    Returns a Callable[[PackOverlayRef], Path]. On miss, raises
+    ``FileNotFoundError`` so :func:`resolve_overlay_chain` surfaces
+    a clean error.
+
+    Used by both the CLI's content-pack verbs and the new Phase 2
+    inline runner. The cluster-side staging path passes a different
+    closure (over the staged tempdir layers) so the cluster reconstructs
+    the overlay chain from the embedded layer subdirs.
+    """
+    # Lazy import to avoid commands -> orchestrator -> commands cycle.
+    from ..commands.content_pack import INSTALLED_CONTENT_PACKS_DIR
+    from ..schema.medallion_pack import PackOverlayRef
+
+    def resolver(ref: PackOverlayRef) -> Path:
+        sibling = pack_path.parent / ref.name
+        if sibling.exists() and (sibling / "pack.yaml").exists():
+            return sibling.resolve()
+        installed = INSTALLED_CONTENT_PACKS_DIR / ref.name
+        if installed.exists() and (installed / "pack.yaml").exists():
+            return installed.resolve()
+        raise FileNotFoundError(
+            f"base pack {ref.name!r} (referenced as `extends: {ref.to_string()}`) "
+            f"not found beside {pack_path} or in {INSTALLED_CONTENT_PACKS_DIR}"
+        )
+
+    return resolver
+
+
+def load_full_chain(pack_path: Path, *, base_resolver=None) -> ResolvedPack:
+    """Load a pack and resolve any ``extends:`` chain — Phase 2 public API.
+
+    For a base pack (no ``extends:``), returns it unmerged. For an
+    overlay, resolves the chain via :func:`resolve_overlay_chain` +
+    :func:`merge_overlay`, yielding the fully-assembled ``ResolvedPack``
+    that validators and the runner expect.
+
+    Args:
+        pack_path: filesystem path to the pack root (the overlay root
+            for chains; the base root for non-overlay packs).
+        base_resolver: callable mapping a :class:`PackOverlayRef` to a
+            ``Path``. Required when the pack uses ``extends:`` — overlay
+            resolution will raise without it. CLI / inline callers
+            typically pass ``make_filesystem_base_resolver(pack_path)``.
+            The cluster-side staging passes a closure over staged
+            layer subdirs.
+
+    Returns:
+        Fully-merged ``ResolvedPack`` with ``chain_roots`` populated.
+    """
+    if base_resolver is None:
+        # Default to the filesystem resolver — the common CLI / inline
+        # case. Cluster-side callers MUST pass a staged resolver
+        # explicitly (the filesystem default won't find the layers
+        # cluster-side).
+        base_resolver = make_filesystem_base_resolver(pack_path)
+
+    chain_paths = resolve_overlay_chain(pack_path, base_resolver=base_resolver)
+    packs = [load_pack(p) for p in chain_paths]
+    merged = packs[0]
+    for overlay in packs[1:]:
+        merged = merge_overlay(merged, overlay)
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # load_pack
 # ---------------------------------------------------------------------------
 

@@ -49,6 +49,7 @@ def run(
     resume_run_id: str | None = None,
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
+    execution_backend: str = "legacy-python",
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -103,6 +104,16 @@ def run(
         if layers else None
     )
 
+    # Phase 2 (PLAN §11.9 / Step 12b): --resume + content-pack rejected.
+    if resume_run_id is not None and execution_backend == "content-pack":
+        from ..schema.bundle import AIDPF_1032_RESUME_NOT_SUPPORTED
+        console.print(
+            f"[red]{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
+            f"with --execution-backend content-pack in v0.3. Re-run with "
+            f"--execution-backend legacy-python (the default) or without --resume.[/red]"
+        )
+        return 2
+
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
@@ -110,6 +121,7 @@ def run(
         return _run_inline(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
+            execution_backend=execution_backend,
         )
     if resume_run_id is not None:
         # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
@@ -125,6 +137,7 @@ def run(
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
+        execution_backend=execution_backend,
     )
 
 
@@ -136,6 +149,8 @@ def _run_inline(
     resume_run_id: str | None,
     dry_run: bool,
     console: Console,
+    *,
+    execution_backend: str = "legacy-python",
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -191,6 +206,8 @@ def _run_via_aidp_dispatch(
     dry_run: bool,
     poll_timeout_s: int,
     console: Console,
+    *,
+    execution_backend: str = "legacy-python",
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
