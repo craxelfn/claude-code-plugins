@@ -228,6 +228,56 @@ def _run_via_aidp_dispatch(
     from ..dispatch.errors import DispatchError
     from ..schema.errors import OrchestratorConfigError
 
+    # Phase 2: when --execution-backend content-pack, prepare the
+    # staging primitives at the CLI layer (orchestrator-side imports
+    # are allowed here; dispatch/ cannot import them).
+    profile_yaml: str | None = None
+    pack_files: dict[str, str] | None = None
+    pack_manifest: dict | None = None
+    if execution_backend == "content-pack":
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import resolve_profile_path
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from ..orchestrator.content_pack_staging import stage_pack_files
+
+        bundle, _bundle_paths = load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; --execution-backend content-pack requires "
+                f"the block. Either add it or run with the legacy-python backend.[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"--execution-backend content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        profile_yaml = profile_path.read_text(encoding="utf-8")
+        pack_files, pack_manifest = stage_pack_files(resolved_pack)
+
     try:
         config = load_aidp_config(config_path)
         env = env_or_error(config, env_name)
@@ -242,6 +292,10 @@ def _run_via_aidp_dispatch(
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
+            execution_backend=execution_backend,
+            profile_yaml=profile_yaml,
+            pack_files=pack_files,
+            pack_manifest=pack_manifest,
         )
     except (DispatchError, OrchestratorConfigError) as exc:
         console.print(f"[red]{exc}[/red]")

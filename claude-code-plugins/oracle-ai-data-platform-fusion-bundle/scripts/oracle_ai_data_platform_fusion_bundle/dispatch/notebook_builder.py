@@ -24,8 +24,9 @@ package.
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # Marker delimiters — must match ``schema.run_summary.RunSummary``'s
 # serialization contract. The dispatch package's ``parse_marker`` looks
@@ -108,7 +109,20 @@ def _build_run_cell(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
+    execution_backend: str = "legacy-python",
 ) -> str:
+    # Phase 2: when execution_backend == "content-pack", the bootstrap
+    # cell that ran just before this one set up _resolved_pack and
+    # _tenant_profile; we thread them into orchestrator.run as kwargs.
+    if execution_backend == "content-pack":
+        backend_kwargs = (
+            f'    execution_backend="content-pack",\n'
+            f"    resolved_pack=_resolved_pack,  # noqa: F821 — bootstrap cell\n"
+            f"    tenant_profile=_tenant_profile,  # noqa: F821 — bootstrap cell\n"
+        )
+    else:
+        backend_kwargs = f'    execution_backend="legacy-python",\n'
+
     return (
         f"import json, time\n"
         f"_tstart = time.time()\n"
@@ -120,6 +134,7 @@ def _build_run_cell(
         f"    layers={layers!r},\n"
         f"    dry_run=False,\n"
         f"    resume_run_id=None,\n"
+        f"{backend_kwargs}"
         f")\n"
         f"_twall = time.time() - _tstart\n"
         f'print(f"run_id={{summary.run_id}}")\n'
@@ -143,6 +158,75 @@ def _build_run_cell(
         f"# can round-trip via RunSummary.from_marker_dict (P1.5ε §4.3a).\n"
         f"_payload = summary.to_marker_dict()\n"
         f'print({MARKER_BEGIN!r}, json.dumps(_payload), {MARKER_END!r})\n'
+    )
+
+
+def _encode_payload_b64(obj: Any) -> str:
+    """base64(json) encoding for arbitrary dict/list payloads.
+
+    Pure-ASCII opaque token — safe to splice into the generated
+    notebook source as a Python string literal. ``sort_keys=True``
+    makes the encoded form deterministic for snapshot tests;
+    ``ensure_ascii=True`` guarantees no non-ASCII chars in the token.
+    """
+    import base64
+    import json as _json
+    raw = _json.dumps(obj, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _encode_text_b64(text: str) -> str:
+    """base64 encoding for arbitrary text payloads (e.g. profile YAML).
+
+    Same safety guarantees as ``_encode_payload_b64`` but for plain
+    string content. No JSON wrapping — the cluster-side decoder calls
+    ``base64.b64decode(...).decode('utf-8')`` and gets the original
+    text back byte-for-byte.
+    """
+    import base64
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _build_content_pack_bootstrap_cell(
+    *,
+    profile_yaml: str,
+    pack_files: Mapping[str, str],
+    pack_manifest: dict[str, Any],
+) -> str:
+    """Cell that materialises the staged pack + reconstructs ResolvedPack on the cluster.
+
+    Emits Python source that:
+
+    1. Imports the orchestrator helpers (load_full_chain,
+       materialize_staged_pack, load_tenant_profile_from_string).
+    2. Decodes the embedded base64+json payloads to get the staged
+       files dict + manifest + profile YAML text.
+    3. Materialises the files to a tempdir + builds the staging-aware
+       base resolver.
+    4. Reconstructs ResolvedPack via load_full_chain(top_root,
+       base_resolver=...).
+    5. Reconstructs TenantProfile via load_tenant_profile_from_string.
+
+    The orchestrator.run call in the run cell consumes
+    ``_resolved_pack`` + ``_tenant_profile`` from this cell's namespace.
+    """
+    pack_files_b64 = _encode_payload_b64(dict(pack_files))
+    pack_manifest_b64 = _encode_payload_b64(pack_manifest)
+    profile_yaml_b64 = _encode_text_b64(profile_yaml)
+
+    return (
+        f"import base64 as _b64\n"
+        f"import json as _json\n"
+        f"from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_staging import materialize_staged_pack\n"
+        f"from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import load_full_chain\n"
+        f"from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import load_tenant_profile_from_string\n"
+        f"_PACK_FILES = _json.loads(_b64.b64decode({pack_files_b64!r}).decode('utf-8'))\n"
+        f"_PACK_MANIFEST = _json.loads(_b64.b64decode({pack_manifest_b64!r}).decode('utf-8'))\n"
+        f"_PROFILE_YAML = _b64.b64decode({profile_yaml_b64!r}).decode('utf-8')\n"
+        f"_top_overlay_root, _base_resolver = materialize_staged_pack(_PACK_FILES, _PACK_MANIFEST)\n"
+        f"_resolved_pack = load_full_chain(_top_overlay_root, base_resolver=_base_resolver)\n"
+        f"_tenant_profile = load_tenant_profile_from_string(_PROFILE_YAML)\n"
+        f'print(f"content-pack bootstrap: pack={{_resolved_pack.pack.id}}@{{_resolved_pack.pack.version}} tenant={{_tenant_profile.tenant}}")\n'
     )
 
 
@@ -197,6 +281,11 @@ def build_notebook(
     bicc_secret_name: str = "fusion_bicc_password",
     bicc_secret_key: str = "password",
     title: str = "P1.5ε dispatch",
+    # Phase 2 additions — primitives only (no orchestrator imports).
+    execution_backend: str = "legacy-python",
+    profile_yaml: str | None = None,
+    pack_files: Mapping[str, str] | None = None,
+    pack_manifest: dict[str, Any] | None = None,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -217,6 +306,24 @@ def build_notebook(
     Returns an nbformat-4 dict ready to pass to
     :meth:`AidpRestClient.upload_notebook`.
     """
+    # Phase 2 invariant check: content-pack backend requires all three
+    # primitives; legacy-python forbids them (programmer error guard).
+    if execution_backend == "content-pack":
+        assert profile_yaml is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires profile_yaml"
+        )
+        assert pack_files is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires pack_files"
+        )
+        assert pack_manifest is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires pack_manifest"
+        )
+    elif execution_backend == "legacy-python":
+        assert profile_yaml is None and pack_files is None and pack_manifest is None, (
+            "build_notebook(execution_backend='legacy-python', ...) must pass "
+            "profile_yaml/pack_files/pack_manifest as None"
+        )
+
     cells = [
         _markdown_cell(f"# {title}\nSelf-contained dispatch from `aidp-fusion-bundle run`."),
         _code_cell(_build_install_cell(wheel_path)),
@@ -227,11 +334,28 @@ def build_notebook(
                 bicc_secret_key=bicc_secret_key,
             )
         ),
+    ]
+
+    if execution_backend == "content-pack":
+        cells.append(
+            _code_cell(
+                _build_content_pack_bootstrap_cell(
+                    profile_yaml=profile_yaml,
+                    pack_files=pack_files,
+                    pack_manifest=pack_manifest,
+                )
+            )
+        )
+
+    cells.extend([
         _code_cell(
-            _build_run_cell(mode=mode, datasets=datasets, layers=layers)
+            _build_run_cell(
+                mode=mode, datasets=datasets, layers=layers,
+                execution_backend=execution_backend,
+            )
         ),
         _code_cell(_build_verify_cell()),
-    ]
+    ])
     return {
         "cells": cells,
         "metadata": {
