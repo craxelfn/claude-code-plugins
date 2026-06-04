@@ -1,0 +1,698 @@
+"""SQL template renderer for the content-pack execution backend.
+
+The renderer is the **security boundary** between untrusted profile/run-id
+values and Spark SQL execution (PLAN §9.4). Profile-string values flow
+through Spark parameter markers (``spark.sql(sql, args=rendered.params)``);
+identifier substitutions (catalog/schema/column names) flow through an
+allowlist regex (``^[A-Za-z_][A-Za-z0-9_]{0,62}$``) and are inlined as
+quoted identifiers only if they match.
+
+The renderer returns a typed :class:`RenderedSql` (NOT a raw string).
+Strategy executors call ``spark.sql(rendered.sql, args=rendered.params)`` —
+never ``spark.sql(rendered.sql)`` alone, never string concatenation.
+
+Token contract (PLAN §9.1):
+
+* ``{{ catalog }}`` / ``{{ bronze_schema }}`` / ``{{ silver_schema }}``
+  / ``{{ gold_schema }}`` — identifier substitution from ``RunContext``.
+* ``{{ run_id_literal }}`` — parameter marker ``:run_id``.
+* ``{{ watermark_predicate }}`` — composed from ``node.refresh.incremental.
+  watermark.column`` + ``ctx.prior_watermark``; column identifier is
+  allowlist-checked; watermark value is a parameter marker
+  ``:watermark_<source>``.
+* ``{{ profile.<dotted.key> }}`` — dotted lookup into the tenant profile;
+  always emitted as a parameter marker ``:profile_<sanitised_key>``.
+* ``{{ column.<name> }}`` — looked up in ``profile.resolved.column[<name>]``;
+  identifier-substituted (the resolved value is a column name).
+* ``{{ semantic.<name> }}`` — picks the candidate from the pack's
+  ``semanticVariants.<name>.candidates`` whose ``id`` matches
+  ``profile.resolved.semantic[<name>]``; renders the candidate's
+  ``fragment`` with ``{table}`` replaced by the source bronze table
+  identifier.
+
+Failure modes:
+
+* ``AIDPF-5001`` — identifier substitution fails the allowlist regex
+  (catalog/schema name has unsafe chars; resolved column name is
+  ``"evil"; DROP TABLE"`` etc.).
+* ``AIDPF-5002`` — unknown ``{{ token }}`` not in the renderer's vocabulary.
+* ``AIDPF-5003`` — variation-point reference (``{{ column.X }}`` or
+  ``{{ semantic.X }}``) not resolved in the active profile / pack.
+* ``AIDPF-5010`` — post-render check fails (comment markers ``--`` or
+  ``/*``, multiple top-level statements, etc.).
+* ``AIDPF-5011`` — profile value referenced by ``{{ profile.<key> }}``
+  has a disallowed Python type (only str/int/float/bool/date/datetime).
+
+References:
+
+* PLAN §9.1 (renderer token vocabulary)
+* PLAN §9.4 (security boundary — parameter markers for untrusted values)
+* PLAN §9.5.2 (semantic-fragment grammar)
+* ADR-0017 (no LLM during seed/incremental — render is deterministic)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+from ..schema.medallion_pack import NodeYaml
+from ..schema.tenant_profile import TenantProfile
+
+# ResolvedPack is imported lazily inside functions where needed because
+# orchestrator/content_pack.py also imports this file indirectly via
+# preflight-style callers; keeping the cycle broken with lazy imports.
+
+
+# ---------------------------------------------------------------------------
+# AIDPF error codes
+# ---------------------------------------------------------------------------
+
+AIDPF_5001_IDENTIFIER_ALLOWLIST = "AIDPF-5001"
+AIDPF_5002_UNKNOWN_TOKEN = "AIDPF-5002"
+AIDPF_5003_UNRESOLVED_VARIATION = "AIDPF-5003"
+AIDPF_5010_POST_RENDER_REJECTED = "AIDPF-5010"
+AIDPF_5011_DISALLOWED_PARAM_TYPE = "AIDPF-5011"
+
+
+class SqlRendererError(Exception):
+    """Base error for SQL renderer failures. Subclasses carry the AIDPF code."""
+
+
+class IdentifierAllowlistError(SqlRendererError):
+    """Identifier substitution failed the allowlist regex (AIDPF-5001)."""
+
+
+class UnknownTokenError(SqlRendererError):
+    """Renderer encountered a ``{{ token }}`` not in its vocabulary (AIDPF-5002)."""
+
+
+class UnresolvedVariationPointError(SqlRendererError):
+    """Variation-point reference not found in active profile/pack (AIDPF-5003)."""
+
+
+class PostRenderRejectedError(SqlRendererError):
+    """Rendered SQL contains disallowed shape (comment markers, ``;`` middle,
+    multiple statements). AIDPF-5010."""
+
+
+class DisallowedParamTypeError(SqlRendererError):
+    """Profile value's Python type isn't in the allowed set (AIDPF-5011)."""
+
+
+# ---------------------------------------------------------------------------
+# Regexes (compiled once)
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}")
+"""Match ``{{ token }}``. Inner content cannot contain ``{``, ``}`` or
+newlines — keeps the parser greedy-resistant on malformed templates."""
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+"""SQL identifier allowlist per PLAN §9.4: ASCII letters / digits / underscore;
+must start with a letter or underscore; max 63 chars (Postgres-compatible)."""
+
+_DISALLOWED_AFTER_RENDER = (
+    "--",   # SQL line comment — injection vector
+    "/*",   # SQL block comment open
+    "*/",   # SQL block comment close
+)
+"""Substrings rejected by the post-render check (AIDPF-5010). Semicolons are
+checked separately (a trailing newline-only ``;`` is acceptable, mid-string ``;``
+is not — but Phase 2 enforces "no ``;`` at all" for simplicity and per §9.4)."""
+
+
+# Allowed Python types for profile values flowing through parameter markers.
+# Anything else (list, dict, set, None, custom classes) → AIDPF-5011.
+_ALLOWED_PARAM_TYPES: tuple[type, ...] = (str, int, float, bool, date, datetime)
+
+
+# Maximum depth for ``{{ profile.<a.b.c.d> }}`` dotted lookups (PLAN: 4 levels).
+_PROFILE_DOTTED_MAX_DEPTH = 4
+
+
+# ---------------------------------------------------------------------------
+# Public dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RenderedSql:
+    """A rendered SQL template plus its parameter bindings.
+
+    Attributes:
+        sql: parameter-marker-bearing SQL string. Profile / run-id /
+            watermark values appear as ``:param_name`` placeholders, NOT
+            inline literals.
+        params: dict of ``name -> value`` bindings for
+            ``spark.sql(rendered.sql, args=rendered.params)``. Values are
+            plain Python types from the allowed set
+            (str / int / float / bool / date / datetime).
+        hash_input: canonical-whitespace-normalised ``sql`` PLUS a sorted,
+            deterministic serialisation of ``params``. Used by
+            :func:`compute_rendered_sql_hash` so plan-hash drift detection
+            catches "same template, different profile-resolved values."
+    """
+
+    sql: str
+    params: Mapping[str, Any] = field(default_factory=dict)
+    hash_input: str = ""
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """Render-time context provided by the orchestrator.
+
+    Attributes:
+        catalog: Spark catalog identifier (e.g. ``fusion_catalog``).
+        bronze_schema / silver_schema / gold_schema: medallion-layer schema
+            identifiers (e.g. ``bronze``, ``silver``, ``gold``).
+        run_id: orchestrator-generated run identifier; emitted via the
+            ``:run_id`` parameter marker (never inlined).
+        prior_watermark: per-source prior watermark value for incremental
+            mode. Keys are source ids (matching
+            ``node.refresh.incremental.watermark.source``); values are the
+            prior ``output_watermark`` from ``fusion_bundle_state``. Empty
+            dict on seed runs.
+        mode: ``"seed"`` or ``"incremental"`` — drives whether
+            ``{{ watermark_predicate }}`` emits an always-true predicate
+            (seed) or a watermark-gated one (incremental).
+        bronze_table_for_source: maps source id to the fully-qualified
+            bronze table identifier used inside semantic-fragment
+            ``{table}`` substitutions.
+    """
+
+    catalog: str
+    bronze_schema: str
+    silver_schema: str
+    gold_schema: str
+    run_id: str
+    prior_watermark: Mapping[str, Any] = field(default_factory=dict)
+    mode: str = "seed"
+    bronze_table_for_source: Mapping[str, str] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def render_node_sql(
+    node: NodeYaml,
+    pack: "ResolvedPack",  # noqa: F821 — forward ref, broken cycle
+    profile: TenantProfile,
+    ctx: RunContext,
+) -> RenderedSql:
+    """Render a node's SQL template into a :class:`RenderedSql`.
+
+    Args:
+        node: the validated ``NodeYaml`` whose ``implementation.sql`` path
+            is the template to render.
+        pack: the assembled ``ResolvedPack`` (used for the per-node source
+            root via ``pack.root_for(qualified_id)`` and for
+            ``semanticVariants`` candidate lookup).
+        profile: validated ``TenantProfile`` for ``{{ profile.<key> }}``,
+            ``{{ column.<name> }}``, ``{{ semantic.<name> }}`` substitution.
+        ctx: render-time context (catalog, schemas, run_id, prior
+            watermark, mode, bronze-table-for-source map).
+
+    Returns:
+        :class:`RenderedSql` with ``sql`` carrying parameter markers and
+        ``params`` carrying the bindings. ``hash_input`` deterministic for
+        a given (template, profile, ctx).
+
+    Raises:
+        IdentifierAllowlistError: AIDPF-5001 — identifier substitution
+            failed the regex.
+        UnknownTokenError: AIDPF-5002 — ``{{ X }}`` not in vocabulary.
+        UnresolvedVariationPointError: AIDPF-5003 — ``column.X`` /
+            ``semantic.X`` not declared in profile or pack.
+        PostRenderRejectedError: AIDPF-5010 — rendered SQL contains
+            disallowed shape (``--``, ``/*``, ``*/``, ``;``).
+        DisallowedParamTypeError: AIDPF-5011 — profile value referenced
+            via ``{{ profile.<key> }}`` has a disallowed Python type.
+    """
+    qualified_id = _qualified_id_for_node(pack, node)
+    sql_path = pack.root_for(qualified_id) / node.implementation.sql  # type: ignore[union-attr]
+    template_text = Path(sql_path).read_text(encoding="utf-8")
+
+    params: dict[str, Any] = {}
+    pack_variants = _build_semantic_variants_index(pack)
+    primary_source = _resolve_primary_source(node, ctx)
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(1).strip()
+        return _substitute_token(
+            token=token,
+            node=node,
+            ctx=ctx,
+            profile=profile,
+            primary_source=primary_source,
+            pack_variants=pack_variants,
+            params=params,
+        )
+
+    rendered = _TOKEN_RE.sub(replace, template_text)
+    _check_post_render(rendered)
+
+    hash_input = _build_hash_input(rendered, params)
+    return RenderedSql(sql=rendered, params=params, hash_input=hash_input)
+
+
+def compute_rendered_sql_hash(rendered: RenderedSql) -> str:
+    """Deterministic sha256 over a :class:`RenderedSql`'s ``hash_input``.
+
+    Used by ``compute_content_pack_plan_hash`` so plan-hash drift detection
+    catches "same template, different profile-resolved values" — cosmetic
+    template whitespace doesn't shift the hash; profile-value flips do.
+    """
+    return hashlib.sha256(rendered.hash_input.encode("utf-8")).hexdigest()
+
+
+def _format_profile_value_for_params(value: Any) -> Any:
+    """Validate that ``value`` is in the allowed parameter-type set.
+
+    Returns the value unchanged when allowed (Spark accepts these directly
+    via ``args=``). Raises :class:`DisallowedParamTypeError` (AIDPF-5011)
+    otherwise.
+
+    The booleans-check uses ``isinstance(value, bool)`` BEFORE
+    ``isinstance(value, int)`` because ``bool`` subclasses ``int`` and we
+    want explicit bool-vs-int diagnostics, not silent coercion.
+    """
+    # Order matters: bool before int (bool subclasses int in Python).
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str, date, datetime)):
+        return value
+    raise DisallowedParamTypeError(
+        f"{AIDPF_5011_DISALLOWED_PARAM_TYPE}: profile value of type "
+        f"{type(value).__name__!r} is not allowed for parameter-marker "
+        f"substitution. Allowed types: str, int, float, bool, date, datetime."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internals — token substitution
+# ---------------------------------------------------------------------------
+
+
+def _substitute_token(
+    *,
+    token: str,
+    node: NodeYaml,
+    ctx: RunContext,
+    profile: TenantProfile,
+    primary_source: str | None,
+    pack_variants: dict[str, "Any"],
+    params: dict[str, Any],
+) -> str:
+    """Dispatch a single ``{{ token }}`` to its substitution handler.
+
+    Returns the string to splice into the rendered SQL. Mutates ``params``
+    in place for parameter-marker substitutions.
+    """
+    # 1. Simple identifier substitutions from RunContext.
+    if token == "catalog":
+        return _check_identifier(ctx.catalog, source=f"{{{{ catalog }}}}")
+    if token == "bronze_schema":
+        return _check_identifier(ctx.bronze_schema, source=f"{{{{ bronze_schema }}}}")
+    if token == "silver_schema":
+        return _check_identifier(ctx.silver_schema, source=f"{{{{ silver_schema }}}}")
+    if token == "gold_schema":
+        return _check_identifier(ctx.gold_schema, source=f"{{{{ gold_schema }}}}")
+
+    # 2. Parameter-marker substitutions.
+    if token == "run_id_literal":
+        params["run_id"] = ctx.run_id
+        return ":run_id"
+
+    if token == "watermark_predicate":
+        return _render_watermark_predicate(node, ctx, primary_source, params)
+
+    # 3. Dotted-prefix substitutions.
+    if token.startswith("profile."):
+        return _render_profile_lookup(token[len("profile."):], profile, params)
+
+    if token.startswith("column."):
+        return _render_column_lookup(token[len("column."):], profile)
+
+    if token.startswith("semantic."):
+        return _render_semantic_lookup(
+            token[len("semantic."):],
+            profile=profile,
+            pack_variants=pack_variants,
+            ctx=ctx,
+            primary_source=primary_source,
+        )
+
+    # 4. Unknown token.
+    raise UnknownTokenError(
+        f"{AIDPF_5002_UNKNOWN_TOKEN}: unknown template token {{{{ {token} }}}}. "
+        f"Allowed: catalog, bronze_schema, silver_schema, gold_schema, "
+        f"run_id_literal, watermark_predicate, profile.<key>, column.<name>, "
+        f"semantic.<name>."
+    )
+
+
+def _check_identifier(value: str, *, source: str) -> str:
+    """Validate ``value`` against the SQL identifier allowlist.
+
+    Returns the value unchanged on match; raises
+    :class:`IdentifierAllowlistError` (AIDPF-5001) on miss.
+    """
+    if not isinstance(value, str) or not _IDENTIFIER_RE.match(value):
+        raise IdentifierAllowlistError(
+            f"{AIDPF_5001_IDENTIFIER_ALLOWLIST}: identifier substitution for "
+            f"{source} resolved to {value!r}, which fails the allowlist "
+            f"`^[A-Za-z_][A-Za-z0-9_]{{0,62}}$`."
+        )
+    return value
+
+
+def _render_watermark_predicate(
+    node: NodeYaml,
+    ctx: RunContext,
+    primary_source: str | None,
+    params: dict[str, Any],
+) -> str:
+    """Render the ``{{ watermark_predicate }}`` token.
+
+    On seed runs, returns an always-true predicate so the same template
+    runs for both modes.
+
+    On incremental runs, emits ``<watermark_column> > :watermark_<source>``
+    where the column is identifier-checked and the prior watermark value
+    flows through a parameter marker. Multi-source nodes emit the predicate
+    for the primary source only (PLAN §11.10 primary/lookup contract — the
+    primary is what advances the cursor).
+    """
+    if ctx.mode == "seed":
+        # Seed mode: no watermark filter. Always-true predicate keeps the
+        # template single-shape across modes.
+        return "1=1"
+
+    inc = node.refresh.incremental
+    if inc is None or inc.watermark is None:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: node {node.id!r} uses "
+            f"{{{{ watermark_predicate }}}} in incremental mode but declares no "
+            f"`refresh.incremental.watermark` block."
+        )
+
+    column = _check_identifier(inc.watermark.column, source=f"watermark column for node {node.id}")
+    source = primary_source or inc.watermark.source
+    param_name = f"watermark_{_sanitise_param_segment(source)}"
+    prior_value = ctx.prior_watermark.get(source)
+    if prior_value is None:
+        # No prior watermark — first incremental after a seed, or no rows yet.
+        # Renderer cannot fabricate a sentinel; the caller (execute_node) is
+        # responsible for switching the run to seed shape or supplying a
+        # tenant-min watermark via ctx.prior_watermark. Treat absence as an
+        # always-true predicate so the template still renders deterministically.
+        return "1=1"
+    params[param_name] = _format_profile_value_for_params(prior_value)
+    return f"{column} > :{param_name}"
+
+
+def _render_profile_lookup(
+    dotted_key: str,
+    profile: TenantProfile,
+    params: dict[str, Any],
+) -> str:
+    """Render ``{{ profile.<dotted.key> }}`` as a parameter marker.
+
+    Looks up the value in ``profile.profile`` (the free-form block) via
+    a depth-limited dotted walk. The value MUST have an allowed parameter
+    type (AIDPF-5011); the lookup MUST resolve to a leaf (AIDPF-5003).
+
+    The emitted parameter marker name sanitises the dotted key by
+    replacing ``.`` with ``__`` so Spark accepts it as an identifier.
+    """
+    segments = dotted_key.split(".")
+    if not segments or len(segments) > _PROFILE_DOTTED_MAX_DEPTH:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: profile lookup "
+            f"{{{{ profile.{dotted_key} }}}} exceeds max depth "
+            f"{_PROFILE_DOTTED_MAX_DEPTH} (or is empty)."
+        )
+
+    # Prefer the free-form profile.profile block; fall back to dotted
+    # attributes on the validated model so `{{ profile.tenant }}` works.
+    payload: Any = profile.profile
+    for seg in segments:
+        if isinstance(payload, dict) and seg in payload:
+            payload = payload[seg]
+            continue
+        # Fall back to model attribute for the very first segment only —
+        # e.g. ``{{ profile.tenant }}`` reaches profile.tenant on the model.
+        if payload is profile.profile and hasattr(profile, seg):
+            payload = getattr(profile, seg)
+            continue
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: profile lookup "
+            f"{{{{ profile.{dotted_key} }}}} unresolved at segment {seg!r}."
+        )
+
+    if isinstance(payload, (dict, list)):
+        raise DisallowedParamTypeError(
+            f"{AIDPF_5011_DISALLOWED_PARAM_TYPE}: profile lookup "
+            f"{{{{ profile.{dotted_key} }}}} resolves to a {type(payload).__name__}; "
+            f"only leaf scalar values are allowed for parameter-marker substitution."
+        )
+
+    value = _format_profile_value_for_params(payload)
+    param_name = f"profile_{_sanitise_param_segment(dotted_key)}"
+    params[param_name] = value
+    return f":{param_name}"
+
+
+def _render_column_lookup(name: str, profile: TenantProfile) -> str:
+    """Render ``{{ column.<name> }}`` as an identifier substitution.
+
+    Looks up ``profile.resolved.column[<name>]``; raises AIDPF-5003 if
+    undeclared. Identifier-checks the resolved value (AIDPF-5001).
+    """
+    resolved = profile.resolved.column.get(name)
+    if resolved is None:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: variation point "
+            f"{{{{ column.{name} }}}} has no resolution in the active profile's "
+            f"`resolved.column` map. Either author the profile to include this "
+            f"key (e.g. `resolved: {{ column: {{ {name}: <chosen_col> }} }}`) or "
+            f"remove the reference from the template."
+        )
+    return _check_identifier(resolved, source=f"{{{{ column.{name} }}}}")
+
+
+def _render_semantic_lookup(
+    name: str,
+    *,
+    profile: TenantProfile,
+    pack_variants: dict[str, Any],
+    ctx: RunContext,
+    primary_source: str | None,
+) -> str:
+    """Render ``{{ semantic.<name> }}`` by selecting the matching candidate's fragment.
+
+    The candidate id comes from ``profile.resolved.semantic[<name>]``;
+    the fragment lives in ``pack.pack.semantic_variants.<name>.candidates``.
+    The fragment may contain ``{table}`` which is substituted with the
+    primary source's bronze table identifier.
+    """
+    candidate_id = profile.resolved.semantic.get(name)
+    if candidate_id is None:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: variation point "
+            f"{{{{ semantic.{name} }}}} has no resolution in the active profile's "
+            f"`resolved.semantic` map."
+        )
+
+    variant = pack_variants.get(name)
+    if variant is None:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: variation point "
+            f"{{{{ semantic.{name} }}}} is referenced by the template but not "
+            f"declared in `pack.yaml`'s `semanticVariants` block."
+        )
+
+    matching = [c for c in variant.candidates if c.id == candidate_id]
+    if not matching:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: profile picked semantic "
+            f"candidate {candidate_id!r} for variant {name!r}, but that candidate "
+            f"is not declared in `pack.yaml`'s semanticVariants.{name}.candidates."
+        )
+
+    fragment = matching[0].fragment
+    # Semantic-fragment grammar: reject the same disallowed shapes as the
+    # post-render check would (so the renderer fails fast on a malicious
+    # pack instead of letting an injection slip through).
+    _check_semantic_fragment_grammar(fragment, variant_name=name)
+
+    if "{table}" in fragment:
+        if primary_source is None:
+            raise UnresolvedVariationPointError(
+                f"{AIDPF_5003_UNRESOLVED_VARIATION}: semantic fragment for "
+                f"variant {name!r} references {{table}} but node has no primary "
+                f"source declared."
+            )
+        table = ctx.bronze_table_for_source.get(primary_source)
+        if table is None:
+            raise UnresolvedVariationPointError(
+                f"{AIDPF_5003_UNRESOLVED_VARIATION}: semantic fragment references "
+                f"{{table}} but ctx.bronze_table_for_source has no entry for "
+                f"source {primary_source!r}."
+            )
+        # `table` may be a dotted identifier (catalog.schema.table). Validate
+        # each segment against the identifier allowlist.
+        for segment in table.split("."):
+            _check_identifier(segment, source=f"bronze table for source {primary_source}")
+        fragment = fragment.replace("{table}", table)
+
+    return fragment
+
+
+def _check_semantic_fragment_grammar(fragment: str, *, variant_name: str) -> None:
+    """Enforce the semantic-fragment grammar (PLAN §9.5.2).
+
+    Forbids comment markers, semicolons, and SQL keywords that smell like
+    subqueries (``SELECT``, ``UNION``, etc.). Allows column refs +
+    comparison ops + ``COALESCE``/``NULLIF``/``IS NULL``/``IS NOT NULL``
+    + standard arithmetic.
+    """
+    for marker in _DISALLOWED_AFTER_RENDER:
+        if marker in fragment:
+            raise PostRenderRejectedError(
+                f"{AIDPF_5010_POST_RENDER_REJECTED}: semantic fragment for variant "
+                f"{variant_name!r} contains disallowed substring {marker!r}."
+            )
+    if ";" in fragment:
+        raise PostRenderRejectedError(
+            f"{AIDPF_5010_POST_RENDER_REJECTED}: semantic fragment for variant "
+            f"{variant_name!r} contains a semicolon."
+        )
+    # Block obvious subquery / DDL patterns by keyword (case-insensitive).
+    forbidden_keywords = (
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP",
+        "ALTER", "TRUNCATE", "GRANT", "REVOKE", "UNION", "INTERSECT", "EXCEPT",
+    )
+    upper = fragment.upper()
+    for kw in forbidden_keywords:
+        # Word-boundary match so column names containing these substrings
+        # (e.g. `selected_amount`) don't false-positive.
+        if re.search(rf"\b{kw}\b", upper):
+            raise PostRenderRejectedError(
+                f"{AIDPF_5010_POST_RENDER_REJECTED}: semantic fragment for variant "
+                f"{variant_name!r} contains forbidden keyword {kw!r}."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Internals — post-render check
+# ---------------------------------------------------------------------------
+
+
+def _check_post_render(rendered: str) -> None:
+    """Reject rendered SQL containing comment markers or semicolons.
+
+    PLAN §9.4 — a rendered SQL string must be exactly one statement with
+    no inline comments. Trailing whitespace is tolerated.
+    """
+    for marker in _DISALLOWED_AFTER_RENDER:
+        if marker in rendered:
+            raise PostRenderRejectedError(
+                f"{AIDPF_5010_POST_RENDER_REJECTED}: rendered SQL contains "
+                f"disallowed substring {marker!r}. The renderer forbids inline "
+                f"SQL comments (``--`` / ``/* */``) so a malicious profile value "
+                f"cannot smuggle one in via string substitution."
+            )
+    # Semicolons are forbidden entirely (strip trailing whitespace first).
+    if ";" in rendered.rstrip():
+        raise PostRenderRejectedError(
+            f"{AIDPF_5010_POST_RENDER_REJECTED}: rendered SQL contains a semicolon. "
+            f"Each template MUST render to exactly one statement with no terminator."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Internals — hash input
+# ---------------------------------------------------------------------------
+
+
+def _build_hash_input(sql: str, params: Mapping[str, Any]) -> str:
+    """Canonicalise (sql, params) into a deterministic string for hashing.
+
+    Whitespace normalisation: collapse runs of whitespace, strip leading/
+    trailing. Param normalisation: sorted by key, values stringified with
+    their type tag so ``1`` (int) and ``"1"`` (str) hash differently.
+    """
+    canonical_sql = re.sub(r"\s+", " ", sql).strip()
+    sorted_params = sorted(params.items())
+    params_repr = "|".join(f"{k}:{type(v).__name__}:{v!r}" for k, v in sorted_params)
+    return f"SQL:{canonical_sql}\nPARAMS:{params_repr}"
+
+
+# ---------------------------------------------------------------------------
+# Internals — helpers
+# ---------------------------------------------------------------------------
+
+
+def _qualified_id_for_node(pack: "ResolvedPack", node: NodeYaml) -> str:  # noqa: F821
+    """Find the qualified id (``silver/<id>`` or ``gold/<id>``) for a node.
+
+    Used by ``pack.root_for(...)`` lookups. Falls back to a bare id if the
+    pack has no record (shouldn't happen for a validated pack, but a
+    defensive default keeps unit tests trivial to set up).
+    """
+    if node.id in pack.silver:
+        return f"silver/{node.id}"
+    if node.id in pack.gold:
+        return f"gold/{node.id}"
+    return node.id
+
+
+def _build_semantic_variants_index(pack: "ResolvedPack") -> dict[str, Any]:  # noqa: F821
+    """Return a name → SemanticVariant index from the pack.
+
+    Looks up ``pack.pack.semantic_variants`` (Pydantic field on PackYaml).
+    Returns an empty dict if the pack declares no semanticVariants block.
+    """
+    variants = getattr(pack.pack, "semantic_variants", None) or {}
+    if isinstance(variants, dict):
+        return dict(variants)
+    return {}
+
+
+def _resolve_primary_source(node: NodeYaml, ctx: RunContext) -> str | None:
+    """Return the primary source id for a node, if declared.
+
+    Used for the watermark predicate's source-suffixed parameter marker
+    and the semantic-fragment ``{table}`` substitution. Multi-source nodes
+    in Phase 2 follow PLAN §11.10 — exactly one primary source per node.
+    """
+    inc = node.refresh.incremental
+    if inc is not None and inc.watermark is not None:
+        return inc.watermark.source
+    # Fall back to dependsOn.bronze[0] when no explicit watermark source.
+    bronze = getattr(node.depends_on, "bronze", None) if node.depends_on else None
+    if bronze:
+        return bronze[0].id
+    return None
+
+
+_PARAM_SEGMENT_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _sanitise_param_segment(segment: str) -> str:
+    """Make a token segment safe for use inside a Spark parameter marker name.
+
+    Dots become double underscores; any other non-identifier char becomes
+    a single underscore. The original segment is round-trip-able for
+    debugging because dots are the only common case and use ``__``.
+    """
+    return _PARAM_SEGMENT_RE.sub("_", segment.replace(".", "__"))
