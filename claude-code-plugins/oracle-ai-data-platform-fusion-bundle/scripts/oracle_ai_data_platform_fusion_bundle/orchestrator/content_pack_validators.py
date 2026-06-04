@@ -354,9 +354,40 @@ def validate_dashboard_requires(
                 )
             )
 
+    # Tables that appear in requires.tables were checked in the loop above.
+    # Tables that appear in requires.columns must ALSO resolve to a gold node;
+    # a typo present only in requires.columns (e.g. `gold.gl_balnace` instead
+    # of `gold.gl_balance`) would otherwise slip through silently.
+    required_tables_set = set(dashboard.requires.tables)
     for table_ref, columns in dashboard.requires.columns.items():
         if table_ref not in gold_by_target:
-            # Already reported above; skip column-level checks.
+            # Distinguish two flavours of failure for clearer remediation:
+            #   * Already reported via requires.tables loop above → silent skip
+            #     would be acceptable, but we still want the dashboard author
+            #     to see one error per failing table so we report it again here.
+            #   * Table only in requires.columns (typo / forgot requires.tables):
+            #     must surface explicitly; otherwise the rest of the column
+            #     checks and the PII firewall skip the table altogether.
+            already_reported = table_ref in required_tables_set
+            extra_hint = (
+                "" if already_reported else
+                " (this table is referenced only by `requires.columns`; "
+                "every column-table key must also appear in `requires.tables` "
+                "AND resolve to a declared gold node)"
+            )
+            errors.append(
+                ValidationError(
+                    code=AIDPF_7001_DASHBOARD_MISSING_NODE,
+                    message=(
+                        f"{AIDPF_7001_DASHBOARD_MISSING_NODE}: dashboard "
+                        f"`{dashboard.id}` references `{table_ref}` in "
+                        f"`requires.columns` which is not declared as a gold "
+                        f"node in the pack{extra_hint}. Known gold tables: "
+                        f"{sorted(gold_by_target)!r}."
+                    ),
+                    location=f"dashboard/{dashboard.id}",
+                )
+            )
             continue
         node = gold_by_target[table_ref]
         node_columns_by_name = {c.name: c for c in node.output_schema.columns}

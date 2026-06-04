@@ -49,6 +49,7 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
 
 # Error codes used by this module (registered in PLAN §25).
 AIDPF_2001 = AIDPF_2001_ORPHAN_OVERRIDE  # orphan override / extends cycle
+AIDPF_2004_EXTENDS_VERSION_MISMATCH = "AIDPF-2004"
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,10 @@ class OrphanOverrideError(PackLoaderError):
 
 class OverlayCycleError(PackLoaderError):
     code = AIDPF_2001
+
+
+class ExtendsVersionMismatchError(PackLoaderError):
+    code = AIDPF_2004_EXTENDS_VERSION_MISMATCH
 
 
 class MissingPackFileError(PackLoaderError):
@@ -267,9 +272,20 @@ def resolve_overlay_chain(
 
     ``base_resolver`` is a callable that maps a :class:`PackOverlayRef` to
     a filesystem path. Tests pass an in-memory resolver; the CLI passes a
-    resolver that walks the installed `content_packs/` directory.
+    resolver that walks the installed ``content_packs/`` directory.
 
-    Raises :class:`OverlayCycleError` if a cycle is detected.
+    After the resolver returns a candidate base path, this function loads
+    the candidate's ``pack.yaml`` and **verifies that the resolved pack's
+    ``id`` and ``version`` match the ``extends:`` ref**. A mismatch raises
+    :class:`ExtendsVersionMismatchError` (``AIDPF-2004``). This guards
+    against the failure mode where a name-only resolver returns the wrong
+    version (e.g., an overlay declaring ``extends: foo@9.9.9`` silently
+    resolving to ``foo@0.1.0``).
+
+    Raises:
+        :class:`OverlayCycleError` — ``extends:`` chain contains a cycle.
+        :class:`ExtendsVersionMismatchError` — resolved base pack's
+            ``id`` or ``version`` does not match the ``extends:`` ref.
     """
     overlay_path = Path(overlay_path).resolve()
     chain: list[Path] = []
@@ -297,7 +313,23 @@ def resolve_overlay_chain(
                 f"pack {pack.id!r} declares extends: {pack.extends!r} but no "
                 "base_resolver was provided to resolve_overlay_chain."
             )
-        current = base_resolver(ref)
+        candidate = base_resolver(ref).resolve()
+
+        # Verify the resolved candidate actually matches the ref's id+version.
+        # Resolvers commonly look up by name only (directory match); without
+        # this gate, a wrong-version base could silently merge in.
+        candidate_raw = _read_yaml(candidate / "pack.yaml") or {}
+        candidate_pack = PackYaml.model_validate(candidate_raw)
+        if candidate_pack.id != ref.name or candidate_pack.version != ref.version:
+            raise ExtendsVersionMismatchError(
+                f"{AIDPF_2004_EXTENDS_VERSION_MISMATCH}: overlay "
+                f"{pack.id!r} declares `extends: {ref.to_string()}` but the "
+                f"base_resolver returned a pack at {candidate} with "
+                f"`id={candidate_pack.id!r}, version={candidate_pack.version!r}`. "
+                f"Expected `id={ref.name!r}, version={ref.version!r}`."
+            )
+
+        current = candidate
 
     return chain
 

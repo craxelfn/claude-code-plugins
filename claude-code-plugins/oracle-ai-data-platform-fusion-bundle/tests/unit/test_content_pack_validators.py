@@ -275,6 +275,73 @@ def test_dashboard_requires_missing_gold_node(tmp_path: Path) -> None:
     assert any(e.code == AIDPF_7001_DASHBOARD_MISSING_NODE for e in errors)
 
 
+def test_dashboard_requires_columns_typo_table_surfaces_AIDPF_7001(tmp_path: Path) -> None:
+    """A typo confined to requires.columns must NOT slip through silently.
+
+    Regression test for Finding 5 — previously validate_dashboard_requires
+    silently skipped `requires.columns` table keys not in gold_by_target,
+    assuming they were already reported from `requires.tables`. False when
+    the typo only appears in `requires.columns` (correct gold table in
+    `requires.tables`, typo'd table in `requires.columns`).
+    """
+    pack_root = _make_base_pack(tmp_path)
+    _write_yaml(
+        pack_root / "gold" / "gl_balance.yaml",
+        {
+            "id": "gl_balance",
+            "layer": "gold",
+            "implementation": {
+                "type": "python_legacy",
+                "callable": "pkg.gl_balance:build",
+                "deprecated": False,
+                "migrationTarget": "gold/gl_balance.sql",
+            },
+            "target": "gl_balance",
+            "refresh": {"seed": {"strategy": "replace"}},
+            "outputSchema": {
+                "columns": [
+                    {"name": "ledger_id", "type": "bigint", "nullable": False, "pii": "none"},
+                ]
+            },
+        },
+    )
+    _write_yaml(
+        pack_root / "dashboards" / "executive_cfo.yaml",
+        {
+            "id": "executive_cfo",
+            "title": "CFO",
+            "version": "0.1.0",
+            "delivery": {
+                "type": "oac-snapshot",
+                "barObject": "dashboards/executive-cfo.bar",
+                "oac": {
+                    "projectName": "CFO",
+                    "folderPath": "/Shared",
+                    "connectionName": "aidp-fusion-gold",
+                },
+            },
+            "requires": {
+                "pack": {"id": "fusion-finance-starter", "minVersion": "0.1.0"},
+                # requires.tables is correct ...
+                "tables": ["gold.gl_balance"],
+                # ... but requires.columns has a typo (gl_balnace) that
+                # references no gold node.
+                "columns": {
+                    "gold.gl_balnace": [{"name": "ledger_id", "type": "bigint"}]
+                },
+            },
+        },
+    )
+    pack = load_pack(pack_root)
+    dashboard = pack.dashboards["executive_cfo"]
+    errors = validate_dashboard_requires(pack, dashboard)
+    # The typo'd key must surface as AIDPF-7001, NOT be silently swallowed.
+    assert any(
+        e.code == AIDPF_7001_DASHBOARD_MISSING_NODE and "gl_balnace" in e.message
+        for e in errors
+    ), f"expected AIDPF-7001 for typo'd gold.gl_balnace, got: {errors!r}"
+
+
 def test_dashboard_column_type_mismatch(tmp_path: Path) -> None:
     pack_root = _make_base_pack(tmp_path)
     _write_yaml(

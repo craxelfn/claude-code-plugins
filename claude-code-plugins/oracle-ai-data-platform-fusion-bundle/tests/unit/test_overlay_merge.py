@@ -13,6 +13,8 @@ import yaml
 
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
     AIDPF_2001,
+    AIDPF_2004_EXTENDS_VERSION_MISMATCH,
+    ExtendsVersionMismatchError,
     OrphanOverrideError,
     OverlayCycleError,
     load_pack,
@@ -156,6 +158,68 @@ def test_resolve_chain_overlay_to_base(tmp_path: Path) -> None:
 
     chain = resolve_overlay_chain(overlay_root, base_resolver=resolver)
     assert chain == [base_root.resolve(), overlay_root.resolve()]
+
+
+def test_resolve_chain_rejects_wrong_version_base(tmp_path: Path) -> None:
+    """Overlay declaring extends: foo@9.9.9 must not silently resolve to foo@0.1.0.
+
+    Regression test for Finding 4 — without the centralised version check
+    in resolve_overlay_chain, a name-only resolver could substitute a
+    different base version than the overlay expects, masking orphan
+    overrides / dashboard drift / SQL changes.
+    """
+    # Build a base pack whose actual version is 0.1.0.
+    base_root = _make_base_pack(tmp_path)
+    assert (base_root / "pack.yaml").exists()
+
+    # Overlay declares extends: fusion-finance-starter@9.9.9 (wrong version).
+    overlay_root = _make_overlay(tmp_path, "fusion-finance-starter@9.9.9")
+
+    def resolver(ref: PackOverlayRef) -> Path:
+        # Resolver returns the 0.1.0 base regardless of the version in `ref`.
+        return base_root
+
+    with pytest.raises(ExtendsVersionMismatchError) as exc:
+        resolve_overlay_chain(overlay_root, base_resolver=resolver)
+    assert AIDPF_2004_EXTENDS_VERSION_MISMATCH in str(exc.value)
+    assert "9.9.9" in str(exc.value)
+    assert "0.1.0" in str(exc.value)
+
+
+def test_resolve_chain_rejects_wrong_id_base(tmp_path: Path) -> None:
+    """Resolver returns a pack whose id doesn't match the ref's name → AIDPF-2004."""
+    # Base pack with id 'sibling-base'.
+    base_root = tmp_path / "sibling-base"
+    base_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        base_root / "pack.yaml",
+        {
+            "id": "sibling-base",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        },
+    )
+
+    # Overlay declares extends: some-other-name@0.1.0 but resolver maps to sibling-base.
+    overlay_root = tmp_path / "broken-overlay"
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        overlay_root / "pack.yaml",
+        {
+            "id": "broken-overlay",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            "extends": "some-other-name@0.1.0",
+        },
+    )
+
+    def bad_resolver(ref: PackOverlayRef) -> Path:
+        return base_root  # always returns sibling-base regardless of ref.name
+
+    with pytest.raises(ExtendsVersionMismatchError) as exc:
+        resolve_overlay_chain(overlay_root, base_resolver=bad_resolver)
+    assert AIDPF_2004_EXTENDS_VERSION_MISMATCH in str(exc.value)
+    assert "sibling-base" in str(exc.value)
 
 
 def test_overlay_chain_cycle_rejected(tmp_path: Path) -> None:

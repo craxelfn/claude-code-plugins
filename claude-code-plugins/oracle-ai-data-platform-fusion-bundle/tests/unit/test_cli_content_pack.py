@@ -151,6 +151,52 @@ def test_cli_validate_broken_overlay_surfaces_orphan_override(tmp_path: Path) ->
     ), f"expected AIDPF-2001 in errors, got: {data['errors']!r}"
 
 
+def test_cli_validate_overlay_wrong_base_version_surfaces_AIDPF_2004(tmp_path: Path) -> None:
+    """Overlay declares extends: name@9.9.9 but sibling pack is 0.1.0 → AIDPF-2004.
+
+    Regression test for Finding 4 — the CLI's base resolver finds bases by
+    name (sibling directory or installed packs dir) but does not itself
+    verify the version. ``resolve_overlay_chain`` enforces the version
+    invariant centrally and raises ``ExtendsVersionMismatchError``.
+    """
+    import yaml
+
+    # Sibling base whose actual version is 0.1.0.
+    base_root = tmp_path / "sibling-base"
+    base_root.mkdir()
+    (base_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "sibling-base",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            }
+        )
+    )
+
+    # Overlay declares extends: sibling-base@9.9.9 — version mismatch.
+    overlay_root = tmp_path / "overlay-wrong-version"
+    overlay_root.mkdir()
+    (overlay_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "overlay-wrong-version",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+                "extends": "sibling-base@9.9.9",
+            }
+        )
+    )
+
+    result = _run_cli("content-pack", "validate", str(overlay_root), "--json")
+    assert result.returncode == 2, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["errors"], "expected at least one validation error"
+    assert any(
+        "AIDPF-2004" in e.get("message", "") for e in data["errors"]
+    ), f"expected AIDPF-2004 in errors, got: {data['errors']!r}"
+
+
 def test_cli_validate_valid_overlay_exits_0(tmp_path: Path) -> None:
     """A valid overlay (no orphan override, inherits base cleanly) → exit 0."""
     import yaml
