@@ -273,6 +273,112 @@ def test_overrides_quality_tests_list_extend(tmp_path: Path) -> None:
     assert tests[0].type == "row_count_min"
 
 
+def test_merged_source_roots_track_provenance(tmp_path: Path) -> None:
+    """Merged pack records per-node source-root provenance.
+
+    Inherited base nodes keep base.root; overlay overrides + overlay-only
+    additions get overlay.root. This is what lets validators resolve SQL
+    paths correctly against the pack each artifact actually lives in.
+    """
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        overrides={"silver/dim_supplier": {"sql": "silver/dim_supplier_acme.sql"}},
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    merged = merge_overlay(base, overlay)
+
+    # The overridden node's source root is the overlay (where the new SQL lives).
+    assert merged.root_for("silver/dim_supplier") == overlay_root.resolve()
+    # And merged.root_for() falls back to overlay.root for anything unmapped.
+    assert merged.root_for("nonexistent") == overlay_root.resolve()
+
+
+def test_merged_inherited_sql_node_resolves_against_base_root(tmp_path: Path) -> None:
+    """An overlay that does NOT override an inherited type:sql base node
+    must validate that node's SQL against the BASE root, not the overlay root.
+
+    Regression test for the Finding 3 bug where `merge_overlay` used
+    `root=overlay.root` for everything, causing inherited base SQL paths
+    to be searched under the overlay directory.
+    """
+    import yaml
+
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_validators import (
+        AIDPF_2003_SQL_FILE_MISSING,
+        validate_sql_paths,
+    )
+
+    # Base pack with a real type:sql node + on-disk SQL file.
+    base_root = tmp_path / "base-pack"
+    base_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        base_root / "pack.yaml",
+        {
+            "id": "base-pack",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        },
+    )
+    _write_yaml(
+        base_root / "silver" / "dim_thing.yaml",
+        {
+            "id": "dim_thing",
+            "layer": "silver",
+            "implementation": {"type": "sql", "sql": "silver/dim_thing.sql"},
+            "target": "dim_thing",
+            "dependsOn": {
+                "bronze": [
+                    {"id": "src", "watermark": {"column": "_extract_ts"}}
+                ]
+            },
+            "refresh": {
+                "seed": {"strategy": "replace"},
+                "incremental": {
+                    "strategy": "merge",
+                    "watermark": {"source": "src", "column": "_extract_ts"},
+                    "naturalKey": ["k"],
+                },
+            },
+            "outputSchema": {
+                "columns": [
+                    {"name": "k", "type": "string", "nullable": False, "pii": "none"}
+                ]
+            },
+        },
+    )
+    # SQL lives in the BASE pack, NOT under the overlay directory.
+    (base_root / "silver" / "dim_thing.sql").write_text("SELECT 1")
+
+    # Overlay pack with NO override on dim_thing (inheritance only).
+    overlay_root = tmp_path / "overlay-pack"
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        overlay_root / "pack.yaml",
+        {
+            "id": "overlay-pack",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            "extends": "base-pack@0.1.0",
+        },
+    )
+
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    merged = merge_overlay(base, overlay)
+
+    # The inherited node's source root must be the BASE root, not the overlay root.
+    assert merged.root_for("silver/dim_thing") == base_root.resolve()
+
+    # And the SQL validator must resolve the file successfully.
+    errors = validate_sql_paths(merged)
+    assert not [e for e in errors if e.code == AIDPF_2003_SQL_FILE_MISSING], (
+        f"Inherited base SQL should resolve against base root; got errors: {errors!r}"
+    )
+
+
 def test_pack_hash_deterministic(tmp_path: Path) -> None:
     base_root = _make_base_pack(tmp_path)
     overlay_root = _make_overlay(

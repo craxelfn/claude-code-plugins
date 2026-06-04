@@ -40,6 +40,9 @@ AIDPF_5002_UNKNOWN_TEMPLATE_VAR = "AIDPF-5002"
 AIDPF_5003_UNDECLARED_VARIATION_POINT = "AIDPF-5003"
 AIDPF_7001_DASHBOARD_MISSING_NODE = "AIDPF-7001"
 AIDPF_7003_DASHBOARD_TYPE_MISMATCH = "AIDPF-7003"
+AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE = "AIDPF-7004"
+AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED = "AIDPF-7005"
+AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE = "AIDPF-8002"
 
 
 # ---------------------------------------------------------------------------
@@ -97,24 +100,30 @@ _TEMPLATE_TOKEN_RE = re.compile(r"\{\{\s*([^}\s]+(?:\.[^}\s]+)*)\s*\}\}")
 
 
 def validate_sql_paths(pack: ResolvedPack) -> list[ValidationError]:
-    """For every node with `implementation.type: sql`, confirm the SQL file exists."""
+    """For every node with `implementation.type: sql`, confirm the SQL file exists.
+
+    Uses ``pack.root_for(qualified_id)`` so inherited base nodes resolve against
+    the base pack's root (not the overlay's), and overlay-overridden / overlay-
+    added nodes resolve against the overlay's root.
+    """
     errors: list[ValidationError] = []
     for layer_name, nodes in (("silver", pack.silver), ("gold", pack.gold)):
         for node_id, node in nodes.items():
             if node.implementation.type != "sql":
                 continue
-            sql_path = pack.root / node.implementation.sql
+            qualified = f"{layer_name}/{node_id}"
+            sql_path = pack.root_for(qualified) / node.implementation.sql
             if not sql_path.exists():
                 errors.append(
                     ValidationError(
                         code=AIDPF_2003_SQL_FILE_MISSING,
                         message=(
                             f"{AIDPF_2003_SQL_FILE_MISSING}: node "
-                            f"`{layer_name}/{node_id}` declares "
+                            f"`{qualified}` declares "
                             f"`implementation.sql: {node.implementation.sql}` but "
                             f"file does not exist at {sql_path}."
                         ),
-                        location=f"{layer_name}/{node_id}",
+                        location=qualified,
                     )
                 )
     return errors
@@ -145,7 +154,8 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
         for node_id, node in nodes.items():
             if node.implementation.type != "sql":
                 continue
-            sql_path = pack.root / node.implementation.sql
+            qualified = f"{layer_name}/{node_id}"
+            sql_path = pack.root_for(qualified) / node.implementation.sql
             if not sql_path.exists():
                 # validate_sql_paths surfaces the AIDPF-2003 error; skip token
                 # scanning to avoid noisy duplicate errors.
@@ -164,10 +174,10 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
                                 code=AIDPF_5003_UNDECLARED_VARIATION_POINT,
                                 message=(
                                     f"{AIDPF_5003_UNDECLARED_VARIATION_POINT}: "
-                                    f"node `{layer_name}/{node_id}` references "
+                                    f"node `{qualified}` references "
                                     f"`{{{{ {token} }}}}` but pack declares no profiles."
                                 ),
-                                location=f"{layer_name}/{node_id}",
+                                location=qualified,
                             )
                         )
                     continue
@@ -179,11 +189,11 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
                                 code=AIDPF_5003_UNDECLARED_VARIATION_POINT,
                                 message=(
                                     f"{AIDPF_5003_UNDECLARED_VARIATION_POINT}: "
-                                    f"node `{layer_name}/{node_id}` references "
+                                    f"node `{qualified}` references "
                                     f"`{{{{ {token} }}}}` but `columnAliases.{name}` "
                                     f"is not declared. Known: {sorted(declared_columns)!r}."
                                 ),
-                                location=f"{layer_name}/{node_id}",
+                                location=qualified,
                             )
                         )
                     continue
@@ -195,11 +205,11 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
                                 code=AIDPF_5003_UNDECLARED_VARIATION_POINT,
                                 message=(
                                     f"{AIDPF_5003_UNDECLARED_VARIATION_POINT}: "
-                                    f"node `{layer_name}/{node_id}` references "
+                                    f"node `{qualified}` references "
                                     f"`{{{{ {token} }}}}` but `semanticVariants.{name}` "
                                     f"is not declared. Known: {sorted(declared_semantics)!r}."
                                 ),
-                                location=f"{layer_name}/{node_id}",
+                                location=qualified,
                             )
                         )
                     continue
@@ -209,11 +219,11 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
                         code=AIDPF_5002_UNKNOWN_TEMPLATE_VAR,
                         message=(
                             f"{AIDPF_5002_UNKNOWN_TEMPLATE_VAR}: node "
-                            f"`{layer_name}/{node_id}` references unknown "
+                            f"`{qualified}` references unknown "
                             f"template variable `{{{{ {token} }}}}`. "
                             f"Allowed: {sorted(_BASE_TEMPLATE_VARS) + ['profile.<key>', 'column.<name>', 'semantic.<name>']}."
                         ),
-                        location=f"{layer_name}/{node_id}",
+                        location=qualified,
                     )
                 )
     return errors
@@ -384,6 +394,154 @@ def validate_dashboard_requires(
 
 
 # ---------------------------------------------------------------------------
+# validate_dashboard_security_and_compat (AIDPF-7004, AIDPF-7005, AIDPF-8002)
+# ---------------------------------------------------------------------------
+
+
+def _semver_tuple(v: str) -> tuple[int, ...]:
+    """Best-effort SemVer to comparable tuple. Ignores pre-release / build."""
+    core = v.split("-")[0].split("+")[0]
+    try:
+        return tuple(int(p) for p in core.split("."))
+    except ValueError:
+        return ()
+
+
+def validate_dashboard_security_and_compat(
+    pack: ResolvedPack, dashboard: DashboardYaml
+) -> list[ValidationError]:
+    """Pack-version compatibility + PII firewall + allowedColumns subset check.
+
+    Three rules:
+
+    * **AIDPF-7004** — ``requires.pack.id`` must equal ``pack.pack.id``; if
+      ``requires.pack.minVersion`` is set, ``pack.pack.version`` must be
+      >= it; if ``requires.pack.maxVersion`` is set, ``pack.pack.version``
+      must be <= it.
+    * **AIDPF-7005** — every entry in ``security.allowedColumns[table]``
+      must already appear in ``requires.columns[table]`` for the same
+      table. Prevents "I allow X for display but never required it" drift.
+    * **AIDPF-8002** — any column in ``requires.columns`` OR
+      ``security.allowedColumns`` whose gold ``outputSchema`` declares
+      ``pii: high`` is rejected. High-PII columns must not be reachable
+      via OAC dataset/RPD (PLAN §12.6).
+    """
+    errors: list[ValidationError] = []
+    where = f"dashboard/{dashboard.id}"
+
+    # --- AIDPF-7004: pack compatibility ----------------------------------
+    req_pack = dashboard.requires.pack
+    if req_pack.id != pack.pack.id:
+        errors.append(
+            ValidationError(
+                code=AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE,
+                message=(
+                    f"{AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE}: dashboard "
+                    f"`{dashboard.id}` requires pack `{req_pack.id}` but "
+                    f"active pack is `{pack.pack.id}`."
+                ),
+                location=where,
+            )
+        )
+    else:
+        pack_v = _semver_tuple(pack.pack.version)
+        min_v = _semver_tuple(req_pack.min_version) if req_pack.min_version else None
+        max_v = _semver_tuple(req_pack.max_version) if req_pack.max_version else None
+        if min_v and pack_v and pack_v < min_v:
+            errors.append(
+                ValidationError(
+                    code=AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE,
+                    message=(
+                        f"{AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE}: dashboard "
+                        f"`{dashboard.id}` requires pack `{req_pack.id}` "
+                        f">= {req_pack.min_version} but active pack is "
+                        f"{pack.pack.version}."
+                    ),
+                    location=where,
+                )
+            )
+        if max_v and pack_v and pack_v > max_v:
+            errors.append(
+                ValidationError(
+                    code=AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE,
+                    message=(
+                        f"{AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE}: dashboard "
+                        f"`{dashboard.id}` requires pack `{req_pack.id}` "
+                        f"<= {req_pack.max_version} but active pack is "
+                        f"{pack.pack.version}."
+                    ),
+                    location=where,
+                )
+            )
+
+    # Look up gold nodes keyed by qualified `gold.<target>` for column ↔ PII checks.
+    gold_by_target = {f"gold.{node.target}": node for node in pack.gold.values()}
+
+    # --- AIDPF-7005: allowed_columns ⊆ requires.columns ------------------
+    required_cols_by_table: dict[str, set[str]] = {
+        table: {c.name for c in cols}
+        for table, cols in dashboard.requires.columns.items()
+    }
+    for table, allowed_names in dashboard.security.allowed_columns.items():
+        required_set = required_cols_by_table.get(table, set())
+        unrequired = [name for name in allowed_names if name not in required_set]
+        if unrequired:
+            errors.append(
+                ValidationError(
+                    code=AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED,
+                    message=(
+                        f"{AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED}: dashboard "
+                        f"`{dashboard.id}` declares `allowedColumns[{table}]` "
+                        f"entries that are not present in `requires.columns[{table}]`: "
+                        f"{sorted(unrequired)!r}."
+                    ),
+                    location=where,
+                )
+            )
+
+    # --- AIDPF-8002: PII high firewall -----------------------------------
+    # Collect every (table, column) pair the dashboard references via
+    # requires.columns OR security.allowedColumns, then check the gold
+    # node's outputSchema for pii=='high' on each.
+    references: dict[str, set[str]] = {}
+    for table, cols in dashboard.requires.columns.items():
+        references.setdefault(table, set()).update(c.name for c in cols)
+    for table, allowed_names in dashboard.security.allowed_columns.items():
+        references.setdefault(table, set()).update(allowed_names)
+
+    for table, col_names in references.items():
+        node = gold_by_target.get(table)
+        if node is None:
+            # validate_dashboard_requires reports the missing-table error;
+            # don't surface a duplicate PII complaint here.
+            continue
+        cols_by_name = {c.name: c for c in node.output_schema.columns}
+        for col_name in col_names:
+            col = cols_by_name.get(col_name)
+            if col is None:
+                # Missing column already reported by validate_dashboard_requires.
+                continue
+            if col.pii == "high":
+                errors.append(
+                    ValidationError(
+                        code=AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE,
+                        message=(
+                            f"{AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE}: dashboard "
+                            f"`{dashboard.id}` references `{table}.{col_name}` "
+                            f"which is declared `pii: high` in the gold node's "
+                            f"`outputSchema`. High-PII columns must not be "
+                            f"reachable via OAC dataset/RPD (PLAN §12.6). "
+                            f"Remove from `requires.columns` / `allowedColumns` "
+                            f"or downgrade the column's pii classification."
+                        ),
+                        location=where,
+                    )
+                )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # validate_pack_full
 # ---------------------------------------------------------------------------
 
@@ -396,4 +554,5 @@ def validate_pack_full(pack: ResolvedPack) -> ValidationReport:
     report.merge_errors(validate_dag(pack))
     for dashboard in pack.dashboards.values():
         report.merge_errors(validate_dashboard_requires(pack, dashboard))
+        report.merge_errors(validate_dashboard_security_and_compat(pack, dashboard))
     return report

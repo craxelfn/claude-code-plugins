@@ -20,8 +20,12 @@ from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_validators 
     AIDPF_5003_UNDECLARED_VARIATION_POINT,
     AIDPF_7001_DASHBOARD_MISSING_NODE,
     AIDPF_7003_DASHBOARD_TYPE_MISMATCH,
+    AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE,
+    AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED,
+    AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE,
     validate_dag,
     validate_dashboard_requires,
+    validate_dashboard_security_and_compat,
     validate_pack_full,
     validate_sql_paths,
     validate_template_variables,
@@ -324,6 +328,252 @@ def test_dashboard_column_type_mismatch(tmp_path: Path) -> None:
     dashboard = pack.dashboards["executive_cfo"]
     errors = validate_dashboard_requires(pack, dashboard)
     assert any(e.code == AIDPF_7003_DASHBOARD_TYPE_MISMATCH for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard security + compat validator (AIDPF-7004, AIDPF-7005, AIDPF-8002)
+# ---------------------------------------------------------------------------
+
+
+def _add_gold_node(
+    pack_root: Path, *, target: str, pii_columns: dict[str, str]
+) -> None:
+    """Write a gold/<target>.yaml stub with the given (column → pii) outputSchema."""
+    cols = [
+        {"name": name, "type": "string", "nullable": True, "pii": pii}
+        for name, pii in pii_columns.items()
+    ]
+    _write_yaml(
+        pack_root / "gold" / f"{target}.yaml",
+        {
+            "id": target,
+            "layer": "gold",
+            "implementation": {
+                "type": "python_legacy",
+                "callable": f"pkg.{target}:build",
+                "deprecated": False,
+                "migrationTarget": f"gold/{target}.sql",
+            },
+            "target": target,
+            "refresh": {"seed": {"strategy": "replace"}},
+            "outputSchema": {"columns": cols},
+        },
+    )
+
+
+def _write_dashboard(
+    pack_root: Path,
+    *,
+    dash_id: str,
+    requires_pack: dict,
+    tables: list[str],
+    required_columns: dict[str, list[dict]],
+    allowed_columns: dict[str, list[str]] | None = None,
+) -> None:
+    """Write a dashboards/<id>.yaml with the given references."""
+    data: dict = {
+        "id": dash_id,
+        "title": dash_id,
+        "version": "0.1.0",
+        "delivery": {
+            "type": "oac-snapshot",
+            "barObject": f"dashboards/{dash_id}.bar",
+            "oac": {
+                "projectName": dash_id,
+                "folderPath": "/Shared",
+                "connectionName": "aidp-fusion-gold",
+            },
+        },
+        "requires": {
+            "pack": requires_pack,
+            "tables": tables,
+            "columns": required_columns,
+        },
+    }
+    if allowed_columns is not None:
+        data["security"] = {"allowedColumns": allowed_columns}
+    _write_yaml(pack_root / "dashboards" / f"{dash_id}.yaml", data)
+
+
+def test_dashboard_pack_id_mismatch_rejected(tmp_path: Path) -> None:
+    """AIDPF-7004 fires when dashboard's requires.pack.id != active pack id."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(pack_root, target="gl_balance", pii_columns={"ledger_id": "none"})
+    _write_dashboard(
+        pack_root,
+        dash_id="cfo",
+        requires_pack={"id": "some-other-pack", "minVersion": "0.1.0"},
+        tables=["gold.gl_balance"],
+        required_columns={"gold.gl_balance": [{"name": "ledger_id", "type": "string"}]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["cfo"])
+    assert any(e.code == AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE for e in errors)
+
+
+def test_dashboard_pack_min_version_violation_rejected(tmp_path: Path) -> None:
+    """AIDPF-7004 fires when active pack version < requires.pack.minVersion."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(pack_root, target="gl_balance", pii_columns={"ledger_id": "none"})
+    _write_dashboard(
+        pack_root,
+        dash_id="cfo",
+        requires_pack={"id": "fusion-finance-starter", "minVersion": "9.9.9"},
+        tables=["gold.gl_balance"],
+        required_columns={"gold.gl_balance": [{"name": "ledger_id", "type": "string"}]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["cfo"])
+    assert any(e.code == AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE for e in errors)
+
+
+def test_dashboard_pack_max_version_violation_rejected(tmp_path: Path) -> None:
+    """AIDPF-7004 fires when active pack version > requires.pack.maxVersion."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(pack_root, target="gl_balance", pii_columns={"ledger_id": "none"})
+    _write_dashboard(
+        pack_root,
+        dash_id="cfo",
+        requires_pack={
+            "id": "fusion-finance-starter",
+            "minVersion": "0.0.1",
+            "maxVersion": "0.0.5",  # active pack is 0.1.0; exceeds max
+        },
+        tables=["gold.gl_balance"],
+        required_columns={"gold.gl_balance": [{"name": "ledger_id", "type": "string"}]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["cfo"])
+    assert any(e.code == AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE for e in errors)
+
+
+def test_dashboard_pack_compat_passes_when_within_range(tmp_path: Path) -> None:
+    """No AIDPF-7004 when active pack falls within [minVersion, maxVersion]."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(pack_root, target="gl_balance", pii_columns={"ledger_id": "none"})
+    _write_dashboard(
+        pack_root,
+        dash_id="cfo",
+        requires_pack={
+            "id": "fusion-finance-starter",
+            "minVersion": "0.1.0",
+            "maxVersion": "1.0.0",
+        },
+        tables=["gold.gl_balance"],
+        required_columns={"gold.gl_balance": [{"name": "ledger_id", "type": "string"}]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["cfo"])
+    assert not [e for e in errors if e.code == AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE]
+
+
+def test_dashboard_pii_high_in_required_columns_rejected(tmp_path: Path) -> None:
+    """AIDPF-8002 fires when requires.columns includes a pii: high gold column."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(
+        pack_root,
+        target="ap_aging",
+        pii_columns={"supplier_number": "low", "tax_id": "high"},
+    )
+    _write_dashboard(
+        pack_root,
+        dash_id="payables",
+        requires_pack={"id": "fusion-finance-starter", "minVersion": "0.1.0"},
+        tables=["gold.ap_aging"],
+        required_columns={
+            "gold.ap_aging": [
+                {"name": "supplier_number", "type": "string"},
+                {"name": "tax_id", "type": "string"},  # pii: high
+            ],
+        },
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["payables"])
+    assert any(
+        e.code == AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE and "tax_id" in e.message
+        for e in errors
+    )
+
+
+def test_dashboard_pii_high_in_allowed_columns_rejected(tmp_path: Path) -> None:
+    """AIDPF-8002 fires when security.allowedColumns includes a pii: high column."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(
+        pack_root,
+        target="ap_aging",
+        pii_columns={"supplier_number": "low", "tax_id": "high"},
+    )
+    _write_dashboard(
+        pack_root,
+        dash_id="payables",
+        requires_pack={"id": "fusion-finance-starter", "minVersion": "0.1.0"},
+        tables=["gold.ap_aging"],
+        required_columns={
+            "gold.ap_aging": [
+                {"name": "supplier_number", "type": "string"},
+                {"name": "tax_id", "type": "string"},
+            ],
+        },
+        allowed_columns={"gold.ap_aging": ["supplier_number", "tax_id"]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["payables"])
+    pii_errors = [e for e in errors if e.code == AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE]
+    assert pii_errors, f"expected AIDPF-8002 errors, got: {errors!r}"
+    assert any("tax_id" in e.message for e in pii_errors)
+
+
+def test_dashboard_allowed_columns_not_required_rejected(tmp_path: Path) -> None:
+    """AIDPF-7005 fires when allowedColumns has entries missing from requires.columns."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(
+        pack_root,
+        target="ap_aging",
+        pii_columns={"supplier_number": "low", "open_amount": "none"},
+    )
+    _write_dashboard(
+        pack_root,
+        dash_id="payables",
+        requires_pack={"id": "fusion-finance-starter", "minVersion": "0.1.0"},
+        tables=["gold.ap_aging"],
+        required_columns={
+            "gold.ap_aging": [{"name": "supplier_number", "type": "string"}]
+        },
+        # allowedColumns mentions open_amount, but it's NOT in required_columns.
+        allowed_columns={"gold.ap_aging": ["supplier_number", "open_amount"]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["payables"])
+    assert any(
+        e.code == AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED and "open_amount" in e.message
+        for e in errors
+    )
+
+
+def test_dashboard_security_validator_clean_when_no_pii_high(tmp_path: Path) -> None:
+    """Validator passes when no high-PII column is referenced and pack matches."""
+    pack_root = _make_base_pack(tmp_path)
+    _add_gold_node(
+        pack_root,
+        target="ap_aging",
+        pii_columns={"supplier_number": "low", "open_amount": "none"},
+    )
+    _write_dashboard(
+        pack_root,
+        dash_id="payables",
+        requires_pack={"id": "fusion-finance-starter", "minVersion": "0.1.0"},
+        tables=["gold.ap_aging"],
+        required_columns={
+            "gold.ap_aging": [
+                {"name": "supplier_number", "type": "string"},
+                {"name": "open_amount", "type": "string"},
+            ]
+        },
+        allowed_columns={"gold.ap_aging": ["supplier_number", "open_amount"]},
+    )
+    pack = load_pack(pack_root)
+    errors = validate_dashboard_security_and_compat(pack, pack.dashboards["payables"])
+    assert errors == []
 
 
 def test_validate_pack_full_aggregates_errors(tmp_path: Path) -> None:

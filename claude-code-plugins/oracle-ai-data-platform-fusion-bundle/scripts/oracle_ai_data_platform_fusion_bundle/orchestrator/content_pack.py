@@ -91,7 +91,9 @@ class ResolvedPack:
     """A fully-loaded content pack (post-overlay-merge).
 
     Attributes:
-        root: filesystem path to the pack root directory.
+        root: filesystem path to the pack root directory. For merged packs,
+            this is the overlay root (top of the chain). Use ``source_roots``
+            for per-node path resolution.
         pack: parsed ``pack.yaml`` (top-level).
         silver: per-node-id mapping of silver nodes (parsed from
             ``silver/*.yaml``).
@@ -102,6 +104,19 @@ class ResolvedPack:
             for now; Phase 1 doesn't validate the schema — Phase 2 will).
         is_merged: True if this is the result of a merge_overlay call.
         chain: list of pack ids in load order (base first, overlays after).
+        source_roots: per-artifact pack-root provenance. Keys are qualified
+            ids (``"silver/<id>"``, ``"gold/<id>"``, ``"dashboards/<id>"``,
+            and the literal ``"bronze.yaml"``). Values are the pack-root
+            paths the artifact's files actually live under. For a non-merged
+            pack, every key maps to ``root``. For a merged pack, inherited
+            base artifacts keep their base root; overlay-added or
+            overlay-overridden artifacts use the overlay root.
+
+            Validators use this to resolve relative file paths (e.g. a
+            silver node's ``implementation.sql``) against the correct
+            filesystem location. The single ``root`` field is insufficient
+            for merged packs because inherited base SQL lives under
+            ``base.root``, not under ``overlay.root``.
     """
 
     root: Path
@@ -112,10 +127,19 @@ class ResolvedPack:
     bronze_yaml: dict[str, Any] = field(default_factory=dict)
     is_merged: bool = False
     chain: tuple[str, ...] = ()
+    source_roots: dict[str, Path] = field(default_factory=dict)
 
     def all_nodes(self) -> dict[str, NodeYaml]:
         """Convenience: silver and gold nodes combined."""
         return {**self.silver, **self.gold}
+
+    def root_for(self, qualified_id: str) -> Path:
+        """Return the source-pack root for an artifact id, falling back to ``root``.
+
+        ``qualified_id`` examples: ``"silver/dim_supplier"``,
+        ``"gold/gl_balance"``, ``"dashboards/executive_cfo"``, ``"bronze.yaml"``.
+        """
+        return self.source_roots.get(qualified_id, self.root)
 
     def compute_hash(self) -> str:
         """Stable sha256 of the pack's canonical serialised form.
@@ -204,6 +228,16 @@ def load_pack(root: Path) -> ResolvedPack:
             d = DashboardYaml.model_validate(raw_d)
             dashboards[d.id] = d
 
+    source_roots: dict[str, Path] = {}
+    if bronze_yaml:
+        source_roots["bronze.yaml"] = root
+    for nid in silver:
+        source_roots[f"silver/{nid}"] = root
+    for nid in gold:
+        source_roots[f"gold/{nid}"] = root
+    for did in dashboards:
+        source_roots[f"dashboards/{did}"] = root
+
     return ResolvedPack(
         root=root,
         pack=pack,
@@ -212,6 +246,7 @@ def load_pack(root: Path) -> ResolvedPack:
         dashboards=dashboards,
         bronze_yaml=bronze_yaml,
         chain=(pack.id,),
+        source_roots=source_roots,
     )
 
 
@@ -352,22 +387,45 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
 
     merged_pack = PackYaml.model_validate(merged_pack_data)
 
-    # ----- Merge node overrides --------------------------------------
+    # ----- Merge node overrides + track source-root provenance ---------
+    # source_roots starts from base (every inherited node + dashboard +
+    # bronze.yaml entry comes from base.root). Overridden nodes and any
+    # overlay-only additions are then reassigned to overlay.root below.
+    merged_source_roots: dict[str, Path] = dict(base.source_roots)
+
     merged_silver = _apply_node_overrides(base.silver, overlay, "silver/")
     merged_gold = _apply_node_overrides(base.gold, overlay, "gold/")
+
+    # Mark every override target's source root as the overlay root,
+    # since the override declared by the overlay points at overlay-side files.
+    for override_key in overlay.pack.overrides:
+        normalized = override_key.replace("silver/", "").replace("gold/", "")
+        if normalized in base.silver:
+            merged_source_roots[f"silver/{normalized}"] = overlay.root
+        elif normalized in base.gold:
+            merged_source_roots[f"gold/{normalized}"] = overlay.root
 
     # Overlay's own silver/gold (not declared as overrides) are additions.
     for nid, node in overlay.silver.items():
         if nid not in merged_silver:
             merged_silver[nid] = node
+            merged_source_roots[f"silver/{nid}"] = overlay.root
     for nid, node in overlay.gold.items():
         if nid not in merged_gold:
             merged_gold[nid] = node
+            merged_source_roots[f"gold/{nid}"] = overlay.root
 
-    # Dashboards: overlay can add but not override (Phase 1 scope).
+    # Dashboards: overlay can add or replace (Phase 1 scope — replace-only,
+    # no field-level merge). Inherited dashboards keep base root; overlay
+    # dashboards (whether new or replacing a base one) get overlay root.
     merged_dashboards = dict(base.dashboards)
     for did, dash in overlay.dashboards.items():
         merged_dashboards[did] = dash
+        merged_source_roots[f"dashboards/{did}"] = overlay.root
+
+    # bronze.yaml: base wins unless overlay provides one (rare; Phase 2 feature).
+    if overlay.bronze_yaml:
+        merged_source_roots["bronze.yaml"] = overlay.root
 
     return ResolvedPack(
         root=overlay.root,
@@ -375,9 +433,10 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
         silver=merged_silver,
         gold=merged_gold,
         dashboards=merged_dashboards,
-        bronze_yaml=base.bronze_yaml,  # bronze rarely overridden; if needed, Phase 2
+        bronze_yaml=overlay.bronze_yaml if overlay.bronze_yaml else base.bronze_yaml,
         is_merged=True,
         chain=tuple(list(base.chain) + [overlay.pack.id]),
+        source_roots=merged_source_roots,
     )
 
 

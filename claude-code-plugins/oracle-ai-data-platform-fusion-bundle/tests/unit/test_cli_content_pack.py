@@ -82,37 +82,17 @@ def test_cli_validate_starter_pack_json() -> None:
     assert data["errors"] == []
 
 
-def test_cli_validate_broken_overlay_exits_2(tmp_path: Path) -> None:
-    """Validate against a hand-crafted broken overlay returns exit 2 + AIDPF code in JSON."""
+def test_cli_validate_bad_semver_pack_exits_2(tmp_path: Path) -> None:
+    """A syntactically broken pack (bad SemVer) → exit 2 + AIDPF-2002 in JSON."""
     import yaml
 
-    pack_root = tmp_path / "broken-pack"
-    pack_root.mkdir()
-    (pack_root / "pack.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "id": "broken-pack",
-                "version": "0.1.0",
-                "compatibility": {"pluginMinVersion": "0.3.0"},
-                "extends": "fusion-finance-starter@0.1.0",
-                "overrides": {
-                    # Override a node that doesn't exist in base.
-                    "silver/dim_nonexistent": {"profile": "finance-default"},
-                },
-            }
-        )
-    )
-
-    # The validate verb only loads the named pack; orphan-override detection
-    # currently lives in the merger. Here we exercise validation of a syntactically
-    # broken pack via direct path argument.
     bad_path = tmp_path / "bad"
     bad_path.mkdir()
     (bad_path / "pack.yaml").write_text(
         yaml.safe_dump(
             {
                 "id": "bad-pack",
-                "version": "not-semver",  # AIDPF-2002
+                "version": "not-semver",
                 "compatibility": {"pluginMinVersion": "0.3.0"},
             }
         )
@@ -122,3 +102,86 @@ def test_cli_validate_broken_overlay_exits_2(tmp_path: Path) -> None:
     data = json.loads(result.stdout)
     assert data["errors"], "expected at least one validation error"
     assert any("AIDPF-2002" in e.get("message", "") for e in data["errors"])
+
+
+def test_cli_validate_broken_overlay_surfaces_orphan_override(tmp_path: Path) -> None:
+    """A broken overlay (orphan override) validated via the CLI → exit 2 + AIDPF-2001.
+
+    Regression test for Finding 2 — previously the CLI called `load_pack` only,
+    which does NOT resolve `extends:` chains. As a result, orphan-override
+    failures from `merge_overlay` never surfaced. The fix calls
+    `resolve_overlay_chain` + `merge_overlay` before `validate_pack_full`.
+    """
+    import yaml
+
+    # Sibling base pack — the CLI's base resolver looks for siblings first.
+    base_root = tmp_path / "sibling-base"
+    base_root.mkdir()
+    (base_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "sibling-base",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            }
+        )
+    )
+
+    overlay_root = tmp_path / "broken-overlay"
+    overlay_root.mkdir()
+    (overlay_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "broken-overlay",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+                "extends": "sibling-base@0.1.0",
+                # The base has no silver/dim_nonexistent — orphan override.
+                "overrides": {"silver/dim_nonexistent": {"profile": "finance-default"}},
+            }
+        )
+    )
+
+    result = _run_cli("content-pack", "validate", str(overlay_root), "--json")
+    assert result.returncode == 2, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["errors"], "expected at least one validation error"
+    assert any(
+        "AIDPF-2001" in e.get("message", "") for e in data["errors"]
+    ), f"expected AIDPF-2001 in errors, got: {data['errors']!r}"
+
+
+def test_cli_validate_valid_overlay_exits_0(tmp_path: Path) -> None:
+    """A valid overlay (no orphan override, inherits base cleanly) → exit 0."""
+    import yaml
+
+    base_root = tmp_path / "sibling-base"
+    base_root.mkdir()
+    (base_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "sibling-base",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            }
+        )
+    )
+
+    overlay_root = tmp_path / "good-overlay"
+    overlay_root.mkdir()
+    (overlay_root / "pack.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "good-overlay",
+                "version": "0.1.0",
+                "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+                "extends": "sibling-base@0.1.0",
+            }
+        )
+    )
+
+    result = _run_cli("content-pack", "validate", str(overlay_root), "--json")
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    assert data["errors"] == []

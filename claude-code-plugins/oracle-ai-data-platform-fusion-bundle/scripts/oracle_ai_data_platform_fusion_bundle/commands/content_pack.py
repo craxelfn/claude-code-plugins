@@ -27,12 +27,16 @@ from pydantic import ValidationError
 import oracle_ai_data_platform_fusion_bundle as _pkg
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
     PackLoaderError,
+    ResolvedPack,
     load_pack,
+    merge_overlay,
+    resolve_overlay_chain,
 )
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_validators import (
     ValidationReport,
     validate_pack_full,
 )
+from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import PackOverlayRef
 
 INSTALLED_CONTENT_PACKS_DIR = Path(_pkg.__file__).parent / "content_packs"
 
@@ -68,6 +72,59 @@ def resolve_pack_path(spec: str) -> Path:
         f"could not resolve content pack {spec!r} — not a directory and not "
         f"an installed pack under {INSTALLED_CONTENT_PACKS_DIR}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Overlay base resolution for the CLI
+# ---------------------------------------------------------------------------
+
+
+def _make_cli_base_resolver(overlay_root: Path):
+    """Build a base resolver for `resolve_overlay_chain`.
+
+    Looks up referenced base packs in two places, in order:
+
+    1. As a sibling directory of the overlay root with the matching pack id.
+       This is the common workflow during development — the customer's
+       overlay sits next to the base it extends.
+    2. Under the installed ``content_packs/`` directory (Oracle-shipped packs).
+
+    On miss, raises ``FileNotFoundError`` so ``resolve_overlay_chain`` surfaces
+    a clean error.
+    """
+
+    def resolver(ref: "PackOverlayRef") -> Path:
+        # Sibling-directory lookup.
+        sibling = overlay_root.parent / ref.name
+        if sibling.exists() and (sibling / "pack.yaml").exists():
+            return sibling.resolve()
+        # Installed-packs lookup.
+        installed = INSTALLED_CONTENT_PACKS_DIR / ref.name
+        if installed.exists() and (installed / "pack.yaml").exists():
+            return installed.resolve()
+        raise FileNotFoundError(
+            f"base pack {ref.name!r} (referenced as `extends: {ref.to_string()}`) "
+            f"not found beside {overlay_root} or in {INSTALLED_CONTENT_PACKS_DIR}"
+        )
+
+    return resolver
+
+
+def _load_full_chain(pack_path: Path) -> "ResolvedPack":
+    """Load a pack and apply any `extends:` chain, returning the merged result.
+
+    For a base pack (no `extends:`), returns it unmerged. For an overlay,
+    resolves the chain via `resolve_overlay_chain` + `merge_overlay`,
+    yielding the fully-assembled `ResolvedPack` that all validators expect.
+    """
+    chain_paths = resolve_overlay_chain(
+        pack_path, base_resolver=_make_cli_base_resolver(pack_path)
+    )
+    packs = [load_pack(p) for p in chain_paths]
+    merged = packs[0]
+    for overlay in packs[1:]:
+        merged = merge_overlay(merged, overlay)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -121,10 +178,10 @@ def list_packs(*, json_output: bool, console) -> int:
 
 
 def info_pack(name: str, *, json_output: bool, console) -> int:
-    """Print details about an installed pack."""
+    """Print details about an installed pack (overlay-aware)."""
     try:
         pack_path = resolve_pack_path(name)
-        pack = load_pack(pack_path)
+        pack = _load_full_chain(pack_path)
     except (FileNotFoundError, PackLoaderError, ValidationError) as exc:
         if json_output:
             print(json.dumps({"error": str(exc)}, indent=2))
@@ -196,7 +253,13 @@ def info_pack(name: str, *, json_output: bool, console) -> int:
 
 
 def validate_pack_cli(name: str, *, json_output: bool, console) -> int:
-    """Run schema + content validation; surface AIDPF codes."""
+    """Run schema + content validation; surface AIDPF codes.
+
+    Resolves the full ``extends:`` chain via ``resolve_overlay_chain`` +
+    ``merge_overlay`` before validating, so overlay failures (orphan
+    overrides → AIDPF-2001, inherited dashboard / SQL errors, etc.) are
+    surfaced to the operator.
+    """
     try:
         pack_path = resolve_pack_path(name)
     except FileNotFoundError as exc:
@@ -207,12 +270,19 @@ def validate_pack_cli(name: str, *, json_output: bool, console) -> int:
         return 1
 
     try:
-        pack = load_pack(pack_path)
+        pack = _load_full_chain(pack_path)
     except PackLoaderError as exc:
         if json_output:
             print(json.dumps({"errors": [{"code": exc.code, "message": str(exc)}]}, indent=2))
         else:
             console.print(f"[red]{exc.code}:[/red] {exc}")
+        return 2
+    except FileNotFoundError as exc:
+        # Base pack referenced by `extends:` not found.
+        if json_output:
+            print(json.dumps({"errors": [{"code": "AIDPF-2000", "message": str(exc)}]}, indent=2))
+        else:
+            console.print(f"[red]error:[/red] {exc}")
         return 2
     except ValidationError as exc:
         if json_output:
