@@ -22,6 +22,41 @@ from .refs import render_vars
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 — content-pack backend AIDPF error codes
+# ---------------------------------------------------------------------------
+# Registered in PLAN §25. Surfaced via the schema layer because content-pack
+# *runtime selection* (--execution-backend content-pack) lives at the CLI/run
+# layer, but the bundle-shape gates (missing contentPack block, unresolvable
+# pack path) are pure schema concerns.
+
+AIDPF_1030_PROFILE_MISSING = "AIDPF-1030"
+"""`bundle.yaml`'s `contentPack.profile` field is missing when content-pack backend selected."""
+
+AIDPF_1031_CONTENT_PACK_MISSING = "AIDPF-1031"
+"""`bundle.yaml` has no `contentPack` block at all when content-pack backend selected."""
+
+AIDPF_1032_RESUME_NOT_SUPPORTED = "AIDPF-1032"
+"""`--resume` is not supported with content-pack backend in v0.3."""
+
+AIDPF_1033_PROFILE_FILE_NOT_FOUND = "AIDPF-1033"
+"""Resolved profile file (`<bundle>/profiles/<name>.yaml`) does not exist."""
+
+AIDPF_1037_INSTALLED_PACK_NOT_FOUND = "AIDPF-1037"
+"""Installed content pack `<name>` not found when `contentPack.path` is None."""
+
+AIDPF_1038_RESOLVED_ROOT_NO_PACK_YAML = "AIDPF-1038"
+"""Resolved content-pack root does not contain `pack.yaml` at the resolved path."""
+
+
+class ContentPackRootNotFoundError(Exception):
+    """Installed pack not found at `<plugin>/content_packs/<name>/`. AIDPF-1037."""
+
+
+class ContentPackRootInvalidError(Exception):
+    """Resolved content-pack root exists but contains no `pack.yaml`. AIDPF-1038."""
+
+
+# ---------------------------------------------------------------------------
 # aidp.config.yaml  (workspace coords + env mapping)
 # ---------------------------------------------------------------------------
 
@@ -276,6 +311,38 @@ class OacDashboardSpec(BaseModel):
     """Default JDBC catalog (OAC sees all catalogs in the schema tree once connected)."""
 
 
+class ContentPackSpec(BaseModel):
+    """Phase 2 — declare which content pack + tenant profile this bundle runs.
+
+    Optional on the top-level ``Bundle``; required when ``--execution-backend
+    content-pack`` is selected. v1 bundles validate without it.
+
+    Three resolution shapes for the pack directory, handled by
+    :func:`resolve_content_pack_root` (not by Pydantic):
+
+    * ``path`` absent → installed Oracle-shipped pack at
+      ``<plugin>/content_packs/<name>/``.
+    * ``path`` absolute → used as-is.
+    * ``path`` relative → resolved against ``bundle.yaml``'s parent
+      directory (NOT CWD — bundle-relative resolution survives `cd`).
+
+    The profile YAML always lives at ``<bundle.yaml.parent>/profiles/
+    <profile>.yaml`` (PLAN §9.5.7 — profile beside the bundle, never inside
+    the pack directory).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str
+    """Pack id (e.g. ``fusion-finance-starter``). Required."""
+
+    path: Path | None = None
+    """Override pack location (relative or absolute). ``None`` → installed-pack lookup."""
+
+    profile: str | None = None
+    """Active tenant profile name. Required at runtime under content-pack backend."""
+
+
 class Bundle(BaseModel):
     """Top-level ``bundle.yaml`` schema."""
 
@@ -302,6 +369,8 @@ class Bundle(BaseModel):
     oac: OacDashboardSpec | None = None
     notifications: NotificationsSpec = NotificationsSpec()
     incremental: IncrementalConfig = Field(default_factory=IncrementalConfig)
+    content_pack: ContentPackSpec | None = Field(default=None, alias="contentPack")
+    """Phase 2 — opt-in content-pack execution. ``None`` means v1 (legacy-python) only."""
 
     @model_validator(mode="after")
     def _validate_unique_dataset_ids(self) -> Self:
@@ -440,3 +509,60 @@ def load_bundle(bundle_path: Path) -> tuple["Bundle", "TablePaths"]:
         ) from e
 
     return bundle, paths
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — content-pack root resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_content_pack_root(bundle_path: Path, spec: ContentPackSpec) -> Path:
+    """Resolve the on-disk root of a ContentPackSpec.
+
+    Three cases:
+
+    * ``spec.path is None`` — installed-pack lookup at
+      ``<plugin>/content_packs/<spec.name>/``. Missing → AIDPF-1037.
+    * ``spec.path.is_absolute()`` — used as-is.
+    * ``spec.path`` relative — resolved against ``bundle_path.parent``
+      (NOT cwd; bundle-relative resolution survives ``cd``).
+
+    In every case, the returned path must contain a ``pack.yaml`` file
+    or :class:`ContentPackRootInvalidError` is raised (AIDPF-1038).
+
+    Args:
+        bundle_path: path to the ``bundle.yaml`` file (its parent dir
+            is the anchor for relative ``spec.path``).
+        spec: parsed ``ContentPackSpec`` from the bundle.
+
+    Returns:
+        Resolved absolute path to the pack root directory.
+
+    Raises:
+        ContentPackRootNotFoundError: installed pack lookup miss
+            (AIDPF-1037). Carries ``spec.name`` in the message.
+        ContentPackRootInvalidError: resolved root has no ``pack.yaml``
+            (AIDPF-1038). Carries the resolved path in the message.
+    """
+    if spec.path is None:
+        # Installed-pack lookup — import lazily to avoid pulling
+        # commands/content_pack.py into the schema layer at import time.
+        from ..commands.content_pack import INSTALLED_CONTENT_PACKS_DIR
+        candidate = (INSTALLED_CONTENT_PACKS_DIR / spec.name).resolve()
+        if not candidate.exists():
+            raise ContentPackRootNotFoundError(
+                f"{AIDPF_1037_INSTALLED_PACK_NOT_FOUND}: installed content pack "
+                f"{spec.name!r} not found at {candidate}. Check spelling or set "
+                f"`contentPack.path` to a local directory."
+            )
+    elif spec.path.is_absolute():
+        candidate = spec.path.resolve()
+    else:
+        candidate = (bundle_path.parent / spec.path).resolve()
+
+    if not (candidate / "pack.yaml").exists():
+        raise ContentPackRootInvalidError(
+            f"{AIDPF_1038_RESOLVED_ROOT_NO_PACK_YAML}: resolved content-pack root "
+            f"{candidate} contains no pack.yaml file."
+        )
+    return candidate
