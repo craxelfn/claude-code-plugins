@@ -1,0 +1,297 @@
+"""Unit tests for overlay pack resolution and merge.
+
+Covers Step 5 of v2-phase-1-content-pack-schema. Uses tmp_path-based fixture
+packs so the loader's filesystem path is exercised end-to-end.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+    AIDPF_2001,
+    OrphanOverrideError,
+    OverlayCycleError,
+    load_pack,
+    merge_overlay,
+    resolve_overlay_chain,
+)
+from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import PackOverlayRef
+
+
+# ---------------------------------------------------------------------------
+# Fixture helpers
+# ---------------------------------------------------------------------------
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def _make_base_pack(root: Path) -> Path:
+    """Write a minimal valid base pack under ``root``; return the pack root."""
+    pack_root = root / "fusion-finance-starter"
+    pack_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        pack_root / "pack.yaml",
+        {
+            "id": "fusion-finance-starter",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            "columnAliases": {
+                "invoice_currency_code": {
+                    "appliesTo": "bronze.ap_invoices",
+                    "required": True,
+                    "candidates": [
+                        "ApInvoicesInvoiceCurrencyCode",
+                        "ApInvoicesCurrencyCode",
+                    ],
+                }
+            },
+        },
+    )
+    # One python_legacy silver node so override tests have a target.
+    _write_yaml(
+        pack_root / "silver" / "dim_supplier.yaml",
+        {
+            "id": "dim_supplier",
+            "layer": "silver",
+            "implementation": {
+                "type": "python_legacy",
+                "callable": "pkg.dim_supplier:build",
+                "deprecated": False,
+                "migrationTarget": "silver/dim_supplier.sql",
+            },
+            "target": "dim_supplier",
+            "dependsOn": {
+                "bronze": [
+                    {"id": "erp_suppliers", "watermark": {"column": "_extract_ts"}}
+                ]
+            },
+            "refresh": {
+                "seed": {"strategy": "replace"},
+                "incremental": {
+                    "strategy": "merge",
+                    "watermark": {"source": "erp_suppliers", "column": "_extract_ts"},
+                    "naturalKey": ["supplier_number"],
+                },
+            },
+            "outputSchema": {
+                "columns": [
+                    {"name": "supplier_key", "type": "bigint", "nullable": False, "pii": "none"},
+                ]
+            },
+        },
+    )
+    return pack_root
+
+
+def _make_overlay(
+    root: Path,
+    base_ref: str,
+    extra: dict | None = None,
+    overrides: dict | None = None,
+) -> Path:
+    """Write a minimal overlay pack; return its root."""
+    overlay_root = root / "acme-finance"
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    body = {
+        "id": "acme-finance",
+        "version": "0.1.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        "extends": base_ref,
+    }
+    if extra:
+        body.update(extra)
+    if overrides:
+        body["overrides"] = overrides
+    _write_yaml(overlay_root / "pack.yaml", body)
+    return overlay_root
+
+
+# ---------------------------------------------------------------------------
+# load_pack
+# ---------------------------------------------------------------------------
+
+
+def test_load_pack_base_only(tmp_path: Path) -> None:
+    pack_root = _make_base_pack(tmp_path)
+    pack = load_pack(pack_root)
+    assert pack.pack.id == "fusion-finance-starter"
+    assert "invoice_currency_code" in pack.pack.column_aliases
+    assert "dim_supplier" in pack.silver
+    assert pack.chain == ("fusion-finance-starter",)
+
+
+def test_load_pack_computes_stable_hash(tmp_path: Path) -> None:
+    pack_root = _make_base_pack(tmp_path)
+    h1 = load_pack(pack_root).compute_hash()
+    h2 = load_pack(pack_root).compute_hash()
+    assert h1 == h2
+    assert len(h1) == 64  # sha256 hex digest
+
+
+# ---------------------------------------------------------------------------
+# resolve_overlay_chain
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_chain_single_pack_no_extends(tmp_path: Path) -> None:
+    pack_root = _make_base_pack(tmp_path)
+    chain = resolve_overlay_chain(pack_root)
+    assert chain == [pack_root.resolve()]
+
+
+def test_resolve_chain_overlay_to_base(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(tmp_path, "fusion-finance-starter@0.1.0")
+
+    def resolver(ref: PackOverlayRef) -> Path:
+        assert ref.name == "fusion-finance-starter"
+        return base_root
+
+    chain = resolve_overlay_chain(overlay_root, base_resolver=resolver)
+    assert chain == [base_root.resolve(), overlay_root.resolve()]
+
+
+def test_overlay_chain_cycle_rejected(tmp_path: Path) -> None:
+    pack_a = tmp_path / "pack-a"
+    pack_b = tmp_path / "pack-b"
+    _write_yaml(
+        pack_a / "pack.yaml",
+        {
+            "id": "pack-a",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0"},
+            "extends": "pack-b@0.1.0",
+        },
+    )
+    _write_yaml(
+        pack_b / "pack.yaml",
+        {
+            "id": "pack-b",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0"},
+            "extends": "pack-a@0.1.0",
+        },
+    )
+
+    def resolver(ref: PackOverlayRef) -> Path:
+        return pack_a if ref.name == "pack-a" else pack_b
+
+    with pytest.raises(OverlayCycleError) as exc:
+        resolve_overlay_chain(pack_a, base_resolver=resolver)
+    assert AIDPF_2001 in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# merge_overlay
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_override_rejected(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        overrides={
+            "silver/dim_nonexistent": {"profile": "finance-default"},
+        },
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    with pytest.raises(OrphanOverrideError) as exc:
+        merge_overlay(base, overlay)
+    assert AIDPF_2001 in str(exc.value)
+
+
+def test_column_aliases_inherit_keyword(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        extra={
+            "columnAliases": {
+                "invoice_currency_code": {
+                    "appliesTo": "bronze.ap_invoices",
+                    "required": True,
+                    "candidates": ["APInvoicesCurrencyCode", "inherit"],
+                }
+            }
+        },
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    merged = merge_overlay(base, overlay)
+    candidates = merged.pack.column_aliases["invoice_currency_code"].candidates
+    # `inherit` expands to base candidates in position.
+    assert candidates == [
+        "APInvoicesCurrencyCode",
+        "ApInvoicesInvoiceCurrencyCode",
+        "ApInvoicesCurrencyCode",
+    ]
+
+
+def test_overrides_sql_full_replace(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        overrides={"silver/dim_supplier": {"sql": "silver/dim_supplier_acme.sql"}},
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    merged = merge_overlay(base, overlay)
+    # The merged node now has type: sql pointing at the overlay's SQL path.
+    assert merged.silver["dim_supplier"].implementation.type == "sql"
+    assert merged.silver["dim_supplier"].implementation.sql == "silver/dim_supplier_acme.sql"
+
+
+def test_overrides_quality_tests_list_extend(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        overrides={
+            "silver/dim_supplier": {
+                "quality": {
+                    "tests": [{"type": "row_count_min", "min": 1}],
+                }
+            }
+        },
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    merged = merge_overlay(base, overlay)
+    tests = merged.silver["dim_supplier"].quality.tests
+    # Base had no tests; overlay added one.
+    assert len(tests) == 1
+    assert tests[0].type == "row_count_min"
+
+
+def test_pack_hash_deterministic(tmp_path: Path) -> None:
+    base_root = _make_base_pack(tmp_path)
+    overlay_root = _make_overlay(
+        tmp_path,
+        "fusion-finance-starter@0.1.0",
+        extra={
+            "columnAliases": {
+                "invoice_currency_code": {
+                    "appliesTo": "bronze.ap_invoices",
+                    "required": True,
+                    "candidates": ["APInvoicesCurrencyCode", "inherit"],
+                }
+            }
+        },
+    )
+    base = load_pack(base_root)
+    overlay = load_pack(overlay_root)
+    h1 = merge_overlay(base, overlay).compute_hash()
+    h2 = merge_overlay(base, overlay).compute_hash()
+    assert h1 == h2
+    # And differs from the base alone.
+    assert h1 != base.compute_hash()

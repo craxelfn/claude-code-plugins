@@ -1,0 +1,74 @@
+id: supplier_spend
+layer: gold
+implementation:
+  type: python_legacy
+  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.supplier_spend:build
+  deprecated: false
+  migrationTarget: gold/supplier_spend.sql
+target: supplier_spend
+
+dependsOn:
+  bronze:
+    - id: ap_invoices
+      watermark:
+        column: _extract_ts
+  silver:
+    - id: dim_supplier
+
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: replace
+    reason: |
+      Aggregate grain mixes mutable `approval_status`. Row-level merge
+      leaves stale (PENDING) aggregate rows on a status flip. The
+      correctness-preserving incremental pattern is `aggregate_merge`
+      (§10.8), deferred to post-v0.3 pending live-tenant evidence that
+      `replace` hits a wall-clock or cost ceiling. Until then, `replace`
+      is the safe default. See ADR-0012.
+
+outputSchema:
+  columns:
+    - name: supplier_number
+      type: string
+      nullable: false
+      pii: low
+    - name: supplier_name
+      type: string
+      nullable: true
+      pii: medium
+    - name: vendor_id
+      type: bigint
+      nullable: true
+      pii: none
+    - name: business_relationship
+      type: string
+      nullable: true
+      pii: none
+    - name: currency_code
+      type: string
+      nullable: false
+      pii: none
+    - name: approval_status
+      type: string
+      nullable: false
+      pii: none
+    - name: total_invoice_amount
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: gold_built_at
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: gold_run_id
+      type: string
+      nullable: true
+      pii: none
+
+quality:
+  tests:
+    - type: row_count_min
+      min: 1
+      whenSourceNonEmpty: bronze.ap_invoices

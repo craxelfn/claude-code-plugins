@@ -1,0 +1,56 @@
+id: dim_account
+layer: silver
+implementation:
+  type: python_legacy
+  callable: oracle_ai_data_platform_fusion_bundle.dimensions.dim_account:build
+  deprecated: false
+  migrationTarget: silver/dim_account.sql
+target: dim_account
+
+dependsOn:
+  bronze:
+    - id: gl_coa
+      watermark:
+        column: _extract_ts
+
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: gl_coa
+      column: _extract_ts
+    naturalKey:
+      - account_id
+
+requiredColumns:
+  gl_coa:
+    - _extract_ts
+    - _source_pvo
+
+outputSchema:
+  columns:
+    - name: account_key
+      type: bigint
+      nullable: false
+      pii: none
+    - name: account_id
+      type: bigint
+      nullable: false
+      pii: none
+    - name: bronze_extract_ts
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: silver_run_id
+      type: string
+      nullable: true
+      pii: none
+
+quality:
+  tests:
+    - type: not_null
+      columns: [account_id]
+    - type: unique
+      columns: [account_id]

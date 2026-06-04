@@ -1,0 +1,71 @@
+id: ap_aging
+layer: gold
+implementation:
+  type: python_legacy
+  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging:build
+  deprecated: false
+  migrationTarget: gold/ap_aging.sql
+target: ap_aging
+
+dependsOn:
+  bronze:
+    - id: ap_invoices
+      watermark:
+        column: _extract_ts
+  silver:
+    - id: dim_supplier
+
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: replace
+    reason: |
+      ap_aging buckets are CURRENT_DATE()-anchored. Row-level merge
+      would freeze bucket assignments from the prior run; daily
+      incremental refresh would go stale by one day every day.
+      Hence `replace` (PLAN §10, ADR-0012). A future `snapshot`
+      strategy (§10.7, deferred) is the right long-term fit.
+
+outputSchema:
+  columns:
+    - name: supplier_number
+      type: string
+      nullable: false
+      pii: low
+    - name: supplier_name
+      type: string
+      nullable: true
+      pii: medium
+    - name: vendor_id
+      type: bigint
+      nullable: true
+      pii: none
+    - name: currency_code
+      type: string
+      nullable: false
+      pii: none
+    - name: age_bucket
+      type: string
+      nullable: false
+      pii: none
+    - name: open_amount
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: gold_built_at
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: gold_run_id
+      type: string
+      nullable: true
+      pii: none
+
+quality:
+  tests:
+    - type: not_null
+      columns: [supplier_number, age_bucket]
+    - type: accepted_values
+      column: age_bucket
+      values: ["NOT_DUE", "0-30", "31-60", "61-90", "OVER_90"]

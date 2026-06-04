@@ -1,0 +1,73 @@
+id: fusion-finance-starter
+version: 0.1.0
+description: |
+  Starter medallion model for Fusion Finance analytics.
+  Ships silver dimensions (dim_supplier, dim_account, dim_calendar) and
+  gold marts (gl_balance, supplier_spend, ap_aging). v0.3 starter pack
+  Phase 1: nodes are declared as `python_legacy` with `migrationTarget`
+  pointing at the SQL file Phase 3 will land. Variation points and
+  profile defaults are authored against the v1 reference branch's
+  registry data (see tests/fixtures/v1_registry_snapshot.yaml).
+
+compatibility:
+  pluginMinVersion: 0.3.0
+  fusionFamilies:
+    - ERP
+  aidp:
+    requiresDelta: true
+
+defaults:
+  sqlDialect: spark-sql
+  identifierPolicy: validated-three-part
+  runIdColumn:
+    bronze: _run_id
+    silver: silver_run_id
+    gold: gold_run_id
+
+profiles:
+  finance-default:
+    calendar:
+      startDate: '2020-01-01'
+      endDate: '2030-12-31'
+      fiscalStartMonth: 1
+    chartOfAccounts:
+      balancingSegment: segment1
+      costCenterSegment: segment2
+      naturalAccountSegment: segment3
+
+# Variation points (PLAN §9.5). Bootstrap walks each entry's candidates
+# in priority order and pins the first that exists on the tenant.
+columnAliases:
+  supplier_natural_key:
+    appliesTo: bronze.erp_suppliers
+    required: true
+    candidates:
+      - SEGMENT1
+  vendor_id:
+    appliesTo: bronze.erp_suppliers
+    required: true
+    candidates:
+      - VENDORID
+  invoice_currency_code:
+    appliesTo: bronze.ap_invoices
+    required: true
+    candidates:
+      - ApInvoicesInvoiceCurrencyCode
+      - ApInvoicesCurrencyCode
+
+# Semantic variants (PLAN §9.5.1 / §9.5.2). The fragment is substituted
+# into `{{ semantic.<name> }}` at render time after bootstrap resolves
+# which candidate's `detect.columnExists` matches the tenant.
+semanticVariants:
+  cancelled_status:
+    appliesTo: bronze.ap_invoices
+    required: true
+    candidates:
+      - id: cancelled_date
+        detect:
+          columnExists: ApInvoicesCancelledDate
+        fragment: "{table}.ApInvoicesCancelledDate IS NULL"
+      - id: cancelled_flag
+        detect:
+          columnExists: ApInvoicesCancelledFlag
+        fragment: "COALESCE({table}.ApInvoicesCancelledFlag, 'N') != 'Y'"

@@ -212,6 +212,45 @@ def status(ctx: click.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Content pack commands (v2 — schema validation + introspection)
+# ---------------------------------------------------------------------------
+
+
+@main.group("content-pack")
+def content_pack() -> None:
+    """Inspect and validate content packs (v2 schema layer)."""
+
+
+@content_pack.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_list(json_output: bool) -> None:
+    """List installed content packs."""
+    from .commands.content_pack import list_packs
+
+    sys.exit(list_packs(json_output=json_output, console=console))
+
+
+@content_pack.command("info")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_info(name: str, json_output: bool) -> None:
+    """Show detailed info about an installed pack (or a pack by path)."""
+    from .commands.content_pack import info_pack
+
+    sys.exit(info_pack(name, json_output=json_output, console=console))
+
+
+@content_pack.command("validate")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_validate(name: str, json_output: bool) -> None:
+    """Validate a content pack against the schema + content validators."""
+    from .commands.content_pack import validate_pack_cli
+
+    sys.exit(validate_pack_cli(name, json_output=json_output, console=console))
+
+
+# ---------------------------------------------------------------------------
 # Dashboard commands (OAC integration)
 # ---------------------------------------------------------------------------
 
