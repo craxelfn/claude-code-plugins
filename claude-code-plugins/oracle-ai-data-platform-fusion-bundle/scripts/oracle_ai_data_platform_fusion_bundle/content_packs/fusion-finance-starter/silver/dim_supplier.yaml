@@ -1,0 +1,84 @@
+id: dim_supplier
+layer: silver
+implementation:
+  type: python_legacy
+  callable: oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier:build
+  deprecated: false
+  migrationTarget: silver/dim_supplier.sql
+target: dim_supplier
+
+dependsOn:
+  bronze:
+    - id: erp_suppliers
+      watermark:
+        column: _extract_ts
+
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: erp_suppliers
+      column: _extract_ts
+    naturalKey:
+      - supplier_number
+    reason: |
+      Row-grain silver dim. xxhash64 surrogate ensures determinism under
+      MERGE per PLAN §11 invariant. Single bronze source; role: primary
+      defaults apply per §11.10.
+
+requiredColumns:
+  erp_suppliers:
+    - SEGMENT1
+    - VENDORID
+    - PARTYID
+    - BUSINESSRELATIONSHIP
+    - _extract_ts
+    - _source_pvo
+
+outputSchema:
+  columns:
+    - name: supplier_key
+      type: bigint
+      nullable: false
+      pii: none
+    - name: supplier_number
+      type: string
+      nullable: false
+      pii: low
+    - name: vendor_id
+      type: bigint
+      nullable: true
+      pii: none
+    - name: party_id
+      type: bigint
+      nullable: true
+      pii: none
+    - name: business_relationship
+      type: string
+      nullable: true
+      pii: none
+    - name: bronze_extract_ts
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: bronze_source_pvo
+      type: string
+      nullable: false
+      pii: none
+    - name: silver_built_at
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: silver_run_id
+      type: string
+      nullable: true
+      pii: none
+
+quality:
+  tests:
+    - type: not_null
+      columns: [supplier_number]
+    - type: unique
+      columns: [supplier_number]

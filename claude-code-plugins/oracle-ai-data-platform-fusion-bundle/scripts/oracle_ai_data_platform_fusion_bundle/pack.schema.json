@@ -1,0 +1,488 @@
+{
+  "$defs": {
+    "CalendarProfile": {
+      "additionalProperties": false,
+      "description": "Default calendar dimensions for the dim_calendar builtin (ADR-0011).",
+      "properties": {
+        "endDate": {
+          "title": "Enddate",
+          "type": "string"
+        },
+        "fiscalStartMonth": {
+          "default": 1,
+          "maximum": 12,
+          "minimum": 1,
+          "title": "Fiscalstartmonth",
+          "type": "integer"
+        },
+        "startDate": {
+          "title": "Startdate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "startDate",
+        "endDate"
+      ],
+      "title": "CalendarProfile",
+      "type": "object"
+    },
+    "ChartOfAccountsProfile": {
+      "additionalProperties": false,
+      "description": "Default COA segment role mapping. Overridden per tenant in profiles/<tenant>.yaml.",
+      "properties": {
+        "balancingSegment": {
+          "title": "Balancingsegment",
+          "type": "string"
+        },
+        "costCenterSegment": {
+          "title": "Costcentersegment",
+          "type": "string"
+        },
+        "naturalAccountSegment": {
+          "title": "Naturalaccountsegment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "balancingSegment",
+        "costCenterSegment",
+        "naturalAccountSegment"
+      ],
+      "title": "ChartOfAccountsProfile",
+      "type": "object"
+    },
+    "ColumnAlias": {
+      "additionalProperties": false,
+      "description": "Same logical column, different physical names across tenants.\n\nPLAN \u00a79.5.1. Bootstrap walks ``candidates`` in priority order and pins\nthe first that exists on the tenant.",
+      "properties": {
+        "appliesTo": {
+          "title": "Appliesto",
+          "type": "string"
+        },
+        "candidates": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "appliesTo",
+        "candidates"
+      ],
+      "title": "ColumnAlias",
+      "type": "object"
+    },
+    "OverrideEntry": {
+      "additionalProperties": true,
+      "description": "Per-node override declared by an overlay pack.\n\nPLAN \u00a78.7 merge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it (Phase-1 stubs use\n  this for ``python_legacy`` migration-period stubs).\n\nUnknown keys default to scalar-replace per \u00a78.7.",
+      "properties": {
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
+        "quality": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quality"
+        },
+        "sql": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sql"
+        }
+      },
+      "title": "OverrideEntry",
+      "type": "object"
+    },
+    "PackCompatibility": {
+      "additionalProperties": false,
+      "description": "Minimum environment requirements declared by the pack.",
+      "properties": {
+        "aidp": {
+          "$ref": "#/$defs/PackCompatibilityAidp"
+        },
+        "fusionFamilies": {
+          "items": {
+            "enum": [
+              "ERP",
+              "HCM",
+              "SCM"
+            ],
+            "type": "string"
+          },
+          "title": "Fusionfamilies",
+          "type": "array"
+        },
+        "pluginMinVersion": {
+          "description": "SemVer 2.0.0 version string (e.g., 0.1.0)",
+          "title": "Pluginminversion",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginMinVersion"
+      ],
+      "title": "PackCompatibility",
+      "type": "object"
+    },
+    "PackCompatibilityAidp": {
+      "additionalProperties": false,
+      "description": "AIDP runtime capability requirements declared by the pack.",
+      "properties": {
+        "requiresDelta": {
+          "default": true,
+          "title": "Requiresdelta",
+          "type": "boolean"
+        }
+      },
+      "title": "PackCompatibilityAidp",
+      "type": "object"
+    },
+    "PackDefaults": {
+      "additionalProperties": false,
+      "description": "Pack-wide defaults applied to every node unless overridden.",
+      "properties": {
+        "identifierPolicy": {
+          "const": "validated-three-part",
+          "default": "validated-three-part",
+          "title": "Identifierpolicy",
+          "type": "string"
+        },
+        "runIdColumn": {
+          "$ref": "#/$defs/RunIdColumnDefaults"
+        },
+        "sqlDialect": {
+          "const": "spark-sql",
+          "default": "spark-sql",
+          "title": "Sqldialect",
+          "type": "string"
+        }
+      },
+      "title": "PackDefaults",
+      "type": "object"
+    },
+    "PackProfileDefaults": {
+      "additionalProperties": true,
+      "description": "One named profile's defaults declared by the pack.\n\nThe pack ships sensible defaults; tenant profiles (``profiles/<tenant>.yaml``)\noverride per-key during bootstrap. Schema is intentionally extensible --\narbitrary typed knobs can be added under nested dicts.",
+      "properties": {
+        "calendar": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CalendarProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "chartOfAccounts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChartOfAccountsProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "PackProfileDefaults",
+      "type": "object"
+    },
+    "PackProvenance": {
+      "additionalProperties": true,
+      "description": "Optional provenance block stamped by the medallion-author skill (ADR-0019).\n\nSkill-authored packs (overlays, in particular) record the skill version,\nmodel identity, generation timestamp, and reason. Hand-authored packs may\nomit this block entirely.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "generatedAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generatedat"
+        },
+        "generatedBy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generatedby"
+        },
+        "modelId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modelid"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "skillVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Skillversion"
+        }
+      },
+      "title": "PackProvenance",
+      "type": "object"
+    },
+    "RunIdColumnDefaults": {
+      "additionalProperties": false,
+      "description": "Audit column names per medallion layer (per PLAN \u00a78.1).",
+      "properties": {
+        "bronze": {
+          "default": "_run_id",
+          "title": "Bronze",
+          "type": "string"
+        },
+        "gold": {
+          "default": "gold_run_id",
+          "title": "Gold",
+          "type": "string"
+        },
+        "silver": {
+          "default": "silver_run_id",
+          "title": "Silver",
+          "type": "string"
+        }
+      },
+      "title": "RunIdColumnDefaults",
+      "type": "object"
+    },
+    "SemanticVariant": {
+      "additionalProperties": false,
+      "description": "Same logical concept, different SQL **shape** across tenants (PLAN \u00a79.5.1).",
+      "properties": {
+        "appliesTo": {
+          "title": "Appliesto",
+          "type": "string"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/SemanticVariantCandidate"
+          },
+          "minItems": 1,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "appliesTo",
+        "candidates"
+      ],
+      "title": "SemanticVariant",
+      "type": "object"
+    },
+    "SemanticVariantCandidate": {
+      "additionalProperties": false,
+      "description": "One semantic-shape candidate (PLAN \u00a79.5.1 / \u00a79.5.2).",
+      "properties": {
+        "detect": {
+          "$ref": "#/$defs/SemanticVariantDetect"
+        },
+        "fragment": {
+          "title": "Fragment",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "detect",
+        "fragment"
+      ],
+      "title": "SemanticVariantCandidate",
+      "type": "object"
+    },
+    "SemanticVariantDetect": {
+      "additionalProperties": false,
+      "description": "How to recognise that this candidate applies to a tenant.",
+      "properties": {
+        "columnExists": {
+          "title": "Columnexists",
+          "type": "string"
+        }
+      },
+      "required": [
+        "columnExists"
+      ],
+      "title": "SemanticVariantDetect",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level schema for ``pack.yaml``.\n\nNode definitions live in separate per-node YAML files under\n``silver/`` and ``gold/`` and are validated by :class:`NodeYaml`\n(Step 3 of v2-phase-1-content-pack-schema -- not yet implemented).\n``PackYaml`` covers pack identity, compatibility, defaults, profile\ndefaults, variation-point declarations, overlay coordination, and\nprovenance.",
+  "properties": {
+    "columnAliases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ColumnAlias"
+      },
+      "title": "Columnaliases",
+      "type": "object"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/PackCompatibility"
+    },
+    "defaults": {
+      "$ref": "#/$defs/PackDefaults"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "extends": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Extends"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "overrides": {
+      "additionalProperties": {
+        "$ref": "#/$defs/OverrideEntry"
+      },
+      "title": "Overrides",
+      "type": "object"
+    },
+    "profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PackProfileDefaults"
+      },
+      "title": "Profiles",
+      "type": "object"
+    },
+    "provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PackProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "semanticVariants": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SemanticVariant"
+      },
+      "title": "Semanticvariants",
+      "type": "object"
+    },
+    "version": {
+      "description": "SemVer 2.0.0 version string (e.g., 0.1.0)",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "compatibility"
+  ],
+  "title": "PackYaml",
+  "type": "object"
+}

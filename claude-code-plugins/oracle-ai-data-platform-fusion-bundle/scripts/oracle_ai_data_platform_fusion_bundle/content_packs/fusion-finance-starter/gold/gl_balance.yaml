@@ -1,0 +1,91 @@
+id: gl_balance
+layer: gold
+implementation:
+  type: python_legacy
+  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance:build
+  deprecated: false
+  migrationTarget: gold/gl_balance.sql
+target: gl_balance
+
+dependsOn:
+  bronze:
+    - id: gl_period_balances
+      role: primary
+      watermark:
+        column: _extract_ts
+  silver:
+    - id: dim_account
+      role: lookup
+
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: gl_period_balances
+      column: _extract_ts
+    naturalKey:
+      - ledger_id
+      - account_id
+      - period_year
+      - period_num
+      - currency_code
+      - actual_flag
+      - translated_flag
+    reason: |
+      Multi-source node (PLAN §11.10). bronze.gl_period_balances is the
+      primary (fact-side mutations); silver.dim_account is lookup (re-read
+      fresh each cycle). Dimension-only changes propagate on next fact-side
+      rerun; see §11.10 known limitation + ADR-0013.
+
+outputSchema:
+  columns:
+    - name: ledger_id
+      type: bigint
+      nullable: false
+      pii: none
+    - name: account_id
+      type: bigint
+      nullable: false
+      pii: none
+    - name: period_year
+      type: int
+      nullable: false
+      pii: none
+    - name: period_num
+      type: int
+      nullable: false
+      pii: none
+    - name: currency_code
+      type: string
+      nullable: false
+      pii: none
+    - name: actual_flag
+      type: string
+      nullable: false
+      pii: none
+    - name: translated_flag
+      type: string
+      nullable: false
+      pii: none
+    - name: ending_balance
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: gold_built_at
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: gold_run_id
+      type: string
+      nullable: true
+      pii: none
+
+quality:
+  tests:
+    - type: not_null
+      columns: [ledger_id, account_id, period_year, period_num]
+    - type: accepted_values
+      column: actual_flag
+      values: ["A", "B", "E"]

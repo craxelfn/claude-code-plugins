@@ -1,0 +1,51 @@
+id: dim_calendar
+layer: silver
+implementation:
+  type: builtin
+  callable: oracle_ai_data_platform_fusion_bundle.dimensions.dim_calendar:build
+target: dim_calendar
+
+# Parameter-driven; no bronze source (ADR-0011). The orchestrator's
+# builtin runner consumes pack.profiles.<name>.calendar to materialise.
+dependsOn:
+  bronze: []
+  silver: []
+
+refresh:
+  seed:
+    strategy: replace
+  # No incremental block — dim_calendar is rebuilt every cycle (PLAN §10.x).
+
+outputSchema:
+  columns:
+    - name: date
+      type: date
+      nullable: false
+      pii: none
+    - name: year
+      type: int
+      nullable: false
+      pii: none
+    - name: quarter
+      type: int
+      nullable: false
+      pii: none
+    - name: month
+      type: int
+      nullable: false
+      pii: none
+    - name: day_of_year
+      type: int
+      nullable: false
+      pii: none
+    - name: silver_built_at
+      type: timestamp
+      nullable: false
+      pii: none
+
+quality:
+  tests:
+    - type: not_null
+      columns: [date]
+    - type: unique
+      columns: [date]

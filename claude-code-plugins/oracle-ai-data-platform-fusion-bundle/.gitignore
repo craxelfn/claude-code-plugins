@@ -63,5 +63,12 @@ LIMITS.md
 OVERVIEW_*.md
 BOOTSTRAP_*.py
 FIX_*.py
+
+# Exception: scripts/dev/ is where shipped dev tools live (e.g.
+# transcribe_v1_registry.py — the v1-parity-baseline transcription tool
+# used by Phase 4's dual-runner gate). The `dev/` rule above targets the
+# top-level working-notes directory, not anywhere named dev.
+!scripts/dev/
+!scripts/dev/**
 TC*_runner.py
 TC_*_runner.py
