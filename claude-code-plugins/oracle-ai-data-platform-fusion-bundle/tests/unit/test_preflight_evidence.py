@@ -461,3 +461,394 @@ class TestLegacyDetection:
         self, value: str | None, expected: bool
     ) -> None:
         assert _is_legacy_fingerprint(value) is expected
+
+
+# ---------------------------------------------------------------------------
+# Phase 3d — datasetDeltas population
+# ---------------------------------------------------------------------------
+
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight_evidence import (
+    _compute_dataset_deltas,
+    _load_snapshot_if_present,
+)
+from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import (
+    BronzeSchemaSnapshotV1,
+    from_observed as snapshot_from_observed,
+    write_bronze_schema_snapshot,
+)
+
+
+def _write_snapshot(
+    tmp_path: Path,
+    *,
+    tenant: str,
+    pinned_at: datetime,
+    fingerprint: str,
+    observed: dict[str, list[ColumnInfo]],
+) -> Path:
+    snap = snapshot_from_observed(
+        tenant=tenant,
+        pinned_at=pinned_at,
+        fingerprint=fingerprint,
+        observed=observed,
+    )
+    return write_bronze_schema_snapshot(tmp_path, tenant, snap)
+
+
+class TestPhase3dDatasetDeltasComputation:
+    """Pure-function tests for ``_compute_dataset_deltas`` — no preflight."""
+
+    def test_no_changes_returns_empty(self) -> None:
+        observed = {
+            "ap_invoices": [
+                ColumnInfo(name="A", type="bigint"),
+                ColumnInfo(name="B", type="string"),
+            ]
+        }
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=observed,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=observed)
+        assert deltas == []
+
+    def test_added_and_removed_columns_in_same_dataset(self) -> None:
+        prior = {
+            "ap_invoices": [
+                ColumnInfo(name="A", type="bigint"),
+                ColumnInfo(name="B", type="string"),
+            ]
+        }
+        live = {
+            "ap_invoices": [
+                ColumnInfo(name="A", type="bigint"),
+                ColumnInfo(name="C", type="double"),
+            ]
+        }
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert len(deltas) == 1
+        d = deltas[0]
+        assert d.dataset_id == "ap_invoices"
+        assert {c.name for c in d.added_columns} == {"C"}
+        assert {c.name for c in d.removed_columns} == {"B"}
+        assert d.type_changed_columns == []
+
+    def test_type_change_only_goes_into_type_changed_list(self) -> None:
+        prior = {"ds": [ColumnInfo(name="amount", type="bigint")]}
+        live = {"ds": [ColumnInfo(name="amount", type="string")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert len(deltas) == 1
+        d = deltas[0]
+        assert d.added_columns == []
+        assert d.removed_columns == []
+        assert len(d.type_changed_columns) == 1
+        tc = d.type_changed_columns[0]
+        assert tc.name == "amount"
+        assert tc.prior_type == "bigint"
+        assert tc.current_type == "string"
+
+    def test_case_only_diff_invisible(self) -> None:
+        """Canonicalisation parity (review #3): a case-only diff in a
+        column name maps to zero deltas — same as the fingerprint."""
+        prior = {"ds": [ColumnInfo(name="ApInvoicesAmount", type="bigint")]}
+        live = {"ds": [ColumnInfo(name="APINVOICESAMOUNT", type="bigint")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert deltas == []
+
+    def test_whitespace_only_diff_invisible(self) -> None:
+        prior = {"ds": [ColumnInfo(name="foo ", type="string")]}
+        live = {"ds": [ColumnInfo(name=" foo", type="string")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert deltas == []
+
+    def test_type_case_only_diff_invisible(self) -> None:
+        prior = {"ds": [ColumnInfo(name="amount", type="BIGINT")]}
+        live = {"ds": [ColumnInfo(name="amount", type="bigint")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert deltas == []
+
+    def test_type_actual_change_preserves_original_casing(self) -> None:
+        """Original casing on prior_type / current_type is preserved for
+        display even though the comparison is case-insensitive."""
+        prior = {"ds": [ColumnInfo(name="amount", type="bigint")]}
+        live = {"ds": [ColumnInfo(name="amount", type="string")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert deltas[0].type_changed_columns[0].prior_type == "bigint"
+        assert deltas[0].type_changed_columns[0].current_type == "string"
+
+    def test_dataset_only_in_snapshot_surfaces_all_removed(self) -> None:
+        prior = {"orphan": [ColumnInfo(name="x", type="string")]}
+        live: dict[str, list[ColumnInfo]] = {}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert len(deltas) == 1
+        assert deltas[0].dataset_id == "orphan"
+        assert [c.name for c in deltas[0].removed_columns] == ["x"]
+        assert deltas[0].added_columns == []
+
+    def test_dataset_only_in_observed_surfaces_all_added(self) -> None:
+        prior: dict[str, list[ColumnInfo]] = {}
+        live = {"newcomer": [ColumnInfo(name="x", type="string")]}
+        snapshot = snapshot_from_observed(
+            tenant="t",
+            pinned_at=datetime(2026, 6, 6, tzinfo=timezone.utc),
+            fingerprint="sha256:" + "a" * 64,
+            observed=prior,
+        )
+        deltas = _compute_dataset_deltas(snapshot=snapshot, observed=live)
+        assert len(deltas) == 1
+        assert deltas[0].dataset_id == "newcomer"
+        assert [c.name for c in deltas[0].added_columns] == ["x"]
+        assert deltas[0].removed_columns == []
+
+
+class TestPhase3dDriftBranchPopulation:
+    """End-to-end: drift fires, snapshot present → datasetDeltas populated."""
+
+    def test_drift_with_snapshot_populates_dataset_deltas(
+        self, tmp_path: Path
+    ) -> None:
+        prior_observed = {
+            "ap_invoices": [
+                ColumnInfo(name="ApInvoicesInvoiceCurrencyCode", type="string"),
+            ]
+        }
+        prior_fingerprint = compute_bronze_fingerprint(observed=prior_observed)
+        _write_snapshot(
+            tmp_path,
+            tenant="finance-default",
+            pinned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            fingerprint=prior_fingerprint,
+            observed=prior_observed,
+        )
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark(
+                {
+                    "ap_invoices": [
+                        "ApInvoicesCurrencyCode"  # column renamed
+                    ]
+                }
+            ),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ap_invoices"]),
+            profile=_mock_profile(pinned=prior_fingerprint),
+            run_id="cp-3d-drift-1",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        deltas = payload["schemaDrift"]["datasetDeltas"]
+        assert len(deltas) == 1
+        assert deltas[0]["datasetId"] == "ap_invoices"
+        added = [c["name"] for c in deltas[0]["addedColumns"]]
+        removed = [c["name"] for c in deltas[0]["removedColumns"]]
+        assert added == ["ApInvoicesCurrencyCode"]
+        assert removed == ["ApInvoicesInvoiceCurrencyCode"]
+
+    def test_snapshot_absent_emits_empty_dataset_deltas_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark({"ap_invoices": ["ApInvoicesCurrencyCode"]}),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ap_invoices"]),
+            profile=_mock_profile(pinned="sha256:" + "a" * 64),
+            run_id="cp-3d-drift-noSnap",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        assert payload["schemaDrift"]["datasetDeltas"] == []
+        assert any(
+            "Phase 3d snapshot absent" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_snapshot_fingerprint_mismatch_with_profile_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Snapshot and profile carry different fingerprints (profile/snapshot
+        desync). Helper degrades to empty deltas + WARN; drift signal
+        still emitted."""
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        # Build a healthy snapshot, then change the profile's pinned
+        # fingerprint to something else.
+        prior_observed = {"ds": [ColumnInfo(name="A", type="string")]}
+        prior_fingerprint = compute_bronze_fingerprint(observed=prior_observed)
+        _write_snapshot(
+            tmp_path,
+            tenant="finance-default",
+            pinned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            fingerprint=prior_fingerprint,
+            observed=prior_observed,
+        )
+        # Profile pinned a *different* fingerprint.
+        other_fingerprint = "sha256:" + "f" * 64
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark({"ds": ["A_renamed"]}),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ds"]),
+            profile=_mock_profile(pinned=other_fingerprint),
+            run_id="cp-3d-desync",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        assert payload["schemaDrift"]["datasetDeltas"] == []
+        assert any(
+            "differs from profile fingerprint" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_snapshot_malformed_emits_empty_dataset_deltas_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        (tmp_path / "profiles").mkdir()
+        (
+            tmp_path / "profiles" / "finance-default.schema-snapshot.yaml"
+        ).write_text("not: [valid: yaml", encoding="utf-8")
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark({"ds": ["A"]}),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ds"]),
+            profile=_mock_profile(pinned="sha256:" + "a" * 64),
+            run_id="cp-3d-malformed",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        assert payload["schemaDrift"]["datasetDeltas"] == []
+        assert any(
+            "Phase 3d snapshot unparseable" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_snapshot_content_hand_edited_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Snapshot's metadata fingerprint still matches the profile, but
+        its `datasets` list was hand-edited so a fresh recompute over
+        the contents produces a different hash. Helper degrades."""
+        import logging
+
+        import yaml
+
+        caplog.set_level(logging.WARNING)
+        prior_observed = {"ds": [ColumnInfo(name="A", type="string")]}
+        prior_fingerprint = compute_bronze_fingerprint(observed=prior_observed)
+        snapshot_path = _write_snapshot(
+            tmp_path,
+            tenant="finance-default",
+            pinned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            fingerprint=prior_fingerprint,
+            observed=prior_observed,
+        )
+        # Hand-edit: drop the only column but keep the fingerprint field.
+        raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        raw["datasets"][0]["columns"] = []
+        snapshot_path.write_text(yaml.safe_dump(raw, sort_keys=False), "utf-8")
+
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark({"ds": ["B"]}),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ds"]),
+            profile=_mock_profile(pinned=prior_fingerprint),
+            run_id="cp-3d-handedited",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        assert payload["schemaDrift"]["datasetDeltas"] == []
+        assert any(
+            "content/metadata fingerprint desync" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_load_snapshot_match_returns_model(self, tmp_path: Path) -> None:
+        prior_observed = {"ds": [ColumnInfo(name="A", type="string")]}
+        prior_fingerprint = compute_bronze_fingerprint(observed=prior_observed)
+        _write_snapshot(
+            tmp_path,
+            tenant="finance-default",
+            pinned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            fingerprint=prior_fingerprint,
+            observed=prior_observed,
+        )
+        loaded = _load_snapshot_if_present(
+            bundle_path=tmp_path / "bundle.yaml",
+            profile=_mock_profile(pinned=prior_fingerprint),
+        )
+        assert isinstance(loaded, BronzeSchemaSnapshotV1)
+        assert loaded.bronze_schema_fingerprint == prior_fingerprint

@@ -330,7 +330,11 @@ def _run_via_aidp_dispatch(
     profile_yaml: str | None = None
     pack_files: dict[str, str] | None = None
     pack_manifest: dict | None = None
+    # Phase 3d — snapshot YAML staged alongside the profile so the
+    # cluster-side preflight can populate `datasetDeltas` on drift.
+    schema_snapshot_yaml: str | None = None
     if execution_backend == "content-pack":
+        from ..schema.bronze_schema_snapshot import resolve_snapshot_path
         from ..schema.bundle import (
             AIDPF_1030_PROFILE_MISSING,
             AIDPF_1031_CONTENT_PACK_MISSING,
@@ -383,6 +387,14 @@ def _run_via_aidp_dispatch(
             return 2
         profile_yaml = profile_path.read_text(encoding="utf-8")
         pack_files, pack_manifest = stage_pack_files(resolved_pack)
+        # Phase 3d — stage the snapshot if it exists. Pre-3d profiles
+        # ship without one; preflight on the cluster degrades to empty
+        # `datasetDeltas` + WARN, same as the laptop path.
+        snapshot_path = resolve_snapshot_path(
+            bundle_path, bundle.content_pack.profile
+        )
+        if snapshot_path.exists():
+            schema_snapshot_yaml = snapshot_path.read_text(encoding="utf-8")
 
     try:
         config = load_aidp_config(config_path)
@@ -403,6 +415,7 @@ def _run_via_aidp_dispatch(
             pack_files=pack_files,
             pack_manifest=pack_manifest,
             force_fingerprint_skip=force_fingerprint_skip,
+            schema_snapshot_yaml=schema_snapshot_yaml,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — drift surfaces from REST-dispatch via the marker

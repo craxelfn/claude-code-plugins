@@ -42,6 +42,27 @@ ADRs 0014 / 0017 / 0019 / 0021.
   declare). Per §9.5.6 #1 MAY-NOT, the skill only EXTENDS existing
   variation-point candidate lists.
 
+## AIDPF-2012 read-only context (Phase 3c + 3d)
+
+When a runtime drift artifact (`AIDPF-2012.json`) is present alongside
+2010/2011 in the same `<run_id>/` directory, the reader exposes it via
+`DiagnosticReadResult.schema_drift_failure`. The skill SURFACES this
+to the operator as context but DOES NOT act on it — drift recovery is
+`bootstrap --refresh`, not an overlay draft.
+
+As of **Phase 3d** the artifact's
+`schema_drift_failure.schema_drift.dataset_deltas` field is populated
+whenever bootstrap pinned a `profiles/<tenant>.schema-snapshot.yaml`
+file (Phase 3a-vintage bootstraps and earlier still emit empty
+`dataset_deltas` and a one-time WARN on the operator's terminal —
+remediation is the same `--refresh`). When `dataset_deltas` is
+non-empty, each entry carries `addedColumns` / `removedColumns` /
+`typeChangedColumns` lists with the operator-facing original casing
+preserved. Surface those directly in any human hand-off message
+instead of asking the operator to re-probe + diff manually against
+the most recent evidence snapshot. The reader contract is unchanged
+— the field just becomes useful.
+
 ## The seven §9.5.6 MUSTs (verbatim)
 
 1. **Probe bronze before declaring**. Skill reads the diagnostic

@@ -105,6 +105,12 @@ def dispatch_via_rest(
     # into the generated notebook's orchestrator.run(...) call so the
     # cluster-side gate honours the operator's break-glass intent.
     force_fingerprint_skip: bool = False,
+    # Phase 3d — passthrough only. When provided, the cluster-side
+    # bootstrap cell materialises the snapshot to the resolved
+    # profiles/<tenant>.schema-snapshot.yaml path so preflight can
+    # populate `datasetDeltas` on drift. ``None`` preserves pre-3d
+    # behaviour (preflight degrades to empty `datasetDeltas` + WARN).
+    schema_snapshot_yaml: str | None = None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -230,6 +236,7 @@ def dispatch_via_rest(
         pack_files=pack_files,
         pack_manifest=pack_manifest,
         force_fingerprint_skip=force_fingerprint_skip,
+        schema_snapshot_yaml=schema_snapshot_yaml,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")

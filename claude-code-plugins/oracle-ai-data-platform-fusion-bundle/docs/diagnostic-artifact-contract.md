@@ -153,6 +153,20 @@ Example: `AIDPF-2012.json`
     "priorFingerprint": "sha256:aaa…",
     "currentFingerprint": "sha256:bbb…",
     "pinnedAt": "2026-06-01T08:00:00+00:00",
+    "datasetDeltas": [
+      {
+        "datasetId": "ap_invoices",
+        "addedColumns": [
+          {"name": "ApInvoicesNewColumn", "type": "string", "nullable": true}
+        ],
+        "removedColumns": [
+          {"name": "ApInvoicesOldColumn", "type": "string", "nullable": true}
+        ],
+        "typeChangedColumns": [
+          {"name": "ApInvoicesAmount", "priorType": "bigint", "currentType": "string"}
+        ]
+      }
+    ],
     "affectedVariationPoints": [
       {
         "name": "invoice_currency_code",
@@ -171,6 +185,7 @@ Example: `AIDPF-2012.json`
 | `schemaDrift.priorFingerprint` | Value pinned in the tenant profile (last `bootstrap` / `bootstrap --refresh`). |
 | `schemaDrift.currentFingerprint` | Live bronze fingerprint computed during preflight. |
 | `schemaDrift.pinnedAt` | Timestamp the prior fingerprint was pinned. |
+| `schemaDrift.datasetDeltas[]` | **Phase 3d** — per-dataset column-level diff: `addedColumns` / `removedColumns` / `typeChangedColumns`. Populated when the bootstrap-pinned `profiles/<tenant>.schema-snapshot.yaml` is present and self-consistent. Empty (with a one-time WARN log) when the snapshot is absent (pre-3d profile), unparseable, or fingerprint-desynced from the profile — remediation is `aidp-fusion-bundle bootstrap --refresh` to repin both atomically. Diff key canonicalisation mirrors the fingerprint algorithm: case- and whitespace-only differences are invisible; original casing is preserved on the surfaced entries for operator display. |
 | `schemaDrift.affectedVariationPoints[]` | Per-VP deltas — for each VP resolved in the profile, whether its pinned candidate is still present in the live bronze. Empty if every pinned candidate still matches (the fingerprint shifted for an unrelated reason — added/removed/retyped columns outside any VP). |
 
 The `medallion_author.reader.read_run` parses this alongside the

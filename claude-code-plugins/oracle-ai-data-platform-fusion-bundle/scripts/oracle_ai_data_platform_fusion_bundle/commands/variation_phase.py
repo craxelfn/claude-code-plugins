@@ -40,6 +40,15 @@ from rich.console import Console
 
 from ..orchestrator.content_pack import ResolvedPack, load_full_chain, load_pack
 from ..schema.bronze_fingerprint import ColumnInfo, compute_bronze_fingerprint
+from ..schema.bronze_schema_snapshot import (
+    BronzeSchemaSnapshotSchemaError,
+    BronzeSchemaSnapshotV1,
+    from_observed as snapshot_from_observed,
+    load_bronze_schema_snapshot,
+    resolve_snapshot_path,
+    snapshot_to_observed,
+    write_bronze_schema_snapshot,
+)
 from ..schema.bundle import Bundle, resolve_content_pack_root
 from ..schema.diagnostic_artifact import (
     AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED,
@@ -253,13 +262,47 @@ def run_variation_phase(
     if options.refresh and profile_path.exists():
         prior_profile = load_tenant_profile(profile_path)
         if prior_profile.bronze_schema_fingerprint == fingerprint:
+            # Phase 3d: back-fill the snapshot if missing / desynced /
+            # hand-edited. This is the only path that exits the no-drift
+            # branch with a write — profile + evidence stay untouched so
+            # the back-fill is observably scoped (no audit-trail noise on
+            # the profile timeline for a snapshot-only repair). Without
+            # this, pre-3d profiles whose fingerprint never drifts could
+            # never recover via the documented `--refresh` remediation;
+            # the refresh would no-op forever and preflight would
+            # forever degrade to empty `datasetDeltas`.
+            now = _now()
+            fresh_snapshot = snapshot_from_observed(
+                tenant=tenant_name,
+                pinned_at=now,
+                fingerprint=fingerprint,
+                observed=observed,
+            )
+            repair_reason = _snapshot_needs_repair(
+                bundle_path=bundle_path,
+                tenant_name=tenant_name,
+                live_fingerprint=fingerprint,
+            )
+            if repair_reason is None:
+                console.print(
+                    f"[green]No drift detected — fingerprint matches "
+                    f"{fingerprint[:24]}... — profile unchanged.[/green]"
+                )
+                return VariationPhaseOutcome(
+                    exit_code=0,
+                    summary="bootstrap --refresh: no drift detected",
+                )
+            write_bronze_schema_snapshot(workdir, tenant_name, fresh_snapshot)
             console.print(
-                f"[green]No drift detected — fingerprint matches "
-                f"{fingerprint[:24]}... — profile unchanged.[/green]"
+                f"[green]No drift detected — snapshot back-filled from "
+                f"observed probe ({repair_reason}) — profile unchanged.[/green]"
             )
             return VariationPhaseOutcome(
                 exit_code=0,
-                summary="bootstrap --refresh: no drift detected",
+                summary=(
+                    f"bootstrap --refresh: no drift; snapshot back-filled "
+                    f"({repair_reason})"
+                ),
             )
 
     # --- Steps 6/7: walk every variation point ---
@@ -466,6 +509,18 @@ def run_variation_phase(
         ),
     )
     evidence_path = write_evidence_snapshot(workdir, snapshot)
+
+    # Phase 3d: snapshot writes AFTER profile + evidence so the snapshot
+    # is never present without a matching profile (rules out a confusing
+    # "snapshot exists but profile is gone" state for preflight). Pin-time
+    # writer for both initial-pin and `--refresh`-with-drift paths.
+    schema_snapshot = snapshot_from_observed(
+        tenant=tenant_name,
+        pinned_at=now,
+        fingerprint=fingerprint,
+        observed=observed,
+    )
+    write_bronze_schema_snapshot(workdir, tenant_name, schema_snapshot)
 
     console.print(
         f"[green]bootstrap variation phase complete — profile "
@@ -864,6 +919,66 @@ def _write_profile_yaml(path: Path, profile: TenantProfile) -> None:
 # ---------------------------------------------------------------------------
 # Spark session management
 # ---------------------------------------------------------------------------
+
+
+def _snapshot_needs_repair(
+    *,
+    bundle_path: Path,
+    tenant_name: str,
+    live_fingerprint: str,
+) -> str | None:
+    """Decide whether the Phase 3d back-fill should rewrite the snapshot
+    inside the no-drift ``--refresh`` branch.
+
+    Returns ``None`` when the snapshot is healthy (file exists, parses,
+    metadata fingerprint matches ``live_fingerprint``, and a fresh
+    recompute over the snapshot's ``datasets`` produces the same value).
+    Returns a short reason string when repair is needed; the caller
+    rewrites the snapshot atomically using the live probe and surfaces
+    the reason in the operator-visible message.
+
+    Repair triggers:
+
+    * **Absent**: snapshot file does not exist. A pre-3d profile, or a
+      partial-failure state where the snapshot write failed after the
+      profile/evidence writes succeeded.
+    * **Unparseable**: file exists but YAML / Pydantic validation fails
+      (schemaVersion unknown, malformed YAML, missing keys).
+    * **Metadata desync**: snapshot's own ``bronze_schema_fingerprint``
+      field differs from the freshly-computed live fingerprint.
+      Indicates a snapshot whose dataset list was never updated after
+      the live bronze changed — preflight would later recompute, find
+      the cross-check failed, degrade to empty deltas, and tell the
+      operator to ``--refresh``. Without back-fill, that refresh would
+      no-op forever.
+    * **Content cross-check failure**: recomputing
+      :func:`compute_bronze_fingerprint` over the snapshot's
+      ``datasets`` produces a different hash than the snapshot's own
+      metadata fingerprint OR the live fingerprint. Catches
+      hand-edited content where the fingerprint field stayed stale.
+
+    Pure function (modulo a file read) — no Spark, no mutation.
+    """
+    snapshot_path = resolve_snapshot_path(bundle_path, tenant_name)
+    if not snapshot_path.exists():
+        return "snapshot absent"
+    try:
+        snapshot = load_bronze_schema_snapshot(snapshot_path)
+    except BronzeSchemaSnapshotSchemaError:
+        return "snapshot unparseable"
+    if snapshot.bronze_schema_fingerprint != live_fingerprint:
+        return "snapshot metadata fingerprint desynced"
+    recomputed = compute_bronze_fingerprint(
+        observed=snapshot_to_observed(snapshot)
+    )
+    if recomputed != snapshot.bronze_schema_fingerprint:
+        return "snapshot content fingerprint desynced"
+    if recomputed != live_fingerprint:
+        # Defence-in-depth: should be unreachable given the two checks
+        # above, but a future divergence would silently leave a stale
+        # snapshot. Surface it as a repair so the next read works.
+        return "snapshot content does not match live fingerprint"
+    return None
 
 
 def _resolve_spark(options: VariationPhaseOptions):

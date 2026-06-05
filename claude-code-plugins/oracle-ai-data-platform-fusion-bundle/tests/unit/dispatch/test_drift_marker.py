@@ -673,6 +673,86 @@ class TestSchemaDriftMarkerTranslation:
             pre_existing.read_text(encoding="utf-8") == "PRIOR ARTIFACT CONTENT"
         )
 
+    def test_drift_marker_preserves_dataset_deltas_round_trip(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 3d — when the cluster-side gate emits a drift artifact
+        with a non-empty ``datasetDeltas`` array, the laptop-side
+        reconstruction must preserve it byte-for-byte. Guards against a
+        future marker-shape regression dropping the new field."""
+        run_id = "cp-3d-deltas"
+        artifact = {
+            "schemaVersion": 1,
+            "runId": run_id,
+            "tenant": "finance-default",
+            "errorCode": "AIDPF-2012",
+            "errorMessage": "drift with deltas",
+            "generatedAt": "2026-06-06T12:00:00Z",
+            "schemaDrift": {
+                "priorFingerprint": "sha256:" + "a" * 64,
+                "currentFingerprint": "sha256:" + "b" * 64,
+                "pinnedAt": "2026-06-01T08:00:00Z",
+                "datasetDeltas": [
+                    {
+                        "datasetId": "ap_invoices",
+                        "addedColumns": [
+                            {
+                                "name": "ApInvoicesNewCol",
+                                "type": "string",
+                                "nullable": True,
+                            }
+                        ],
+                        "removedColumns": [
+                            {
+                                "name": "ApInvoicesOldCol",
+                                "type": "string",
+                                "nullable": True,
+                            }
+                        ],
+                        "typeChangedColumns": [
+                            {
+                                "name": "ApInvoicesAmount",
+                                "priorType": "bigint",
+                                "currentType": "string",
+                            }
+                        ],
+                    }
+                ],
+                "affectedVariationPoints": [],
+            },
+        }
+        client = _stub_client(monkeypatch)
+        client.fetch_output.return_value = _executed_notebook_with_drift_marker(
+            run_id=run_id, artifact_json=json.dumps(artifact)
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(SchemaDriftDetectedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+        body = json.loads(
+            exc_info.value.diagnostic_path.read_text(encoding="utf-8")
+        )
+        # Round-trip preserves the deltas byte-for-byte.
+        deltas = body["schemaDrift"]["datasetDeltas"]
+        assert len(deltas) == 1
+        assert deltas[0]["datasetId"] == "ap_invoices"
+        assert deltas[0]["addedColumns"][0]["name"] == "ApInvoicesNewCol"
+        assert deltas[0]["removedColumns"][0]["name"] == "ApInvoicesOldCol"
+        assert (
+            deltas[0]["typeChangedColumns"][0]["priorType"] == "bigint"
+        )
+        assert (
+            deltas[0]["typeChangedColumns"][0]["currentType"] == "string"
+        )
+
     def test_failed_status_without_drift_marker_still_raises_run_failed(
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
