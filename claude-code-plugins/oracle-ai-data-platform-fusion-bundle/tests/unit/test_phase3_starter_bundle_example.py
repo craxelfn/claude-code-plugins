@@ -98,19 +98,16 @@ class TestStarterBundleParse:
         prof = load_tenant_profile(EXAMPLE_PROFILE)
         assert prof.tenant == "finance-default"
         assert prof.bronze_schema_fingerprint.startswith("sha256:")
-        # All COA + currency + supplier-key resolutions are populated.
+        # Currency + supplier-key resolutions are populated. v1-parity
+        # dim_account reads positional CodeCombinationSegmentN columns
+        # directly (Phase 3 Step 6 rework — see review feedback) so no
+        # COA columnAliases are required in the profile.
         required_columns = {
             "supplier_natural_key",
             "vendor_id",
             "invoice_currency_code",
-            "coa_balancing_segment",
-            "coa_cost_center_segment",
-            "coa_natural_account_segment",
         }
         assert required_columns <= set(prof.resolved.column.keys())
-        # COA values are CodeCombinationSegmentN (NOT SEGMENT_N).
-        assert prof.resolved.column["coa_balancing_segment"] == "CodeCombinationSegment1"
-        assert prof.resolved.column["coa_natural_account_segment"] == "CodeCombinationSegment3"
         # Semantic variant resolved.
         assert prof.resolved.semantic["cancelled_status"] == "cancelled_date"
         # Snapshot date authored at the fixture-determinism value.
@@ -197,45 +194,77 @@ class TestBuiltinDispatchSmoke:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Render-all activates after Step 5+ ship the SQL templates; "
-           "today every silver/gold node except dim_calendar still declares "
-           "python_legacy. Re-enable when the migration steps land."
-)
 class TestRenderAllSmoke:
-    """Once Steps 5–9 land, every `implementation.type == 'sql'` node MUST
-    render without raising and MUST NOT bind any identifier-shaped name
-    as a profile parameter."""
+    """Every `implementation.type == 'sql'` node MUST render against the
+    example profile without raising, MUST NOT bind any identifier-shaped
+    name as a profile parameter (which would emit a `:param` where SQL
+    needs a bare column / table name), and MUST keep the security-boundary
+    invariant that profile values cannot smuggle SQL fragments."""
 
-    def test_every_sql_node_renders(self) -> None:
-        pack_root = (REPO_ROOT / "scripts" / "oracle_ai_data_platform_fusion_bundle"
-                     / "content_packs" / "fusion-finance-starter")
-        pack = load_full_chain(pack_root, overlay_paths=())
-        profile = load_tenant_profile(EXAMPLE_PROFILE)
-        ctx = RunContext(
+    def _ctx(self, pack) -> RunContext:
+        # The bronze_table_for_source map is consumed by semantic-fragment
+        # `{table}` substitutions (e.g. ap_aging's cancelled_status). We
+        # build it from the pack's bronze.yaml dataset list so every node
+        # renders against a consistent virtual cluster.
+        bronze_yaml = pack.bronze_yaml or {}
+        btfs = {
+            ds["id"]: f"cat.bronze.{ds['id']}"
+            for ds in bronze_yaml.get("datasets", [])
+        }
+        return RunContext(
             catalog="cat",
             bronze_schema="bronze",
             silver_schema="silver",
             gold_schema="gold",
             run_id="render-all-smoke",
             active_profile_name="finance-default",
-            bronze_table_for_source={
-                ds.id: f"cat.bronze.{ds.id}" for ds in pack.pack.bronze.datasets  # type: ignore[attr-defined]
-            } if hasattr(pack.pack, "bronze") else {},
+            bronze_table_for_source=btfs,
         )
+
+    def test_every_sql_node_renders(self) -> None:
+        pack = load_full_chain(
+            REPO_ROOT / "scripts" / "oracle_ai_data_platform_fusion_bundle"
+            / "content_packs" / "fusion-finance-starter",
+        )
+        profile = load_tenant_profile(EXAMPLE_PROFILE)
+        ctx = self._ctx(pack)
 
         sql_nodes = [
             n for n in {**pack.silver, **pack.gold}.values()
             if n.implementation.type == "sql"
         ]
-        assert sql_nodes, "Expected at least one type:sql node post Steps 5-9"
+        # Phase 3 migrated five nodes; assert that's the floor.
+        assert len(sql_nodes) >= 5, (
+            f"expected ≥5 type:sql nodes after Steps 5–9, got {len(sql_nodes)}"
+        )
 
         for node in sql_nodes:
             rendered = render_node_sql(node, pack, profile, ctx)
-            # No bound parameter name looks like an SQL identifier.
+            # No bound parameter name looks like an SQL identifier — that
+            # would mean a `{{ profile.* }}` lookup was used where a
+            # `{{ column.* }}` substitution was needed.
             for name in rendered.params.keys():
                 assert not _IDENTIFIER_SUFFIX_RE.search(name), (
                     f"node {node.id}: bound parameter {name!r} ends in an "
                     f"identifier-shaped suffix — was an identifier knob "
                     f"accidentally smuggled in as {{{{ profile.* }}}}?"
                 )
+
+    def test_every_sql_node_emits_run_id_audit(self) -> None:
+        """All migrated SQL nodes must carry the orchestrator's run-id
+        through to their respective audit column."""
+        pack = load_full_chain(
+            REPO_ROOT / "scripts" / "oracle_ai_data_platform_fusion_bundle"
+            / "content_packs" / "fusion-finance-starter",
+        )
+        profile = load_tenant_profile(EXAMPLE_PROFILE)
+        ctx = self._ctx(pack)
+        for node in {**pack.silver, **pack.gold}.values():
+            if node.implementation.type != "sql":
+                continue
+            rendered = render_node_sql(node, pack, profile, ctx)
+            assert ":run_id" in rendered.sql, (
+                f"node {node.id} renders without :run_id parameter — "
+                f"the audit column is missing the {{{{ run_id_literal }}}} token."
+            )
+            assert rendered.params.get("run_id") == "render-all-smoke"

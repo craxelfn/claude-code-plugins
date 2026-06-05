@@ -25,16 +25,12 @@ refresh:
       Hence `replace` (PLAN §10, ADR-0012). A future `snapshot`
       strategy (§10.7, deferred) is the right long-term fit.
 
+# Output schema matches v1 build_ap_aging_sql in proxy mode
+# (transforms/gold/ap_aging.py:475-505 with due_date_mode='proxy') —
+# 19 columns. Phase 3 ships proxy mode only; real-mode (terms/due_date
+# probing) is deferred until a renderer "optional column" feature.
 outputSchema:
   columns:
-    - name: supplier_number
-      type: string
-      nullable: false
-      pii: low
-    - name: supplier_name
-      type: string
-      nullable: true
-      pii: medium
     - name: vendor_id
       type: bigint
       nullable: true
@@ -43,12 +39,64 @@ outputSchema:
       type: string
       nullable: false
       pii: none
+    - name: supplier_number
+      type: string
+      nullable: true
+      pii: low
+    - name: supplier_name
+      type: string
+      nullable: true
+      pii: medium
+    - name: business_relationship
+      type: string
+      nullable: true
+      pii: none
     - name: age_bucket
       type: string
       nullable: false
       pii: none
+    - name: bucket_basis
+      type: string
+      nullable: false
+      pii: none
+    - name: open_invoice_count
+      type: bigint
+      nullable: false
+      pii: none
     - name: open_amount
       type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: invoice_amount_total
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: amount_paid_total
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: credit_open_amount
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: credit_open_count
+      type: bigint
+      nullable: false
+      pii: none
+    - name: oldest_invoice_date
+      type: date
+      nullable: true
+      pii: none
+    - name: max_days_outstanding
+      type: int
+      nullable: true
+      pii: none
+    - name: as_of_date
+      type: date
+      nullable: false
+      pii: none
+    - name: bronze_extract_ts
+      type: timestamp
       nullable: true
       pii: none
     - name: gold_built_at

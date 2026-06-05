@@ -18,7 +18,7 @@ bronzeSchemaFingerprint: "sha256:placeholder-finance-default-2026-06-05"
 # Variation-point resolutions referenced by starter-pack SQL templates.
 # The renderer raises AIDPF-5003 at sql_renderer.py:474 / :507 if any of
 # these is missing — see docs/features/v2-phase-3-export-modules-to-sql/
-# variation_catalog.md for the per-knob audit.
+# docs/v2-phase-3-variation-catalog.md for the per-knob audit.
 resolved:
   column:
     # dim_supplier
@@ -26,13 +26,6 @@ resolved:
     vendor_id: VENDORID
     # supplier_spend + ap_aging
     invoice_currency_code: ApInvoicesInvoiceCurrencyCode
-    # dim_account COA segment roles. Source columns on bronze.gl_coa are
-    # CodeCombinationSegment1..30; the role-to-position mapping is a tenant
-    # config call (all six columns exist on every Fusion extract), NOT a
-    # bootstrap probe — see variation_catalog.md "Bootstrap nuance".
-    coa_balancing_segment: CodeCombinationSegment1
-    coa_cost_center_segment: CodeCombinationSegment2
-    coa_natural_account_segment: CodeCombinationSegment3
   semantic:
     # ap_aging cancelled-invoice detection. The `cancelled_date` candidate
     # uses ApInvoicesCancelledDate IS NULL; the alternative `cancelled_flag`

@@ -37,6 +37,9 @@ refresh:
       fresh each cycle). Dimension-only changes propagate on next fact-side
       rerun; see §11.10 known limitation + ADR-0013.
 
+# Output schema matches v1 build_gl_balance_sql with DEFAULT_COA_SEGMENT_MAP
+# (transforms/gold/gl_balance.py:225-271) — 24 columns including the
+# six semantic COA aliases sourced via LEFT JOIN dim_account.
 outputSchema:
   columns:
     - name: ledger_id
@@ -47,6 +50,38 @@ outputSchema:
       type: bigint
       nullable: false
       pii: none
+    - name: code_combination
+      type: string
+      nullable: true
+      pii: none
+    - name: account_type
+      type: string
+      nullable: true
+      pii: none
+    - name: company
+      type: string
+      nullable: true
+      pii: none
+    - name: cost_center
+      type: string
+      nullable: true
+      pii: none
+    - name: natural_account
+      type: string
+      nullable: true
+      pii: none
+    - name: subaccount
+      type: string
+      nullable: true
+      pii: none
+    - name: product
+      type: string
+      nullable: true
+      pii: none
+    - name: intercompany
+      type: string
+      nullable: true
+      pii: none
     - name: period_year
       type: int
       nullable: false
@@ -54,6 +89,10 @@ outputSchema:
     - name: period_num
       type: int
       nullable: false
+      pii: none
+    - name: period_name
+      type: string
+      nullable: true
       pii: none
     - name: currency_code
       type: string
@@ -67,9 +106,29 @@ outputSchema:
       type: string
       nullable: false
       pii: none
+    - name: begin_balance_dr
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: begin_balance_cr
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: period_net_dr
+      type: decimal(28,8)
+      nullable: true
+      pii: none
+    - name: period_net_cr
+      type: decimal(28,8)
+      nullable: true
+      pii: none
     - name: ending_balance
       type: decimal(28,8)
       nullable: true
+      pii: none
+    - name: bronze_extract_ts
+      type: timestamp
+      nullable: false
       pii: none
     - name: gold_built_at
       type: timestamp

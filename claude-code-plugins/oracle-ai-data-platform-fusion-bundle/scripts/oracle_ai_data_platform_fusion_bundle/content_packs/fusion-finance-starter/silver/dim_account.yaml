@@ -25,16 +25,18 @@ refresh:
 requiredColumns:
   gl_coa:
     - CodeCombinationCodeCombinationId
+    - CodeCombinationSegment1
+    - CodeCombinationSegment2
+    - CodeCombinationSegment3
     - _extract_ts
     - _source_pvo
 
-# Output schema is the v2 focused subset of v1 dim_account: surrogate key,
-# natural key, three role-aliased COA segments (source columns resolved via
-# tenant profile `resolved.column.coa_*_segment`), the standard account
-# attributes, plus audit columns. The v1 module's 30-position firehose
-# (CodeCombinationSegment1..30 + 6 semantic aliases) is not in scope here —
-# subaccount/product/intercompany roles can be added as additional
-# columnAliases entries in a follow-up if a tenant needs them.
+# Output schema mirrors the v1 module's default projection
+# (dimensions/dim_account.py with DEFAULT_SEMANTIC_SEGMENT_MAP — six
+# segments). v1 emits up to MAX_FUSION_SEGMENTS=30 positional columns
+# but the saasfademo1 demo COA only populates six; Phase 3 ships the
+# six-segment subset to keep the YAML and live data aligned. Tenants
+# with deeper COAs extend via a pack overlay.
 outputSchema:
   columns:
     - name: account_key
@@ -49,15 +51,55 @@ outputSchema:
       type: bigint
       nullable: true
       pii: none
-    - name: balancing_segment
+    - name: code_combination
       type: string
       nullable: true
       pii: none
-    - name: cost_center_segment
+    - name: segment_01
       type: string
       nullable: true
       pii: none
-    - name: natural_account_segment
+    - name: segment_02
+      type: string
+      nullable: true
+      pii: none
+    - name: segment_03
+      type: string
+      nullable: true
+      pii: none
+    - name: segment_04
+      type: string
+      nullable: true
+      pii: none
+    - name: segment_05
+      type: string
+      nullable: true
+      pii: none
+    - name: segment_06
+      type: string
+      nullable: true
+      pii: none
+    - name: company
+      type: string
+      nullable: true
+      pii: none
+    - name: cost_center
+      type: string
+      nullable: true
+      pii: none
+    - name: natural_account
+      type: string
+      nullable: true
+      pii: none
+    - name: subaccount
+      type: string
+      nullable: true
+      pii: none
+    - name: product
+      type: string
+      nullable: true
+      pii: none
+    - name: intercompany
       type: string
       nullable: true
       pii: none
@@ -77,12 +119,16 @@ outputSchema:
       type: string
       nullable: true
       pii: none
+    - name: financial_category
+      type: string
+      nullable: true
+      pii: none
     - name: start_date_active
-      type: timestamp
+      type: date
       nullable: true
       pii: none
     - name: end_date_active
-      type: timestamp
+      type: date
       nullable: true
       pii: none
     - name: bronze_extract_ts
