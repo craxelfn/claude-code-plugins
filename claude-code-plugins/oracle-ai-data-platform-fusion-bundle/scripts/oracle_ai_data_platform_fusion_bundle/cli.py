@@ -156,10 +156,21 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "Fusion pods. Below 60s rejected at parse — anything that short is "
          "operator error. Only meaningful for REST dispatch (no --inline).",
 )
+@click.option(
+    "--execution-backend", "execution_backend",
+    type=click.Choice(["legacy-python", "content-pack"]),
+    default="legacy-python",
+    show_default=True,
+    help="Execution backend (Phase 2): `legacy-python` runs the v1 "
+         "hardcoded dim_*.py / gold_*.py modules (unchanged from v0.3); "
+         "`content-pack` runs the content-pack SQL runner against the "
+         "pack declared in bundle.yaml's `contentPack:` block. Phase 4's "
+         "dual-runner parity gate decides when (or if) the default flips.",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
-        poll_timeout_s: int) -> None:
+        poll_timeout_s: int, execution_backend: str) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -173,6 +184,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         resume_run_id=resume_run_id,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
+        execution_backend=execution_backend,
         console=console,
     ))
 

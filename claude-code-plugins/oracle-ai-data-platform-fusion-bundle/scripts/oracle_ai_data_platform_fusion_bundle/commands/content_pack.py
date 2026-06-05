@@ -111,20 +111,17 @@ def _make_cli_base_resolver(overlay_root: Path):
 
 
 def _load_full_chain(pack_path: Path) -> "ResolvedPack":
-    """Load a pack and apply any `extends:` chain, returning the merged result.
+    """Backwards-compat alias — delegates to the promoted Phase 2 helper.
 
-    For a base pack (no `extends:`), returns it unmerged. For an overlay,
-    resolves the chain via `resolve_overlay_chain` + `merge_overlay`,
-    yielding the fully-assembled `ResolvedPack` that all validators expect.
+    Phase 2 promoted ``_load_full_chain`` (CLI-private) to
+    :func:`orchestrator.content_pack.load_full_chain` (orchestrator-owned
+    public API) so the generated REST notebook can import it without
+    crossing the dispatch import boundary. This alias preserves the
+    pre-Phase-2 import path for any internal callers and matches the
+    behaviour 1:1 — same callable shape, same default base resolver.
     """
-    chain_paths = resolve_overlay_chain(
-        pack_path, base_resolver=_make_cli_base_resolver(pack_path)
-    )
-    packs = [load_pack(p) for p in chain_paths]
-    merged = packs[0]
-    for overlay in packs[1:]:
-        merged = merge_overlay(merged, overlay)
-    return merged
+    from ..orchestrator.content_pack import load_full_chain
+    return load_full_chain(pack_path, base_resolver=_make_cli_base_resolver(pack_path))
 
 
 # ---------------------------------------------------------------------------

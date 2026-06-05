@@ -89,6 +89,11 @@ def dispatch_via_rest(
     auto_start_cluster: bool = True,
     poll_timeout_s: int = 3600,
     log: Callable[[str], None] = lambda msg: None,
+    # Phase 2 additions — primitives only (no orchestrator imports here).
+    execution_backend: str = "legacy-python",
+    profile_yaml: str | None = None,
+    pack_files: "Mapping[str, str] | None" = None,
+    pack_manifest: "dict[str, Any] | None" = None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -202,6 +207,11 @@ def dispatch_via_rest(
         layers=layers,
         bicc_secret_name=env.bicc_secret_name,
         bicc_secret_key=env.bicc_secret_key,
+        # Phase 2 primitives — passthrough only; dispatch never inspects them.
+        execution_backend=execution_backend,
+        profile_yaml=profile_yaml,
+        pack_files=pack_files,
+        pack_manifest=pack_manifest,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")

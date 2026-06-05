@@ -49,6 +49,7 @@ def run(
     resume_run_id: str | None = None,
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
+    execution_backend: str = "legacy-python",
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -103,6 +104,16 @@ def run(
         if layers else None
     )
 
+    # Phase 2 (PLAN §11.9 / Step 12b): --resume + content-pack rejected.
+    if resume_run_id is not None and execution_backend == "content-pack":
+        from ..schema.bundle import AIDPF_1032_RESUME_NOT_SUPPORTED
+        console.print(
+            f"[red]{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
+            f"with --execution-backend content-pack in v0.3. Re-run with "
+            f"--execution-backend legacy-python (the default) or without --resume.[/red]"
+        )
+        return 2
+
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
@@ -110,6 +121,7 @@ def run(
         return _run_inline(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
+            execution_backend=execution_backend,
         )
     if resume_run_id is not None:
         # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
@@ -125,6 +137,7 @@ def run(
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
+        execution_backend=execution_backend,
     )
 
 
@@ -136,6 +149,8 @@ def _run_inline(
     resume_run_id: str | None,
     dry_run: bool,
     console: Console,
+    *,
+    execution_backend: str = "legacy-python",
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -161,6 +176,67 @@ def _run_inline(
             f"reading fusion_bundle_state, computing reattempt plan…"
         )
 
+    # Phase 2 — when --execution-backend content-pack, resolve the pack
+    # + profile up front and pass them into orchestrator.run.
+    resolved_pack = None
+    tenant_profile = None
+    if execution_backend == "content-pack":
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
+            load_bundle as _load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import (
+            load_tenant_profile,
+            resolve_profile_path,
+        )
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from ..orchestrator.content_pack_validators import validate_pack_full
+
+        bundle, _paths = _load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; --execution-backend content-pack "
+                f"requires it.[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"--execution-backend content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        # Phase 1 full validation BEFORE any profile/stage/dispatch work.
+        # validate_dag/validate_template_variables/validate_dashboard_*/etc.
+        # catch errors that the runtime DAG resolver doesn't — e.g. a typo
+        # in dependsOn.silver that points to a non-existent node would
+        # otherwise let the dependent execute against stale upstream tables.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        tenant_profile = load_tenant_profile(profile_path)
+
     try:
         summary = orchestrator.run(
             bundle_path=bundle_path,
@@ -169,6 +245,9 @@ def _run_inline(
             layers=layers,
             resume_run_id=resume_run_id,
             dry_run=dry_run,
+            execution_backend=execution_backend,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
         )
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
@@ -191,6 +270,8 @@ def _run_via_aidp_dispatch(
     dry_run: bool,
     poll_timeout_s: int,
     console: Console,
+    *,
+    execution_backend: str = "legacy-python",
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
@@ -211,6 +292,66 @@ def _run_via_aidp_dispatch(
     from ..dispatch.errors import DispatchError
     from ..schema.errors import OrchestratorConfigError
 
+    # Phase 2: when --execution-backend content-pack, prepare the
+    # staging primitives at the CLI layer (orchestrator-side imports
+    # are allowed here; dispatch/ cannot import them).
+    profile_yaml: str | None = None
+    pack_files: dict[str, str] | None = None
+    pack_manifest: dict | None = None
+    if execution_backend == "content-pack":
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
+            load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import resolve_profile_path
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from ..orchestrator.content_pack_staging import stage_pack_files
+        from ..orchestrator.content_pack_validators import validate_pack_full
+
+        bundle, _bundle_paths = load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; --execution-backend content-pack requires "
+                f"the block. Either add it or run with the legacy-python backend.[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"--execution-backend content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        # Phase 1 full validation BEFORE staging (round-15 review fix).
+        # An invalid pack must NOT reach the cluster — fail fast at the
+        # laptop with AIDPF-1036 carrying the per-error report.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        profile_yaml = profile_path.read_text(encoding="utf-8")
+        pack_files, pack_manifest = stage_pack_files(resolved_pack)
+
     try:
         config = load_aidp_config(config_path)
         env = env_or_error(config, env_name)
@@ -225,6 +366,10 @@ def _run_via_aidp_dispatch(
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
+            execution_backend=execution_backend,
+            profile_yaml=profile_yaml,
+            pack_files=pack_files,
+            pack_manifest=pack_manifest,
         )
     except (DispatchError, OrchestratorConfigError) as exc:
         console.print(f"[red]{exc}[/red]")

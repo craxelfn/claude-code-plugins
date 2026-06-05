@@ -1,0 +1,19 @@
+apiVersion: aidp-fusion-bundle/v1
+project: phase2-test
+fusion:
+  serviceUrl: https://example.com
+  username: test
+  password: test
+  externalStorage: test-storage
+aidp:
+  catalog: phase2_catalog
+  bronzeSchema: bronze
+  silverSchema: silver
+  goldSchema: gold
+datasets:
+  - id: erp_thing
+    mode: incremental
+contentPack:
+  name: phase2-test-pack
+  path: ../../content_packs/phase2_test_pack
+  profile: phase2-fixture
