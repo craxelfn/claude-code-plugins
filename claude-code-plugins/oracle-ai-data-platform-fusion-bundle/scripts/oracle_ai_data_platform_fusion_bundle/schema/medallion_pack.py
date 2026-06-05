@@ -31,6 +31,8 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
+from .incremental_impact import IncrementalImpact
+
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -324,12 +326,43 @@ class OverrideEntry(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class SkillProposalRecord(BaseModel):
+    """One per-VP proposal the medallion-author skill captured at
+    overlay-draft time (Phase 3b).
+
+    Bootstrap reads ``candidate_added`` to detect AutoResolved-on-skill-
+    proposed-candidate at commit time (Phase 3b round-2 finding —
+    initial-onboarding flow must record ``mechanism: skill_proposed``
+    when the walker AutoResolves on a candidate the skill added).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    candidate_added: str = Field(alias="candidateAdded")
+    """The candidate value the skill appended to the VP's list (e.g.
+    ``ApInvoicesXCurrCode``)."""
+
+    confidence: str | None = None
+    """``high`` | ``medium`` | ``low`` — LLM's confidence in the
+    proposal. Optional for audit only."""
+
+    reasoning: str | None = None
+    """Operator-facing rationale paragraph from the propose phase."""
+
+
 class PackProvenance(BaseModel):
     """Optional provenance block stamped by the medallion-author skill (ADR-0019).
 
     Skill-authored packs (overlays, in particular) record the skill version,
     model identity, generation timestamp, and reason. Hand-authored packs may
     omit this block entirely.
+
+    Phase 3b extends the schema with skill-specific fields
+    (``skill_id``, ``diagnostic_run_id``, ``proposals``,
+    ``incremental_impact``). **Every new field declares an explicit
+    camelCase ``Field(alias=...)``** so overlay YAML's camelCase keys
+    parse — round-3 plan-review finding (without aliases the bootstrap
+    detection silently never fires).
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -340,6 +373,36 @@ class PackProvenance(BaseModel):
     generated_at: str | None = Field(default=None, alias="generatedAt")
     reason: str | None = None
     evidence: dict[str, Any] | None = None
+
+    # --- Phase 3b extensions (additive, default-None) ---
+
+    skill_id: str | None = Field(default=None, alias="skillId")
+    """Stable identifier of the skill that drafted the overlay. The
+    medallion-author skill stamps ``aidp-fusion-medallion-author``;
+    bootstrap detects skill-authored overlays via this field and
+    records ``mechanism: skill_proposed`` on the resolutions they
+    drive."""
+
+    diagnostic_run_id: str | None = Field(default=None, alias="diagnosticRunId")
+    """The bootstrap run_id whose diagnostic artifacts triggered the
+    skill invocation. Threads the audit trail from failure → draft →
+    commit."""
+
+    proposals: dict[str, SkillProposalRecord] | None = Field(
+        default=None, alias="proposals"
+    )
+    """Per-VP candidate proposals the skill captured at draft time.
+    Keyed by VP name (e.g. ``invoice_currency_code``). Bootstrap
+    reads this to detect AutoResolved-on-skill-added-candidate at
+    commit time."""
+
+    incremental_impact: dict[str, IncrementalImpact] | None = Field(
+        default=None, alias="incrementalImpact"
+    )
+    """Per-VP impact analysis (change kind, risk label, affected
+    nodes, remediation choice). Bootstrap mirrors this into the
+    per-resolution evidence snapshot on commit. See
+    :class:`schema.incremental_impact.IncrementalImpact`."""
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 from rich.console import Console
 
-from ..orchestrator.content_pack import ResolvedPack, load_full_chain
+from ..orchestrator.content_pack import ResolvedPack, load_full_chain, load_pack
 from ..schema.bronze_fingerprint import ColumnInfo, compute_bronze_fingerprint
 from ..schema.bundle import Bundle, resolve_content_pack_root
 from ..schema.diagnostic_artifact import (
@@ -64,6 +64,7 @@ from ..schema.evidence_snapshot import (
     SnapshotProvenance,
     write_evidence_snapshot,
 )
+from ..schema.incremental_impact import IncrementalImpact
 from ..schema.path_segment import UnsafePathSegmentError, validate_path_segment
 from ..schema.resolutions_input import (
     ResolutionsFileError,
@@ -223,6 +224,11 @@ def run_variation_phase(
     # --- Pack load + Spark probe ---
     pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
     pack: ResolvedPack = load_full_chain(pack_root)
+    # Phase 3b: also load the unmerged entry overlay (if any) to access
+    # its untouched ``provenance`` block. ``merge_overlay`` discards
+    # overlay-level provenance (see content_pack.py:486), so we re-read
+    # the entry root to detect skill-authored overlays.
+    entry_overlay_pack = _load_entry_overlay_provenance(pack_root)
 
     dataset_ids = _bronze_dataset_ids(pack)
     catalog = bundle.aidp.catalog
@@ -410,6 +416,7 @@ def run_variation_phase(
         walker_results=walker_results,
         picks=picks,
         operator=operator,
+        entry_overlay_pack=entry_overlay_pack,
     )
 
     now = _now()
@@ -425,6 +432,16 @@ def run_variation_phase(
     )
     _write_profile_yaml(profile_path, profile)
 
+    # Phase 3b: thread skill_version from the entry overlay (when
+    # skill-authored) into the snapshot's top-level provenance so audit
+    # tooling can correlate evidence files with the skill version that
+    # produced them.
+    skill_version_for_snapshot: str | None = None
+    if _is_skill_authored_overlay(entry_overlay_pack):
+        prov = entry_overlay_pack.pack.provenance  # type: ignore[union-attr]
+        if prov is not None:
+            skill_version_for_snapshot = prov.skill_version
+
     snapshot = EvidenceSnapshotV1(
         tenant=tenant_name,
         generatedAt=now,
@@ -436,6 +453,7 @@ def run_variation_phase(
                 timestamp=now,
                 mechanism=mechanism_record,  # type: ignore[arg-type]
             ),
+            skillVersion=skill_version_for_snapshot,
             evidence=EvidenceContainer(
                 snapshots=[
                     SnapshotEntry(
@@ -585,6 +603,7 @@ def _assemble_resolutions(
     walker_results: dict[tuple[str, str], CandidateWalkResult],
     picks: dict[tuple[str, str], PromptResult],
     operator: str,
+    entry_overlay_pack=None,
 ) -> tuple[dict[tuple[str, str], str], list[ResolvedVariationPoint], str]:
     """Turn walker outcomes + operator picks into:
 
@@ -592,7 +611,29 @@ def _assemble_resolutions(
     * ``snapshot_entries``: the per-resolution audit list for the evidence snapshot.
     * ``mechanism_record``: the strongest mechanism applied across all picks
       (used in the profile's approvedBy block).
+
+    Phase 3b: when ``entry_overlay_pack`` is a skill-authored overlay,
+    stamp ``mechanism: skill_proposed`` on resolutions whose chosen
+    candidate matches the overlay's ``provenance.proposals[vp].candidate_added``,
+    and copy ``provenance.incremental_impact[vp]`` into the resolved
+    variation point. Without this, the initial-onboarding flow
+    silently records ``auto_resolve`` even though the skill drafted
+    the candidate that resolved — audit trail can't tell skill-driven
+    from pack-author-driven resolutions.
     """
+    skill_authored = _is_skill_authored_overlay(entry_overlay_pack)
+    skill_proposals: dict[str, str] = {}
+    skill_incremental_impacts: dict[str, IncrementalImpact] = {}
+    if skill_authored:
+        prov = entry_overlay_pack.pack.provenance  # type: ignore[union-attr]
+        if prov is not None and prov.proposals:
+            skill_proposals = {
+                vp_name: rec.candidate_added
+                for vp_name, rec in prov.proposals.items()
+            }
+        if prov is not None and prov.incremental_impact:
+            skill_incremental_impacts = dict(prov.incremental_impact)
+
     resolutions: dict[tuple[str, str], str] = {}
     snapshot_resolutions: list[ResolvedVariationPoint] = []
     mechanisms: list[str] = []
@@ -608,6 +649,11 @@ def _assemble_resolutions(
             override = picks.get(key)
             if override is not None and override.chosen == chosen:
                 mechanism = override.mechanism
+            elif skill_authored and skill_proposals.get(name) == chosen:
+                # Phase 3b: AutoResolved on a skill-proposed candidate —
+                # record skill_proposed instead of bare auto_resolve so
+                # the audit trail attributes the resolution to the skill.
+                mechanism = "skill_proposed"
             else:
                 mechanism = "auto_resolve"
             considered = [
@@ -617,6 +663,10 @@ def _assemble_resolutions(
             pick = picks[key]
             chosen = pick.chosen
             mechanism = pick.mechanism
+            # Phase 3b: cli_flag picks driven by a skill-authored overlay
+            # become skill_proposed.
+            if skill_authored and mechanism == "cli_flag" and name in skill_proposals:
+                mechanism = "skill_proposed"
             considered = [
                 CandidateConsidered(candidate=c, outcome="matched")
                 for c in outcome.matched
@@ -632,27 +682,31 @@ def _assemble_resolutions(
                 kind=kind,  # type: ignore[arg-type]
                 chosenCandidate=chosen,
                 candidatesConsidered=considered,
+                incrementalImpact=skill_incremental_impacts.get(name),
             )
         )
 
     # Record the profile-level mechanism per §9.5.9 audit-floor semantics:
-    #   1. ``auto_resolve`` is the baseline — it means "no operator
-    #      decision was needed for this variation point". Any
-    #      operator-touched mechanism takes precedence over it (an
-    #      operator-touched profile should NOT look identical to an
-    #      all-auto profile in the audit trail).
+    #   1. ``auto_resolve`` is the baseline — any operator-touched
+    #      mechanism takes precedence (an operator-touched profile
+    #      should NOT look identical to an all-auto profile in the
+    #      audit trail).
     #   2. Among operator-touched mechanisms, the WEAKEST wins — a
-    #      single ``non_interactive`` choice taints the whole profile
-    #      because it represents the least-validated approval.
+    #      single ``non_interactive`` choice taints the whole profile.
     # Order (weakest → strongest among operator-touched):
-    #   non_interactive < cli_flag < terminal_prompt.
+    #   non_interactive < cli_flag < skill_proposed < terminal_prompt.
     operator_touched = [m for m in mechanisms if m != "auto_resolve"]
     if not operator_touched:
         mechanism_record = "auto_resolve"
+        # Phase 3b: if all resolutions are auto_resolve but ANY came
+        # via a skill-proposed candidate, the run is skill-driven.
+        if skill_authored and "skill_proposed" in mechanisms:
+            mechanism_record = "skill_proposed"
     else:
         precedence_among_operator = [
             "non_interactive",
             "cli_flag",
+            "skill_proposed",
             "terminal_prompt",
         ]
         mechanism_record = operator_touched[0]
@@ -662,6 +716,41 @@ def _assemble_resolutions(
                 break
 
     return resolutions, snapshot_resolutions, mechanism_record
+
+
+def _load_entry_overlay_provenance(pack_root: Path):
+    """Re-load the entry overlay pack (unmerged) to access its untouched
+    ``provenance`` block.
+
+    Phase 3b: ``merge_overlay`` discards overlay-level provenance (see
+    ``orchestrator/content_pack.py:486``), so the merged pack returned
+    by ``load_full_chain`` always reflects the BASE's provenance. To
+    detect skill-authored overlays we need to re-read the entry root
+    via ``load_pack`` (which performs no overlay merging).
+
+    Returns ``None`` when the entry root does not declare ``extends:``
+    (i.e. the bundle points directly at a base pack — no overlay layer,
+    nothing to thread).
+    """
+    try:
+        entry = load_pack(pack_root)
+    except Exception:  # noqa: BLE001 — defensive: any load failure → skip
+        return None
+    if entry.pack.extends is None:
+        # The entry root IS the base pack (no overlay layer).
+        return None
+    return entry
+
+
+def _is_skill_authored_overlay(entry_overlay_pack) -> bool:
+    """Return True iff the entry overlay's provenance carries the
+    medallion-author skill_id."""
+    if entry_overlay_pack is None:
+        return False
+    prov = getattr(entry_overlay_pack.pack, "provenance", None)
+    if prov is None:
+        return False
+    return getattr(prov, "skill_id", None) == "aidp-fusion-medallion-author"
 
 
 def _build_profile(

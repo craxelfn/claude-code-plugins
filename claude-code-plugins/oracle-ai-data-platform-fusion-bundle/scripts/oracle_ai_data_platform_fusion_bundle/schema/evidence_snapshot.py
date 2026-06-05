@@ -61,6 +61,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from .incremental_impact import IncrementalImpact
+
 
 # ---------------------------------------------------------------------------
 # Approval / provenance sub-models
@@ -110,6 +112,15 @@ class ResolvedVariationPoint(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
     """Free-form measured evidence — row counts, non-null counts, whatever
     the prompt showed the operator. Skill consumes this for context."""
+
+    incremental_impact: IncrementalImpact | None = Field(
+        default=None, alias="incrementalImpact"
+    )
+    """Phase 3b extension — populated by bootstrap when the resolution
+    came via a skill-authored overlay carrying ``provenance.incrementalImpact``.
+    ``None`` for non-skill paths (preserves backwards-compat with
+    pre-Phase-3b evidence files). See
+    :class:`schema.incremental_impact.IncrementalImpact`."""
 
 
 class SnapshotEntry(BaseModel):

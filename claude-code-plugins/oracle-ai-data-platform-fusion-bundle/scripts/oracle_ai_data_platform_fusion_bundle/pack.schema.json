@@ -81,6 +81,64 @@
       "title": "ColumnAlias",
       "type": "object"
     },
+    "IncrementalImpact": {
+      "additionalProperties": false,
+      "description": "Per-VP impact analysis recorded on both the overlay and the\nevidence snapshot.\n\nThe medallion-author skill populates this when drafting an overlay;\nbootstrap (feature #2) mirrors it into the per-resolution evidence\non the ``--refresh`` commit (and on initial commit when the\noverlay is skill-authored).",
+      "properties": {
+        "affectedNodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Affectednodes",
+          "type": "array"
+        },
+        "changeKind": {
+          "enum": [
+            "initial",
+            "promotion",
+            "demotion"
+          ],
+          "title": "Changekind",
+          "type": "string"
+        },
+        "newCandidate": {
+          "title": "Newcandidate",
+          "type": "string"
+        },
+        "priorPinned": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priorpinned"
+        },
+        "remediation": {
+          "$ref": "#/$defs/RemediationRecord"
+        },
+        "riskLabel": {
+          "enum": [
+            "likely-rename",
+            "likely-different-semantics",
+            "unknown"
+          ],
+          "title": "Risklabel",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeKind",
+        "newCandidate",
+        "riskLabel",
+        "remediation"
+      ],
+      "title": "IncrementalImpact",
+      "type": "object"
+    },
     "OverrideEntry": {
       "additionalProperties": true,
       "description": "Per-node override declared by an overlay pack.\n\nPLAN \u00a78.7 merge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it (Phase-1 stubs use\n  this for ``python_legacy`` migration-period stubs).\n\nUnknown keys default to scalar-replace per \u00a78.7.",
@@ -225,8 +283,20 @@
     },
     "PackProvenance": {
       "additionalProperties": true,
-      "description": "Optional provenance block stamped by the medallion-author skill (ADR-0019).\n\nSkill-authored packs (overlays, in particular) record the skill version,\nmodel identity, generation timestamp, and reason. Hand-authored packs may\nomit this block entirely.",
+      "description": "Optional provenance block stamped by the medallion-author skill (ADR-0019).\n\nSkill-authored packs (overlays, in particular) record the skill version,\nmodel identity, generation timestamp, and reason. Hand-authored packs may\nomit this block entirely.\n\nPhase 3b extends the schema with skill-specific fields\n(``skill_id``, ``diagnostic_run_id``, ``proposals``,\n``incremental_impact``). **Every new field declares an explicit\ncamelCase ``Field(alias=...)``** so overlay YAML's camelCase keys\nparse \u2014 round-3 plan-review finding (without aliases the bootstrap\ndetection silently never fires).",
       "properties": {
+        "diagnosticRunId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Diagnosticrunid"
+        },
         "evidence": {
           "anyOf": [
             {
@@ -264,6 +334,21 @@
           "default": null,
           "title": "Generatedby"
         },
+        "incrementalImpact": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/IncrementalImpact"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Incrementalimpact"
+        },
         "modelId": {
           "anyOf": [
             {
@@ -276,6 +361,21 @@
           "default": null,
           "title": "Modelid"
         },
+        "proposals": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/SkillProposalRecord"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Proposals"
+        },
         "reason": {
           "anyOf": [
             {
@@ -287,6 +387,18 @@
           ],
           "default": null,
           "title": "Reason"
+        },
+        "skillId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Skillid"
         },
         "skillVersion": {
           "anyOf": [
@@ -302,6 +414,45 @@
         }
       },
       "title": "PackProvenance",
+      "type": "object"
+    },
+    "RemediationRecord": {
+      "additionalProperties": false,
+      "description": "The remediation choice recorded for one variation-point change.",
+      "properties": {
+        "operatorChose": {
+          "enum": [
+            "A",
+            "B",
+            "C",
+            "D",
+            "E"
+          ],
+          "title": "Operatorchose",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "recommended": {
+          "enum": [
+            "A",
+            "B",
+            "C",
+            "D",
+            "E"
+          ],
+          "title": "Recommended",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recommended",
+        "operatorChose",
+        "rationale"
+      ],
+      "title": "RemediationRecord",
       "type": "object"
     },
     "RunIdColumnDefaults": {
@@ -393,6 +544,45 @@
         "columnExists"
       ],
       "title": "SemanticVariantDetect",
+      "type": "object"
+    },
+    "SkillProposalRecord": {
+      "additionalProperties": false,
+      "description": "One per-VP proposal the medallion-author skill captured at\noverlay-draft time (Phase 3b).\n\nBootstrap reads ``candidate_added`` to detect AutoResolved-on-skill-\nproposed-candidate at commit time (Phase 3b round-2 finding \u2014\ninitial-onboarding flow must record ``mechanism: skill_proposed``\nwhen the walker AutoResolves on a candidate the skill added).",
+      "properties": {
+        "candidateAdded": {
+          "title": "Candidateadded",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning"
+        }
+      },
+      "required": [
+        "candidateAdded"
+      ],
+      "title": "SkillProposalRecord",
       "type": "object"
     }
   },
