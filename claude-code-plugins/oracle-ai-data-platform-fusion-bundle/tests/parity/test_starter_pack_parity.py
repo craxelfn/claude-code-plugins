@@ -274,7 +274,21 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
         bronze_table_for_source=btfs,
     )
 
-    outputs: dict[str, dict[str, list]] = {}
+    outputs: dict[str, dict[str, Any]] = {}
+
+    def _capture(node_id: str, layer: str, v1_target: str, v2_target: str):
+        """Collect rows + simple-string types for both targets. Type
+        capture is what makes precision/scale drift (e.g. decimal(28,2)
+        vs decimal(28,8)) visible to the parity assertions."""
+        v1_df = spark.read.table(v1_target)
+        v2_df = spark.read.table(v2_target)
+        outputs[node_id] = {
+            "v1": v1_df.collect(),
+            "v2": v2_df.collect(),
+            "v1_schema": {f.name: f.dataType.simpleString() for f in v1_df.schema.fields},
+            "v2_schema": {f.name: f.dataType.simpleString() for f in v2_df.schema.fields},
+            "layer": layer,
+        }
 
     # ---- dim_supplier ------------------------------------------------
     v1_target = f"{CATALOG}.{SILVER}.dim_supplier_v1"
@@ -286,11 +300,8 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
     v2_target = f"{CATALOG}.{SILVER}.dim_supplier_v2"
     r = render_node_sql(pack.silver["dim_supplier"], pack, profile, ctx)
     _execute_v2(spark, r.sql, dict(r.params), v2_target)
-    outputs["dim_supplier"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "silver",
-    }
+    _capture("dim_supplier", "silver",
+             f"{CATALOG}.{SILVER}.dim_supplier_v1", v2_target)
 
     # ---- dim_account -------------------------------------------------
     v1_target = f"{CATALOG}.{SILVER}.dim_account_v1"
@@ -303,11 +314,8 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
     v2_target = f"{CATALOG}.{SILVER}.dim_account_v2"
     r = render_node_sql(pack.silver["dim_account"], pack, profile, ctx)
     _execute_v2(spark, r.sql, dict(r.params), v2_target)
-    outputs["dim_account"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "silver",
-    }
+    _capture("dim_account", "silver",
+             f"{CATALOG}.{SILVER}.dim_account_v1", v2_target)
 
     # ---- gl_balance --------------------------------------------------
     # gl_balance LEFT JOINs dim_account. Use the v1 dim for v1's gl_balance
@@ -327,11 +335,8 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
               f"AS SELECT * FROM {CATALOG}.{SILVER}.dim_account_v2")
     r = render_node_sql(pack.gold["gl_balance"], pack, profile, ctx)
     _execute_v2(spark, r.sql, dict(r.params), v2_target)
-    outputs["gl_balance"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "gold",
-    }
+    _capture("gl_balance", "gold",
+             f"{CATALOG}.{GOLD}.gl_balance_v1", v2_target)
 
     # ---- supplier_spend ----------------------------------------------
     v1_target = f"{CATALOG}.{GOLD}.supplier_spend_v1"
@@ -347,11 +352,8 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
               f"AS SELECT * FROM {CATALOG}.{SILVER}.dim_supplier_v2")
     r = render_node_sql(pack.gold["supplier_spend"], pack, profile, ctx)
     _execute_v2(spark, r.sql, dict(r.params), v2_target)
-    outputs["supplier_spend"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "gold",
-    }
+    _capture("supplier_spend", "gold",
+             f"{CATALOG}.{GOLD}.supplier_spend_v1", v2_target)
 
     # ---- ap_aging ----------------------------------------------------
     # v1 ap_aging defaults to due_date_mode='auto'; for parity with the
@@ -369,11 +371,8 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
     v2_target = f"{CATALOG}.{GOLD}.ap_aging_v2"
     r = render_node_sql(pack.gold["ap_aging"], pack, profile, ctx)
     _execute_v2(spark, r.sql, dict(r.params), v2_target)
-    outputs["ap_aging"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "gold",
-    }
+    _capture("ap_aging", "gold",
+             f"{CATALOG}.{GOLD}.ap_aging_v1", v2_target)
 
     # ---- dim_calendar ------------------------------------------------
     # Builtin — both paths call the same dim_calendar.build under the
@@ -395,11 +394,7 @@ def parity_outputs(spark: SparkSession, seeded_bronze):
         start_date="2020-01-01", end_date="2030-12-31",
         fiscal_start_month=1, run_id=V2_RUN_ID,
     ), v2_target)
-    outputs["dim_calendar"] = {
-        "v1": spark.read.table(v1_target).collect(),
-        "v2": spark.read.table(v2_target).collect(),
-        "layer": "silver",
-    }
+    _capture("dim_calendar", "silver", v1_target, v2_target)
     # Touch the adapter for coverage — it constructs the same SQL the v2
     # leg above hand-rolled.
     _ = dim_calendar_adapter.VERSION
@@ -422,24 +417,43 @@ def _audit_cols_for(layer: str) -> set[str]:
 
 def _normalise(row, audit_cols: set[str]) -> tuple:
     """Project a Row to a deterministic comparable tuple — drops audit
-    columns whose values are non-deterministic across runs."""
+    columns whose values are non-deterministic across runs.
+
+    Decimal values are compared AS Decimal (not coerced to float) so
+    precision/scale mismatches between backends — e.g. v1's DECIMAL(28,2)
+    rounding to cents vs a v2 DECIMAL(28,8) that preserves 8 fractional
+    digits — surface as test failures rather than silently passing.
+    """
     d = row.asDict()
-    # Spark may return Decimal for the same value with different precision/
-    # scale across paths; coerce decimals to a canonical float for
-    # comparison, since the row-equivalence contract is about values.
     out = []
     for k in sorted(d.keys()):
         if k in audit_cols:
             continue
-        v = d[k]
-        try:
-            from decimal import Decimal
-            if isinstance(v, Decimal):
-                v = float(v)
-        except ImportError:
-            pass
-        out.append((k, v))
+        out.append((k, d[k]))
     return tuple(out)
+
+
+def _assert_schemas_match(v1, v2, node_id: str, audit_cols: set[str]) -> None:
+    """Stronger contract: column names + Spark types must agree. Catches
+    precision/scale drift that row-value comparison alone would miss
+    (decimal(28,2) vs decimal(28,8) hold the same numeric value but
+    different types)."""
+    if not v1 or not v2:
+        return
+    # Sample one row from each side; Spark Rows carry a schema reference
+    # via row.__fields__ but not the types. The DataFrame-level schema is
+    # captured at execution time and passed through the row's dtype map.
+    # Compare what we can: the field set.
+    v1_fields = set(v1[0].asDict().keys()) - audit_cols
+    v2_fields = set(v2[0].asDict().keys()) - audit_cols
+    only_in_v1 = v1_fields - v2_fields
+    only_in_v2 = v2_fields - v1_fields
+    if only_in_v1 or only_in_v2:
+        pytest.fail(
+            f"{node_id}: schema field-set diverges between backends.\n"
+            f"  v1-only: {sorted(only_in_v1)}\n"
+            f"  v2-only: {sorted(only_in_v2)}"
+        )
 
 
 def _assert_row_sets_equal(v1, v2, node_id: str, layer: str) -> None:
@@ -476,6 +490,26 @@ def _assert_audit_typed(v1, v2, node_id: str, layer: str) -> None:
         assert col in v2_keys, f"{node_id} v2 missing audit column {col!r}"
 
 
+def _assert_schema_types_match(o: dict, audit_cols: set[str], node_id: str) -> None:
+    """v1 and v2 schemas (excluding audit cols) must agree on column
+    name AND Spark type (precision/scale included). This catches the
+    decimal(28,2) vs decimal(28,8) class of drift that row-value
+    comparison alone hides."""
+    v1_types = {k: v for k, v in o["v1_schema"].items() if k not in audit_cols}
+    v2_types = {k: v for k, v in o["v2_schema"].items() if k not in audit_cols}
+    if v1_types != v2_types:
+        diffs = []
+        for k in sorted(set(v1_types) | set(v2_types)):
+            t1 = v1_types.get(k, "<missing>")
+            t2 = v2_types.get(k, "<missing>")
+            if t1 != t2:
+                diffs.append(f"  {k}: v1={t1!r} v2={t2!r}")
+        pytest.fail(
+            f"{node_id}: schema types diverge between backends\n"
+            + "\n".join(diffs)
+        )
+
+
 def _assert_surrogate_match(v1, v2, node_id: str, surrogate: str,
                              natural_key: str) -> None:
     if not v1:
@@ -499,6 +533,8 @@ class TestStarterPackParity:
 
     def test_dim_supplier_parity(self, parity_outputs) -> None:
         o = parity_outputs["dim_supplier"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "dim_supplier")
         _assert_row_sets_equal(o["v1"], o["v2"], "dim_supplier", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "dim_supplier", o["layer"])
         _assert_surrogate_match(o["v1"], o["v2"], "dim_supplier",
@@ -506,6 +542,8 @@ class TestStarterPackParity:
 
     def test_dim_account_parity(self, parity_outputs) -> None:
         o = parity_outputs["dim_account"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "dim_account")
         _assert_row_sets_equal(o["v1"], o["v2"], "dim_account", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "dim_account", o["layer"])
         _assert_surrogate_match(o["v1"], o["v2"], "dim_account",
@@ -513,21 +551,29 @@ class TestStarterPackParity:
 
     def test_dim_calendar_parity(self, parity_outputs) -> None:
         o = parity_outputs["dim_calendar"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "dim_calendar")
         assert len(o["v1"]) == len(o["v2"])
         _assert_row_sets_equal(o["v1"], o["v2"], "dim_calendar", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "dim_calendar", o["layer"])
 
     def test_gl_balance_parity(self, parity_outputs) -> None:
         o = parity_outputs["gl_balance"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "gl_balance")
         _assert_row_sets_equal(o["v1"], o["v2"], "gl_balance", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "gl_balance", o["layer"])
 
     def test_supplier_spend_parity(self, parity_outputs) -> None:
         o = parity_outputs["supplier_spend"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "supplier_spend")
         _assert_row_sets_equal(o["v1"], o["v2"], "supplier_spend", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "supplier_spend", o["layer"])
 
     def test_ap_aging_parity(self, parity_outputs) -> None:
         o = parity_outputs["ap_aging"]
+        audit = _audit_cols_for(o["layer"])
+        _assert_schema_types_match(o, audit, "ap_aging")
         _assert_row_sets_equal(o["v1"], o["v2"], "ap_aging", o["layer"])
         _assert_audit_typed(o["v1"], o["v2"], "ap_aging", o["layer"])

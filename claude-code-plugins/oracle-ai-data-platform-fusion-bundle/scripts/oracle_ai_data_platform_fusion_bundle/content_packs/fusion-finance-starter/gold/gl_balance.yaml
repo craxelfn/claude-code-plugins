@@ -83,11 +83,11 @@ outputSchema:
       nullable: true
       pii: none
     - name: period_year
-      type: int
+      type: bigint
       nullable: false
       pii: none
     - name: period_num
-      type: int
+      type: bigint
       nullable: false
       pii: none
     - name: period_name
@@ -107,23 +107,23 @@ outputSchema:
       nullable: false
       pii: none
     - name: begin_balance_dr
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: begin_balance_cr
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: period_net_dr
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: period_net_cr
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: closing_balance
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: bronze_extract_ts

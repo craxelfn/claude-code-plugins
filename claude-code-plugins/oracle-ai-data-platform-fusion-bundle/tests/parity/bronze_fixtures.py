@@ -177,6 +177,15 @@ def gl_period_balances_rows() -> list[dict[str, Any]]:
          "BalancePeriodName": "Mar-26", "BalanceCurrencyCode": "USD",
          "BalanceBeginBalanceDr": 1450.00, "BalanceBeginBalanceCr": 0.00,
          "BalancePeriodNetDr": 200.00, "BalancePeriodNetCr": 0.00},
+        # Sub-cent fractional row — v1 rounds to DECIMAL(28,2); v2 must
+        # do the same. If a future regression widens v2 to DECIMAL(28,8)
+        # this row's closing_balance will differ between backends.
+        {**base,
+         "BalanceCodeCombinationId": 10001,
+         "BalancePeriodYear": 2026, "BalancePeriodNum": 4,
+         "BalancePeriodName": "Apr-26", "BalanceCurrencyCode": "USD",
+         "BalanceBeginBalanceDr": 1650.00, "BalanceBeginBalanceCr": 0.00,
+         "BalancePeriodNetDr": 100.12345678, "BalancePeriodNetCr": 0.00567},
     ]
 
 
@@ -230,6 +239,15 @@ def ap_invoices_rows() -> list[dict[str, Any]]:
          "ApInvoicesInvoiceAmount": 750.00,
          "ApInvoicesAmountPaid": None,  # NULL → COALESCE 0
          "ApInvoicesInvoiceDate": datetime(2026, 5, 10, tzinfo=timezone.utc)},
+        # Sub-cent fractional amounts — v1's DECIMAL(28,2) rounds to
+        # cents. Phase 3 round-3 regression guard: if a future change
+        # widens v2 to DECIMAL(28,8) the open_amount / total_paid
+        # aggregates here will diverge between backends.
+        {**base, "ApInvoicesVendorId": 102,
+         "ApInvoicesInvoiceCurrencyCode": "USD",
+         "ApInvoicesInvoiceAmount": 1234.5678,
+         "ApInvoicesAmountPaid": 100.1234,
+         "ApInvoicesInvoiceDate": datetime(2026, 5, 25, tzinfo=timezone.utc)},
     ]
 
 

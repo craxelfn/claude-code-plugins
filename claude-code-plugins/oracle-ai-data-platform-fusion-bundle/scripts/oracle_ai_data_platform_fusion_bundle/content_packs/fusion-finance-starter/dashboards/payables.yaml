@@ -29,12 +29,12 @@ requires:
       - name: aging_bucket
         type: string
       - name: open_amount
-        type: decimal(28,8)
+        type: decimal(28,2)
     gold.supplier_spend:
       - name: supplier_number
         type: string
       - name: total_invoice_amount
-        type: decimal(28,8)
+        type: decimal(20,2)
 
 validationQueries:
   - id: ap_aging_has_data

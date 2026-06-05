@@ -82,19 +82,19 @@ outputSchema:
       nullable: false
       pii: none
     - name: open_amount
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: invoice_amount_total
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: amount_paid_total
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: credit_open_amount
-      type: decimal(28,8)
+      type: decimal(28,2)
       nullable: true
       pii: none
     - name: credit_open_count

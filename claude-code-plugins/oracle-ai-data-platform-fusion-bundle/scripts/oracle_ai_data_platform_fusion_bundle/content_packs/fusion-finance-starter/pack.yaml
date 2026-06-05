@@ -30,13 +30,21 @@ profiles:
       startDate: '2020-01-01'
       endDate: '2030-12-31'
       fiscalStartMonth: 1
-    # NOTE: superseded in Phase 3 by `columnAliases.coa_*_segment` below.
-    # These positional-alias names are migration-period redundant — the
-    # Phase 3 SQL templates resolve COA segments via `{{ column.coa_*_segment }}`
-    # against `resolved.column.*` in the tenant profile, not via
-    # `{{ profile.chartOfAccounts.* }}` (the generic profile resolver binds
-    # values as parameters, not identifiers). Block stays for Phase 1 / 2
-    # validation surface stability; Phase 4+ can remove cleanly.
+    # NOTE: round-2 contract — Phase 3 hardcodes the conventional
+    # six-segment v1 COA shape directly in `silver/dim_account.sql`
+    # (positional `segment_01..06` + six semantic aliases
+    # company/cost_center/account/subaccount/product/intercompany).
+    # No `coa_*_segment` columnAliases / `{{ column.coa_* }}` tokens
+    # exist in v0.3 — that was the initial PR shape, rolled back per
+    # reviewer feedback to restore v1 row-equivalence. Tenants whose
+    # COA places roles at non-conventional positions today need a
+    # pack overlay that ships a different `dim_account.sql`; a future
+    # declarative role-to-position override mechanism awaits new
+    # renderer vocabulary + live evidence of role-positioning
+    # variation. See docs/v2-phase-3-variation-catalog.md "COA segment
+    # handling" for the full audit. The chartOfAccounts block below
+    # stays as documentation of the conventional positions but is not
+    # consumed by any v0.3 SQL template.
     chartOfAccounts:
       balancingSegment: segment1
       costCenterSegment: segment2

@@ -60,11 +60,11 @@ outputSchema:
       nullable: false
       pii: none
     - name: total_invoice_amount
-      type: decimal(28,8)
+      type: decimal(20,2)
       nullable: true
       pii: none
     - name: total_paid
-      type: decimal(28,8)
+      type: decimal(20,2)
       nullable: true
       pii: none
     - name: last_invoice_date
