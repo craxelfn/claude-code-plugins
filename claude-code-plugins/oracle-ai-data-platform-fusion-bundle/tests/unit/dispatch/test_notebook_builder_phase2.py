@@ -210,6 +210,76 @@ class TestAdversarialRoundTrip:
         assert "DROP TABLE" not in bootstrap
         assert "malicious_value" not in bootstrap
 
+    def test_generated_run_cell_uses_kwargs_orchestrator_run_accepts(self, tmp_wheel) -> None:
+        """Lock the round-12 review finding: the generated notebook's
+        orchestrator.run(...) call must use kwargs that the real
+        function signature accepts. Otherwise the notebook raises
+        TypeError before any node executes.
+        """
+        import inspect
+
+        from oracle_ai_data_platform_fusion_bundle import orchestrator
+
+        # Pull the real orchestrator.run signature.
+        run_sig = inspect.signature(orchestrator.run)
+        accepted_kwargs = set(run_sig.parameters)
+
+        # Build a content-pack notebook and extract the run cell.
+        nb = build_notebook(
+            **_minimal_args(
+                tmp_wheel,
+                execution_backend="content-pack",
+                profile_yaml="schemaVersion: 1\ntenant: x\n",
+                pack_files={"x": "y"},
+                pack_manifest={"a": 1},
+            )
+        )
+        run_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
+        all_sources = "\n".join(
+            "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
+            for c in run_cells
+        )
+
+        # Find every kwarg the run cell passes to orchestrator.run(...).
+        run_call_match = re.search(
+            r"orchestrator\.run\(([^)]*)\)", all_sources, re.DOTALL,
+        )
+        assert run_call_match is not None
+        args_block = run_call_match.group(1)
+        used_kwargs = set(re.findall(r"^\s*(\w+)\s*=", args_block, re.MULTILINE))
+
+        # Every used kwarg must be accepted by the real function. If a
+        # future change emits an unsupported kwarg, this test fails
+        # BEFORE the notebook is ever uploaded.
+        unsupported = used_kwargs - accepted_kwargs
+        assert not unsupported, (
+            f"Generated notebook's orchestrator.run(...) uses kwargs "
+            f"the real function doesn't accept: {unsupported!r}. "
+            f"Accepted: {sorted(accepted_kwargs)!r}."
+        )
+
+    def test_legacy_backend_run_cell_also_uses_accepted_kwargs(self, tmp_wheel) -> None:
+        """Same check for the legacy-python branch — must not emit
+        unsupported kwargs."""
+        import inspect
+
+        from oracle_ai_data_platform_fusion_bundle import orchestrator
+
+        accepted_kwargs = set(inspect.signature(orchestrator.run).parameters)
+
+        nb = build_notebook(**_minimal_args(tmp_wheel, execution_backend="legacy-python"))
+        all_sources = "\n".join(
+            "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
+            for c in nb["cells"] if c["cell_type"] == "code"
+        )
+        run_call_match = re.search(r"orchestrator\.run\(([^)]*)\)", all_sources, re.DOTALL)
+        assert run_call_match is not None
+        used_kwargs = set(re.findall(r"^\s*(\w+)\s*=", run_call_match.group(1), re.MULTILINE))
+        unsupported = used_kwargs - accepted_kwargs
+        assert not unsupported, (
+            f"Legacy-backend notebook emits unsupported kwargs: {unsupported!r}"
+        )
+
     def test_pack_files_dict_round_trips_via_base64(self) -> None:
         pack_files = {
             "__layer_0__/pack.yaml": "id: malicious-pack\nversion: 1.0.0\n",

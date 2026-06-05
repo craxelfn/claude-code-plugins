@@ -89,13 +89,16 @@ aidp-fusion-bundle run --inline --mode incremental \
 
 ## REST dispatch (no `--inline`)
 
-The same flow runs from the laptop CLI through the AIDP REST job
-API. `dispatch/notebook_builder.py` embeds the staged pack files +
-profile YAML as **base64-encoded JSON** in the generated notebook
-source — no raw payload leaks into the cell text. The cluster-side
-notebook reconstructs the `ResolvedPack` + `TenantProfile` via
-`materialize_staged_pack` + `load_full_chain` (the orchestrator-owned
-public helpers promoted in Step 12c.bis).
+Same backend choice flows through. `commands/run.py` resolves the pack
+and reads the profile YAML at the laptop; `dispatch/notebook_builder.py`
+embeds the staged pack files + profile YAML as **base64-encoded JSON**
+in the generated notebook source — no raw payload leaks into the cell
+text. The cluster-side notebook reconstructs the `ResolvedPack` +
+`TenantProfile` via `materialize_staged_pack` + `load_full_chain` (the
+orchestrator-owned public helpers promoted in Step 12c.bis) and passes
+them into `orchestrator.run(..., execution_backend="content-pack",
+resolved_pack=..., tenant_profile=...)`, which dispatches to the
+content-pack per-node runner.
 
 ## Default backend stays `legacy-python`
 
@@ -140,6 +143,10 @@ A working fixture lives at:
 * Pack — `tests/fixtures/content_packs/phase2_test_pack/`
 * Bundle + profile — `tests/fixtures/projects/phase2_project/`
 
-The integration tests under `tests/integration/` (gated by
-`AIDP_FUSION_BUNDLE_RUN_SPARK_TESTS=1`) exercise the runner end-to-end
-against a local PySpark session using this fixture.
+Unit tests under `tests/unit/test_orchestrator_run_content_pack.py`
+exercise `orchestrator.run(..., execution_backend="content-pack", ...)`
+end-to-end against this fixture using a mocked Spark session — they
+prove the CLI flag reaches `sql_runner.execute_node`. Live PySpark
+integration tests against the same fixture (gated by
+`AIDP_FUSION_BUNDLE_RUN_SPARK_TESTS=1`) are a follow-up that lands
+alongside the bronze-layer migration in Phase 3.

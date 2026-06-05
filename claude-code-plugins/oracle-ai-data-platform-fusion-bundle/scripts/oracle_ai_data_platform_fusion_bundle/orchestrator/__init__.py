@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from graphlib import TopologicalSorter
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from oracle_ai_data_platform_fusion_bundle import extractors
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
@@ -802,6 +802,10 @@ def run(
     layers: list[str] | None = None,
     dry_run: bool = False,
     resume_run_id: str | None = None,
+    # Phase 2 additions (PLAN §15 Phase 2; default behaviour unchanged).
+    execution_backend: str = "legacy-python",
+    resolved_pack: "Any | None" = None,
+    tenant_profile: "Any | None" = None,
 ) -> RunSummary:
     """Materialize bronze + silver + gold per the bundle.yaml plan.
 
@@ -858,6 +862,25 @@ def run(
     # now dispatches the bronze MERGE + silver/gold MERGE pipeline; the
     # write-strategy / state-contract pieces shipped together to keep the
     # destructive-write blast radius contained.
+
+    # Phase 2 — content-pack backend dispatch. When the operator opts
+    # in via `--execution-backend content-pack`, divert to the new
+    # silver/gold runner (PLAN §15 Phase 2). The default legacy-python
+    # path falls through unchanged, so every existing v0.3 behaviour is
+    # preserved. Resume + content-pack is not supported in v0.3
+    # (AIDPF-1032 — guarded at the CLI; defensive re-check here).
+    if execution_backend == "content-pack":
+        return _run_content_pack_backend(
+            bundle_path=bundle_path,
+            spark=spark,
+            mode=mode,
+            datasets=datasets,
+            layers=layers,
+            dry_run=dry_run,
+            resume_run_id=resume_run_id,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
+        )
 
     # 1. Load bundle.yaml → (Bundle, TablePaths) via load_bundle (§4.4b).
     bundle, paths = load_bundle(bundle_path)
@@ -1128,6 +1151,200 @@ def run(
         # P1.5α-fix19: thread the preflight recommendations into the
         # operator-facing summary so the CLI renders them in the footer.
         recommendations=preflight_result.recommendations,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — content-pack execution backend dispatcher
+# ---------------------------------------------------------------------------
+
+
+def _run_content_pack_backend(
+    *,
+    bundle_path: "Path",
+    spark: "SparkSession | None",
+    mode: str,
+    datasets: "list[str] | None",
+    layers: "list[str] | None",
+    dry_run: bool,
+    resume_run_id: str | None,
+    resolved_pack: "Any | None",
+    tenant_profile: "Any | None",
+) -> RunSummary:
+    """Execute the silver+gold layers via the content-pack runner (PLAN §15 Phase 2).
+
+    Default for v0.3: bronze stays a legacy-python concern. Customers
+    opting into ``--execution-backend content-pack`` run a legacy seed
+    first to populate bronze, then content-pack against silver+gold.
+    Phase 3 migrates bronze; until then this dispatcher does NOT
+    invoke the v1 bronze extractor — that keeps the cross-backend
+    blast radius contained.
+
+    Args:
+        bundle_path: path to ``bundle.yaml``.
+        spark: optional pre-existing SparkSession.
+        mode: ``"seed"`` or ``"incremental"``.
+        datasets / layers: content-pack node-id and layer filters
+            (interpreted by :func:`resolve_content_pack_plan`, NOT by
+            the legacy registry's :func:`resolve_plan`).
+        dry_run: returns an empty RunSummary without dispatching.
+        resume_run_id: not supported for content-pack v0.3
+            (AIDPF-1032; CLI rejects this earlier; defensive
+            re-check below).
+        resolved_pack: pre-loaded ``ResolvedPack``. CLI / inline
+            passes the laptop-resolved pack; REST notebook passes the
+            cluster-side reconstructed pack from
+            ``materialize_staged_pack`` + ``load_full_chain``.
+        tenant_profile: pre-loaded ``TenantProfile``. Same shape as
+            above.
+
+    Returns:
+        Standard :class:`RunSummary` with one :class:`RunStep` per
+        executed node.
+
+    Raises:
+        OrchestratorConfigError: ``--resume`` requested with
+            ``execution_backend == 'content-pack'`` (defensive — the
+            CLI rejects earlier).
+        ValueError: ``resolved_pack`` or ``tenant_profile`` is None.
+    """
+    # Lazy imports — the content-pack backend's deps don't load on the
+    # default v1 path.
+    from datetime import datetime as _dt, timezone as _tz
+    from uuid import uuid4
+    from .content_pack_plan_resolver import resolve_content_pack_plan
+    from .sql_runner import execute_node as cp_execute_node
+    from .sql_renderer import RunContext as CpRunContext
+    from .state_phase2 import ensure_state_columns_v2
+    from ..schema.bundle import (
+        AIDPF_1032_RESUME_NOT_SUPPORTED,
+        load_bundle as _load_bundle_v2,
+    )
+    from ..schema.tenant_profile import compute_profile_hash
+
+    if resume_run_id is not None:
+        raise OrchestratorConfigError(
+            f"{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
+            f"with --execution-backend content-pack in v0.3."
+        )
+    if resolved_pack is None:
+        raise ValueError(
+            "_run_content_pack_backend: resolved_pack is None. The CLI / "
+            "inline path is responsible for loading the pack via "
+            "load_full_chain(...) and passing it in. REST dispatch passes "
+            "the cluster-side reconstructed pack."
+        )
+    if tenant_profile is None:
+        raise ValueError(
+            "_run_content_pack_backend: tenant_profile is None. The CLI / "
+            "inline path loads the profile via load_tenant_profile(...); "
+            "REST dispatch reconstructs it via load_tenant_profile_from_string."
+        )
+
+    bundle, paths = _load_bundle_v2(bundle_path)
+    bundle_project = bundle.project
+
+    if dry_run:
+        # Return a clean empty summary; the plan resolver is cheap so
+        # we could build the would-run plan here, but Phase 2 keeps the
+        # dry-run path minimal.
+        return RunSummary.empty(bundle_project=bundle_project, mode=mode)
+
+    spark = spark or _bootstrap_spark()
+
+    # State-table setup + Phase 2 additive migration. ensure_state_table
+    # (v1) creates the base table if needed; ensure_state_columns_v2
+    # adds the Phase 2 columns + redeploys the latest view with the
+    # widened grain.
+    state.ensure_state_table(spark, paths)
+    ensure_state_columns_v2(spark, paths)
+
+    # Build the run context the renderer needs.
+    run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    ctx = CpRunContext(
+        catalog=bundle.aidp.catalog,
+        bronze_schema=bundle.aidp.bronze_schema,
+        silver_schema=bundle.aidp.silver_schema,
+        gold_schema=bundle.aidp.gold_schema,
+        run_id=run_id,
+        prior_watermark={},  # Phase 2 v0.3: caller-side prior watermark
+                              # lookups land in Phase 3 alongside the
+                              # bronze-merge generalisation.
+        mode=mode,
+        bronze_table_for_source={},  # Populated below from bundle datasets.
+    )
+    # Map each declared dataset to its fully-qualified bronze table.
+    bronze_table_for_source = {
+        ds.id: f"{bundle.aidp.catalog}.{bundle.aidp.bronze_schema}.{ds.id}"
+        for ds in bundle.datasets
+    }
+    # Re-build ctx with the populated bronze map.
+    ctx = CpRunContext(
+        catalog=ctx.catalog,
+        bronze_schema=ctx.bronze_schema,
+        silver_schema=ctx.silver_schema,
+        gold_schema=ctx.gold_schema,
+        run_id=ctx.run_id,
+        prior_watermark=ctx.prior_watermark,
+        mode=ctx.mode,
+        bronze_table_for_source=bronze_table_for_source,
+    )
+
+    profile_hash = compute_profile_hash(tenant_profile)
+
+    plan = resolve_content_pack_plan(
+        resolved_pack, datasets=datasets, layers=layers,
+    )
+
+    # Per-node execution loop. execute_node writes its own state rows
+    # (success + failure paths) and returns a NodeExecutionResult; we
+    # translate that into RunStep entries for the RunSummary.
+    started_at = _dt.now(_tz.utc)
+    steps: list[RunStep] = []
+    for node in plan:
+        node_started = _dt.now(_tz.utc)
+        result = cp_execute_node(
+            spark,
+            node=node,
+            pack=resolved_pack,
+            profile=tenant_profile,
+            ctx=ctx,
+            paths=paths,
+            mode=mode,  # type: ignore[arg-type]
+            profile_hash=profile_hash,
+            prior_plan_hash=None,  # Phase 2 v0.3: drift gate reads
+                                    # come from execute_node's own
+                                    # state lookup in a follow-up;
+                                    # here we leave None which is the
+                                    # correct seed-mode value.
+        )
+        node_duration = (_dt.now(_tz.utc) - node_started).total_seconds()
+        status: str = "success" if result.status == "success" else "failed"
+        steps.append(
+            RunStep(
+                run_id=run_id,
+                dataset_id=node.id,
+                layer=node.layer,
+                mode=mode,  # type: ignore[arg-type]
+                status=status,  # type: ignore[arg-type]
+                row_count=result.row_count,
+                duration_seconds=node_duration,
+                error_message=result.error_message or None,
+                watermark_used=None,
+                last_watermark=result.output_watermark,
+                plan_hash=result.plan_hash or None,
+                plan_snapshot=None,
+            )
+        )
+
+    finished_at = _dt.now(_tz.utc)
+    return RunSummary(
+        run_id=run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        bundle_project=bundle_project,
+        mode=mode,
+        steps=tuple(steps),
     )
 
 

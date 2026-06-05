@@ -176,6 +176,55 @@ def _run_inline(
             f"reading fusion_bundle_state, computing reattempt plan…"
         )
 
+    # Phase 2 — when --execution-backend content-pack, resolve the pack
+    # + profile up front and pass them into orchestrator.run.
+    resolved_pack = None
+    tenant_profile = None
+    if execution_backend == "content-pack":
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            load_bundle as _load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import (
+            load_tenant_profile,
+            resolve_profile_path,
+        )
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+
+        bundle, _paths = _load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; --execution-backend content-pack "
+                f"requires it.[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"--execution-backend content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        tenant_profile = load_tenant_profile(profile_path)
+
     try:
         summary = orchestrator.run(
             bundle_path=bundle_path,
@@ -184,6 +233,9 @@ def _run_inline(
             layers=layers,
             resume_run_id=resume_run_id,
             dry_run=dry_run,
+            execution_backend=execution_backend,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
         )
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
