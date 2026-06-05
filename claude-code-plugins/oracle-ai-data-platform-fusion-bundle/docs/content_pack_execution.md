@@ -166,6 +166,58 @@ modules drive every default run.
   and explained at length in
   `docs/v2-phase-3-variation-catalog.md` "AP aging — proxy mode only".
 
+## Phase 3a additions — bootstrap variation-point resolution
+
+`aidp-fusion-bundle bootstrap` now runs a **second phase** when
+`bundle.content_pack` is non-None: it probes the tenant's bronze
+schema, walks each variation point declared in `pack.yaml`'s
+`columnAliases` / `semanticVariants`, pins resolved values to
+`<bundle.yaml.parent>/profiles/<tenant>.yaml`, and writes an evidence
+snapshot to `<bundle.yaml.parent>/evidence/<tenant>/<ISO-ts>.yaml`.
+The phase is no-op for v1 bundles (no `contentPack:` block);
+their existing `bootstrap` behaviour is unchanged.
+
+Algorithm per PLAN §9.5.4:
+
+1. **Identity gate** — resolve operator from `--operator` →
+   `AIDP_OPERATOR` → `USER`. Empty / whitespace / unset → `AIDPF-1020`.
+2. **Pack load + probe** — load the resolved pack (overlay chain
+   included); run `DESCRIBE TABLE` once per bronze dataset.
+3. **Walk** — for each `columnAliases.<name>` and
+   `semanticVariants.<name>`, walk the candidate list in priority
+   order. Three outcomes:
+   - **Exactly one match** → auto-resolve, record `mechanism: auto_resolve`.
+   - **Multiple matches** → terminal prompt (or scripted via
+     `--resolutions`, or auto-pick first under `--non-interactive`).
+   - **Zero matches with `required: true`** → write
+     `AIDPF-2010__<vp-name>.json` / `AIDPF-2011__<vp-name>.json`
+     diagnostic artifact. Bootstrap COLLECTS all failures before
+     exiting — multiple unresolved variation points produce multiple
+     artifact files in one run.
+4. **Persist** — on success, write profile YAML +
+   `bronzeSchemaFingerprint` + evidence snapshot; preserve all
+   prior snapshots.
+
+New CLI flags on `bootstrap`:
+
+* `--refresh` — re-walk every variation point against the live bronze;
+  resolves drift per §9.5.5 Tier-1. No-op when the fingerprint matches
+  the pinned one byte-for-byte. NEVER emits `AIDPF-2012` (runtime
+  preflight owns that error code in feature #4).
+* `--operator <string>` — explicit identity override
+  (highest precedence).
+* `--non-interactive` — sandbox/CI mode: multi-match auto-picks first
+  candidate; `--refresh` refuses changes to pinned values
+  (`RefreshRequiresConfirmation`).
+* `--resolutions <json-file>` — scripted multi-match resolution.
+  Schema documented in `docs/diagnostic-artifact-contract.md`.
+* `--skip-preonboarding-probes` — skip phase-1 BICC / AIDP probes;
+  useful for `--refresh` after initial onboarding succeeded.
+
+Diagnostic artifact contract for feature #3
+(`v2-phase-3b-medallion-author-skill`) consumption:
+[`docs/diagnostic-artifact-contract.md`](./diagnostic-artifact-contract.md).
+
 ## Reference fixtures
 
 Two layers of test fixtures live in the tree:
