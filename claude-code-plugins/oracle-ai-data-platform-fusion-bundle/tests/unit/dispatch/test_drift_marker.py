@@ -502,6 +502,177 @@ class TestSchemaDriftMarkerTranslation:
                 layers=None,
             )
 
+    def test_drift_marker_with_traversal_run_id_rejected(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding (P3c-review #4, BLOCKING): treating marker
+        payloads as untrusted is incomplete unless the path write is
+        also hardened. A marker with ``run_id="../escape"`` must NOT
+        write outside the workdir's .aidp/diagnostics tree, even if
+        every other field validates."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "../escape",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            "artifact_json": _drift_artifact_json("../escape"),
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="unsafe path segment"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+        # Defence in depth: no escape-target was written either.
+        escape_target = (
+            bundle_path.resolve().parent / "escape" / "AIDPF-2012.json"
+        )
+        assert not escape_target.exists()
+
+    def test_drift_marker_with_slash_in_run_id_rejected(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Marker ``run_id="foo/bar"`` would land at
+        ``.aidp/diagnostics/foo/bar/AIDPF-2012.json`` if accepted —
+        unintended nesting that breaks reader auto-discovery."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "foo/bar",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            "artifact_json": _drift_artifact_json("foo/bar"),
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="path separator"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+
+    def test_drift_marker_run_id_mismatch_with_artifact_runid_rejected(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If ``marker.run_id`` and ``artifact_json.runId`` disagree,
+        one of them is wrong — refuse to write rather than picking a
+        winner. Cross-check guards against a cluster-side bug emitting
+        a payload that targets a different run than its envelope claims."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "cp-envelope",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            "artifact_json": _drift_artifact_json("cp-inner-different"),
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="does not match"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+
+    def test_drift_marker_refuses_to_overwrite_existing_local_artifact(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeated run_id (operator re-running the same job, or a
+        cluster-side bug emitting two drift events for the same run)
+        must NOT silently overwrite an existing local artifact —
+        destroying the prior evidence would break the
+        bootstrap/skill recovery flow. Refuse via
+        DispatchMarkerMissingError."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        # Pre-create the diagnostic that "would" be written.
+        run_id = "cp-drift-existing-1"
+        pre_existing = (
+            bundle_path.resolve().parent
+            / ".aidp"
+            / "diagnostics"
+            / run_id
+            / "AIDPF-2012.json"
+        )
+        pre_existing.parent.mkdir(parents=True, exist_ok=True)
+        pre_existing.write_text("PRIOR ARTIFACT CONTENT", encoding="utf-8")
+
+        client = _stub_client(monkeypatch)
+        client.fetch_output.return_value = _executed_notebook_with_drift_marker(
+            run_id=run_id
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="already exists"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+        # Prior content preserved — the new write was refused atomically.
+        assert (
+            pre_existing.read_text(encoding="utf-8") == "PRIOR ARTIFACT CONTENT"
+        )
+
     def test_failed_status_without_drift_marker_still_raises_run_failed(
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

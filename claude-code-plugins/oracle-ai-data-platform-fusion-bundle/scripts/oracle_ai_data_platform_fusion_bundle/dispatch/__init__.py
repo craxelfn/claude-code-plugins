@@ -37,7 +37,13 @@ import oci
 _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
+from ..schema.diagnostic_artifact import (
+    DiagnosticArtifactAlreadyExistsError,
+    SchemaDriftDiagnosticV1,
+    write_schema_drift_diagnostic,
+)
 from ..schema.errors import SchemaDriftDetectedError
+from ..schema.path_segment import UnsafePathSegmentError, validate_path_segment
 from ..schema.run_summary import RunSummary
 from .errors import (
     DispatchAuthError,
@@ -390,16 +396,56 @@ def dispatch_via_rest(
                 f"artifact_json payload is not an AIDPF-2012 diagnostic "
                 f"(errorCode={artifact_obj.get('errorCode') if isinstance(artifact_obj, dict) else type(artifact_obj).__name__})."
             )
+        # Treat marker payloads as untrusted: validate run_id is a safe
+        # path segment + cross-check the inner artifact's runId matches
+        # before letting it drive a filesystem write. A malicious or
+        # corrupted marker with ``run_id="../outside"`` would otherwise
+        # write outside the workdir's .aidp/diagnostics tree.
         drift_run_id = str(marker["run_id"])
-        diagnostic_path = (
-            bundle_path.resolve().parent
-            / ".aidp"
-            / "diagnostics"
-            / drift_run_id
-            / "AIDPF-2012.json"
-        )
-        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
-        diagnostic_path.write_text(artifact_text, encoding="utf-8")
+        try:
+            validate_path_segment(drift_run_id, field="marker.run_id")
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"{exc}"
+            ) from exc
+        if str(artifact_obj.get("runId", "")) != drift_run_id:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json.runId={artifact_obj.get('runId')!r} does "
+                f"not match marker.run_id={drift_run_id!r}."
+            )
+        # Reconstruct via the Pydantic model + canonical writer so the
+        # laptop-side artifact uses the same path-segment validation,
+        # within-root assertion, and atomic-no-overwrite semantics as
+        # the cluster-side write.
+        try:
+            artifact_model = SchemaDriftDiagnosticV1.model_validate(artifact_obj)
+        except Exception as exc:  # ValidationError, ValueError, etc.
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json failed Pydantic validation: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        try:
+            diagnostic_path = write_schema_drift_diagnostic(
+                bundle_path.resolve().parent,
+                drift_run_id,
+                artifact_model,
+            )
+        except DiagnosticArtifactAlreadyExistsError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused: a local "
+                f"AIDPF-2012 artifact already exists for "
+                f"run_id={drift_run_id!r} "
+                f"(jobRunKey={job_run_key}). Delete the prior file or "
+                f"re-run with a fresh run_id to overwrite."
+            ) from exc
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused (jobRunKey="
+                f"{job_run_key}); {exc}"
+            ) from exc
         raise SchemaDriftDetectedError(
             run_id=drift_run_id,
             diagnostic_path=diagnostic_path,
