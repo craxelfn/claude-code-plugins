@@ -77,6 +77,7 @@ AIDPF_5002_UNKNOWN_TOKEN = "AIDPF-5002"
 AIDPF_5003_UNRESOLVED_VARIATION = "AIDPF-5003"
 AIDPF_5010_POST_RENDER_REJECTED = "AIDPF-5010"
 AIDPF_5011_DISALLOWED_PARAM_TYPE = "AIDPF-5011"
+AIDPF_5013_INVALID_SNAPSHOT_DATE = "AIDPF-5013"
 
 
 class SqlRendererError(Exception):
@@ -102,6 +103,17 @@ class PostRenderRejectedError(SqlRendererError):
 
 class DisallowedParamTypeError(SqlRendererError):
     """Profile value's Python type isn't in the allowed set (AIDPF-5011)."""
+
+
+class InvalidSnapshotDateError(SqlRendererError):
+    """``profile.profile.snapshotDate`` is present but not an ISO-8601 date.
+
+    The ``{{ snapshot_date }}`` token requires either an absent / empty
+    value (falls back to literal ``CURRENT_DATE()``) or an ISO-8601
+    date string (``YYYY-MM-DD``) that binds as a parameter. Any other
+    shape — non-string types, malformed dates, or strings containing
+    SQL like ``CURRENT_DATE()`` — fails with this error (AIDPF-5013).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +196,13 @@ class RunContext:
         bronze_table_for_source: maps source id to the fully-qualified
             bronze table identifier used inside semantic-fragment
             ``{table}`` substitutions.
+        active_profile_name: the ``contentPack.profile`` name declared
+            on the bundle (e.g. ``"finance-default"``). Required —
+            builtin adapters (Step 3) key off ``pack.pack.profiles``
+            on this name; renderer extensions may need it for
+            pack-default lookups. The tenant id on
+            :class:`TenantProfile` is NOT a substitute (tenants can
+            run any profile the pack ships).
     """
 
     catalog: str
@@ -191,6 +210,7 @@ class RunContext:
     silver_schema: str
     gold_schema: str
     run_id: str
+    active_profile_name: str
     prior_watermark: Mapping[str, Any] = field(default_factory=dict)
     mode: str = "seed"
     bronze_table_for_source: Mapping[str, str] = field(default_factory=dict)
@@ -334,6 +354,9 @@ def _substitute_token(
     if token == "watermark_predicate":
         return _render_watermark_predicate(node, ctx, primary_source, params)
 
+    if token == "snapshot_date":
+        return _render_snapshot_date(profile, params)
+
     # 3. Dotted-prefix substitutions.
     if token.startswith("profile."):
         return _render_profile_lookup(token[len("profile."):], profile, params)
@@ -354,8 +377,8 @@ def _substitute_token(
     raise UnknownTokenError(
         f"{AIDPF_5002_UNKNOWN_TOKEN}: unknown template token {{{{ {token} }}}}. "
         f"Allowed: catalog, bronze_schema, silver_schema, gold_schema, "
-        f"run_id_literal, watermark_predicate, profile.<key>, column.<name>, "
-        f"semantic.<name>."
+        f"run_id_literal, watermark_predicate, snapshot_date, "
+        f"profile.<key>, column.<name>, semantic.<name>."
     )
 
 
@@ -417,6 +440,77 @@ def _render_watermark_predicate(
         return "1=1"
     params[param_name] = _format_profile_value_for_params(prior_value)
     return f"{column} > :{param_name}"
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+"""Strict ISO-8601 date shape for ``{{ snapshot_date }}`` profile values.
+
+Used by :func:`_render_snapshot_date`. Anything that doesn't match this
+regex (including ``CURRENT_DATE()`` strings, slashes, timestamps) is
+rejected with AIDPF-5013; a separate ``date.fromisoformat`` round-trip
+catches things like ``9999-99-99`` that match the regex but are not
+real dates.
+"""
+
+
+def _render_snapshot_date(
+    profile: TenantProfile,
+    params: dict[str, Any],
+) -> str:
+    """Render the ``{{ snapshot_date }}`` token.
+
+    Resolution order:
+
+    * ``profile.profile.snapshotDate`` absent / ``None`` / empty string →
+      emit the literal SQL expression ``CURRENT_DATE()`` (no parameter
+      binding). This is the only place the renderer emits a raw SQL
+      function call from a token — documented exception so production
+      runs default to "today" without forcing every tenant to author a
+      profile value.
+    * Present, type ``str``, matches ``^\\d{4}-\\d{2}-\\d{2}$`` AND
+      round-trips through ``datetime.date.fromisoformat`` → bind as
+      ``:snapshot_date`` parameter. Test determinism path.
+    * Anything else (non-string, malformed, contains SQL, etc.) → raise
+      :class:`InvalidSnapshotDateError` (AIDPF-5013).
+
+    Notes:
+
+    * Empty string is treated as absent so a customer who clears their
+      profile's ``snapshotDate`` doesn't accidentally break rendering
+      — they get the same production default as if the key was never
+      authored.
+    * The value flows through ``params`` as a plain ``str`` (Spark
+      accepts ISO-date strings for ``DATE`` comparisons).
+    """
+    value = profile.profile.get("snapshotDate") if isinstance(profile.profile, dict) else None
+
+    # Absent / explicit-None / empty-string → fall back to raw SQL.
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return "CURRENT_DATE()"
+
+    # Must be a string with the exact ISO-date shape.
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        raise InvalidSnapshotDateError(
+            f"{AIDPF_5013_INVALID_SNAPSHOT_DATE}: profile.snapshotDate must be "
+            f"absent or an ISO-8601 date string (YYYY-MM-DD); got "
+            f"{value!r} of type {type(value).__name__}. Embedding SQL "
+            f"functions (e.g. 'CURRENT_DATE()') in this profile field is "
+            f"rejected — clear the value to fall back to CURRENT_DATE() at "
+            f"render time, or pass a literal date string."
+        )
+
+    # Round-trip through fromisoformat to catch nonsense like '9999-99-99'.
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise InvalidSnapshotDateError(
+            f"{AIDPF_5013_INVALID_SNAPSHOT_DATE}: profile.snapshotDate "
+            f"{value!r} matches the YYYY-MM-DD shape but is not a real "
+            f"calendar date: {exc}."
+        ) from exc
+
+    params["snapshot_date"] = value
+    return ":snapshot_date"
 
 
 def _render_profile_lookup(

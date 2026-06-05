@@ -26,15 +26,15 @@ requires:
     gold.ap_aging:
       - name: supplier_number
         type: string
-      - name: age_bucket
+      - name: aging_bucket
         type: string
       - name: open_amount
-        type: decimal(28,8)
+        type: decimal(28,2)
     gold.supplier_spend:
       - name: supplier_number
         type: string
       - name: total_invoice_amount
-        type: decimal(28,8)
+        type: decimal(20,2)
 
 validationQueries:
   - id: ap_aging_has_data
@@ -49,7 +49,7 @@ security:
   allowedColumns:
     gold.ap_aging:
       - supplier_number
-      - age_bucket
+      - aging_bucket
       - open_amount
     gold.supplier_spend:
       - supplier_number

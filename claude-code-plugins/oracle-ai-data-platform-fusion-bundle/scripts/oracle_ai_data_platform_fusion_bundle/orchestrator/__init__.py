@@ -1259,14 +1259,20 @@ def _run_content_pack_backend(
     state.ensure_state_table(spark, paths)
     ensure_state_columns_v2(spark, paths)
 
-    # Build the run context the renderer needs.
+    # Build the run context the renderer needs. ``active_profile_name``
+    # is the bundle's contentPack.profile — keyed by the renderer + builtin
+    # adapters into pack.pack.profiles for pack-default lookups. Required
+    # field (no default); the content-pack backend has already validated
+    # that bundle.content_pack and bundle.content_pack.profile exist.
     run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    active_profile_name = bundle.content_pack.profile  # type: ignore[union-attr]
     ctx = CpRunContext(
         catalog=bundle.aidp.catalog,
         bronze_schema=bundle.aidp.bronze_schema,
         silver_schema=bundle.aidp.silver_schema,
         gold_schema=bundle.aidp.gold_schema,
         run_id=run_id,
+        active_profile_name=active_profile_name,
         prior_watermark={},  # Phase 2 v0.3: caller-side prior watermark
                               # lookups land in Phase 3 alongside the
                               # bronze-merge generalisation.
@@ -1285,6 +1291,7 @@ def _run_content_pack_backend(
         silver_schema=ctx.silver_schema,
         gold_schema=ctx.gold_schema,
         run_id=ctx.run_id,
+        active_profile_name=ctx.active_profile_name,
         prior_watermark=ctx.prior_watermark,
         mode=ctx.mode,
         bronze_table_for_source=bronze_table_for_source,
@@ -1382,6 +1389,7 @@ def _run_content_pack_backend(
             silver_schema=ctx.silver_schema,
             gold_schema=ctx.gold_schema,
             run_id=ctx.run_id,
+            active_profile_name=ctx.active_profile_name,
             prior_watermark=prior_watermark_for_node,
             mode=ctx.mode,
             bronze_table_for_source=ctx.bronze_table_for_source,

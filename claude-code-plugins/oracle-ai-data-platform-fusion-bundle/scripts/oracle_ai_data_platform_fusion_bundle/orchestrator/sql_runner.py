@@ -84,9 +84,19 @@ which catches YAML-author-induced drift pre-dispatch. Both gates fire
 independently; if both conditions hold, the pre-dispatch gate fires first
 and the SQL is never executed."""
 
+AIDPF_5014_UNKNOWN_BUILTIN_DISPATCH = "AIDPF-5014"
+"""Content-pack execute_node dispatched a ``type: builtin`` node whose
+``implementation.callable`` is not in the builtin registry. Phase 3
+contract is strict: the registry is the allowlist, missing entries fail
+fast rather than auto-importing arbitrary callables."""
+
 
 class ExecuteNodeError(Exception):
     """Base error class for execute_node failures."""
+
+
+class UnknownBuiltinDispatchError(ExecuteNodeError):
+    """Builtin node's callable id not in ``_BUILTIN_REGISTRY`` (AIDPF-5014)."""
 
 
 class PlanHashDriftError(ExecuteNodeError):
@@ -176,6 +186,36 @@ def execute_node(
         written the state rows itself; for hard programmer errors it
         re-raises.
     """
+    # Phase 3 Step 3 — dispatch on implementation type. The SQL path
+    # (existing body) handles ``type: sql``; the builtin path handles
+    # ``type: builtin`` (ADR-0011, e.g. dim_calendar). ``type:
+    # python_legacy`` should never reach this entry point — the
+    # Phase 2 loader rejects it under the content-pack backend.
+    impl_type = node.implementation.type
+    if impl_type == "builtin":
+        return _execute_builtin_node(
+            spark,
+            node=node,
+            pack=pack,
+            profile=profile,
+            ctx=ctx,
+            paths=paths,
+            mode=mode,
+            profile_hash=profile_hash,
+            prior_plan_hash=prior_plan_hash,
+            target_override=target_override,
+        )
+    if impl_type != "sql":
+        # Defensive — the loader's discriminated union already rejects
+        # everything outside {sql, builtin, python_legacy}, and Phase 2's
+        # content-pack backend rejects python_legacy. Reaching here means
+        # a future implementation type slipped through the loader gate
+        # without being wired in. Hard-raise so the bug is visible.
+        raise ValueError(
+            f"execute_node: unsupported implementation.type={impl_type!r} "
+            f"for node {node.id!r}. Expected 'sql' or 'builtin'."
+        )
+
     # ----- Step 1: static schema validation (Phase 1; loader did this).
 
     # ----- Step 2: preflight ------------------------------------------
@@ -664,4 +704,230 @@ def _safe_write_schema_drift_row(
     _safe_write_failure_row(
         spark, paths, node=node, ctx=ctx, status="output_schema_drift",
         message=message, profile=profile, plan_hash=plan_hash,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Step 3 — builtin dispatch
+# ---------------------------------------------------------------------------
+
+
+def _build_dim_calendar_adapter_entry():
+    """Lazily import the dim_calendar adapter to avoid an orchestrator-load-time
+    dependency cycle (``dim_calendar`` imports from ``config.paths`` which
+    transitively imports parts of ``orchestrator``)."""
+    from .builtins import dim_calendar_adapter
+    return (dim_calendar_adapter.run, dim_calendar_adapter.VERSION)
+
+
+_BUILTIN_REGISTRY: dict[str, "tuple[Any, str]"] = {
+    # Keyed by NodeImpl.callable (the dotted ``<module>:<func>`` form authored
+    # in node YAML). Value is (adapter_func, version_string). The adapter
+    # function has uniform signature
+    # ``(spark, *, node, pack, profile, ctx) -> DataFrame``; the version flows
+    # into the content-pack plan-hash as the rendered_sql_hash substitute.
+    #
+    # Initial entry is dim_calendar per ADR-0011. New builtins MUST be
+    # listed here — auto-importing arbitrary callables is the AIDPF-5014
+    # surface this gate prevents.
+}
+
+
+def _ensure_registry_populated() -> None:
+    """Populate :data:`_BUILTIN_REGISTRY` on first dispatch.
+
+    Lazy population sidesteps an orchestrator-load-time circular import
+    (sql_runner ← orchestrator ← dim_calendar) without forcing the
+    adapter import at module top.
+    """
+    if not _BUILTIN_REGISTRY:
+        _BUILTIN_REGISTRY[
+            "oracle_ai_data_platform_fusion_bundle.dimensions.dim_calendar:build"
+        ] = _build_dim_calendar_adapter_entry()
+
+
+def _builtin_rendered_sql_hash_substitute(callable_id: str, version: str) -> str:
+    """Compute the rendered_sql_hash substitute for a builtin dispatch.
+
+    The content-pack plan-hash signature requires a ``rendered_sql_hash``
+    string. For SQL nodes that's the canonical hash of the rendered
+    template + bound params; for builtins it's a sha256 of
+    ``<callable_id>:<version>``. Bumping the adapter's VERSION constant
+    flips this hash, triggering the AIDPF-4040 drift gate just like a
+    SQL-template edit does.
+    """
+    return hashlib.sha256(f"{callable_id}:{version}".encode("utf-8")).hexdigest()
+
+
+def _execute_builtin_node(
+    spark: "SparkSession",
+    *,
+    node: "NodeYaml",  # noqa: F821
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: RunContext,
+    paths: "TablePaths",  # noqa: F821
+    mode: Literal["seed", "incremental"],
+    profile_hash: str,
+    prior_plan_hash: str | None,
+    target_override: str | None,
+) -> NodeExecutionResult:
+    """Execute a ``type: builtin`` node via the registry.
+
+    Lifecycle mirrors the SQL path
+    (preflight → plan-hash → drift gate → execute → quality → schema
+    assertion → state-row write) but skips ``render_node_sql`` (builtins
+    have no SQL template) and substitutes the builtin's (callable,
+    version) for the rendered_sql_hash so the §11.9 drift gate stays
+    uniform.
+    """
+    _ensure_registry_populated()
+
+    # ----- Step 1: static validation done by the loader. -------------
+
+    # ----- Step 2: preflight (column probes + identity validation). --
+    # For builtins with empty bronze deps (dim_calendar), preflight is a
+    # no-op pass. Keeping the call uniform avoids special-casing.
+    preflight = preflight_node(spark, node, pack, profile, ctx)
+    if not preflight.ok:
+        message = "; ".join(f"[{e.code}] {e.message}" for e in preflight.errors)
+        _safe_write_preflight_blocked_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        )
+        return NodeExecutionResult(status="preflight_blocked", error_message=message)
+
+    # ----- Step 3: resolve the builtin adapter ----------------------
+    callable_id = node.implementation.callable  # type: ignore[union-attr]
+    entry = _BUILTIN_REGISTRY.get(callable_id)
+    if entry is None:
+        message = (
+            f"{AIDPF_5014_UNKNOWN_BUILTIN_DISPATCH}: builtin callable "
+            f"{callable_id!r} not in _BUILTIN_REGISTRY. Registered: "
+            f"{sorted(_BUILTIN_REGISTRY.keys())!r}. Add an adapter under "
+            f"orchestrator/builtins/ and register it before content-pack "
+            f"dispatch can run."
+        )
+        _safe_write_render_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        )
+        return NodeExecutionResult(status="render_failed", error_message=message)
+    adapter_func, adapter_version = entry
+
+    # ----- Step 4: compute plan-hash inputs --------------------------
+    rendered_sql_hash = _builtin_rendered_sql_hash_substitute(callable_id, adapter_version)
+    output_schema_hash = plan_hash_module.compute_output_schema_hash(node)
+    expected_plan_hash = plan_hash_module.compute_content_pack_plan_hash(
+        pack=pack,
+        node=node,
+        profile=profile,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+    )
+
+    # ----- Step 5: plan-hash drift gate (incremental only) ----------
+    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
+        message = (
+            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
+            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
+            f"Re-run with --mode seed (or revert the YAML / adapter version change)."
+        )
+        _safe_write_resume_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="resume_drift_blocked",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 6: invoke the adapter --------------------------------
+    target = target_override or _build_target_identifier(node, ctx)
+    try:
+        adapter_func(spark, node=node, pack=pack, profile=profile, ctx=ctx)
+    except Exception as exc:  # noqa: BLE001 — surface any adapter failure uniformly
+        message = f"builtin_failed: {exc}"
+        _safe_write_strategy_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="strategy_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 7: quality tests -------------------------------------
+    target_df = spark.table(target)
+    quality_report = run_quality_tests(spark, node, target_df, ctx)
+    if not quality_report.ok:
+        message = "; ".join(f"[{f.test_type}] {f.message}" for f in quality_report.failures)
+        _safe_write_quality_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="quality_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 8: materialised-schema assertion ---------------------
+    try:
+        materialized_schema_hash = _assert_materialized_matches_declared(
+            spark, target, node
+        )
+    except MaterializedSchemaDriftError as exc:
+        message = str(exc)
+        _safe_write_schema_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="output_schema_drift",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 9: assemble + write success state rows --------------
+    # Builtins are parameter-driven (no bronze source → no watermark);
+    # we synthesise a thin strategy_result-shaped object so the existing
+    # _assemble_success_state_rows helper handles the row layout.
+    class _BuiltinStrategyResult:
+        rows_scanned = target_df.count() if hasattr(target_df, "count") else 0
+        merge_skipped_empty_delta = False
+
+    strategy_result = _BuiltinStrategyResult()
+    state_rows = _assemble_success_state_rows(
+        node=node,
+        ctx=ctx,
+        pack=pack,
+        profile=profile,
+        mode=mode,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+        plan_hash=expected_plan_hash,
+        strategy_result=strategy_result,
+        output_watermark=None,  # builtins are parameter-driven, no cursor.
+    )
+
+    try:
+        state_phase2.write_state_rows_hard(spark, paths, state_rows)
+    except state_phase2.StateCommitError as exc:
+        message = f"state_commit_failed: {exc}"
+        return NodeExecutionResult(
+            status="state_commit_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+            row_count=strategy_result.rows_scanned,
+        )
+
+    return NodeExecutionResult(
+        status="success",
+        row_count=strategy_result.rows_scanned,
+        output_watermark=None,
+        materialized_schema_hash=materialized_schema_hash,
+        plan_hash=expected_plan_hash,
     )

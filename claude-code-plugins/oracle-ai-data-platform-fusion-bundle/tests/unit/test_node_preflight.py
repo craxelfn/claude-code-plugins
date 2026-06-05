@@ -69,6 +69,7 @@ def _ctx() -> RunContext:
         silver_schema="silver",
         gold_schema="gold",
         run_id="r",
+        active_profile_name="finance-default",
         bronze_table_for_source={"erp_thing": "cat.bronze.erp_thing"},
     )
 
@@ -123,6 +124,7 @@ class TestRequiredColumnMissing:
             silver_schema="silver",
             gold_schema="gold",
             run_id="r",
+            active_profile_name="finance-default",
             bronze_table_for_source={},  # NO entry for erp_thing
         )
         report = preflight_node(spark, _load_node(), pack=MagicMock(), profile=MagicMock(), ctx=ctx)

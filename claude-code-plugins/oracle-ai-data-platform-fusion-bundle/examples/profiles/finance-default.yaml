@@ -1,0 +1,54 @@
+# Finance-default tenant profile for the fusion-finance-starter content pack.
+#
+# Resolved at bootstrap; frozen for subsequent runs. Authored values mirror
+# the saasfademo1 demo pod's PVO shapes.
+#
+# COA segments: Phase 3 round-1 rework adopted v1's positional COA shape —
+# dim_account.sql emits CodeCombinationSegment1..6 directly as segment_01..06
+# plus six semantic aliases (company / cost_center / natural_account /
+# subaccount / product / intercompany) following v1's DEFAULT_SEMANTIC_SEGMENT_MAP.
+# Tenants whose COA puts different roles at non-conventional positions are
+# served by a pack overlay that emits a different dim_account.sql; there is
+# no per-tenant role-to-position override knob in the v0.3 pack vocabulary.
+#
+# Field aliases match scripts/oracle_ai_data_platform_fusion_bundle/schema/tenant_profile.py.
+schemaVersion: 1
+tenant: finance-default
+pinnedAt: 2026-06-05T00:00:00+00:00
+
+# Placeholder fingerprint — the §11.6 drift gate compares this against the
+# live bronze schema each run. Re-run `aidp-fusion-bundle bootstrap` on a
+# real tenant to capture the actual sha256.
+bronzeSchemaFingerprint: "sha256:placeholder-finance-default-2026-06-05"
+
+# Variation-point resolutions referenced by starter-pack SQL templates.
+# The renderer raises AIDPF-5003 at sql_renderer.py:474 / :507 if any of
+# these is missing — see docs/v2-phase-3-variation-catalog.md for the
+# per-knob audit.
+resolved:
+  column:
+    # dim_supplier
+    supplier_natural_key: SEGMENT1
+    vendor_id: VENDORID
+    # supplier_spend + ap_aging
+    invoice_currency_code: ApInvoicesInvoiceCurrencyCode
+  semantic:
+    # ap_aging cancelled-invoice detection. The `cancelled_date` candidate
+    # uses ApInvoicesCancelledDate IS NULL; the alternative `cancelled_flag`
+    # candidate uses COALESCE(...CancelledFlag, 'N') != 'Y' for tenants
+    # whose extract omits the date column.
+    cancelled_status: cancelled_date
+
+# Free-form profile block — consumed by the renderer's `{{ profile.<key> }}`,
+# `{{ snapshot_date }}` tokens, and the dim_calendar builtin adapter.
+#
+# Delete or comment-out `snapshotDate` to use CURRENT_DATE() in production
+# (Phase 3 Step 2 fallback contract). The `calendar:` block here overrides
+# pack-level defaults; omitting it falls back to
+# pack.pack.profiles.finance-default.calendar.
+profile:
+  snapshotDate: '2026-06-05'
+  calendar:
+    startDate: '2020-01-01'
+    endDate: '2030-12-31'
+    fiscalStartMonth: 1

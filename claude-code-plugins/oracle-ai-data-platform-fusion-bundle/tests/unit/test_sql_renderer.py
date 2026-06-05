@@ -196,6 +196,7 @@ def _default_ctx(mode: str = "seed", **overrides) -> RunContext:
         silver_schema="silver",
         gold_schema="gold",
         run_id="run-2026-06-06-001",
+        active_profile_name="finance-default",
         prior_watermark={},
         mode=mode,
         bronze_table_for_source={"erp_thing": "fusion_catalog.bronze.erp_thing"},

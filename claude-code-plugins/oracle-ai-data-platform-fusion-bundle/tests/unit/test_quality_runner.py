@@ -20,6 +20,7 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import NodeYaml
 def _ctx() -> RunContext:
     return RunContext(
         catalog="c", bronze_schema="b", silver_schema="s", gold_schema="g", run_id="r",
+        active_profile_name="finance-default",
     )
 
 

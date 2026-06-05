@@ -133,20 +133,85 @@ modules drive every default run.
 | `AIDPF-5003` | Unresolved variation point |
 | `AIDPF-5010` | Post-render check rejected SQL (comment markers, semicolons, subqueries) |
 | `AIDPF-5011` | Disallowed parameter value type for `{{ profile.<key> }}` |
+| `AIDPF-5013` | `profile.snapshotDate` present but not an ISO-8601 date (Phase 3) |
+| `AIDPF-5014` | `type: builtin` node's `implementation.callable` not in registry (Phase 3) |
 | `AIDPF-8010` | Quality test failed |
 | `AIDPF-8011` | Quality test deferred to a later phase |
 
-## Reference fixture
+## Phase 3 additions
 
-A working fixture lives at:
+* New renderer token `{{ snapshot_date }}` — emits literal `CURRENT_DATE()`
+  when `profile.profile.snapshotDate` is absent / empty; binds as
+  `:snapshot_date` parameter when present + ISO-8601. Used by `ap_aging.sql`
+  to anchor aging buckets deterministically in tests; production runs
+  with `snapshotDate` unset fall back to `CURRENT_DATE()` semantics
+  matching v1.
+* `RunContext.active_profile_name: str` — required field carrying the
+  bundle's `contentPack.profile` value. Builtin adapters (initial:
+  `dim_calendar`) key off this into `pack.pack.profiles[<name>]` for
+  default lookups.
+* Content-pack `execute_node` now dispatches `implementation.type: builtin`
+  through `orchestrator/builtins/` adapters via `_BUILTIN_REGISTRY`.
+  Initial entry: `dim_calendar`. The §11.9 plan-hash drift gate stays
+  uniform across SQL and builtin paths by substituting
+  `sha256(callable_id:VERSION)` for `rendered_sql_hash`.
+* **AP aging proxy-mode-only divergence** — the v2 `ap_aging.sql` ships
+  only v1's `due_date_mode='proxy'` shape (`bucket_basis='invoice_date'`,
+  `max_days_outstanding`). v1's auto/real-mode behaviour, which probes
+  Terms/Due-date coverage at runtime and switches to a different
+  output schema (`max_days_past_due` + three provenance counts), is
+  out of scope for v0.3. Tenants whose live AP data would auto-route
+  to real mode under v1 will see different `ap_aging` output under
+  the content-pack backend. Documented in `LIMITS.md` as **P3-L1**
+  and explained at length in
+  `docs/v2-phase-3-variation-catalog.md` "AP aging — proxy mode only".
 
-* Pack — `tests/fixtures/content_packs/phase2_test_pack/`
-* Bundle + profile — `tests/fixtures/projects/phase2_project/`
+## Reference fixtures
 
-Unit tests under `tests/unit/test_orchestrator_run_content_pack.py`
-exercise `orchestrator.run(..., execution_backend="content-pack", ...)`
-end-to-end against this fixture using a mocked Spark session — they
-prove the CLI flag reaches `sql_runner.execute_node`. Live PySpark
-integration tests against the same fixture (gated by
-`AIDP_FUSION_BUNDLE_RUN_SPARK_TESTS=1`) are a follow-up that lands
-alongside the bronze-layer migration in Phase 3.
+Two layers of test fixtures live in the tree:
+
+* **Phase 2 minimal pack** — `tests/fixtures/content_packs/phase2_test_pack/` +
+  `tests/fixtures/projects/phase2_project/`. Mocked-Spark unit tests in
+  `tests/unit/test_orchestrator_run_content_pack.py` prove the CLI flag
+  reaches `sql_runner.execute_node`.
+* **Phase 3 starter pack + example bundle** — `examples/fusion-finance-starter.yaml`
+  + `examples/profiles/finance-default.yaml`. Pairs with the shipped
+  starter pack at `scripts/oracle_ai_data_platform_fusion_bundle/content_packs/fusion-finance-starter/`.
+  Five migrated SQL templates + one builtin route the content-pack
+  backend end-to-end; smoke tests live in
+  `tests/unit/test_phase3_starter_bundle_example.py`.
+
+## Row-grain parity harness (active)
+
+`tests/parity/test_starter_pack_parity.py` is a **fully-enabled
+direct-SQL parity harness**, not a skipped skeleton. Run with
+`pytest -m parity`. It:
+
+1. Seeds a shared bronze schema with hand-crafted fixtures in
+   `tests/parity/bronze_fixtures.py` (3 supplier rows, 4 COA rows,
+   7 balance rows including sub-cent fractional amounts that exercise
+   the `DECIMAL(28,2)` rounding contract, 6 invoice rows spanning
+   aging buckets + multi-currency + NULL cancelled-date).
+2. For each migrated node, executes both v1's SQL (via the v1 module's
+   `build_<name>_sql()` helper, normalising `USING DELTA` →
+   `USING PARQUET`) and v2's SQL (via `render_node_sql`) against the
+   same bronze fixture data, writing to per-backend table-name suffixes
+   (`..._v1` / `..._v2`).
+3. Asserts:
+   * **Schema-type equality** between v1 and v2 (Spark
+     `dataType.simpleString` match including `decimal(p,s)`
+     precision/scale).
+   * **Multiset row equality** in both directions; Decimal values
+     compared as Decimal (no float coercion).
+   * **Audit-column presence + type** in both backends.
+   * **xxhash64 surrogate parity** for `dim_supplier.supplier_key`
+     and `dim_account.account_key`.
+
+Direct-SQL was chosen over the original PLAN §15 Step 10 spec of
+`orchestrator.run(...)` for both backends for three reasons: tighter
+equivalence contract (no state-table / plan-hash noise on top of the
+SQL), reproducibility on workstations without Delta Lake, and a
+single shared bronze schema (per-backend table-name suffixes prevent
+cross-contamination without two state-table setups). The module
+docstring expands on the trade-off. A future `orchestrator.run`-based
+harness can layer on top once the Delta-local-mode story is solved.
