@@ -1351,8 +1351,12 @@ def _run_content_pack_backend(
             continue
 
         # Prior-state hydration for the drift gate + watermark predicate.
+        # ``mode`` is threaded in so the helper can fail closed on
+        # incremental reads (round-13/14 review fix) — a state-read
+        # failure in incremental mode must NOT silently degrade to
+        # seed semantics.
         prior_plan_hash, prior_watermark_for_node = _read_prior_state_for_node(
-            spark, paths, node,
+            spark, paths, node, mode=mode,
         )
         # Build a per-node ctx that carries the prior watermark for the
         # primary source. We rebuild the ctx (instead of mutating
@@ -1430,30 +1434,54 @@ def _find_cascade_blocker(node: Any, failed_node_ids: set[str]) -> str | None:
 
 
 def _read_prior_state_for_node(
-    spark: "Any", paths: "Any", node: "Any",
+    spark: "Any", paths: "Any", node: "Any", *, mode: str,
 ) -> "tuple[str | None, dict[str, Any]]":
     """Read the latest successful primary state row for a content-pack node.
 
-    Returns ``(prior_plan_hash, prior_watermark_by_source)``. Both are
-    ``None`` / empty dict when no prior successful row exists (the
-    common first-run case), in which case:
+    Returns ``(prior_plan_hash, prior_watermark_by_source)``.
+
+    Empty result set (no prior successful row exists — the common
+    first-run case) yields ``(None, {})`` in both modes:
 
     * ``prior_plan_hash=None`` makes the AIDPF-4040 drift gate a no-op
-      (correct seed-mode behaviour; nothing to drift against).
+      (correct semantics; nothing to drift against).
     * Empty ``prior_watermark`` makes the renderer emit
-      ``{{ watermark_predicate }}`` as ``1=1`` (correct seed-mode).
+      ``{{ watermark_predicate }}`` as ``1=1`` (correct semantics for
+      seed mode AND first incremental — both legitimately have no prior
+      cursor).
 
-    Subsequent incremental runs with a successful prior row:
+    Failure modes differ by mode (round-13/14 review fix — fail closed
+    on incremental):
 
-    * ``prior_plan_hash`` flows into ``execute_node`` for the drift
-      gate comparison.
-    * ``prior_watermark[source_id]`` flows into the renderer so the
-      source delta is filtered by ``<column> > :watermark_<source>``.
+    * ``mode == "seed"`` — Spark-side read failures (table missing on
+      first run, transient connection blip) are SWALLOWED and the
+      function returns ``(None, {})``. Seed semantics are "full
+      rebuild from bronze" — no cursor needed; a benign read failure
+      shouldn't fail the run.
 
-    Defensive on failures: any Spark exception (missing table on a
-    first-ever run, transient connection issue) is swallowed and the
-    function returns ``(None, {})``. This preserves the seed-mode
-    semantics rather than failing the run on a benign read.
+    * ``mode == "incremental"`` — Spark-side read failures FAIL the
+      run with ``StateReadFailedError``. An incremental run cannot
+      proceed without verifying the prior cursor + plan hash, because
+      falling through to ``(None, {})`` would silently full-scan the
+      source AND skip the AIDPF-4040 drift gate. The reviewer's
+      example: metastore/permission/schema error on the latest-view
+      read would otherwise let the run commit despite being unable to
+      verify state.
+
+    Args:
+        spark: live Spark session.
+        paths: TablePaths.
+        node: validated NodeYaml whose prior state we're reading.
+        mode: ``"seed"`` or ``"incremental"`` — drives the
+            fail-open / fail-closed decision.
+
+    Returns:
+        ``(prior_plan_hash, {source_id: prior_output_watermark})``.
+
+    Raises:
+        StateReadFailedError: ``mode == "incremental"`` AND the
+            underlying Spark query raised. Carries the original
+            exception as ``__cause__``.
     """
     primary_source = _resolve_primary_source_id_for_state_read(node)
     if primary_source is None:
@@ -1474,7 +1502,20 @@ def _read_prior_state_for_node(
             f"ORDER BY last_run_at DESC LIMIT 1"
         )
         rows = df.collect()
-    except Exception:  # noqa: BLE001 — first-run table-missing or transient is benign
+    except Exception as exc:  # noqa: BLE001 — re-wrap based on mode
+        if mode == "incremental":
+            # Fail closed — caller cannot verify prior cursor / plan hash.
+            # Use the existing StateReadFailedError class (same shape v1
+            # preflight uses); operators see a consistent diagnostic
+            # regardless of which backend triggered the failure.
+            from . import state as v1_state
+            raise StateReadFailedError(
+                dataset_id=node.id,
+                layer=node.layer,
+                table_path=v1_state._state_latest_view_path(paths),
+                cause=exc,
+            ) from exc
+        # Seed mode — table-missing on first run is benign; fall through.
         return None, {}
 
     if not rows:

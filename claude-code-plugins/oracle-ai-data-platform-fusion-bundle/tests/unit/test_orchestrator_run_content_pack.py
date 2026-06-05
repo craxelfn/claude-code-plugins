@@ -320,10 +320,13 @@ class TestPriorStateHydration:
         assert call["prior_plan_hash"] is None
         assert call["ctx"].prior_watermark == {}
 
-    def test_state_read_failure_is_swallowed_and_defaults_to_none(self, monkeypatch) -> None:
-        """Defensive: a transient Spark error reading the latest view
-        (e.g. table doesn't exist on a clean catalog) MUST NOT fail the
-        run — degrades to seed-mode semantics."""
+    def test_state_read_failure_in_seed_mode_is_swallowed(self, monkeypatch) -> None:
+        """Seed mode: a transient Spark error reading the latest view
+        (e.g. table doesn't exist on a clean catalog) MUST NOT fail
+        the run. Seed semantics are 'full rebuild from bronze' — no
+        prior cursor needed; a benign read failure degrades cleanly
+        to (None, {}) and execute_node still runs.
+        """
         from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
         from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
         from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
@@ -349,26 +352,92 @@ class TestPriorStateHydration:
         monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
 
         fake_spark = MagicMock()
-        # State-table setup succeeds (mocked); the prior-state SELECT
-        # raises.
         fake_spark.sql.side_effect = RuntimeError("simulated AnalysisException")
-
         monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
         monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
         monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
 
-        # Should not raise — degrades gracefully.
+        # Seed mode — should NOT raise; degrades gracefully.
         orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
-            mode="incremental",
+            mode="seed",
             execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
         )
 
+        assert len(execute_node_calls) == 1
         call = execute_node_calls[0]
         assert call["prior_plan_hash"] is None
         assert call["ctx"].prior_watermark == {}
+
+    def test_state_read_failure_in_incremental_mode_fails_closed(self, monkeypatch) -> None:
+        """Round-13/14 fix: an incremental content-pack run MUST fail
+        closed when the latest-view read raises (permission, metastore,
+        schema, transient Spark). Falling through to (None, {}) would
+        full-scan the source AND skip the AIDPF-4040 drift gate — a
+        silent failure mode that masks state-table accessibility issues
+        and could commit incremental writes despite being unable to
+        verify the prior cursor.
+
+        The run must raise StateReadFailedError BEFORE any execute_node
+        invocation.
+        """
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
+            StateReadFailedError,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = load_full_chain(FIXTURE_PACK, base_resolver=make_filesystem_base_resolver(FIXTURE_PACK))
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        fake_spark = MagicMock()
+        fake_spark.sql.side_effect = RuntimeError("simulated metastore permission error")
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        with pytest.raises(StateReadFailedError) as exc_info:
+            orchestrator.run(
+                bundle_path=FIXTURE_BUNDLE,
+                mode="incremental",
+                execution_backend="content-pack",
+                resolved_pack=pack,
+                tenant_profile=profile,
+            )
+
+        # Critical assertion: execute_node MUST NOT have been called.
+        assert execute_node_calls == [], (
+            "execute_node was invoked despite state-read failure in "
+            "incremental mode — the run silently full-scanned the source. "
+            "fail-closed contract violated."
+        )
+
+        # The original Spark exception is preserved as __cause__ for triage.
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "metastore" in str(exc_info.value.__cause__)
+        # The StateReadFailedError carries the dataset_id + layer.
+        assert exc_info.value.dataset_id == "dim_thing"
+        assert exc_info.value.layer == "silver"
 
 
 # ---------------------------------------------------------------------------
