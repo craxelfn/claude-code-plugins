@@ -1,11 +1,22 @@
 """Implementation of ``aidp-fusion-bundle bootstrap``.
 
-Probes live prerequisites against the Fusion pod + AIDP workspace listed
-in ``aidp.config.yaml``. Each probe is independent and reports
-PASS / FAIL / SKIP with the exact remediation step. Overall exit code:
-0 if every probe passed (or was intentionally skipped), 1 otherwise.
+Two phases:
 
-Probes performed:
+1. **Pre-onboarding probes** (existing) — validate ``bundle.yaml`` +
+   ``aidp.config.yaml``, ping BICC + AIDP REST, reconcile the catalog,
+   optionally probe IAM. Skippable via ``--skip-preonboarding-probes``
+   for ``--refresh`` flows.
+2. **Variation-resolution phase** (Phase 3a — this feature) — when
+   ``bundle.content_pack`` is set, walk the pack's declared
+   ``columnAliases`` / ``semanticVariants`` against the tenant's live
+   bronze schema, pin chosen values to ``profiles/<tenant>.yaml``,
+   write an evidence snapshot. ``--refresh`` re-walks every variation
+   point against a possibly-drifted bronze (Step 9).
+
+v1 bundles (no ``contentPack:`` block) skip phase 2 entirely; their
+existing ``bootstrap`` behaviour is unchanged.
+
+Probes performed in phase 1:
   1. ``bundle.yaml + aidp.config.yaml`` schema validate
   2. ``GET <pod>/biacm/rest/meta/datastores`` reachable + auth works
   3. Catalog reconciliation (every dataset id resolves to a live datastore)
@@ -26,6 +37,12 @@ from rich.table import Table
 
 from ..schema.bundle import AidpConfig, Bundle
 from ..schema.fusion_catalog import CATALOG
+from .variation_phase import (
+    RefreshRequiresConfirmation,
+    VariationPhaseOptions,
+    VariationPhaseOutcome,
+    run_variation_phase,
+)
 
 
 class _ProbeResult:
@@ -51,8 +68,33 @@ def bootstrap(
     *,
     check_iam: bool = False,
     console: Console | None = None,
+    # --- Phase 3a flags ---
+    refresh: bool = False,
+    operator: str | None = None,
+    non_interactive: bool = False,
+    resolutions_path: Path | None = None,
+    skip_preonboarding_probes: bool = False,
+    spark_session=None,
 ) -> int:
-    """Probe all prereqs; return process exit code (0 if all PASS, 1 otherwise)."""
+    """Run pre-onboarding probes + variation-resolution phase.
+
+    Returns process exit code (0 on success, non-zero on any failure).
+
+    Args:
+        bundle_path: path to ``bundle.yaml``.
+        config_path: path to ``aidp.config.yaml``.
+        env_name: environment key from ``aidp.config.yaml``.
+        check_iam: optional IAM probe (phase 1 only).
+        console: Rich console for output.
+        refresh: phase 2 re-walk against possibly-drifted bronze.
+        operator: explicit ``--operator`` value (phase 2).
+        non_interactive: phase 2 multi-match auto-pick mode.
+        resolutions_path: scripted multi-match resolutions JSON.
+        skip_preonboarding_probes: skip phase 1 (power-user knob for
+            ``--refresh`` flows that already passed phase 1 on initial
+            onboarding).
+        spark_session: caller-injected Spark session (tests).
+    """
     console = console or Console()
     results: list[_ProbeResult] = []
 
@@ -65,7 +107,7 @@ def bootstrap(
                 f"env '{env_name}' not in aidp.config.yaml",
                 f"add '{env_name}:' under environments: in aidp.config.yaml",
             ))
-        else:
+        elif not skip_preonboarding_probes:
             _probe_bicc(bundle, results)
             _probe_aidp(env, results)
             if check_iam:
@@ -74,9 +116,39 @@ def bootstrap(
                     "policy probe requires AIDP RP credentials and is not auto-discoverable",
                     "verify manually that AIDP RP can read the BICC External Storage bucket",
                 ))
+        elif skip_preonboarding_probes:
+            results.append(_ProbeResult(
+                "preonboarding-probes", "SKIP",
+                "skipped via --skip-preonboarding-probes",
+                "re-run without the flag to validate pod / AIDP reachability",
+            ))
 
     _render(results, console)
-    return 0 if all(r.status == "PASS" or r.status == "SKIP" for r in results) else 1
+    phase1_failed = any(r.status == "FAIL" for r in results)
+    if phase1_failed:
+        return 1
+
+    # ----- Phase 2: variation resolution -----
+    if bundle is None or bundle.content_pack is None:
+        # v1 bundle — phase 1 result is the only signal.
+        return 0
+
+    options = VariationPhaseOptions(
+        refresh=refresh,
+        operator=operator,
+        non_interactive=non_interactive,
+        resolutions_path=resolutions_path,
+        spark_session=spark_session,
+    )
+    try:
+        outcome: VariationPhaseOutcome = run_variation_phase(
+            bundle, bundle_path, options=options, console=console
+        )
+    except RefreshRequiresConfirmation as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
+    return outcome.exit_code
 
 
 def _load(

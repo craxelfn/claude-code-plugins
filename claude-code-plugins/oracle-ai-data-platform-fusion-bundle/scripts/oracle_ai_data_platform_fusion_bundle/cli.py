@@ -73,9 +73,38 @@ def validate(ctx: click.Context) -> None:
 
 @main.command()
 @click.option("--check-iam", is_flag=True, help="Also probe OCI IAM policies (requires AIDP RP credentials).")
+@click.option(
+    "--refresh", is_flag=True,
+    help="Re-walk every variation point against the live bronze; resolves drift per §9.5.5 Tier-1.",
+)
+@click.option(
+    "--operator", "operator", type=str, default=None,
+    help="Explicit operator identity for the SOX-floor audit trail (overrides $AIDP_OPERATOR / $USER).",
+)
+@click.option(
+    "--non-interactive", is_flag=True,
+    help="Sandbox/CI mode: multi-match auto-picks the first candidate; refuses --refresh changes to pinned values.",
+)
+@click.option(
+    "--resolutions", "resolutions_path", type=click.Path(path_type=Path, exists=True),
+    default=None,
+    help="JSON file scripting multi-match resolutions (feature #3 / CI use).",
+)
+@click.option(
+    "--skip-preonboarding-probes", is_flag=True,
+    help="Skip phase-1 BICC / AIDP probes; useful for --refresh after initial onboarding succeeded.",
+)
 @click.pass_context
-def bootstrap(ctx: click.Context, check_iam: bool) -> None:
-    """Probe all prerequisites against the live Fusion pod + AIDP workspace."""
+def bootstrap(
+    ctx: click.Context,
+    check_iam: bool,
+    refresh: bool,
+    operator: str | None,
+    non_interactive: bool,
+    resolutions_path: Path | None,
+    skip_preonboarding_probes: bool,
+) -> None:
+    """Probe all prerequisites + run the variation-resolution phase when content-pack-enabled."""
     from .commands.bootstrap import bootstrap as bootstrap_impl
     sys.exit(bootstrap_impl(
         bundle_path=ctx.obj["bundle_path"],
@@ -83,6 +112,11 @@ def bootstrap(ctx: click.Context, check_iam: bool) -> None:
         env_name=ctx.obj["env_name"],
         check_iam=check_iam,
         console=console,
+        refresh=refresh,
+        operator=operator,
+        non_interactive=non_interactive,
+        resolutions_path=resolutions_path,
+        skip_preonboarding_probes=skip_preonboarding_probes,
     ))
 
 
