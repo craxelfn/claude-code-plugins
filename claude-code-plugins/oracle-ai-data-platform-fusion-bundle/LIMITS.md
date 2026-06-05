@@ -255,21 +255,37 @@ treats a `bronzeSchemaFingerprint` value that is `None`, the sentinel
 
 **Status**: tracked-by-design for v0.3. Stricter mode (treat legacy profiles as a hard fail) would gate every legacy tenant from running incrementals until they refresh — too disruptive for v0.3 rollout. A future env-var `AIDP_REQUIRE_PINNED_FINGERPRINT=1` could flip the policy without a code change.
 
-### P3c-L2 — drift artifact lacks per-dataset column-level diff in v0.3
-
-**What**: the `AIDPF-2012` diagnostic artifact reports the pinned vs. current bronze fingerprints + a `affectedVariationPoints[]` array (per-VP "is the pinned candidate still present?"). It does **not** include a per-dataset, per-column diff showing exactly which columns were added / removed / retyped.
-
-**Why**: the pinned fingerprint is a one-way SHA-256 hash. Reconstructing the prior schema requires bootstrap to ALSO write a pinned-schema snapshot (a full `DESCRIBE TABLE` capture per bronze dataset) at pin time, then diff laptop-side against the live observation. Deferred — `affectedVariationPoints` IS computable without that and IS what the skill's recovery flow needs.
-
-**Where it bites**: operators investigating an `AIDPF-2012` see "fingerprint changed" + "VP X's pinned candidate disappeared" but not "column ApInvoicesFoo was added and column ApInvoicesBar was renamed". For triage they fall back to manually re-running `aidp-fusion-bundle catalog probe` and diffing against the most recent `evidence/<tenant>/<ISO>.yaml` snapshot. The information IS retrievable; it's just not in the artifact.
-
-**Mitigation**: cross-reference the live evidence snapshot in `evidence/<tenant>/`. Or, if extra signal is needed before re-running, the operator can run `bootstrap --refresh` (which emits a new evidence snapshot capturing the live schema) and diff manually.
-
-**Status**: deferred to follow-up feature `v2-phase-3d-pinned-schema-diff`. Tracked-by-design for v0.3.
-
 ---
 
 ## Resolved limits
+
+### P3c-L2 — drift artifact lacks per-dataset column-level diff (RESOLVED 2026-06-06 by Phase 3d)
+
+Phase 3d adds a bootstrap-pinned per-dataset bronze-schema snapshot file at
+`<bundle.yaml.parent>/profiles/<tenant>.schema-snapshot.yaml`. Runtime
+preflight reads the snapshot on drift and populates
+`SchemaDriftFailure.datasetDeltas` with per-dataset `addedColumns` /
+`removedColumns` / `typeChangedColumns` lists — the exact column-level
+signal the operator triage flow needs. `bootstrap --refresh` back-fills
+the snapshot atomically when it's missing / unparseable / has a desynced
+metadata fingerprint / has hand-edited contents. REST dispatch stages the
+snapshot alongside the profile YAML so cluster-side preflight sees the
+same snapshot the laptop pinned. Pre-3d profiles continue to emit empty
+`datasetDeltas` + a one-time WARN log (graceful degrade); `bootstrap
+--refresh` is the documented remediation. See
+`docs/content_pack_execution.md` "Phase 3d additions" for the full
+contract.
+
+> *Pre-fix P3c-L2 (Phase 3c era): the `AIDPF-2012` artifact reported
+> pinned vs. current bronze fingerprints + `affectedVariationPoints[]`
+> (per-VP "is the pinned candidate still present?"), but no per-dataset,
+> per-column diff. The pinned fingerprint was a one-way SHA-256 hash, so
+> reconstructing the prior schema required a pinned-schema snapshot
+> deferred to v2-phase-3d-pinned-schema-diff. Operators triaging drift
+> cross-referenced the live evidence snapshot in `evidence/<tenant>/`
+> manually.*
+
+---
 
 ### L5 — `--mode incremental` gate (RESOLVED 2026-06-02 by P1.17 commits `5f644d7` + `f6d003a` + `76fec96`)
 

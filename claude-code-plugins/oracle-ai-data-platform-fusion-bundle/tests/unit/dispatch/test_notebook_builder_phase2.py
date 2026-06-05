@@ -302,3 +302,215 @@ class TestAdversarialRoundTrip:
 
         # Raw SQL must NOT appear as substring.
         assert "MERGE INTO target" not in bootstrap
+
+
+# ---------------------------------------------------------------------------
+# Phase 3d — schema snapshot staging
+# ---------------------------------------------------------------------------
+
+
+class TestPhase3dSchemaSnapshotStaging:
+    _MINIMAL_SNAPSHOT_YAML = (
+        "schemaVersion: 1\n"
+        "tenant: acme\n"
+        "pinnedAt: 2026-06-06T12:00:00+00:00\n"
+        "bronzeSchemaFingerprint: sha256:" + "a" * 64 + "\n"
+        "datasets:\n"
+        "  - datasetId: ap_invoices\n"
+        "    columns:\n"
+        "      - name: A\n"
+        "        type: bigint\n"
+    )
+
+    def test_content_pack_with_snapshot_materialises_on_cluster(
+        self, tmp_wheel
+    ) -> None:
+        nb = build_notebook(
+            **_minimal_args(
+                tmp_wheel,
+                execution_backend="content-pack",
+                profile_yaml="schemaVersion: 1\ntenant: acme\n",
+                pack_files={"__layer_0__/pack.yaml": "id: x\nversion: 1.0.0\n"},
+                pack_manifest={"chain_layers": [], "entry_layer_index": 0},
+                schema_snapshot_yaml=self._MINIMAL_SNAPSHOT_YAML,
+            )
+        )
+        all_sources = "\n".join(
+            "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
+            for c in nb["cells"]
+            if c["cell_type"] == "code"
+        )
+        # Bootstrap cell decodes + writes the snapshot to the resolved path.
+        assert "_SCHEMA_SNAPSHOT_YAML" in all_sources
+        assert "resolve_snapshot_path" in all_sources
+        assert "schema-snapshot.yaml" not in all_sources  # not raw — resolved on cluster
+        # The decoded payload round-trips byte-for-byte.
+        m = re.search(
+            r"_SCHEMA_SNAPSHOT_YAML = _b64\.b64decode\(['\"]([^'\"]+)['\"]\)",
+            all_sources,
+        )
+        assert m is not None
+        decoded = base64.b64decode(m.group(1)).decode("utf-8")
+        assert decoded == self._MINIMAL_SNAPSHOT_YAML
+
+    def test_content_pack_without_snapshot_omits_materialisation(
+        self, tmp_wheel
+    ) -> None:
+        nb = build_notebook(
+            **_minimal_args(
+                tmp_wheel,
+                execution_backend="content-pack",
+                profile_yaml="schemaVersion: 1\ntenant: acme\n",
+                pack_files={"x": "y"},
+                pack_manifest={"a": 1},
+                schema_snapshot_yaml=None,
+            )
+        )
+        all_sources = "\n".join(
+            "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
+            for c in nb["cells"]
+            if c["cell_type"] == "code"
+        )
+        assert "_SCHEMA_SNAPSHOT_YAML" not in all_sources
+        assert "resolve_snapshot_path" not in all_sources
+
+    def test_legacy_python_with_snapshot_raises(self, tmp_wheel) -> None:
+        with pytest.raises(AssertionError):
+            build_notebook(
+                **_minimal_args(
+                    tmp_wheel,
+                    execution_backend="legacy-python",
+                    schema_snapshot_yaml=self._MINIMAL_SNAPSHOT_YAML,
+                )
+            )
+
+    def test_dispatch_via_rest_threads_kwarg_through(
+        self, tmp_wheel, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``dispatch_via_rest`` must thread ``schema_snapshot_yaml``
+        into ``build_notebook``. Mirrors the
+        ``force_fingerprint_skip`` round-1 thread-through test."""
+        from unittest.mock import MagicMock
+
+        import oracle_ai_data_platform_fusion_bundle.dispatch as dispatch_mod
+
+        # Capture the kwargs that ``build_notebook`` is called with.
+        captured: dict = {}
+
+        def _spy_build_notebook(**kwargs):
+            captured.update(kwargs)
+            return {"cells": [], "nbformat": 4, "nbformat_minor": 5}
+
+        monkeypatch.setattr(dispatch_mod, "build_notebook", _spy_build_notebook)
+        monkeypatch.setattr(
+            dispatch_mod, "build_wheel", lambda **_: pathlib.Path("/tmp/x.whl")
+        )
+
+        # Stub preflight + REST client so dispatch reaches build_notebook.
+        from oracle_ai_data_platform_fusion_bundle.dispatch.preflight import (
+            PreflightResult,
+        )
+
+        monkeypatch.setattr(
+            dispatch_mod,
+            "run_local_preflight",
+            lambda **_: [PreflightResult(name="x", status="PASS", detail="")],
+        )
+        monkeypatch.setattr(
+            dispatch_mod,
+            "run_remote_preflight",
+            lambda **_: [PreflightResult(name="x", status="PASS", detail="")],
+        )
+
+        rest_client = MagicMock(name="AidpRestClient")
+        rest_client.upload_notebook.return_value = "/Workspace/x.ipynb"
+        rest_client.create_notebook_job.return_value = "job-1"
+        rest_client.submit_run.return_value = "run-1"
+        from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+            RunResult,
+        )
+
+        raw = {"taskToTaskRunMap": {"orchestrator_run": "task-1"}}
+        rest_client.poll_run.return_value = RunResult(status="SUCCESS", raw=raw)
+        # Return a notebook with a parseable success marker so dispatch
+        # builds a RunSummary without raising. Use the real
+        # ``RunSummary.empty(...)`` shape via ``to_marker_dict``.
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            RunSummary,
+        )
+
+        marker_dict = RunSummary.empty(
+            bundle_project="x", mode="incremental"
+        ).to_marker_dict()
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(marker_dict)} "
+            f"AIDP_LIVE_TEST_RESULT_END"
+        )
+        rest_client.fetch_output.return_value = json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "outputs": [
+                            {
+                                "output_type": "stream",
+                                "name": "stdout",
+                                "text": marker_text,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+            AidpRestClient as RealAidpRestClient,
+        )
+
+        factory = MagicMock(return_value=rest_client)
+        factory.parse_marker = RealAidpRestClient.parse_marker
+        factory.resolve_task_run_key = RealAidpRestClient.resolve_task_run_key
+        monkeypatch.setattr(dispatch_mod, "AidpRestClient", factory)
+
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\nproject: x\n", encoding="utf-8"
+        )
+
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import (
+            AidpConfig,
+            EnvSpec,
+        )
+
+        env = EnvSpec.model_validate(
+            {
+                "workspaceKey": "wk",
+                "aiDataPlatformId": "ocid1.x",
+                "clusterKey": "ck",
+                "clusterName": "cn",
+                "ociProfile": "DEFAULT",
+            }
+        )
+        cfg = AidpConfig.model_validate(
+            {
+                "apiVersion": "aidp-fusion-bundle/v1",
+                "project": "x",
+                "environments": {"dev": env.model_dump(by_alias=True)},
+            }
+        )
+
+        dispatch_mod.dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=cfg,
+            env=env,
+            env_name="dev",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+            execution_backend="content-pack",
+            profile_yaml="schemaVersion: 1\ntenant: x\n",
+            pack_files={"x": "y"},
+            pack_manifest={"a": 1},
+            schema_snapshot_yaml=self._MINIMAL_SNAPSHOT_YAML,
+        )
+
+        assert captured.get("schema_snapshot_yaml") == self._MINIMAL_SNAPSHOT_YAML

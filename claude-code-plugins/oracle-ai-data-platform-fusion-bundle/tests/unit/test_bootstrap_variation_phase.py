@@ -331,3 +331,463 @@ class TestWorkdirAnchor:
         # And nothing accidentally written under cwd.
         assert not (other_cwd / "profiles").exists()
         assert not (other_cwd / "evidence").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3d — pinned bronze-schema snapshot + bootstrap --refresh back-fill
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime, timezone
+
+from oracle_ai_data_platform_fusion_bundle.schema.bronze_fingerprint import (
+    ColumnInfo,
+    compute_bronze_fingerprint,
+)
+from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import (
+    from_observed as snapshot_from_observed,
+    load_bronze_schema_snapshot,
+    resolve_snapshot_path,
+    write_bronze_schema_snapshot,
+)
+
+
+def _bronze_observed_for_starter() -> dict[str, list[ColumnInfo]]:
+    """Reproduce the saasfademo1 bronze observation the variation phase
+    would see for the starter pack — used to compute the fingerprint
+    that the simulated prior profile pinned."""
+    return {
+        dataset: [ColumnInfo(name=c, type="string") for c in cols]
+        for dataset, cols in SAASFADEMO_BRONZE.items()
+    }
+
+
+class TestPhase3dInitialPinWritesSnapshot:
+    def test_initial_pin_writes_snapshot_at_expected_path(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        assert snapshot_path.exists()
+        loaded = load_bronze_schema_snapshot(snapshot_path)
+        # The snapshot's fingerprint must equal the value pinned on the
+        # profile (single bootstrap-commit consistency).
+        profile = yaml.safe_load(outcome.profile_path.read_text(encoding="utf-8"))
+        assert loaded.bronze_schema_fingerprint == profile["bronzeSchemaFingerprint"]
+        # No leftover .tmp file in profiles/.
+        leftovers = [
+            p
+            for p in (bundle_dir / "profiles").iterdir()
+            if p.name.endswith(".tmp")
+        ]
+        assert leftovers == []
+
+    def test_refresh_with_drift_rewrites_snapshot(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+
+        # Initial pin
+        run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        # Refresh against a DIFFERENT bronze shape → full re-pin path.
+        drifted_bronze: dict[str, list[str]] = {
+            **SAASFADEMO_BRONZE,
+            "ap_invoices": [
+                "ApInvoicesInvoiceCurrencyCode",
+                "ApInvoicesCurrencyCode",
+                "ApInvoicesCancelledDate",
+                "ApInvoicesNewColumn",  # introduces drift
+            ],
+        }
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(drifted_bronze),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        loaded = load_bronze_schema_snapshot(snapshot_path)
+        col_names = {
+            c.name for d in loaded.datasets if d.dataset_id == "ap_invoices"
+            for c in d.columns
+        }
+        assert "ApInvoicesNewColumn" in col_names
+
+
+class TestPhase3dRefreshBackfill:
+    """Step 3a — `--refresh` no-drift back-fills missing/desynced snapshots."""
+
+    def _initial_pin_then_delete_snapshot(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> Path:
+        """Helper: do an initial pin, then delete the snapshot file +
+        return the profile mtime so callers can confirm it's unchanged."""
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        snapshot_path.unlink()
+        return outcome.profile_path
+
+    def test_refresh_backfills_missing_snapshot(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        profile_path = self._initial_pin_then_delete_snapshot(
+            bundle_dir, monkeypatch
+        )
+        evidence_dir = bundle_dir / "evidence" / "finance-default"
+        evidence_files_before = sorted(p.name for p in evidence_dir.iterdir())
+        profile_mtime_before = profile_path.stat().st_mtime_ns
+
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        assert "back-filled" in outcome.summary
+        # Snapshot back exists.
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        assert snapshot_path.exists()
+        # Profile + evidence untouched.
+        assert profile_path.stat().st_mtime_ns == profile_mtime_before
+        assert (
+            sorted(p.name for p in evidence_dir.iterdir())
+            == evidence_files_before
+        )
+
+    def test_refresh_backfills_metadata_fingerprint_desync(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Snapshot file present, but its `bronzeSchemaFingerprint` field
+        was hand-edited to a stale value (e.g. partial-failure history)."""
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        # Hand-edit the metadata fingerprint to something stale.
+        raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        raw["bronzeSchemaFingerprint"] = "sha256:" + "0" * 64
+        snapshot_path.write_text(yaml.safe_dump(raw, sort_keys=False), "utf-8")
+        profile_mtime_before = outcome.profile_path.stat().st_mtime_ns
+
+        outcome2 = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome2.exit_code == 0
+        assert "back-filled" in outcome2.summary
+        # Snapshot rewritten with the live fingerprint.
+        loaded = load_bronze_schema_snapshot(snapshot_path)
+        profile = yaml.safe_load(
+            outcome.profile_path.read_text(encoding="utf-8")
+        )
+        assert (
+            loaded.bronze_schema_fingerprint == profile["bronzeSchemaFingerprint"]
+        )
+        # Profile untouched.
+        assert outcome.profile_path.stat().st_mtime_ns == profile_mtime_before
+
+    def test_refresh_backfills_content_handedit(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Snapshot metadata fingerprint matches live, but the
+        `datasets[]` contents were hand-edited so a fresh recompute
+        disagrees. Without this back-fill, the runtime preflight would
+        later reject the snapshot, ask for `--refresh`, and the refresh
+        would no-op forever."""
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        # Hand-edit: drop a column from one dataset's list without
+        # touching the metadata fingerprint.
+        raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        # Find the first non-empty dataset
+        for ds in raw["datasets"]:
+            if ds["columns"]:
+                ds["columns"].pop(0)
+                break
+        snapshot_path.write_text(yaml.safe_dump(raw, sort_keys=False), "utf-8")
+
+        outcome2 = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome2.exit_code == 0
+        assert "back-filled" in outcome2.summary
+        # Snapshot is now self-consistent again.
+        loaded = load_bronze_schema_snapshot(snapshot_path)
+        from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import (
+            snapshot_to_observed,
+        )
+        assert compute_bronze_fingerprint(
+            observed=snapshot_to_observed(loaded)
+        ) == loaded.bronze_schema_fingerprint
+
+    def test_refresh_backfills_unparseable_snapshot(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        snapshot_path.write_text("not: [valid: yaml", encoding="utf-8")
+
+        outcome2 = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome2.exit_code == 0
+        assert "back-filled" in outcome2.summary
+        # Snapshot now parses again.
+        load_bronze_schema_snapshot(snapshot_path)
+
+    def test_refresh_backfill_then_preflight_read_when_profile_name_differs_from_tenant_field(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reviewer-caught (round 1, BLOCKING): when
+        ``bundle.contentPack.profile`` differs from a pre-3d profile
+        YAML's ``tenant:`` field, ``bootstrap --refresh`` back-fills
+        the snapshot under the **active profile name**
+        (``contentPack.profile``), and preflight must read it from
+        the SAME key. End-to-end probe to prove the file written by
+        the back-fill is the file preflight reads.
+        """
+        from unittest.mock import MagicMock
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight_evidence import (
+            check_bronze_fingerprint_drift,
+        )
+
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        # Initial pin via bootstrap — uses contentPack.profile="finance-default"
+        # for both file key and the in-YAML tenant field.
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        # Simulate a hand-authored pre-3d profile shape: rewrite the
+        # `tenant:` field to a different value than contentPack.profile.
+        # Also delete the snapshot so we exercise the back-fill path.
+        profile_path = bundle_dir / "profiles" / "finance-default.yaml"
+        profile_doc = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        profile_doc["tenant"] = "acme-prod"
+        profile_path.write_text(
+            yaml.safe_dump(profile_doc, sort_keys=False), encoding="utf-8"
+        )
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        snapshot_path.unlink()
+
+        # bootstrap --refresh — no drift, back-fills the snapshot under
+        # the contentPack.profile key.
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+        assert "back-filled" in outcome.summary
+        # File appeared at the contentPack.profile-keyed path.
+        assert snapshot_path.exists()
+        # The legacy hand-authored `tenant:` field is preserved (no-drift
+        # branch does NOT rewrite the profile).
+        profile_after = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        assert profile_after["tenant"] == "acme-prod"
+
+        # Now exercise preflight against drifted bronze. If preflight
+        # had keyed on profile.tenant="acme-prod" it would have looked
+        # at profiles/acme-prod.schema-snapshot.yaml (which doesn't
+        # exist) and emitted empty datasetDeltas. With the fix, it
+        # keys on bundle.contentPack.profile="finance-default" and
+        # finds the back-filled snapshot — populating datasetDeltas.
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+
+        loaded_profile = load_tenant_profile(profile_path)
+        assert loaded_profile.tenant == "acme-prod"
+
+        # Build a mock pack + spark with the same dataset shape as the
+        # backfill, but drift one column to trigger the gate.
+        drifted = {**SAASFADEMO_BRONZE, "ap_invoices": ["RenamedCurrencyCol"]}
+        spark = _mock_spark(drifted)
+
+        pack_mock = MagicMock(name="pack")
+        pack_mock.bronze_yaml = {
+            "datasets": [{"id": k} for k in SAASFADEMO_BRONZE.keys()]
+        }
+        pack_mock.pack.semantic_variants = {}
+
+        result = check_bronze_fingerprint_drift(
+            spark=spark,
+            bundle=bundle,  # bundle.content_pack.profile == "finance-default"
+            bundle_path=bundle_dir / "bundle.yaml",
+            pack=pack_mock,
+            profile=loaded_profile,  # profile.tenant == "acme-prod"
+            run_id="cp-3d-divergent-key",
+            mode="incremental",
+            workdir=bundle_dir,
+        )
+        assert result.kind == "drift"
+        import json
+
+        body = json.loads(result.diagnostic_path.read_text(encoding="utf-8"))
+        deltas = body["schemaDrift"]["datasetDeltas"]
+        # Snapshot was found via the contentPack.profile key — diff
+        # populated. (Empty here would mean the regression came back.)
+        assert any(d["datasetId"] == "ap_invoices" for d in deltas), (
+            "Phase 3d snapshot keyed on contentPack.profile was not "
+            "read — preflight is keying on profile.tenant again."
+        )
+
+    def test_refresh_genuine_noop_when_snapshot_matches(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Healthy snapshot + matching fingerprint → genuine no-op
+        (no `back-filled` in the summary, snapshot mtime preserved)."""
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+            ),
+        )
+        snapshot_path = resolve_snapshot_path(
+            bundle_dir / "bundle.yaml", "finance-default"
+        )
+        snapshot_mtime_before = snapshot_path.stat().st_mtime_ns
+
+        outcome2 = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(SAASFADEMO_BRONZE),
+                non_interactive=True,
+                refresh=True,
+            ),
+        )
+        assert outcome2.exit_code == 0
+        assert "back-filled" not in outcome2.summary
+        assert outcome2.summary == "bootstrap --refresh: no drift detected"
+        assert snapshot_path.stat().st_mtime_ns == snapshot_mtime_before

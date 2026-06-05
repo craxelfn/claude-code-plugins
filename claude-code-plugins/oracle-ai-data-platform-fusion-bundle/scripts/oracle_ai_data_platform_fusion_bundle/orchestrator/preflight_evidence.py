@@ -41,10 +41,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..commands.bronze_probe import describe_bronze
-from ..schema.bronze_fingerprint import compute_bronze_fingerprint
+from ..schema.bronze_fingerprint import ColumnInfo, compute_bronze_fingerprint
+from ..schema.bronze_schema_snapshot import (
+    BronzeSchemaSnapshotSchemaError,
+    BronzeSchemaSnapshotV1,
+    load_bronze_schema_snapshot,
+    resolve_snapshot_path,
+    snapshot_to_observed,
+)
 from ..schema.diagnostic_artifact import (
     AIDPF_2012_SCHEMA_DRIFT_DETECTED,
     AffectedVariationPoint,
+    ColumnTypeChange,
+    DatasetSchemaDelta,
+    ObservedColumn,
     SchemaDriftDiagnosticV1,
     SchemaDriftFailure,
     write_schema_drift_diagnostic,
@@ -187,6 +197,29 @@ def check_bronze_fingerprint_drift(
     affected_vps = _compute_affected_variation_points(
         pack=pack, profile=profile, observed=observed
     )
+    # Phase 3d — read the pinned snapshot (when present + healthy) and
+    # diff against the live observation to populate per-dataset
+    # column-level deltas. Absent / unparseable / desynced snapshot
+    # degrades to empty `datasetDeltas` + a one-time WARN log; preflight
+    # never crashes from this helper — drift signal must always reach
+    # the artifact even when the snapshot path is unhealthy.
+    # Snapshot path is keyed by `bundle.contentPack.profile` (same key
+    # bootstrap writes under), NOT `profile.tenant` — a hand-authored
+    # pre-3d profile YAML may carry a different `tenant:` value than
+    # the active profile name, and using the YAML field as the path
+    # key would silently look in the wrong place after a healthy
+    # back-fill.
+    snapshot_key = bundle.content_pack.profile or bundle.content_pack.name
+    snapshot = _load_snapshot_if_present(
+        bundle_path=bundle_path,
+        profile_name=snapshot_key,
+        profile=profile,
+    )
+    dataset_deltas: list[DatasetSchemaDelta] = (
+        _compute_dataset_deltas(snapshot=snapshot, observed=observed)
+        if snapshot is not None
+        else []
+    )
     artifact = SchemaDriftDiagnosticV1(
         runId=run_id,
         tenant=profile.tenant,
@@ -201,7 +234,7 @@ def check_bronze_fingerprint_drift(
             priorFingerprint=prior_fingerprint,  # type: ignore[arg-type]
             currentFingerprint=current_fingerprint,
             pinnedAt=profile.pinned_at,
-            datasetDeltas=[],  # v0.3 — see feature #3d for per-dataset diffs
+            datasetDeltas=dataset_deltas,
             affectedVariationPoints=affected_vps,
         ),
     )
@@ -389,6 +422,202 @@ def _build_handoff_message(
         f"    Documentation:       PLAN.md §9.5.5\n"
         f"    run_id:              {run_id}"
     )
+
+
+def _load_snapshot_if_present(
+    *,
+    bundle_path: Path,
+    profile_name: str,
+    profile: "TenantProfile",
+) -> BronzeSchemaSnapshotV1 | None:
+    """Read the Phase 3d pinned snapshot for the active profile.
+
+    Returns ``None`` (with a WARN log) when ANY of:
+
+    * The snapshot file is absent. A pre-3d profile, or a partial-failure
+      state where the snapshot write failed. Operator's remediation:
+      ``bootstrap --refresh`` repins both the profile and the snapshot.
+    * The file fails to parse. Hand-edit corruption — same remediation.
+    * The snapshot's metadata ``bronze_schema_fingerprint`` differs from
+      a recomputed fingerprint over its own ``datasets`` list. Indicates
+      the dataset/column lists were hand-edited but the fingerprint field
+      stayed stale. Operator should ``--refresh`` so the metadata
+      catches up.
+    * The snapshot's metadata fingerprint differs from
+      ``profile.bronze_schema_fingerprint``. Profile/snapshot desync —
+      e.g. snapshot remained from an older pin while the profile was
+      rewritten by hand.
+
+    In all four cases the drift signal still reaches the artifact —
+    only ``datasetDeltas`` stays empty (the Phase 3c v0.3 behaviour).
+    The function NEVER raises; it's a defensive helper.
+
+    Args:
+        bundle_path: path to ``bundle.yaml`` — drives the snapshot
+            file location via
+            :func:`schema.bronze_schema_snapshot.resolve_snapshot_path`.
+        profile_name: the **active profile name** — same key bootstrap
+            writes the snapshot under (``bundle.contentPack.profile or
+            .name``). NOT ``profile.tenant``: a hand-authored pre-3d
+            profile YAML's ``tenant:`` value may differ from the
+            active profile name, and using the YAML field as the
+            path key would silently look in the wrong place after a
+            healthy back-fill.
+        profile: loaded ``TenantProfile``;
+            ``bronze_schema_fingerprint`` is the cross-check anchor
+            against the snapshot's own metadata fingerprint.
+
+    Returns:
+        ``BronzeSchemaSnapshotV1`` when healthy; ``None`` otherwise.
+    """
+    snapshot_path = resolve_snapshot_path(bundle_path, profile_name)
+    if not snapshot_path.exists():
+        logger.warning(
+            "Phase 3d snapshot absent — datasetDeltas will be empty in "
+            "the AIDPF-2012 artifact. Run `aidp-fusion-bundle bootstrap "
+            "--refresh` to pin the snapshot. Expected at: %s",
+            snapshot_path,
+        )
+        return None
+
+    try:
+        snapshot = load_bronze_schema_snapshot(snapshot_path)
+    except BronzeSchemaSnapshotSchemaError as exc:
+        logger.warning(
+            "Phase 3d snapshot unparseable — datasetDeltas will be empty "
+            "in the AIDPF-2012 artifact. Run `aidp-fusion-bundle "
+            "bootstrap --refresh` to repin. Reason: %s",
+            exc,
+        )
+        return None
+
+    # Content cross-check: recompute over the snapshot's datasets and
+    # confirm it matches the snapshot's own metadata fingerprint. A
+    # mismatch means the dataset list was hand-edited but the metadata
+    # field wasn't updated to match — we can't trust the diff key set.
+    recomputed = compute_bronze_fingerprint(
+        observed=snapshot_to_observed(snapshot)
+    )
+    if recomputed != snapshot.bronze_schema_fingerprint:
+        logger.warning(
+            "Phase 3d snapshot content/metadata fingerprint desync at "
+            "%s — datasetDeltas will be empty in the AIDPF-2012 artifact. "
+            "Run `aidp-fusion-bundle bootstrap --refresh` to repin "
+            "atomically.",
+            snapshot_path,
+        )
+        return None
+
+    # Profile cross-check: snapshot's pinned fingerprint must match the
+    # profile's pinned fingerprint. If they differ the snapshot is from
+    # a different pin than the profile — the diff would compare against
+    # a schema the profile never saw.
+    if snapshot.bronze_schema_fingerprint != profile.bronze_schema_fingerprint:
+        logger.warning(
+            "Phase 3d snapshot fingerprint %s differs from profile "
+            "fingerprint %s at %s — datasetDeltas will be empty in the "
+            "AIDPF-2012 artifact. Run `aidp-fusion-bundle bootstrap "
+            "--refresh` to repin atomically.",
+            snapshot.bronze_schema_fingerprint[:24] + "...",
+            (profile.bronze_schema_fingerprint or "<unset>")[:24] + "...",
+            snapshot_path,
+        )
+        return None
+
+    return snapshot
+
+
+def _compute_dataset_deltas(
+    *,
+    snapshot: BronzeSchemaSnapshotV1,
+    observed: dict[str, list[ColumnInfo]],
+) -> list[DatasetSchemaDelta]:
+    """Diff the pinned snapshot against the live observation.
+
+    One :class:`DatasetSchemaDelta` per dataset in the union of
+    snapshot.datasets and observed.keys() — datasets only present in
+    the snapshot surface every column as ``removedColumns``; datasets
+    only present in observed surface every column as ``addedColumns``.
+
+    Canonical diff key MIRRORS
+    :func:`schema.bronze_fingerprint.compute_bronze_fingerprint`
+    exactly: ``name.strip().lower()`` for column matching,
+    ``type.strip().lower()`` for type comparison. Original casing is
+    preserved on the surfaced entries for operator display.
+
+    Pure function — no Spark, no I/O. Returns an empty list when the
+    snapshot and observed are byte-equivalent under the canonical key.
+    """
+    snapshot_by_dataset: dict[str, list[ColumnInfo]] = snapshot_to_observed(
+        snapshot
+    )
+    all_dataset_ids = sorted(
+        set(snapshot_by_dataset.keys()) | set(observed.keys())
+    )
+
+    deltas: list[DatasetSchemaDelta] = []
+    for dataset_id in all_dataset_ids:
+        snapshot_cols = snapshot_by_dataset.get(dataset_id, [])
+        observed_cols = observed.get(dataset_id, [])
+
+        snapshot_index = _canonical_index(snapshot_cols)
+        observed_index = _canonical_index(observed_cols)
+
+        added: list[ObservedColumn] = []
+        removed: list[ObservedColumn] = []
+        type_changed: list[ColumnTypeChange] = []
+
+        for key, obs_col in observed_index.items():
+            if key not in snapshot_index:
+                added.append(
+                    ObservedColumn(name=obs_col.name, type=obs_col.type)
+                )
+                continue
+            prior_col = snapshot_index[key]
+            if prior_col.type.strip().lower() != obs_col.type.strip().lower():
+                type_changed.append(
+                    ColumnTypeChange(
+                        name=obs_col.name,
+                        priorType=prior_col.type,
+                        currentType=obs_col.type,
+                    )
+                )
+
+        for key, prior_col in snapshot_index.items():
+            if key not in observed_index:
+                removed.append(
+                    ObservedColumn(name=prior_col.name, type=prior_col.type)
+                )
+
+        if added or removed or type_changed:
+            deltas.append(
+                DatasetSchemaDelta(
+                    datasetId=dataset_id,
+                    addedColumns=added,
+                    removedColumns=removed,
+                    typeChangedColumns=type_changed,
+                )
+            )
+
+    return deltas
+
+
+def _canonical_index(columns: list[ColumnInfo]) -> dict[str, ColumnInfo]:
+    """Build a ``{canonical_name: ColumnInfo}`` map preserving the first
+    occurrence of each canonical key.
+
+    Mirrors the dedupe behaviour of
+    :func:`schema.bronze_fingerprint._dedupe_by_name` so the diff walker
+    sees the same effective column set the fingerprint hashed. Original
+    casing on the returned :class:`ColumnInfo` is preserved for display.
+    """
+    out: dict[str, ColumnInfo] = {}
+    for col in columns:
+        key = col.name.strip().lower()
+        if key in out:
+            continue
+        out[key] = col
+    return out
 
 
 __all__ = [

@@ -322,13 +322,16 @@ Architectural notes:
   `<bundle_dir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json`, and
   raises `SchemaDriftDetectedError` — so a drift surfaces as exit 14
   whether the operator ran with `--inline` or via REST dispatch.
-* **No per-dataset column-level diff in v0.3** — the pinned
-  fingerprint is a one-way hash, so reconstructing the prior schema
-  requires bootstrap to also write a pinned-schema snapshot
-  (deferred to `v2-phase-3d-pinned-schema-diff`). The actionable
-  diff that IS available — pinned variation points → observed bronze
-  columns — IS what the recovery flow needs. Tracked as **`P3c-L2`**
-  in `LIMITS.md`.
+* **Per-dataset column-level diff lands in Phase 3d** —
+  `bootstrap` writes a pinned bronze-schema snapshot to
+  `<bundle.yaml.parent>/profiles/<tenant>.schema-snapshot.yaml`
+  at the same instant it pins `bronzeSchemaFingerprint`. Runtime
+  preflight reads the snapshot on drift, diffs it against the live
+  observation, and populates
+  `SchemaDriftFailure.datasetDeltas` with per-dataset
+  `addedColumns` / `removedColumns` / `typeChangedColumns` entries.
+  Closes **`P3c-L2`**. See "Phase 3d additions" below for the
+  graceful-degrade rules.
 
 Error code added by this phase:
 
@@ -341,6 +344,81 @@ Reserved exit code added:
 | Code | Meaning |
 |------|---------|
 | `14` (`EXIT_CODE_SCHEMA_DRIFT`) | `AIDPF-2012` raised on the active run. |
+
+## Phase 3d additions — pinned bronze-schema snapshot + per-dataset delta
+
+`bootstrap` writes a per-dataset bronze-schema snapshot file at
+`<bundle.yaml.parent>/profiles/<tenant>.schema-snapshot.yaml` at the
+same instant it computes `bronzeSchemaFingerprint`. The snapshot is
+the un-hashed input that drives the fingerprint — same `(name, type)`
+projection per dataset, no second probe.
+
+Lifecycle:
+
+* Written by `bootstrap` and `bootstrap --refresh` (atomic
+  sibling-temp + `os.replace`).
+* No history — only the current pinned snapshot matters for drift
+  triage. Historical fingerprints live in `evidence/<tenant>/<ISO-ts>.yaml`.
+* `bootstrap --refresh` BACK-FILLS the snapshot inside the
+  no-drift branch when it's missing / unparseable / has a desynced
+  metadata fingerprint / has hand-edited contents. Profile + evidence
+  files stay untouched — the back-fill is observably scoped.
+
+Runtime preflight reads the snapshot, recomputes the fingerprint over
+its `datasets`, cross-checks against both the snapshot's own metadata
+fingerprint AND the profile's pinned fingerprint, then diffs against
+the live observation. On match it emits non-empty
+`SchemaDriftFailure.datasetDeltas`:
+
+```yaml
+schemaDrift:
+  datasetDeltas:
+    - datasetId: ap_invoices
+      addedColumns:
+        - {name: ApInvoicesNewColumn, type: string, nullable: true}
+      removedColumns:
+        - {name: ApInvoicesOldColumn, type: string, nullable: true}
+      typeChangedColumns:
+        - {name: ApInvoicesAmount, priorType: bigint, currentType: string}
+```
+
+Diff key canonicalisation mirrors `compute_bronze_fingerprint` exactly
+— `name.strip().lower()` for column matching, `type.strip().lower()`
+for type comparison. Original casing is preserved on the surfaced
+entries so the operator-facing display matches what the live probe
+returned.
+
+**Graceful-degrade paths** (preflight emits empty `datasetDeltas` +
+a one-time WARN log; never crashes):
+
+| Condition | Operator remediation |
+|---|---|
+| Snapshot file absent (pre-3d profile) | `bootstrap --refresh` repins both profile and snapshot atomically. |
+| Snapshot file unparseable (hand-edit corruption) | Same. |
+| Snapshot metadata fingerprint ≠ live fingerprint OR snapshot content recompute disagrees | Same. |
+| Snapshot fingerprint ≠ profile fingerprint (profile/snapshot desync) | Same. |
+
+**Snapshot path key is `bundle.contentPack.profile`** — NOT the loaded
+profile's in-YAML `tenant:` field. Bootstrap writes the snapshot under
+`<contentPack.profile>.schema-snapshot.yaml`; preflight reads from the
+SAME key; the cluster-side bootstrap cell resolves the SAME key by
+re-loading `bundle.yaml`. This matters when a pre-3d profile YAML
+carries a hand-authored `tenant:` value that diverges from the active
+profile name — the active profile name (`contentPack.profile`) is the
+single source of truth, and the loaded `TenantProfile.tenant` field is
+treated as opaque tenant metadata, not as a filesystem key.
+
+**REST dispatch** stages the snapshot YAML alongside the profile YAML
+via the same base64-encoded notebook channel. The cluster-side
+bootstrap cell materialises the snapshot at the resolved
+`profiles/<contentPack.profile>.schema-snapshot.yaml` path (re-loading
+the bundle on the cluster + calling the shared `resolve_snapshot_path`
+helper) before `orchestrator.run` fires. Legacy-python REST runs cannot
+drift via the gate, so the staging is content-pack-only and asserted
+(programmer-error guard).
+
+Closes `LIMITS.md P3c-L2`. No schemaVersion bump on AIDPF-2012 — the
+`DatasetSchemaDelta` model already shipped in Phase 3c.
 
 ## Reference fixtures
 

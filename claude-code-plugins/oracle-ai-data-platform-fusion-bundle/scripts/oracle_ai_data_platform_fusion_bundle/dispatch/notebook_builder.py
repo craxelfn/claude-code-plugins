@@ -217,6 +217,7 @@ def _build_content_pack_bootstrap_cell(
     profile_yaml: str,
     pack_files: Mapping[str, str],
     pack_manifest: dict[str, Any],
+    schema_snapshot_yaml: str | None = None,
 ) -> str:
     """Cell that materialises the staged pack + reconstructs ResolvedPack on the cluster.
 
@@ -231,6 +232,14 @@ def _build_content_pack_bootstrap_cell(
     4. Reconstructs ResolvedPack via load_full_chain(top_root,
        base_resolver=...).
     5. Reconstructs TenantProfile via load_tenant_profile_from_string.
+    6. **Phase 3d**: when ``schema_snapshot_yaml`` is provided,
+       materialises the snapshot to
+       ``<BUNDLE_PATH.parent>/profiles/<profile>.schema-snapshot.yaml``
+       — the same path the laptop-side bootstrap writes, resolved on
+       the cluster via the shared ``resolve_snapshot_path`` helper.
+       Without this step, preflight on the cluster would never find
+       the snapshot and would silently degrade to empty
+       ``datasetDeltas``.
 
     The orchestrator.run call in the run cell consumes
     ``_resolved_pack`` + ``_tenant_profile`` from this cell's namespace.
@@ -238,6 +247,31 @@ def _build_content_pack_bootstrap_cell(
     pack_files_b64 = _encode_payload_b64(dict(pack_files))
     pack_manifest_b64 = _encode_payload_b64(pack_manifest)
     profile_yaml_b64 = _encode_text_b64(profile_yaml)
+
+    if schema_snapshot_yaml is None:
+        snapshot_stage = ""
+    else:
+        snapshot_yaml_b64 = _encode_text_b64(schema_snapshot_yaml)
+        # Key the cluster-side snapshot path by `bundle.contentPack.profile`
+        # — the SAME key bootstrap writes under on the laptop. NOT
+        # `_tenant_profile.tenant`: a pre-3d profile YAML may carry a
+        # hand-authored `tenant:` field that differs from the active
+        # profile name; using the YAML field as the path key would
+        # write to (and later read from) the wrong file.
+        snapshot_stage = (
+            f"from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import resolve_snapshot_path\n"
+            f"from oracle_ai_data_platform_fusion_bundle.schema.bundle import load_bundle as _load_bundle_for_snapshot\n"
+            f"_SCHEMA_SNAPSHOT_YAML = _b64.b64decode({snapshot_yaml_b64!r}).decode('utf-8')\n"
+            f"_bundle_for_snapshot, _ = _load_bundle_for_snapshot(BUNDLE_PATH)  # noqa: F821\n"
+            f"_snapshot_profile_name = (\n"
+            f"    _bundle_for_snapshot.content_pack.profile\n"
+            f"    or _bundle_for_snapshot.content_pack.name\n"
+            f")\n"
+            f"_snapshot_path = resolve_snapshot_path(BUNDLE_PATH, _snapshot_profile_name)  # noqa: F821\n"
+            f"_snapshot_path.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"_snapshot_path.write_text(_SCHEMA_SNAPSHOT_YAML, encoding='utf-8')\n"
+            f'print(f"phase 3d snapshot staged at {{_snapshot_path}}")\n'
+        )
 
     return (
         f"import base64 as _b64\n"
@@ -251,6 +285,7 @@ def _build_content_pack_bootstrap_cell(
         f"_top_overlay_root, _base_resolver = materialize_staged_pack(_PACK_FILES, _PACK_MANIFEST)\n"
         f"_resolved_pack = load_full_chain(_top_overlay_root, base_resolver=_base_resolver)\n"
         f"_tenant_profile = load_tenant_profile_from_string(_PROFILE_YAML)\n"
+        f"{snapshot_stage}"
         f'print(f"content-pack bootstrap: pack={{_resolved_pack.pack.id}}@{{_resolved_pack.pack.version}} tenant={{_tenant_profile.tenant}}")\n'
     )
 
@@ -314,6 +349,12 @@ def build_notebook(
     # Phase 3c — splices into the orchestrator.run kwargs in the run
     # cell so the cluster-side gate honours the break-glass intent.
     force_fingerprint_skip: bool = False,
+    # Phase 3d — when provided, the bootstrap cell materialises the
+    # pinned bronze-schema snapshot at the cluster-side resolved path
+    # so preflight can populate `datasetDeltas` on drift. ``None``
+    # preserves pre-3d behaviour (snapshot absent → empty
+    # `datasetDeltas` + WARN).
+    schema_snapshot_yaml: str | None = None,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -346,10 +387,20 @@ def build_notebook(
         assert pack_manifest is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires pack_manifest"
         )
+        # Phase 3d snapshot is OPTIONAL — pre-3d profiles legitimately ship
+        # without one; preflight degrades to empty `datasetDeltas` on the
+        # cluster the same way it does on the laptop.
     elif execution_backend == "legacy-python":
         assert profile_yaml is None and pack_files is None and pack_manifest is None, (
             "build_notebook(execution_backend='legacy-python', ...) must pass "
             "profile_yaml/pack_files/pack_manifest as None"
+        )
+        # Phase 3d — legacy-python REST runs cannot drift via the gate,
+        # so staging a snapshot on the cluster would be dead weight + a
+        # silent contract violation. Programmer-error guard.
+        assert schema_snapshot_yaml is None, (
+            "build_notebook(execution_backend='legacy-python', ...) must "
+            "pass schema_snapshot_yaml as None"
         )
 
     cells = [
@@ -371,6 +422,7 @@ def build_notebook(
                     profile_yaml=profile_yaml,
                     pack_files=pack_files,
                     pack_manifest=pack_manifest,
+                    schema_snapshot_yaml=schema_snapshot_yaml,
                 )
             )
         )
