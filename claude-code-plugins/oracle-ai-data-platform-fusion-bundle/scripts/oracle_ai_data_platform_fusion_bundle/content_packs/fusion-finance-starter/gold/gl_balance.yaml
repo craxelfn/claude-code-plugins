@@ -1,10 +1,8 @@
 id: gl_balance
 layer: gold
 implementation:
-  type: python_legacy
-  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.gl_balance:build
-  deprecated: false
-  migrationTarget: gold/gl_balance.sql
+  type: sql
+  sql: gold/gl_balance.sql
 target: gl_balance
 
 dependsOn:

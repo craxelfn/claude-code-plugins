@@ -108,6 +108,7 @@ def _ctx(mode: str = "seed") -> RunContext:
         silver_schema="silver",
         gold_schema="gold",
         run_id="run-phase2",
+        active_profile_name="finance-default",
         prior_watermark={},
         mode=mode,
         bronze_table_for_source={"erp_thing": "cat.bronze.erp_thing"},

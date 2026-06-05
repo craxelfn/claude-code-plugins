@@ -1,10 +1,8 @@
 id: supplier_spend
 layer: gold
 implementation:
-  type: python_legacy
-  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.supplier_spend:build
-  deprecated: false
-  migrationTarget: gold/supplier_spend.sql
+  type: sql
+  sql: gold/supplier_spend.sql
 target: supplier_spend
 
 dependsOn:

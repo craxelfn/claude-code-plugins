@@ -85,6 +85,7 @@ _BASE_TEMPLATE_VARS = {
     "gold_schema",
     "run_id_literal",
     "watermark_predicate",
+    "snapshot_date",  # Phase 3 Step 2 — dedicated ISO-date token (AIDPF-5013).
 }
 
 # `{{ profile.<key> }}` / `{{ column.<name> }}` / `{{ semantic.<name> }}`

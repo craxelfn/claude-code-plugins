@@ -1,10 +1,8 @@
 id: ap_aging
 layer: gold
 implementation:
-  type: python_legacy
-  callable: oracle_ai_data_platform_fusion_bundle.transforms.gold.ap_aging:build
-  deprecated: false
-  migrationTarget: gold/ap_aging.sql
+  type: sql
+  sql: gold/ap_aging.sql
 target: ap_aging
 
 dependsOn:

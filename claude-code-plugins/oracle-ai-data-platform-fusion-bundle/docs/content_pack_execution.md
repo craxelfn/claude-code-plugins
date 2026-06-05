@@ -133,20 +133,50 @@ modules drive every default run.
 | `AIDPF-5003` | Unresolved variation point |
 | `AIDPF-5010` | Post-render check rejected SQL (comment markers, semicolons, subqueries) |
 | `AIDPF-5011` | Disallowed parameter value type for `{{ profile.<key> }}` |
+| `AIDPF-5013` | `profile.snapshotDate` present but not an ISO-8601 date (Phase 3) |
+| `AIDPF-5014` | `type: builtin` node's `implementation.callable` not in registry (Phase 3) |
 | `AIDPF-8010` | Quality test failed |
 | `AIDPF-8011` | Quality test deferred to a later phase |
 
+## Phase 3 additions
+
+* New renderer token `{{ snapshot_date }}` — emits literal `CURRENT_DATE()`
+  when `profile.profile.snapshotDate` is absent / empty; binds as
+  `:snapshot_date` parameter when present + ISO-8601. Used by `ap_aging.sql`
+  to anchor aging buckets deterministically in tests while keeping
+  production behaviour identical to v1.
+* `RunContext.active_profile_name: str` — required field carrying the
+  bundle's `contentPack.profile` value. Builtin adapters (initial:
+  `dim_calendar`) key off this into `pack.pack.profiles[<name>]` for
+  default lookups.
+* Content-pack `execute_node` now dispatches `implementation.type: builtin`
+  through `orchestrator/builtins/` adapters via `_BUILTIN_REGISTRY`.
+  Initial entry: `dim_calendar`. The §11.9 plan-hash drift gate stays
+  uniform across SQL and builtin paths by substituting
+  `sha256(callable_id:VERSION)` for `rendered_sql_hash`.
+
 ## Reference fixture
 
-A working fixture lives at:
+Two working fixtures live in the tree:
 
-* Pack — `tests/fixtures/content_packs/phase2_test_pack/`
-* Bundle + profile — `tests/fixtures/projects/phase2_project/`
+* **Phase 2 minimal pack** — `tests/fixtures/content_packs/phase2_test_pack/` +
+  `tests/fixtures/projects/phase2_project/`. Mocked-Spark unit tests in
+  `tests/unit/test_orchestrator_run_content_pack.py` prove the CLI flag
+  reaches `sql_runner.execute_node`.
+* **Phase 3 starter pack + example bundle** — `examples/fusion-finance-starter.yaml`
+  + `examples/profiles/finance-default.yaml`. Pairs with the shipped
+  starter pack at `scripts/oracle_ai_data_platform_fusion_bundle/content_packs/fusion-finance-starter/`.
+  Five migrated SQL templates + one builtin route the content-pack
+  backend end-to-end; smoke tests live in
+  `tests/unit/test_phase3_starter_bundle_example.py`.
 
-Unit tests under `tests/unit/test_orchestrator_run_content_pack.py`
-exercise `orchestrator.run(..., execution_backend="content-pack", ...)`
-end-to-end against this fixture using a mocked Spark session — they
-prove the CLI flag reaches `sql_runner.execute_node`. Live PySpark
+The row-grain parity harness skeleton lives at
+`tests/parity/test_starter_pack_parity.py` (run with `pytest -m parity`).
+It encodes the isolation contract (per-backend `silver_v1`/`silver_v2`
+schemas, distinct run IDs captured from `RunSummary.run_id`,
+`layers=["silver","gold"]` to bypass BICC) but defers full row-level
+parity assertions to the follow-up that authors the bronze fixture
+rows covering COALESCE / NULL / multi-currency invariants. Live PySpark
 integration tests against the same fixture (gated by
-`AIDP_FUSION_BUNDLE_RUN_SPARK_TESTS=1`) are a follow-up that lands
-alongside the bronze-layer migration in Phase 3.
+`AIDP_FUSION_BUNDLE_RUN_SPARK_TESTS=1`) follow alongside the bronze-layer
+migration in a later phase.

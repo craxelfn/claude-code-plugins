@@ -30,6 +30,13 @@ profiles:
       startDate: '2020-01-01'
       endDate: '2030-12-31'
       fiscalStartMonth: 1
+    # NOTE: superseded in Phase 3 by `columnAliases.coa_*_segment` below.
+    # These positional-alias names are migration-period redundant — the
+    # Phase 3 SQL templates resolve COA segments via `{{ column.coa_*_segment }}`
+    # against `resolved.column.*` in the tenant profile, not via
+    # `{{ profile.chartOfAccounts.* }}` (the generic profile resolver binds
+    # values as parameters, not identifiers). Block stays for Phase 1 / 2
+    # validation surface stability; Phase 4+ can remove cleanly.
     chartOfAccounts:
       balancingSegment: segment1
       costCenterSegment: segment2
@@ -54,6 +61,44 @@ columnAliases:
     candidates:
       - ApInvoicesInvoiceCurrencyCode
       - ApInvoicesCurrencyCode
+
+  # COA segment role → source column. All six CodeCombinationSegmentN columns
+  # exist on every Fusion gl_coa extract, so bootstrap's "first column that
+  # exists" heuristic cannot pick roles — these are pre-authored in the
+  # tenant profile (resolved.column.coa_*_segment). Tenants whose COA places
+  # balancing / cost-center / natural-account at higher positions extend the
+  # candidate list via a pack overlay. See dim_account.py:109-122 +
+  # docs/features/v2-phase-3-export-modules-to-sql/variation_catalog.md.
+  coa_balancing_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment1
+      - CodeCombinationSegment2
+      - CodeCombinationSegment3
+      - CodeCombinationSegment4
+      - CodeCombinationSegment5
+      - CodeCombinationSegment6
+  coa_cost_center_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment1
+      - CodeCombinationSegment2
+      - CodeCombinationSegment3
+      - CodeCombinationSegment4
+      - CodeCombinationSegment5
+      - CodeCombinationSegment6
+  coa_natural_account_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment1
+      - CodeCombinationSegment2
+      - CodeCombinationSegment3
+      - CodeCombinationSegment4
+      - CodeCombinationSegment5
+      - CodeCombinationSegment6
 
 # Semantic variants (PLAN §9.5.1 / §9.5.2). The fragment is substituted
 # into `{{ semantic.<name> }}` at render time after bootstrap resolves

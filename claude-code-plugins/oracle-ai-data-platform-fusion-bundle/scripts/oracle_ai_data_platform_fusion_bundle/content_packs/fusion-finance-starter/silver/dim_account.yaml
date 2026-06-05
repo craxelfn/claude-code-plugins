@@ -1,10 +1,8 @@
 id: dim_account
 layer: silver
 implementation:
-  type: python_legacy
-  callable: oracle_ai_data_platform_fusion_bundle.dimensions.dim_account:build
-  deprecated: false
-  migrationTarget: silver/dim_account.sql
+  type: sql
+  sql: silver/dim_account.sql
 target: dim_account
 
 dependsOn:
@@ -26,9 +24,17 @@ refresh:
 
 requiredColumns:
   gl_coa:
+    - CodeCombinationCodeCombinationId
     - _extract_ts
     - _source_pvo
 
+# Output schema is the v2 focused subset of v1 dim_account: surrogate key,
+# natural key, three role-aliased COA segments (source columns resolved via
+# tenant profile `resolved.column.coa_*_segment`), the standard account
+# attributes, plus audit columns. The v1 module's 30-position firehose
+# (CodeCombinationSegment1..30 + 6 semantic aliases) is not in scope here —
+# subaccount/product/intercompany roles can be added as additional
+# columnAliases entries in a follow-up if a tenant needs them.
 outputSchema:
   columns:
     - name: account_key
@@ -39,7 +45,55 @@ outputSchema:
       type: bigint
       nullable: false
       pii: none
+    - name: chart_of_accounts_id
+      type: bigint
+      nullable: true
+      pii: none
+    - name: balancing_segment
+      type: string
+      nullable: true
+      pii: none
+    - name: cost_center_segment
+      type: string
+      nullable: true
+      pii: none
+    - name: natural_account_segment
+      type: string
+      nullable: true
+      pii: none
+    - name: account_type
+      type: string
+      nullable: true
+      pii: none
+    - name: enabled_flag
+      type: string
+      nullable: true
+      pii: none
+    - name: summary_flag
+      type: string
+      nullable: true
+      pii: none
+    - name: detail_posting_allowed_flag
+      type: string
+      nullable: true
+      pii: none
+    - name: start_date_active
+      type: timestamp
+      nullable: true
+      pii: none
+    - name: end_date_active
+      type: timestamp
+      nullable: true
+      pii: none
     - name: bronze_extract_ts
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: bronze_source_pvo
+      type: string
+      nullable: false
+      pii: none
+    - name: silver_built_at
       type: timestamp
       nullable: false
       pii: none
