@@ -228,6 +228,22 @@ Detail: [`BLOCKER_P1.6_dim_item.md`](BLOCKER_P1.6_dim_item.md) (5 FIX scripts on
 
 ---
 
+### P3-L2 — content-pack `dim_account` COA role-positioning has two gaps
+
+**What (gap 1 — three role aliases, not six)**: v0.3 declares `coa_*_segment` `columnAliases` for three of the six v1 Fusion COA roles (`balancing`, `cost_center`, `natural_account`). The other three roles in v1's `DEFAULT_SEMANTIC_SEGMENT_MAP` (`subaccount`, `product`, `intercompany`) have NO declared `columnAliases`; `dim_account.sql` emits them via positional hardcoded references (`CodeCombinationSegment4 AS subaccount`, `Segment5 AS product`, `Segment6 AS intercompany`).
+
+**What (gap 2 — `columnAliases` existence-based resolution cannot disambiguate role-positioning)**: even for the three declared roles, the candidate list is a single conventional default per role (`coa_balancing_segment.candidates: [CodeCombinationSegment1]`, etc.). `columnAliases` resolves by physical column existence (PLAN §9.5.4 step 2). All six `CodeCombinationSegmentN` columns coexist on every Fusion `gl_coa` extract, so on a non-conventional tenant — e.g., one where the `balancing` role lives at `CodeCombinationSegment4` — bootstrap auto-resolves to `Segment1` because `Segment1` still exists, and silently binds the wrong source column.
+
+**Where it bites**: a non-conventional COA tenant — one where any of `balancing`, `cost_center`, `natural_account`, `subaccount`, `product`, or `intercompany` lives at a position other than the conventional 1 / 2 / 3 / 4 / 5 / 6 mapping — will have those roles silently bound to the wrong `CodeCombinationSegmentN` source columns unless the operator intervenes BEFORE running `bootstrap`.
+
+**Mitigation (manual today)**: for the three declared roles, pre-author `overlays/<name>/pack.yaml` extending `columnAliases.coa_<role>_segment.candidates` with the role's actual source column (or hand-edit `profile.resolved.column.coa_<role>_segment` directly). For the three undeclared roles (`subaccount` / `product` / `intercompany`), invoke the medallion-author skill (feature `v2-phase-3b-medallion-author-skill`) to draft a pack overlay declaring `coa_subaccount_segment` / `coa_product_segment` / `coa_intercompany_segment` AND extending `dim_account.sql` via overlay to substitute via `{{ column.* }}` tokens. Either intervention must happen BEFORE `bootstrap` runs.
+
+**Architectural fix (future, out of v0.3)**: a new `{{ coa.<role> }}` renderer token consuming `profile.chartOfAccounts.<role>Segment` integers is the proper substitution mechanism — bootstrap prompts the operator at onboarding for each role's position (or reads from a structured `chartOfAccounts` profile block), and the renderer emits `CodeCombinationSegment<N>` based on the resolved integer. Makes role-positioning explicit rather than relying on existence-based resolution. Requires (a) new renderer vocabulary, (b) bootstrap UX changes, (c) live-tenant evidence justifying the work.
+
+**Status**: tracked-by-design for v0.3; future renderer feature reserved.
+
+---
+
 ## Resolved limits
 
 ### L5 — `--mode incremental` gate (RESOLVED 2026-06-02 by P1.17 commits `5f644d7` + `f6d003a` + `76fec96`)

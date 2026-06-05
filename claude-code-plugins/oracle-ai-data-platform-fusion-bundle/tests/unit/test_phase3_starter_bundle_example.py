@@ -98,16 +98,25 @@ class TestStarterBundleParse:
         prof = load_tenant_profile(EXAMPLE_PROFILE)
         assert prof.tenant == "finance-default"
         assert prof.bronze_schema_fingerprint.startswith("sha256:")
-        # Currency + supplier-key resolutions are populated. v1-parity
-        # dim_account reads positional CodeCombinationSegmentN columns
-        # directly (Phase 3 Step 6 rework — see review feedback) so no
-        # COA columnAliases are required in the profile.
+        # Currency + supplier-key + three COA role-aliases (round-3 restore
+        # after the round-2 rollback regression — see
+        # docs/v2-phase-3-variation-catalog.md "Round-3 restore notes").
+        # Each role's `columnAliases.coa_*_segment` candidate list is
+        # single-candidate-per-role; the values below pin the conventional
+        # Fusion COA defaults that saasfademo1 uses.
         required_columns = {
             "supplier_natural_key",
             "vendor_id",
             "invoice_currency_code",
+            "coa_balancing_segment",
+            "coa_cost_center_segment",
+            "coa_natural_account_segment",
         }
         assert required_columns <= set(prof.resolved.column.keys())
+        # COA role-aliases pin the saasfademo1 conventional positions.
+        assert prof.resolved.column["coa_balancing_segment"] == "CodeCombinationSegment1"
+        assert prof.resolved.column["coa_cost_center_segment"] == "CodeCombinationSegment2"
+        assert prof.resolved.column["coa_natural_account_segment"] == "CodeCombinationSegment3"
         # Semantic variant resolved.
         assert prof.resolved.semantic["cancelled_status"] == "cancelled_date"
         # Snapshot date authored at the fixture-determinism value.
