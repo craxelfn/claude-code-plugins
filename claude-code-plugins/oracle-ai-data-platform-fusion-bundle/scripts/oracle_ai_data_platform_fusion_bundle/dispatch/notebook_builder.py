@@ -110,6 +110,7 @@ def _build_run_cell(
     datasets: list[str] | None,
     layers: list[str] | None,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
 ) -> str:
     # Phase 2: when execution_backend == "content-pack", the bootstrap
     # cell that ran just before this one set up _resolved_pack and
@@ -139,6 +140,7 @@ def _build_run_cell(
         f"        layers={layers!r},\n"
         f"        dry_run=False,\n"
         f"        resume_run_id=None,\n"
+        f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
         f"{backend_kwargs}"
         f"    )\n"
         f"except SchemaDriftDetectedError as _drift_exc:\n"
@@ -309,6 +311,9 @@ def build_notebook(
     profile_yaml: str | None = None,
     pack_files: Mapping[str, str] | None = None,
     pack_manifest: dict[str, Any] | None = None,
+    # Phase 3c — splices into the orchestrator.run kwargs in the run
+    # cell so the cluster-side gate honours the break-glass intent.
+    force_fingerprint_skip: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -375,6 +380,7 @@ def build_notebook(
             _build_run_cell(
                 mode=mode, datasets=datasets, layers=layers,
                 execution_backend=execution_backend,
+                force_fingerprint_skip=force_fingerprint_skip,
             )
         ),
         _code_cell(_build_verify_cell()),

@@ -140,6 +140,7 @@ def run(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
         execution_backend=execution_backend,
+        force_fingerprint_skip=force_fingerprint_skip,
     )
 
 
@@ -296,6 +297,7 @@ def _run_via_aidp_dispatch(
     console: Console,
     *,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
@@ -400,6 +402,7 @@ def _run_via_aidp_dispatch(
             profile_yaml=profile_yaml,
             pack_files=pack_files,
             pack_manifest=pack_manifest,
+            force_fingerprint_skip=force_fingerprint_skip,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — drift surfaces from REST-dispatch via the marker

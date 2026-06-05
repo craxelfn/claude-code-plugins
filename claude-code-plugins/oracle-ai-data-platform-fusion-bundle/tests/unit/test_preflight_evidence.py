@@ -78,9 +78,36 @@ def _mock_bundle():
     return bundle
 
 
-def _mock_pack(datasets: list[str]):
+def _mock_pack(
+    datasets: list[str],
+    *,
+    semantic_variants: dict[str, list[tuple[str, str]]] | None = None,
+):
+    """Mock a ResolvedPack.
+
+    ``semantic_variants``: optional mapping of VP name → list of
+    ``(candidate_id, detect_column)`` tuples. Used by the Phase 3c
+    drift gate's affected-VP computation: for each pinned semantic VP,
+    the gate looks up the pinned candidate id in
+    ``pack.pack.semantic_variants[name].candidates`` and reads its
+    ``detect.column_exists`` to decide ``stillExistsOnBronze``.
+    Defaults to ``{}`` — callers that don't exercise the semantic
+    branch don't need to wire it.
+    """
     pack = MagicMock(name="pack")
     pack.bronze_yaml = {"datasets": [{"id": d} for d in datasets]}
+    sv_map: dict[str, MagicMock] = {}
+    for vp_name, cand_list in (semantic_variants or {}).items():
+        variant = MagicMock(name=f"sv-{vp_name}")
+        cand_mocks = []
+        for cand_id, detect_col in cand_list:
+            c = MagicMock(name=f"cand-{cand_id}")
+            c.id = cand_id
+            c.detect.column_exists = detect_col
+            cand_mocks.append(c)
+        variant.candidates = cand_mocks
+        sv_map[vp_name] = variant
+    pack.pack.semantic_variants = sv_map
     return pack
 
 
@@ -171,13 +198,29 @@ class TestDrift:
         assert "bootstrap --refresh" in outcome.summary
 
     def test_affected_variation_points_diff(self, tmp_path: Path) -> None:
+        """columnAlias-pinned values check column existence directly;
+        semantic-pinned values resolve through the pack's candidate
+        list to their detect column (review-driven fix — the prior
+        version always reported ``stillExistsOnBronze=True`` for
+        semantic VPs, hiding real drift signal)."""
         outcome = check_bronze_fingerprint_drift(
             spark=_mock_spark(
-                {"ap_invoices": ["ApInvoicesCurrencyCode"]}  # pinned column dropped
+                # cancelled_date detect column still present here so the
+                # semantic VP reports True; the columnAlias pins are
+                # both absent.
+                {"ap_invoices": ["ApInvoicesCurrencyCode", "ApInvoicesCancelledDate"]}
             ),
             bundle=_mock_bundle(),
             bundle_path=tmp_path / "bundle.yaml",
-            pack=_mock_pack(["ap_invoices"]),
+            pack=_mock_pack(
+                ["ap_invoices"],
+                semantic_variants={
+                    "cancelled_status": [
+                        ("cancelled_date", "ApInvoicesCancelledDate"),
+                        ("cancelled_flag", "ApInvoicesCancelledFlag"),
+                    ],
+                },
+            ),
             profile=_mock_profile(
                 pinned="sha256:" + "a" * 64,
                 resolved_column={
@@ -198,9 +241,94 @@ class TestDrift:
         # Both columnAlias-pinned values are missing from bronze.
         assert by_name["invoice_currency_code"]["stillExistsOnBronze"] is False
         assert by_name["vendor_id"]["stillExistsOnBronze"] is False
-        # SemanticVariant pin is reported "still exists" by convention
-        # (the id isn't a bronze column).
+        # Semantic VP: pinned 'cancelled_date' candidate's detect column
+        # (ApInvoicesCancelledDate) IS still present → True.
         assert by_name["cancelled_status"]["stillExistsOnBronze"] is True
+
+    def test_semantic_variant_detect_column_dropped_surfaces_drift(
+        self, tmp_path: Path
+    ) -> None:
+        """Review finding (P3c-review #2): when bootstrap pinned
+        ``cancelled_status: cancelled_date`` because
+        ``ApInvoicesCancelledDate`` existed, and Fusion later drops /
+        renames that detect column, the AIDPF-2012 artifact MUST
+        report ``stillExistsOnBronze: False`` so the operator sees the
+        real semantic-VP drift signal. Prior code falsely reported
+        True (treated the candidate id as opaque)."""
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark(
+                # ApInvoicesCancelledDate is gone; only the flag column
+                # remains (so a `bootstrap --refresh` would re-pin to
+                # cancelled_flag).
+                {"ap_invoices": ["ApInvoicesCancelledFlag"]}
+            ),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(
+                ["ap_invoices"],
+                semantic_variants={
+                    "cancelled_status": [
+                        ("cancelled_date", "ApInvoicesCancelledDate"),
+                        ("cancelled_flag", "ApInvoicesCancelledFlag"),
+                    ],
+                },
+            ),
+            profile=_mock_profile(
+                pinned="sha256:" + "a" * 64,
+                resolved_semantic={"cancelled_status": "cancelled_date"},
+            ),
+            run_id="cp-drift-sv",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        affected = payload["schemaDrift"]["affectedVariationPoints"]
+        by_name = {vp["name"]: vp for vp in affected}
+        assert by_name["cancelled_status"]["stillExistsOnBronze"] is False
+        assert by_name["cancelled_status"]["pinnedCandidate"] == "cancelled_date"
+
+    def test_semantic_variant_pinned_id_no_longer_in_pack_surfaces_drift(
+        self, tmp_path: Path
+    ) -> None:
+        """If the pack version changed and the pinned candidate id is
+        no longer declared (e.g., overlay removed it), the gate can't
+        resolve a detect column → surfaces ``stillExistsOnBronze=False``
+        so the operator gets actionable signal instead of a silent
+        True. The downstream renderer will fail later anyway."""
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark(
+                {"ap_invoices": ["ApInvoicesCancelledDate"]}
+            ),
+            bundle=_mock_bundle(),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(
+                ["ap_invoices"],
+                # Only cancelled_flag declared now — the pinned
+                # cancelled_date id was removed from the pack.
+                semantic_variants={
+                    "cancelled_status": [
+                        ("cancelled_flag", "ApInvoicesCancelledFlag"),
+                    ],
+                },
+            ),
+            profile=_mock_profile(
+                pinned="sha256:" + "a" * 64,
+                resolved_semantic={"cancelled_status": "cancelled_date"},
+            ),
+            run_id="cp-drift-pack",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+        payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
+        by_name = {
+            vp["name"]: vp
+            for vp in payload["schemaDrift"]["affectedVariationPoints"]
+        }
+        assert by_name["cancelled_status"]["stillExistsOnBronze"] is False
 
 
 # ---------------------------------------------------------------------------

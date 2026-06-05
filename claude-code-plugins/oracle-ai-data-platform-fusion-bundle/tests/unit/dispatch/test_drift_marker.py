@@ -304,6 +304,204 @@ class TestSchemaDriftMarkerTranslation:
         assert body["errorCode"] == "AIDPF-2012"
         assert body["runId"] == "cp-drift-write-1"
 
+    def test_force_fingerprint_skip_threaded_to_build_notebook(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding (P3c-review #1, BLOCKING): the
+        ``force_fingerprint_skip`` kwarg must thread from
+        ``dispatch_via_rest`` into ``build_notebook`` so the
+        cluster-side run cell sees the operator's break-glass intent.
+        Without this thread, the REST path silently enforces the gate
+        and the audit row is never written."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.rest_client import (
+            RunResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
+            MARKER_SCHEMA_VERSION,
+        )
+
+        client = _stub_client(monkeypatch)
+        # Happy path — SUCCESS with a valid RunSummary marker.
+        marker_payload = {
+            "schema_version": MARKER_SCHEMA_VERSION,
+            "run_id": "r-1",
+            "started_at": "2026-06-03T14:00:00Z",
+            "finished_at": "2026-06-03T14:05:00Z",
+            "bundle_project": "test-dispatch",
+            "mode": "incremental",
+            "recommendations": [],
+            "steps": [],
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(marker_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.poll_run.return_value = RunResult(
+            status="SUCCESS",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        captured: dict = {}
+
+        def _capturing_build_notebook(**kwargs):
+            captured.update(kwargs)
+            return {"cells": [], "nbformat": 4, "nbformat_minor": 5}
+
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            lambda **_: Path("/tmp/fake.whl"),
+        )
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            _capturing_build_notebook,
+        )
+
+        dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+            force_fingerprint_skip=True,
+        )
+        assert captured.get("force_fingerprint_skip") is True
+
+    def test_drift_marker_missing_artifact_json_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding (P3c-review #3): a drift marker missing
+        ``artifact_json`` (or with empty / non-string content) must
+        NOT silently write an empty AIDPF-2012.json and exit 14. The
+        operator would land in the drift recovery flow with no usable
+        diagnostic. Reject as DispatchMarkerMissingError instead."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "cp-drift-bad",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            # artifact_json is MISSING — malformed cluster-side emit.
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="missing required field"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+        # No diagnostic file written — the local AIDPF-2012.json must
+        # NOT exist under .aidp/diagnostics/<run_id>/ when validation
+        # failed (regression check on the "fall back, don't write" path).
+        expected_path = (
+            bundle_path.resolve().parent
+            / ".aidp"
+            / "diagnostics"
+            / "cp-drift-bad"
+            / "AIDPF-2012.json"
+        )
+        assert not expected_path.exists()
+
+    def test_drift_marker_with_unparseable_artifact_json_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """artifact_json present but unparseable → reject. The
+        downstream reader / bootstrap flow expects a valid AIDPF-2012
+        document; writing garbage would corrupt that interface."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "cp-drift-junk",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            "artifact_json": "{not-json",
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="not valid JSON"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+
+    def test_drift_marker_with_wrong_error_code_raises_marker_missing(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """artifact_json parses but its ``errorCode`` is not AIDPF-2012
+        → reject. Guards against a cluster-side bug that puts an
+        unrelated diagnostic in the drift slot."""
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerMissingError,
+        )
+
+        client = _stub_client(monkeypatch)
+        bad_payload = {
+            "_kind": "schema_drift",
+            "run_id": "cp-drift-wrongcode",
+            "summary": "drift",
+            "prior_fingerprint": "sha256:" + "a" * 64,
+            "current_fingerprint": "sha256:" + "b" * 64,
+            "artifact_json": json.dumps(
+                {"schemaVersion": 1, "errorCode": "AIDPF-2010"}
+            ),
+        }
+        marker_text = (
+            f"AIDP_LIVE_TEST_RESULT_BEGIN {json.dumps(bad_payload)} "
+            "AIDP_LIVE_TEST_RESULT_END"
+        )
+        client.fetch_output.return_value = json.dumps(
+            {"cells": [{"cell_type": "code", "outputs": [{"text": marker_text}]}]}
+        )
+        _setup_build_stubs(monkeypatch)
+
+        with pytest.raises(DispatchMarkerMissingError, match="not an AIDPF-2012"):
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+            )
+
     def test_failed_status_without_drift_marker_still_raises_run_failed(
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

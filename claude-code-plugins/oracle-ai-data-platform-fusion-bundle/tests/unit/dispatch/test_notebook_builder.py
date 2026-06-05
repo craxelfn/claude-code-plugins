@@ -258,6 +258,40 @@ class TestRunCell:
         # marker-precedence contract in dispatch_via_rest).
         assert "raise" in run
 
+    def test_force_fingerprint_skip_threaded_into_run_cell(
+        self, wheel: Path
+    ) -> None:
+        """Review finding (P3c-review #1, BLOCKING): the
+        ``--force-fingerprint-skip`` CLI flag must reach the
+        cluster-side ``orchestrator.run(...)`` kwargs, not only the
+        inline path. Without this, the REST-dispatch path silently
+        enforces the gate and the audit-row promised in the PR is
+        never written."""
+        for ffs in (False, True):
+            nb = build_notebook(
+                wheel_path=wheel,
+                bundle_yaml="",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+                force_fingerprint_skip=ffs,
+            )
+            run = "".join(nb["cells"][3]["source"])
+            assert f"force_fingerprint_skip={ffs!r}" in run
+
+    def test_force_fingerprint_skip_default_is_false(self, wheel: Path) -> None:
+        """Default must be False so existing callers don't accidentally
+        bypass the gate."""
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        assert "force_fingerprint_skip=False" in run
+
     def test_run_cell_compiles_as_python(self, wheel: Path) -> None:
         """The run cell source must be valid Python — a stray indentation
         bug in the try/except would surface as a SyntaxError on the

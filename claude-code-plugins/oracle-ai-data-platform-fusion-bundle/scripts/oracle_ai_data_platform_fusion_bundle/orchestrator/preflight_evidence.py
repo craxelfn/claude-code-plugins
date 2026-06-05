@@ -185,7 +185,7 @@ def check_bronze_fingerprint_drift(
 
     # ─── Drift: write artifact + return outcome ────────────────────
     affected_vps = _compute_affected_variation_points(
-        profile=profile, observed=observed
+        pack=pack, profile=profile, observed=observed
     )
     artifact = SchemaDriftDiagnosticV1(
         runId=run_id,
@@ -283,22 +283,27 @@ def _bronze_dataset_ids(pack: "ResolvedPack") -> list[str]:
 
 def _compute_affected_variation_points(
     *,
+    pack: "ResolvedPack",
     profile: "TenantProfile",
     observed: dict[str, list[Any]],
 ) -> list[AffectedVariationPoint]:
     """For each pinned VP in ``profile.resolved.*``, check whether
-    the pinned candidate column still exists anywhere in the live
+    the pinned candidate is still present on the live bronze
     observation.
 
+    * ``columnAliases``: the pinned value IS a physical column name;
+      check existence directly.
+    * ``semanticVariants``: the pinned value is a candidate ``id``
+      (e.g., ``cancelled_date``). Look up that candidate in
+      ``pack.pack.semantic_variants[vp].candidates`` and check whether
+      its ``detect.columnExists`` column is present on bronze. If the
+      pinned id no longer exists in the pack (overlay removed it) or
+      its detect column has vanished from bronze, surface
+      ``stillExistsOnBronze=False`` so the operator sees the real
+      drift signal.
+
     Returns a flat list — skill (Phase 3b) reads it for recovery
-    context. The check is column-existence-only (matches the
-    walker's columnAlias semantics); SemanticVariant pinned values
-    are ``id``s like ``cancelled_date``, NOT bronze columns —
-    those can't be diff'd against bronze directly (the detect-clause
-    column might still exist while a different detect-clause
-    candidate now matches), so semantic VPs always surface as
-    ``stillExistsOnBronze: True``. Operator + skill resolve any
-    real semantic drift via re-bootstrap.
+    context.
     """
     # Flatten observed columns across all datasets — the walker
     # checks per-dataset existence, but for the drift gate we only
@@ -307,6 +312,8 @@ def _compute_affected_variation_points(
     for cols in observed.values():
         for col in cols:
             all_observed_columns.add(col.name.lower())
+
+    semantic_variants = pack.pack.semantic_variants or {}
 
     result: list[AffectedVariationPoint] = []
     for vp_name, pinned in profile.resolved.column.items():
@@ -319,17 +326,28 @@ def _compute_affected_variation_points(
             )
         )
     for vp_name, pinned in profile.resolved.semantic.items():
-        # SemanticVariants pin a candidate ``id`` (not a column) —
-        # column-existence on the id is meaningless; report True
-        # so the skill can show the operator the VP didn't drop
-        # from bronze but the fingerprint shifted (likely an
-        # adjacent column delta).
+        # Resolve the pinned id → its detect column → existence on bronze.
+        # If the pack no longer declares this VP or this candidate id (overlay
+        # was removed / pack version changed), treat as drift — the
+        # rendering path will fail later anyway, so flag it here for the
+        # operator's recovery context.
+        variant = semantic_variants.get(vp_name)
+        detect_column: str | None = None
+        if variant is not None:
+            for cand in variant.candidates:
+                if cand.id == pinned:
+                    detect_column = cand.detect.column_exists
+                    break
+        still_exists = (
+            detect_column is not None
+            and detect_column.lower() in all_observed_columns
+        )
         result.append(
             AffectedVariationPoint(
                 name=vp_name,
                 kind="semanticVariants",
                 pinnedCandidate=pinned,
-                stillExistsOnBronze=True,
+                stillExistsOnBronze=still_exists,
             )
         )
     return result

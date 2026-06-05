@@ -95,6 +95,10 @@ def dispatch_via_rest(
     profile_yaml: str | None = None,
     pack_files: "Mapping[str, str] | None" = None,
     pack_manifest: "dict[str, Any] | None" = None,
+    # Phase 3c — passthrough only; dispatch never inspects it. Threaded
+    # into the generated notebook's orchestrator.run(...) call so the
+    # cluster-side gate honours the operator's break-glass intent.
+    force_fingerprint_skip: bool = False,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -219,6 +223,7 @@ def dispatch_via_rest(
         profile_yaml=profile_yaml,
         pack_files=pack_files,
         pack_manifest=pack_manifest,
+        force_fingerprint_skip=force_fingerprint_skip,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")
@@ -337,8 +342,55 @@ def dispatch_via_rest(
     # SchemaDriftDetectedError on the laptop, reconstructing the
     # diagnostic file locally so the operator can run `bootstrap
     # --refresh` against it.
+    #
+    # Validate the marker before honouring it: a truncated / malformed
+    # drift marker (missing run_id, summary, fingerprints, or
+    # artifact_json that isn't a parseable AIDPF-2012 payload) must NOT
+    # silently write an unusable artifact + exit 14 — that would put
+    # the operator into the drift recovery flow with no actionable
+    # diagnostic. Reject as DispatchMarkerMissingError so the standard
+    # evidence-capture failure path runs.
     if isinstance(marker, dict) and marker.get("_kind") == "schema_drift":
-        drift_run_id = str(marker.get("run_id", "unknown"))
+        required_fields = (
+            "run_id",
+            "summary",
+            "prior_fingerprint",
+            "current_fingerprint",
+            "artifact_json",
+        )
+        missing = [f for f in required_fields if not marker.get(f)]
+        if missing:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"missing required field(s): {', '.join(missing)}. "
+                f"Cannot reconstruct local AIDPF-2012 artifact — "
+                f"evidence-capture failure."
+            )
+        artifact_text = marker["artifact_json"]
+        if not isinstance(artifact_text, str):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not a string "
+                f"(got {type(artifact_text).__name__})."
+            )
+        try:
+            artifact_obj = json.loads(artifact_text)
+        except json.JSONDecodeError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not valid JSON: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        if (
+            not isinstance(artifact_obj, dict)
+            or artifact_obj.get("errorCode") != "AIDPF-2012"
+        ):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json payload is not an AIDPF-2012 diagnostic "
+                f"(errorCode={artifact_obj.get('errorCode') if isinstance(artifact_obj, dict) else type(artifact_obj).__name__})."
+            )
+        drift_run_id = str(marker["run_id"])
         diagnostic_path = (
             bundle_path.resolve().parent
             / ".aidp"
@@ -347,15 +399,13 @@ def dispatch_via_rest(
             / "AIDPF-2012.json"
         )
         diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
-        diagnostic_path.write_text(
-            str(marker.get("artifact_json", "")), encoding="utf-8"
-        )
+        diagnostic_path.write_text(artifact_text, encoding="utf-8")
         raise SchemaDriftDetectedError(
             run_id=drift_run_id,
             diagnostic_path=diagnostic_path,
-            summary=str(marker.get("summary", "schema drift detected")),
-            prior_fingerprint=str(marker.get("prior_fingerprint", "")),
-            current_fingerprint=str(marker.get("current_fingerprint", "")),
+            summary=str(marker["summary"]),
+            prior_fingerprint=str(marker["prior_fingerprint"]),
+            current_fingerprint=str(marker["current_fingerprint"]),
         )
 
     if result.status != "SUCCESS":
