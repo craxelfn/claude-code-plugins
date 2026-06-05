@@ -1299,27 +1299,91 @@ def _run_content_pack_backend(
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we
     # translate that into RunStep entries for the RunSummary.
+    #
+    # Two contracts enforced in this loop (round-13 review findings):
+    #
+    #   1. Prior state hydration. Before each node's execute_node, we
+    #      look up the latest successful primary state row to populate
+    #      ctx.prior_watermark[<source_id>] (so {{ watermark_predicate }}
+    #      filters the source delta instead of evaluating 1=1 and
+    #      scanning the full source) AND prior_plan_hash (so the
+    #      AIDPF-4040 drift gate can fire on incremental resume).
+    #
+    #   2. Cascade-abort on failure. The plan is topologically ordered
+    #      (resolve_content_pack_plan sorts silver-then-gold with
+    #      explicit silver->silver and silver->gold dependencies
+    #      threaded through). When a node returns any non-success
+    #      status, downstream nodes that depend on it (directly or
+    #      transitively) MUST NOT be dispatched — they'd read stale
+    #      pre-existing upstream tables and commit success rows after
+    #      the current run's upstream failed. We track failed node IDs
+    #      and skip-cascade any dependent.
     started_at = _dt.now(_tz.utc)
     steps: list[RunStep] = []
+    failed_node_ids: set[str] = set()
     for node in plan:
+        # Cascade-abort check — if any of this node's silver-deps is in
+        # failed_node_ids, skip it with a 'cascade' RunStep instead of
+        # dispatching to execute_node.
+        cascade_blocking = _find_cascade_blocker(node, failed_node_ids)
+        if cascade_blocking:
+            steps.append(
+                RunStep(
+                    run_id=run_id,
+                    dataset_id=node.id,
+                    layer=node.layer,
+                    mode=mode,  # type: ignore[arg-type]
+                    status="skipped",
+                    row_count=None,
+                    duration_seconds=0.0,
+                    error_message=None,
+                    watermark_used=None,
+                    last_watermark=None,
+                    skip_reason="cascade",
+                    plan_hash=None,
+                    plan_snapshot=None,
+                )
+            )
+            # The skipped node itself is also part of the failed set so
+            # transitive dependents (gold depending on a skipped silver)
+            # propagate the skip.
+            failed_node_ids.add(node.id)
+            continue
+
+        # Prior-state hydration for the drift gate + watermark predicate.
+        prior_plan_hash, prior_watermark_for_node = _read_prior_state_for_node(
+            spark, paths, node,
+        )
+        # Build a per-node ctx that carries the prior watermark for the
+        # primary source. We rebuild the ctx (instead of mutating
+        # ctx.prior_watermark) so it stays a clean immutable dataclass.
+        node_ctx = CpRunContext(
+            catalog=ctx.catalog,
+            bronze_schema=ctx.bronze_schema,
+            silver_schema=ctx.silver_schema,
+            gold_schema=ctx.gold_schema,
+            run_id=ctx.run_id,
+            prior_watermark=prior_watermark_for_node,
+            mode=ctx.mode,
+            bronze_table_for_source=ctx.bronze_table_for_source,
+        )
+
         node_started = _dt.now(_tz.utc)
         result = cp_execute_node(
             spark,
             node=node,
             pack=resolved_pack,
             profile=tenant_profile,
-            ctx=ctx,
+            ctx=node_ctx,
             paths=paths,
             mode=mode,  # type: ignore[arg-type]
             profile_hash=profile_hash,
-            prior_plan_hash=None,  # Phase 2 v0.3: drift gate reads
-                                    # come from execute_node's own
-                                    # state lookup in a follow-up;
-                                    # here we leave None which is the
-                                    # correct seed-mode value.
+            prior_plan_hash=prior_plan_hash,
         )
         node_duration = (_dt.now(_tz.utc) - node_started).total_seconds()
         status: str = "success" if result.status == "success" else "failed"
+        if status != "success":
+            failed_node_ids.add(node.id)
         steps.append(
             RunStep(
                 run_id=run_id,
@@ -1346,6 +1410,102 @@ def _run_content_pack_backend(
         mode=mode,
         steps=tuple(steps),
     )
+
+
+def _find_cascade_blocker(node: Any, failed_node_ids: set[str]) -> str | None:
+    """Return a failed upstream node id if this node depends on one, else None.
+
+    Walks the node's ``dependsOn.silver`` list (intra-pack dependencies).
+    Bronze dependencies are out of scope for cascade — bronze is the
+    legacy-python concern in Phase 2 v0.3.
+    """
+    deps = getattr(node, "depends_on", None)
+    if deps is None:
+        return None
+    silver_deps = getattr(deps, "silver", None) or []
+    for dep in silver_deps:
+        if dep.id in failed_node_ids:
+            return dep.id
+    return None
+
+
+def _read_prior_state_for_node(
+    spark: "Any", paths: "Any", node: "Any",
+) -> "tuple[str | None, dict[str, Any]]":
+    """Read the latest successful primary state row for a content-pack node.
+
+    Returns ``(prior_plan_hash, prior_watermark_by_source)``. Both are
+    ``None`` / empty dict when no prior successful row exists (the
+    common first-run case), in which case:
+
+    * ``prior_plan_hash=None`` makes the AIDPF-4040 drift gate a no-op
+      (correct seed-mode behaviour; nothing to drift against).
+    * Empty ``prior_watermark`` makes the renderer emit
+      ``{{ watermark_predicate }}`` as ``1=1`` (correct seed-mode).
+
+    Subsequent incremental runs with a successful prior row:
+
+    * ``prior_plan_hash`` flows into ``execute_node`` for the drift
+      gate comparison.
+    * ``prior_watermark[source_id]`` flows into the renderer so the
+      source delta is filtered by ``<column> > :watermark_<source>``.
+
+    Defensive on failures: any Spark exception (missing table on a
+    first-ever run, transient connection issue) is swallowed and the
+    function returns ``(None, {})``. This preserves the seed-mode
+    semantics rather than failing the run on a benign read.
+    """
+    primary_source = _resolve_primary_source_id_for_state_read(node)
+    if primary_source is None:
+        return None, {}
+
+    try:
+        # Read the latest primary-role row for this node from the
+        # Phase 2 latest view. The view's grain is (run_id, dataset_id,
+        # layer, source_id) so we additionally filter by source_role
+        # to disambiguate.
+        from . import state as v1_state
+        view_path = v1_state._state_latest_view_path(paths)
+        df = spark.sql(
+            f"SELECT plan_hash, output_watermark, source_id, status "
+            f"FROM {view_path} "
+            f"WHERE dataset_id = '{node.id}' AND layer = '{node.layer}' "
+            f"AND source_role = 'primary' AND status = 'success' "
+            f"ORDER BY last_run_at DESC LIMIT 1"
+        )
+        rows = df.collect()
+    except Exception:  # noqa: BLE001 — first-run table-missing or transient is benign
+        return None, {}
+
+    if not rows:
+        return None, {}
+
+    row = rows[0]
+    # Spark Row supports both attribute and index access; use index
+    # for resilience to fake-Spark tuples used in unit tests.
+    try:
+        plan_hash = row["plan_hash"]
+        output_watermark = row["output_watermark"]
+    except (KeyError, TypeError):
+        try:
+            plan_hash, output_watermark = row[0], row[1]
+        except (IndexError, TypeError):
+            return None, {}
+
+    prior_watermark = {primary_source: output_watermark} if output_watermark is not None else {}
+    return plan_hash, prior_watermark
+
+
+def _resolve_primary_source_id_for_state_read(node: "Any") -> "str | None":
+    """Mirror sql_runner._resolve_primary_source_id (kept private here to
+    avoid a cross-module import cycle into the dispatcher)."""
+    inc = node.refresh.incremental
+    if inc is not None and inc.watermark is not None:
+        return inc.watermark.source
+    deps = getattr(node, "depends_on", None)
+    if deps and deps.bronze:
+        return deps.bronze[0].id
+    return None
 
 
 __all__ = [

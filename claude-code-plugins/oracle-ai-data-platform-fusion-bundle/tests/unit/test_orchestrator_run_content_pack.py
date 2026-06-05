@@ -198,6 +198,359 @@ class TestContentPackBackendInvokesExecuteNode:
 
 
 # ---------------------------------------------------------------------------
+# Prior-state hydration — incremental watermark + plan-hash drift gate
+# ---------------------------------------------------------------------------
+
+
+class TestPriorStateHydration:
+    """Round-13 blocking #1: an incremental run must read the latest
+    successful primary state row before each node and populate
+    ctx.prior_watermark + prior_plan_hash. Without this, the renderer
+    emits 1=1 (full scan) and the drift gate never fires."""
+
+    def test_prior_state_lookup_populates_watermark_and_plan_hash(self, monkeypatch) -> None:
+        """When a prior successful state row exists, execute_node sees
+        the prior plan_hash + watermark."""
+        from datetime import datetime, timezone
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = load_full_chain(FIXTURE_PACK, base_resolver=make_filesystem_base_resolver(FIXTURE_PACK))
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        # Fake a prior successful state row for dim_thing.
+        prior_watermark = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        prior_plan_hash = "h-from-prior-success"
+
+        # Stub the state-read query.
+        fake_spark = MagicMock(name="FakeSpark")
+        prior_df = MagicMock()
+        prior_df.collect.return_value = [
+            {"plan_hash": prior_plan_hash, "output_watermark": prior_watermark,
+             "source_id": "erp_thing", "status": "success"}
+        ]
+        fake_spark.sql.return_value = prior_df
+
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        orchestrator.run(
+            bundle_path=FIXTURE_BUNDLE,
+            mode="incremental",
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+        )
+
+        # execute_node received the prior_plan_hash + prior_watermark.
+        assert len(execute_node_calls) == 1
+        call = execute_node_calls[0]
+        assert call["prior_plan_hash"] == prior_plan_hash
+        # ctx carries the per-source prior watermark.
+        ctx = call["ctx"]
+        assert ctx.prior_watermark.get("erp_thing") == prior_watermark
+
+    def test_first_run_no_prior_state_uses_none(self, monkeypatch) -> None:
+        """Bare first-run case: no prior rows in fusion_bundle_state →
+        prior_plan_hash=None + empty prior_watermark. The drift gate
+        is correctly a no-op and the renderer falls through to 1=1."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = load_full_chain(FIXTURE_PACK, base_resolver=make_filesystem_base_resolver(FIXTURE_PACK))
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        fake_spark = MagicMock()
+        # Latest-view query returns empty (no prior runs yet).
+        empty_df = MagicMock()
+        empty_df.collect.return_value = []
+        fake_spark.sql.return_value = empty_df
+
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        orchestrator.run(
+            bundle_path=FIXTURE_BUNDLE,
+            mode="seed",
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+        )
+
+        call = execute_node_calls[0]
+        assert call["prior_plan_hash"] is None
+        assert call["ctx"].prior_watermark == {}
+
+    def test_state_read_failure_is_swallowed_and_defaults_to_none(self, monkeypatch) -> None:
+        """Defensive: a transient Spark error reading the latest view
+        (e.g. table doesn't exist on a clean catalog) MUST NOT fail the
+        run — degrades to seed-mode semantics."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = load_full_chain(FIXTURE_PACK, base_resolver=make_filesystem_base_resolver(FIXTURE_PACK))
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        fake_spark = MagicMock()
+        # State-table setup succeeds (mocked); the prior-state SELECT
+        # raises.
+        fake_spark.sql.side_effect = RuntimeError("simulated AnalysisException")
+
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        # Should not raise — degrades gracefully.
+        orchestrator.run(
+            bundle_path=FIXTURE_BUNDLE,
+            mode="incremental",
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+        )
+
+        call = execute_node_calls[0]
+        assert call["prior_plan_hash"] is None
+        assert call["ctx"].prior_watermark == {}
+
+
+# ---------------------------------------------------------------------------
+# Cascade abort — failed upstream node blocks downstream dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestCascadeAbort:
+    """Round-13 blocking #2: when a node fails, downstream nodes that
+    depend on it MUST NOT be dispatched. Otherwise they'd read stale
+    pre-existing upstream tables and silently commit success.
+
+    Uses a two-node fixture pack where gold.mart_x depends on
+    silver.dim_thing. First call returns failure → second node must
+    never be passed to execute_node."""
+
+    def _two_node_pack(self, tmp_path: pathlib.Path):
+        """Build a 2-node fixture: silver.dim_a + gold.mart_x depending on dim_a."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+
+        root = tmp_path / "pack"
+        root.mkdir()
+        (root / "pack.yaml").write_text(
+            "id: cascade-test\nversion: 1.0.0\ncompatibility:\n  pluginMinVersion: 0.3.0\n"
+        )
+        (root / "silver").mkdir()
+        (root / "silver" / "dim_a.yaml").write_text(
+            "id: dim_a\nlayer: silver\nimplementation:\n  type: sql\n  sql: silver/dim_a.sql\n"
+            "target: dim_a\noutputSchema:\n  columns:\n    - name: a\n      type: string\n"
+            "      nullable: false\n      pii: none\ndependsOn:\n  bronze:\n    - id: erp_a\n"
+            "      role: primary\nrefresh:\n  seed:\n    strategy: replace\n"
+        )
+        (root / "silver" / "dim_a.sql").write_text("SELECT 1 AS a")
+        (root / "gold").mkdir()
+        (root / "gold" / "mart_x.yaml").write_text(
+            "id: mart_x\nlayer: gold\nimplementation:\n  type: sql\n  sql: gold/mart_x.sql\n"
+            "target: mart_x\noutputSchema:\n  columns:\n    - name: x\n      type: string\n"
+            "      nullable: false\n      pii: none\ndependsOn:\n  silver:\n    - id: dim_a\n"
+            "      role: primary\nrefresh:\n  seed:\n    strategy: replace\n"
+        )
+        (root / "gold" / "mart_x.sql").write_text("SELECT 1 AS x")
+        return load_full_chain(root, base_resolver=make_filesystem_base_resolver(root))
+
+    def test_downstream_node_skipped_when_upstream_fails(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = self._two_node_pack(tmp_path)
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        # First node (dim_a) fails; second (mart_x) MUST NOT be called.
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            # dim_a fails; if mart_x were reached we'd see two calls.
+            return NodeExecutionResult(
+                status="quality_failed",
+                error_message="[unique] simulated failure",
+            )
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        fake_spark = MagicMock()
+        empty_df = MagicMock()
+        empty_df.collect.return_value = []
+        fake_spark.sql.return_value = empty_df
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        summary = orchestrator.run(
+            bundle_path=FIXTURE_BUNDLE,  # the fixture bundle's content_pack
+                                          # block is satisfied by the
+                                          # passed-in resolved_pack here
+                                          # — orchestrator.run trusts the
+                                          # caller-supplied pack.
+            mode="seed",
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+        )
+
+        # execute_node was called for dim_a; mart_x must not have been.
+        called_node_ids = [c["node"].id for c in execute_node_calls]
+        assert "dim_a" in called_node_ids
+        assert "mart_x" not in called_node_ids
+        assert len(execute_node_calls) == 1
+
+        # RunSummary has 2 steps: dim_a failed + mart_x skipped/cascade.
+        step_ids = {s.dataset_id: s for s in summary.steps}
+        assert step_ids["dim_a"].status == "failed"
+        assert step_ids["mart_x"].status == "skipped"
+        assert step_ids["mart_x"].skip_reason == "cascade"
+
+    def test_independent_node_not_blocked_by_unrelated_failure(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """If two silvers are independent (no dependsOn between them),
+        failure of one MUST NOT cascade to the other."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        # Build a 2-silver pack with no inter-dependency.
+        root = tmp_path / "pack"
+        root.mkdir()
+        (root / "pack.yaml").write_text(
+            "id: cascade-test\nversion: 1.0.0\ncompatibility:\n  pluginMinVersion: 0.3.0\n"
+        )
+        (root / "silver").mkdir()
+        for nid in ("dim_a", "dim_b"):
+            (root / "silver" / f"{nid}.yaml").write_text(
+                f"id: {nid}\nlayer: silver\nimplementation:\n  type: sql\n"
+                f"  sql: silver/{nid}.sql\ntarget: {nid}\noutputSchema:\n  columns:\n"
+                f"    - name: c\n      type: string\n      nullable: false\n      pii: none\n"
+                f"dependsOn:\n  bronze:\n    - id: erp_a\n      role: primary\n"
+                f"refresh:\n  seed:\n    strategy: replace\n"
+            )
+            (root / "silver" / f"{nid}.sql").write_text("SELECT 1 AS c")
+        pack = load_full_chain(root, base_resolver=make_filesystem_base_resolver(root))
+
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        # Make dim_a fail; assert dim_b STILL runs.
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            if kwargs["node"].id == "dim_a":
+                return NodeExecutionResult(status="quality_failed", error_message="x")
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        fake_spark = MagicMock()
+        empty_df = MagicMock()
+        empty_df.collect.return_value = []
+        fake_spark.sql.return_value = empty_df
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        summary = orchestrator.run(
+            bundle_path=FIXTURE_BUNDLE,
+            mode="seed",
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+        )
+
+        called_ids = [c["node"].id for c in execute_node_calls]
+        # Both nodes were dispatched — no false cascade.
+        assert "dim_a" in called_ids
+        assert "dim_b" in called_ids
+        # dim_b succeeded.
+        status_by_id = {s.dataset_id: s.status for s in summary.steps}
+        assert status_by_id["dim_a"] == "failed"
+        assert status_by_id["dim_b"] == "success"
+
+
+# ---------------------------------------------------------------------------
 # CLI integration: --inline --execution-backend content-pack reaches execute_node
 # ---------------------------------------------------------------------------
 
