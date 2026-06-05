@@ -30,21 +30,13 @@ profiles:
       startDate: '2020-01-01'
       endDate: '2030-12-31'
       fiscalStartMonth: 1
-    # NOTE: round-2 contract — Phase 3 hardcodes the conventional
-    # six-segment v1 COA shape directly in `silver/dim_account.sql`
-    # (positional `segment_01..06` + six semantic aliases
-    # company/cost_center/account/subaccount/product/intercompany).
-    # No `coa_*_segment` columnAliases / `{{ column.coa_* }}` tokens
-    # exist in v0.3 — that was the initial PR shape, rolled back per
-    # reviewer feedback to restore v1 row-equivalence. Tenants whose
-    # COA places roles at non-conventional positions today need a
-    # pack overlay that ships a different `dim_account.sql`; a future
-    # declarative role-to-position override mechanism awaits new
-    # renderer vocabulary + live evidence of role-positioning
-    # variation. See docs/v2-phase-3-variation-catalog.md "COA segment
-    # handling" for the full audit. The chartOfAccounts block below
-    # stays as documentation of the conventional positions but is not
-    # consumed by any v0.3 SQL template.
+    # Documentation of conventional Fusion COA role-to-position
+    # mapping. NOT consumed by any v0.3 SQL template — the three
+    # `coa_*_segment` columnAliases below own the bootstrap-resolved
+    # source-column substitution for the three roles. See
+    # `docs/v2-phase-3-variation-catalog.md` "Round-3 restore" + the
+    # `LIMITS.md P3-L2` entry for the role-positioning architectural
+    # limit + the future `{{ coa.<role> }}` token follow-up.
     chartOfAccounts:
       balancingSegment: segment1
       costCenterSegment: segment2
@@ -69,6 +61,38 @@ columnAliases:
     candidates:
       - ApInvoicesInvoiceCurrencyCode
       - ApInvoicesCurrencyCode
+
+  # COA role aliases. Each role has a SINGLE-CANDIDATE list pinning
+  # its conventional source column. Bootstrap auto-resolves trivially
+  # on conventional Fusion COA (saasfademo1: each candidate exists).
+  #
+  # Honest limit (LIMITS.md P3-L2): columnAliases resolve by physical
+  # column existence (PLAN §9.5.4 step 2). CodeCombinationSegment1..6
+  # all coexist on every Fusion gl_coa extract, so a non-conventional
+  # tenant (e.g., balancing role at Segment4) would have bootstrap
+  # auto-resolve to Segment1 anyway — Segment1 still exists, just
+  # not as the balancing column. The recovery path for non-conventional
+  # COA is pre-authored overlay (extending the candidate list with
+  # the role's actual source column) OR hand-edited profile, BEFORE
+  # running bootstrap. A future `{{ coa.<role> }}` renderer token
+  # consuming `profile.chartOfAccounts.<role>Segment` integers is
+  # the proper architectural fix (out of v0.3 scope). See §9.5.5
+  # Tier-2 for the skill-overlay escalation.
+  coa_balancing_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment1
+  coa_cost_center_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment2
+  coa_natural_account_segment:
+    appliesTo: bronze.gl_coa
+    required: true
+    candidates:
+      - CodeCombinationSegment3
 
 
 # Semantic variants (PLAN §9.5.1 / §9.5.2). The fragment is substituted

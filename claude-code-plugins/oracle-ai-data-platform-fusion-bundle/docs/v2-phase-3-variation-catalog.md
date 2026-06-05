@@ -24,40 +24,73 @@ documents. No speculative additions.
 | `VENDORID` | `columnAliases.vendor_id` (candidates: `[VENDORID]`) | `{{ column.vendor_id }}` | `dim_supplier.py` (line 101) |
 | `KNOWN_CURRENCY_COL_ALIASES` | `columnAliases.invoice_currency_code` (candidates: `[ApInvoicesInvoiceCurrencyCode, ApInvoicesCurrencyCode]`) | `{{ column.invoice_currency_code }}` | `supplier_spend.py` (lines 77–80), `ap_aging.py` (line 557) |
 | `cancelled_*` probe (date / flag) | `semanticVariants.cancelled_status` (candidates: `cancelled_date`, `cancelled_flag`) | `{{ semantic.cancelled_status }}` | `ap_aging.py` (lines 544–553) |
+| COA `balancing` role source column | `columnAliases.coa_balancing_segment` (candidates: `[CodeCombinationSegment1]`) | `{{ column.coa_balancing_segment }}` | `dim_account.py` (DEFAULT_SEMANTIC_SEGMENT_MAP position 1) |
+| COA `cost_center` role source column | `columnAliases.coa_cost_center_segment` (candidates: `[CodeCombinationSegment2]`) | `{{ column.coa_cost_center_segment }}` | `dim_account.py` (position 2) |
+| COA `natural_account` role source column | `columnAliases.coa_natural_account_segment` (candidates: `[CodeCombinationSegment3]`) | `{{ column.coa_natural_account_segment }}` | `dim_account.py` (position 3) |
 
 That is the complete set of declared variation points as of Phase 3
-round-1. **No `coa_*_segment` columnAliases exist** — see "Round-1 rework
-notes" below for the rationale.
+round-3 (restored after the round-2 regression).
 
-## Round-1 rework notes — what changed since the initial PR push
+## Round-3 restore notes — what changed since the round-2 rollback
 
 ### COA segment handling
 
-The initial Phase 3 commit declared three new `columnAliases`
+The initial Phase 3 commit (round-1) declared three `columnAliases`
 (`coa_balancing_segment` / `coa_cost_center_segment` /
-`coa_natural_account_segment`) so a slimmed-down `dim_account.sql` could
-read three role-aliased COA columns through `{{ column.coa_*_segment }}`.
+`coa_natural_account_segment`) so `dim_account.sql` could read the
+three Fusion COA role-aliased source columns through
+`{{ column.coa_*_segment }}` substitution.
 
-Reviewer feedback (round 1) flagged that the resulting `dim_account`
-output schema diverged from v1's default emit (positional `segment_01..30`
-plus the `DEFAULT_SEMANTIC_SEGMENT_MAP` six semantic aliases), breaking
-the row-equivalence Phase 3's exit criteria require.
+Round-2 misread external-reviewer "v1 row-equivalence" pressure as
+"v2 SQL text must match v1 SQL text" and DELETED the three
+columnAliases + hardcoded `CodeCombinationSegment1/2/3` directly into
+`dim_account.sql`. That rollback was an architectural regression
+under PLAN §9.5.4: the engine substitutes variation-point tokens at
+runtime from values that `bootstrap` resolves at onboarding;
+v1-equivalence on saasfademo1 is *satisfied* by the variation-point
+design (resolved values happen to match v1's hardcodes), not in
+conflict with it.
 
-Round-1 rework restored v1 parity: `dim_account.sql` now hardcodes the
-six-position positional + semantic emit (`segment_01..06` plus
-`company` / `cost_center` / `natural_account` / `subaccount` / `product` /
-`intercompany`) reading `CodeCombinationSegment1..6` directly from
-`bronze.gl_coa`. The three `coa_*_segment` columnAliases were dropped
-because `dim_account.sql` no longer references them.
+Round-3 (feature `v2-phase-3-fix-variation-points`) restores the
+three columnAliases + the three `{{ column.* }}` tokens. On
+saasfademo1's conventional COA, bootstrap auto-resolves each role to
+its single conventional candidate (`Segment1` / `Segment2` /
+`Segment3`); the renderer substitutes those identifiers into
+`dim_account.sql`; output rows are byte-identical to v1.
 
-**Future work** (not Phase 3): tenants whose COA puts roles at
-non-conventional positions are served today by a pack overlay that ships
-a different `dim_account.sql`. A future declarative role-to-position
-override mechanism (likely a new renderer token shape like
-`{{ coa.<role> }}` plus a structured `chartOfAccounts:` block in the
-profile) is the natural successor — but it requires both new renderer
-vocabulary and live-tenant evidence of role-positioning variation, neither
-of which is in Phase 3 scope.
+**Two honest limits remain (`LIMITS.md P3-L2`):**
+
+1. **Only three of six v1 COA roles are declared.** `subaccount` /
+   `product` / `intercompany` are NOT in `columnAliases`;
+   `dim_account.sql` emits them via positional hardcoded references
+   (`Segment4 AS subaccount`, etc.). A tenant whose `subaccount`
+   role lives at a non-conventional position triggers the same
+   skill-overlay path described below, but the lack of a declared
+   role-alias means the overlay must declare it from scratch.
+
+2. **`columnAliases` existence-based resolution cannot disambiguate
+   role-positioning.** Each declared role's candidate list is a
+   single conventional default (e.g.,
+   `coa_balancing_segment.candidates: [CodeCombinationSegment1]`).
+   On a non-conventional tenant where balancing actually lives at
+   `Segment4`, `Segment1` STILL exists in bronze — Fusion always
+   emits all six — so bootstrap auto-resolves to `Segment1` and
+   silently mis-resolves. The recovery path is for the operator to
+   pre-author an overlay extending the candidate list with the
+   role's actual source column (or hand-edit
+   `profile.resolved.column.coa_<role>_segment` directly) BEFORE
+   running bootstrap.
+
+**Future architectural fix** (out of v0.3 scope): a new
+`{{ coa.<role> }}` renderer token consuming
+`profile.chartOfAccounts.<role>Segment` integers makes
+role-positioning explicit rather than relying on existence-based
+resolution. Bootstrap prompts the operator at onboarding for each
+role's position (or reads from a structured `chartOfAccounts`
+profile block); the renderer emits `CodeCombinationSegment<N>` based
+on the resolved integer. This requires (a) new renderer vocabulary,
+(b) bootstrap UX changes, (c) live-tenant evidence justifying the
+work — none in v0.3 scope.
 
 ### AP aging — proxy mode only (intentional v2 narrow)
 
@@ -159,7 +192,9 @@ same reasons as the auto/real-mode split.
 | `SEGMENT1` / `VENDORID` | Declared as `columnAliases.supplier_natural_key` / `vendor_id` |
 | `KNOWN_CURRENCY_COL_ALIASES` | Declared as `columnAliases.invoice_currency_code` |
 | `cancelled_*` (date / flag) | Declared as `semanticVariants.cancelled_status` (two candidates) |
-| `semantic_segment_map` (six COA roles) | Hardcoded in `dim_account.sql` to the v1 `DEFAULT_SEMANTIC_SEGMENT_MAP` — round-1 rework dropped the parameterised approach for v1 parity |
+| `semantic_segment_map` — three role aliases (`balancing` / `cost_center` / `natural_account`) | **DECLARED** as `columnAliases.coa_{balancing,cost_center,natural_account}_segment` — single-candidate-per-role lists pinning conventional `Segment1/2/3`. `dim_account.sql` substitutes via `{{ column.coa_*_segment }}`. Output column names stay `company` / `cost_center` / `account` per v1 convention. (Round-3 restore after the round-2 rollback regression.) |
+| `semantic_segment_map` — three other roles (`subaccount` / `product` / `intercompany`) | Hardcoded positional in `dim_account.sql` (lines 19–21). Limit captured in `LIMITS.md P3-L2` (gap 1); skill-overlay recovery path documented. |
+| COA role-positioning on non-conventional tenants | Limit captured in `LIMITS.md P3-L2` (gap 2). `columnAliases` existence-based resolution cannot disambiguate; pre-authored overlay or hand-edited profile required BEFORE bootstrap. Future `{{ coa.<role> }}` renderer token is the architectural fix; out of v0.3 scope. |
 | `CURRENT_DATE()` anchor | **NEW** renderer token `{{ snapshot_date }}` (Step 2) |
 | `dim_calendar` parameters | **NEW** builtin adapter (Step 3) |
 | `due_date_mode='auto'` runtime probe | **DEFERRED** — v2 ships proxy-mode-only; auto/real awaits a renderer feature + live-tenant evidence |
