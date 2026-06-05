@@ -1,9 +1,15 @@
 # Finance-default tenant profile for the fusion-finance-starter content pack.
 #
 # Resolved at bootstrap; frozen for subsequent runs. Authored values mirror
-# the saasfademo1 demo pod's COA shape — tenants whose COA places balancing /
-# cost-center / natural-account at different segment positions override
-# `resolved.column.coa_*_segment` to match their layout.
+# the saasfademo1 demo pod's PVO shapes.
+#
+# COA segments: Phase 3 round-1 rework adopted v1's positional COA shape —
+# dim_account.sql emits CodeCombinationSegment1..6 directly as segment_01..06
+# plus six semantic aliases (company / cost_center / natural_account /
+# subaccount / product / intercompany) following v1's DEFAULT_SEMANTIC_SEGMENT_MAP.
+# Tenants whose COA puts different roles at non-conventional positions are
+# served by a pack overlay that emits a different dim_account.sql; there is
+# no per-tenant role-to-position override knob in the v0.3 pack vocabulary.
 #
 # Field aliases match scripts/oracle_ai_data_platform_fusion_bundle/schema/tenant_profile.py.
 schemaVersion: 1
@@ -17,8 +23,8 @@ bronzeSchemaFingerprint: "sha256:placeholder-finance-default-2026-06-05"
 
 # Variation-point resolutions referenced by starter-pack SQL templates.
 # The renderer raises AIDPF-5003 at sql_renderer.py:474 / :507 if any of
-# these is missing — see docs/features/v2-phase-3-export-modules-to-sql/
-# docs/v2-phase-3-variation-catalog.md for the per-knob audit.
+# these is missing — see docs/v2-phase-3-variation-catalog.md for the
+# per-knob audit.
 resolved:
   column:
     # dim_supplier

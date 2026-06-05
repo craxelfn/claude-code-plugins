@@ -7,14 +7,15 @@ WITH balances AS (
     b.BalancePeriodName,
     b.BalanceCurrencyCode,
     b.BalanceActualFlag,
-    COALESCE(b.BalanceTranslatedFlag, 'N')                          AS BalanceTranslatedFlag,
+    b.BalanceTranslatedFlag,
     b._extract_ts                                                   AS bronze_extract_ts,
     CAST(b.BalanceBeginBalanceDr AS DECIMAL(28, 8))                 AS begin_balance_dr,
     CAST(b.BalanceBeginBalanceCr AS DECIMAL(28, 8))                 AS begin_balance_cr,
     CAST(b.BalancePeriodNetDr    AS DECIMAL(28, 8))                 AS period_net_dr,
     CAST(b.BalancePeriodNetCr    AS DECIMAL(28, 8))                 AS period_net_cr
   FROM {{ catalog }}.{{ bronze_schema }}.gl_period_balances b
-  WHERE b.BalanceCodeCombinationId IS NOT NULL
+  WHERE b.BalanceActualFlag = 'A'
+    AND b.BalanceCodeCombinationId IS NOT NULL
     AND {{ watermark_predicate }}
 )
 SELECT
@@ -24,7 +25,7 @@ SELECT
   da.account_type                                                   AS account_type,
   da.company                                                        AS company,
   da.cost_center                                                    AS cost_center,
-  da.natural_account                                                AS natural_account,
+  da.account                                                        AS natural_account,
   da.subaccount                                                     AS subaccount,
   da.product                                                        AS product,
   da.intercompany                                                   AS intercompany,
@@ -44,7 +45,7 @@ SELECT
     + COALESCE(b.period_net_dr,    0)
     - COALESCE(b.period_net_cr,    0),
     8
-  )                                                                 AS ending_balance,
+  )                                                                 AS closing_balance,
   b.bronze_extract_ts                                               AS bronze_extract_ts,
   current_timestamp()                                               AS gold_built_at,
   {{ run_id_literal }}                                              AS gold_run_id

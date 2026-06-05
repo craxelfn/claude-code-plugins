@@ -122,7 +122,7 @@ outputSchema:
       type: decimal(28,8)
       nullable: true
       pii: none
-    - name: ending_balance
+    - name: closing_balance
       type: decimal(28,8)
       nullable: true
       pii: none

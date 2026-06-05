@@ -87,7 +87,7 @@ outputSchema:
       type: string
       nullable: true
       pii: none
-    - name: natural_account
+    - name: account
       type: string
       nullable: true
       pii: none
@@ -124,11 +124,11 @@ outputSchema:
       nullable: true
       pii: none
     - name: start_date_active
-      type: date
+      type: timestamp
       nullable: true
       pii: none
     - name: end_date_active
-      type: date
+      type: timestamp
       nullable: true
       pii: none
     - name: bronze_extract_ts

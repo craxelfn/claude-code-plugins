@@ -1,19 +1,19 @@
 WITH open_invoices AS (
   SELECT
-    CAST(inv.ApInvoicesVendorId AS BIGINT)                          AS vendor_id,
-    UPPER(CAST(inv.{{ column.invoice_currency_code }} AS STRING))   AS currency_code,
-    CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(28, 8))             AS invoice_amount,
-    CAST(COALESCE(inv.ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8))   AS amount_paid,
-    CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(28, 8))
-      - CAST(COALESCE(inv.ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8)) AS open_amount,
-    CAST(inv.ApInvoicesInvoiceDate AS DATE)                         AS invoice_date,
-    inv._extract_ts                                                 AS bronze_extract_ts
-  FROM {{ catalog }}.{{ bronze_schema }}.ap_invoices inv
-  WHERE inv.ApInvoicesVendorId IS NOT NULL
-    AND inv.ApInvoicesInvoiceDate IS NOT NULL
+    CAST(ApInvoicesVendorId AS BIGINT)                              AS vendor_id,
+    UPPER(CAST({{ column.invoice_currency_code }} AS STRING))       AS currency_code,
+    CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 8))                 AS invoice_amount,
+    CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8))       AS amount_paid,
+    CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 8))
+      - CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8))   AS open_amount,
+    CAST(ApInvoicesInvoiceDate AS DATE)                             AS invoice_date,
+    _extract_ts                                                     AS bronze_extract_ts
+  FROM {{ catalog }}.{{ bronze_schema }}.ap_invoices
+  WHERE ApInvoicesVendorId IS NOT NULL
+    AND ApInvoicesInvoiceDate IS NOT NULL
     AND {{ semantic.cancelled_status }}
-    AND CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(28, 2))
-      - CAST(COALESCE(inv.ApInvoicesAmountPaid, 0) AS DECIMAL(28, 2)) <> 0
+    AND CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 8))
+      - CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8)) <> 0
 )
 SELECT
   o.vendor_id                                                       AS vendor_id,
@@ -22,12 +22,12 @@ SELECT
   ds.supplier_name                                                  AS supplier_name,
   ds.business_relationship                                          AS business_relationship,
   CASE
-    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 0   THEN 'NOT_DUE'
-    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 30  THEN '0-30'
+    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 0   THEN 'current'
+    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 30  THEN '1-30'
     WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 60  THEN '31-60'
     WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 90  THEN '61-90'
-    ELSE 'OVER_90'
-  END                                                               AS age_bucket,
+    ELSE '91+'
+  END                                                               AS aging_bucket,
   'invoice_date'                                                    AS bucket_basis,
   COUNT(*)                                                          AS open_invoice_count,
   ROUND(SUM(o.open_amount), 8)                                      AS open_amount,
@@ -52,9 +52,9 @@ GROUP BY
   ds.supplier_name,
   ds.business_relationship,
   CASE
-    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 0   THEN 'NOT_DUE'
-    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 30  THEN '0-30'
+    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 0   THEN 'current'
+    WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 30  THEN '1-30'
     WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 60  THEN '31-60'
     WHEN DATEDIFF({{ snapshot_date }}, o.invoice_date) <= 90  THEN '61-90'
-    ELSE 'OVER_90'
+    ELSE '91+'
   END

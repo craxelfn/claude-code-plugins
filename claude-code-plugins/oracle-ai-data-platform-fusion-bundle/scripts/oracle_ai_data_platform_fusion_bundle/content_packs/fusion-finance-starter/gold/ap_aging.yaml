@@ -25,10 +25,28 @@ refresh:
       Hence `replace` (PLAN §10, ADR-0012). A future `snapshot`
       strategy (§10.7, deferred) is the right long-term fit.
 
-# Output schema matches v1 build_ap_aging_sql in proxy mode
-# (transforms/gold/ap_aging.py:475-505 with due_date_mode='proxy') —
-# 19 columns. Phase 3 ships proxy mode only; real-mode (terms/due_date
-# probing) is deferred until a renderer "optional column" feature.
+# INTENTIONAL SCOPE DECISION — Phase 3 ships AP aging in **proxy mode
+# only**. v1's auto/real-mode behaviour (transforms/gold/ap_aging.py
+# defaults to `due_date_mode='auto'`, probes ApInvoicesTermsDate /
+# ApInvoicesDueDate coverage at runtime, switches to real mode when
+# coverage exceeds DEFAULT_REAL_MODE_GATE_THRESHOLD) is exactly the kind
+# of runtime probing ADR-0014 removes in v2. The two modes also produce
+# different output schemas — real mode emits max_days_past_due plus
+# three provenance counts (due_date_count, terms_date_count,
+# net30_fallback_count), proxy mode emits max_days_outstanding — which
+# the renderer's static-token vocabulary cannot select between from a
+# single template.
+#
+# Tenants whose live AP data would auto-route to real mode under v1
+# will see proxy-shape output under v2. This is a documented divergence
+# (see docs/v2-phase-3-variation-catalog.md "AP aging — proxy mode only"
+# and LIMITS.md). The auto/real follow-up needs (a) a renderer extension
+# for two-schema variants, (b) declarative tenant-side threshold config,
+# and (c) live evidence of any tenant exceeding the v1 threshold.
+#
+# Output schema below matches v1 ap_aging.py:475-505 with
+# due_date_mode='proxy' — 19 columns aligned to the dashboards' bindings
+# (age_bucket name, decimal(28,8) widths).
 outputSchema:
   columns:
     - name: vendor_id
@@ -51,7 +69,7 @@ outputSchema:
       type: string
       nullable: true
       pii: none
-    - name: age_bucket
+    - name: aging_bucket
       type: string
       nullable: false
       pii: none
@@ -111,7 +129,7 @@ outputSchema:
 quality:
   tests:
     - type: not_null
-      columns: [supplier_number, age_bucket]
+      columns: [supplier_number, aging_bucket]
     - type: accepted_values
-      column: age_bucket
-      values: ["NOT_DUE", "0-30", "31-60", "61-90", "OVER_90"]
+      column: aging_bucket
+      values: ["current", "1-30", "31-60", "61-90", "91+"]
