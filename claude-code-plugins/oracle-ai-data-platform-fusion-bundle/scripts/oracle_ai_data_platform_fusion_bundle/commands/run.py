@@ -185,6 +185,7 @@ def _run_inline(
             AIDPF_1030_PROFILE_MISSING,
             AIDPF_1031_CONTENT_PACK_MISSING,
             AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
             load_bundle as _load_bundle,
             resolve_content_pack_root,
         )
@@ -196,6 +197,7 @@ def _run_inline(
             load_full_chain,
             make_filesystem_base_resolver,
         )
+        from ..orchestrator.content_pack_validators import validate_pack_full
 
         bundle, _paths = _load_bundle(bundle_path)
         if bundle.content_pack is None:
@@ -216,6 +218,16 @@ def _run_inline(
         resolved_pack = load_full_chain(
             pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
         )
+        # Phase 1 full validation BEFORE any profile/stage/dispatch work.
+        # validate_dag/validate_template_variables/validate_dashboard_*/etc.
+        # catch errors that the runtime DAG resolver doesn't — e.g. a typo
+        # in dependsOn.silver that points to a non-existent node would
+        # otherwise let the dependent execute against stale upstream tables.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
         profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
         if not profile_path.exists():
             console.print(
@@ -291,6 +303,7 @@ def _run_via_aidp_dispatch(
             AIDPF_1030_PROFILE_MISSING,
             AIDPF_1031_CONTENT_PACK_MISSING,
             AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
             load_bundle,
             resolve_content_pack_root,
         )
@@ -300,6 +313,7 @@ def _run_via_aidp_dispatch(
             make_filesystem_base_resolver,
         )
         from ..orchestrator.content_pack_staging import stage_pack_files
+        from ..orchestrator.content_pack_validators import validate_pack_full
 
         bundle, _bundle_paths = load_bundle(bundle_path)
         if bundle.content_pack is None:
@@ -320,6 +334,14 @@ def _run_via_aidp_dispatch(
         resolved_pack = load_full_chain(
             pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
         )
+        # Phase 1 full validation BEFORE staging (round-15 review fix).
+        # An invalid pack must NOT reach the cluster — fail fast at the
+        # laptop with AIDPF-1036 carrying the per-error report.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
         profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
         if not profile_path.exists():
             console.print(

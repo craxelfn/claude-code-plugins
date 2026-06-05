@@ -1324,9 +1324,24 @@ def _run_content_pack_backend(
     for node in plan:
         # Cascade-abort check — if any of this node's silver-deps is in
         # failed_node_ids, skip it with a 'cascade' RunStep instead of
-        # dispatching to execute_node.
+        # dispatching to execute_node. Write a best-effort soft state
+        # row for the skipped node so the persisted audit trail records
+        # the cascade — without this, status/audit readers would still
+        # show the node's previous successful run (or no record at all)
+        # for the current run_id, violating the v1 audit-completeness
+        # invariant.
         cascade_blocking = _find_cascade_blocker(node, failed_node_ids)
         if cascade_blocking:
+            _safe_write_content_pack_cascade_skip_row(
+                spark=spark,
+                paths=paths,
+                node=node,
+                run_id=run_id,
+                mode=mode,
+                blocker_id=cascade_blocking,
+                tenant_profile=tenant_profile,
+                resolved_pack=resolved_pack,
+            )
             steps.append(
                 RunStep(
                     run_id=run_id,
@@ -1336,7 +1351,7 @@ def _run_content_pack_backend(
                     status="skipped",
                     row_count=None,
                     duration_seconds=0.0,
-                    error_message=None,
+                    error_message=f"cascade: upstream {cascade_blocking!r} failed",
                     watermark_used=None,
                     last_watermark=None,
                     skip_reason="cascade",
@@ -1414,6 +1429,77 @@ def _run_content_pack_backend(
         mode=mode,
         steps=tuple(steps),
     )
+
+
+def _safe_write_content_pack_cascade_skip_row(
+    *,
+    spark: "Any",
+    paths: "Any",
+    node: "Any",
+    run_id: str,
+    mode: str,
+    blocker_id: str,
+    tenant_profile: "Any | None",
+    resolved_pack: "Any | None",
+) -> None:
+    """Best-effort soft state row for a cascade-skipped content-pack node.
+
+    Mirrors sql_runner's _safe_write_failure_row pattern: assemble the
+    row dict + call state_phase2.write_state_rows_hard, but wrap the
+    write in try/except so a Spark failure here only loses the audit
+    trail — never raises. Cursor advancement is preserved (no
+    output_watermark on the row); the prior run's last_watermark is
+    not touched because we leave the field NULL.
+
+    Carries the upstream blocker id in ``error_message`` so audit
+    readers can trace which dep triggered the cascade.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from . import state_phase2 as _sp2
+
+    primary_source = _resolve_primary_source_id_for_state_read(node)
+    now = _dt.now(_tz.utc)
+    pack_id = getattr(getattr(resolved_pack, "pack", None), "id", None)
+    pack_version = getattr(getattr(resolved_pack, "pack", None), "version", None)
+    tenant = getattr(tenant_profile, "tenant", None)
+    fingerprint = getattr(tenant_profile, "bronze_schema_fingerprint", None)
+
+    row = {
+        "run_id": run_id,
+        "dataset_id": node.id,
+        "layer": node.layer,
+        "mode": mode,
+        "last_watermark": None,
+        "last_run_at": now,
+        "status": "skipped",
+        "row_count": None,
+        "error_message": f"cascade: upstream {blocker_id!r} failed",
+        "skip_reason": "cascade",
+        "duration_seconds": None,
+        "plan_hash": None,
+        "plan_snapshot": None,
+        "pack_id": pack_id,
+        "pack_version": pack_version,
+        "node_version": None,
+        "node_implementation_type": getattr(node.implementation, "type", None),
+        "rendered_sql_hash": None,
+        "output_schema_hash": None,
+        "profile_hash": None,
+        "tenant_fingerprint": tenant,
+        "fusion_version": None,
+        "bronze_schema_fingerprint": fingerprint,
+        "source_id": primary_source,
+        "source_role": "primary",
+        "input_watermark_start": None,
+        "input_watermark_end": None,
+        "output_watermark": None,
+        "consumed_version": None,
+        "delta_row_count": None,
+    }
+    try:
+        _sp2.write_state_rows_hard(spark, paths, [row])
+    except Exception:  # noqa: BLE001 — diagnostic write is best-effort
+        return
 
 
 def _find_cascade_blocker(node: Any, failed_node_ids: set[str]) -> str | None:

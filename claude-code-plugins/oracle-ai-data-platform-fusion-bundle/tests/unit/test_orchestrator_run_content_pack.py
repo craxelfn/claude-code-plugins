@@ -512,6 +512,15 @@ class TestCascadeAbort:
             )
         monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
 
+        # Spy on write_state_rows_hard so we can assert the cascade-skip
+        # row is persisted (round-15 finding #2 — audit-completeness).
+        state_write_calls: list[list[dict]] = []
+        original_write = state_phase2.write_state_rows_hard
+        def spy_write_state_rows_hard(spark, paths, rows):
+            state_write_calls.append(list(rows))
+            return None
+        monkeypatch.setattr(state_phase2, "write_state_rows_hard", spy_write_state_rows_hard)
+
         fake_spark = MagicMock()
         empty_df = MagicMock()
         empty_df.collect.return_value = []
@@ -543,6 +552,26 @@ class TestCascadeAbort:
         assert step_ids["dim_a"].status == "failed"
         assert step_ids["mart_x"].status == "skipped"
         assert step_ids["mart_x"].skip_reason == "cascade"
+
+        # Round-15 finding #2: the cascade-skipped node MUST have a
+        # diagnostic state row written so audit readers see the current
+        # run's cascade event (not the previous successful run).
+        cascade_rows = [
+            row for batch in state_write_calls
+            for row in batch
+            if row.get("dataset_id") == "mart_x" and row.get("status") == "skipped"
+        ]
+        assert len(cascade_rows) == 1, (
+            "Expected exactly one cascade-skip state row for mart_x; got "
+            f"{len(cascade_rows)}. All state writes: {state_write_calls!r}"
+        )
+        skip_row = cascade_rows[0]
+        assert skip_row["skip_reason"] == "cascade"
+        assert skip_row["layer"] == "gold"
+        assert "dim_a" in (skip_row.get("error_message") or "")
+        # No cursor advance on a cascade skip.
+        assert skip_row["output_watermark"] is None
+        assert skip_row["last_watermark"] is None
 
     def test_independent_node_not_blocked_by_unrelated_failure(
         self, monkeypatch, tmp_path
@@ -677,6 +706,175 @@ class TestInlineCliReachesExecuteNode:
         assert exit_code == 0
         assert len(execute_node_calls) == 1
         assert execute_node_calls[0]["node"].id == "dim_thing"
+
+
+# ---------------------------------------------------------------------------
+# Round-15 finding #1: invalid pack rejected before execution / staging
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidPackRejectedBeforeExecution:
+    """``validate_pack_full`` MUST run after every ``load_full_chain`` on
+    the content-pack entry paths. A pack with errors (e.g. a typo in
+    ``dependsOn.silver`` pointing to a non-existent node) must NOT
+    reach orchestrator.run (inline) or dispatch_via_rest (REST) — fail
+    fast with AIDPF-1036 carrying the per-error report."""
+
+    def _build_invalid_pack(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        """Build a pack whose gold node references a non-existent silver dep."""
+        root = tmp_path / "invalid_pack"
+        root.mkdir()
+        (root / "pack.yaml").write_text(
+            "id: invalid-pack\nversion: 1.0.0\n"
+            "compatibility:\n  pluginMinVersion: 0.3.0\n",
+            encoding="utf-8",
+        )
+        # Define a gold node whose dependsOn.silver points to "dim_typo"
+        # which doesn't exist. validate_dag() rejects this.
+        (root / "gold").mkdir()
+        (root / "gold" / "mart_x.yaml").write_text(
+            "id: mart_x\nlayer: gold\n"
+            "implementation:\n  type: sql\n  sql: gold/mart_x.sql\n"
+            "target: mart_x\noutputSchema:\n  columns:\n"
+            "    - name: x\n      type: string\n      nullable: false\n      pii: none\n"
+            "dependsOn:\n  silver:\n    - id: dim_typo\n      role: primary\n"
+            "refresh:\n  seed:\n    strategy: replace\n",
+            encoding="utf-8",
+        )
+        (root / "gold" / "mart_x.sql").write_text("SELECT 1 AS x", encoding="utf-8")
+        return root
+
+    def _build_invalid_bundle(self, tmp_path: pathlib.Path, pack_root: pathlib.Path) -> pathlib.Path:
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "profiles").mkdir()
+        # Profile referenced by the bundle.
+        (project / "profiles" / "test-profile.yaml").write_text(
+            "schemaVersion: 1\n"
+            "tenant: test\n"
+            "pinnedAt: 2026-06-01T00:00:00+00:00\n"
+            "bronzeSchemaFingerprint: \"sha256:test\"\n"
+            "resolved:\n  column: {}\n  semantic: {}\n",
+            encoding="utf-8",
+        )
+        # Bundle pointing at the invalid pack.
+        bundle_path = project / "bundle.yaml"
+        bundle_path.write_text(
+            f"apiVersion: aidp-fusion-bundle/v1\n"
+            f"project: invalid-pack-test\n"
+            f"fusion:\n"
+            f"  serviceUrl: https://example.com\n"
+            f"  username: u\n"
+            f"  password: p\n"
+            f"  externalStorage: s\n"
+            f"aidp:\n"
+            f"  catalog: c\n"
+            f"  bronzeSchema: bronze\n"
+            f"  silverSchema: silver\n"
+            f"  goldSchema: gold\n"
+            f"datasets:\n"
+            f"  - id: erp_x\n"
+            f"contentPack:\n"
+            f"  name: invalid-pack\n"
+            f"  path: {pack_root.resolve()}\n"
+            f"  profile: test-profile\n",
+            encoding="utf-8",
+        )
+        return bundle_path
+
+    def test_inline_path_rejects_invalid_pack_before_orchestrator_run(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """CLI --inline --execution-backend content-pack with an invalid
+        pack: orchestrator.run is NEVER called; CLI returns non-zero."""
+        from rich.console import Console
+        from oracle_ai_data_platform_fusion_bundle import orchestrator as _o
+        from oracle_ai_data_platform_fusion_bundle.commands.run import run as run_impl
+
+        pack_root = self._build_invalid_pack(tmp_path)
+        bundle_path = self._build_invalid_bundle(tmp_path, pack_root)
+
+        # Spy on orchestrator.run so we can assert it was NEVER called.
+        run_calls: list[dict] = []
+        original_run = _o.run
+        def spy_run(*args, **kwargs):
+            run_calls.append(kwargs)
+            return original_run(*args, **kwargs)
+        monkeypatch.setattr(_o, "run", spy_run)
+
+        config_path = tmp_path / "aidp.config.yaml"
+        config_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: invalid-pack-test\n"
+            "environments:\n"
+            "  dev:\n"
+            "    workspaceKey: w\n"
+            "    ociProfile: DEFAULT\n",
+            encoding="utf-8",
+        )
+
+        exit_code = run_impl(
+            bundle_path=bundle_path,
+            config_path=config_path,
+            env_name="dev",
+            mode="seed",
+            inline=True,
+            execution_backend="content-pack",
+            console=Console(),
+        )
+
+        # Non-zero exit (CLI returns 2 for config errors).
+        assert exit_code == 2
+        # orchestrator.run was NEVER reached.
+        assert run_calls == [], (
+            "orchestrator.run was invoked despite pack validation failure — "
+            "AIDPF-1036 fail-fast contract violated."
+        )
+
+    def test_rest_path_rejects_invalid_pack_before_dispatch(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """CLI without --inline + --execution-backend content-pack with an
+        invalid pack: dispatch_via_rest is NEVER called; CLI returns
+        non-zero. Staging primitives are not even produced."""
+        from rich.console import Console
+        from oracle_ai_data_platform_fusion_bundle.commands.run import run as run_impl
+        from oracle_ai_data_platform_fusion_bundle import dispatch as _dispatch_pkg
+
+        pack_root = self._build_invalid_pack(tmp_path)
+        bundle_path = self._build_invalid_bundle(tmp_path, pack_root)
+
+        dispatch_calls: list[dict] = []
+        def spy_dispatch_via_rest(**kwargs):
+            dispatch_calls.append(kwargs)
+            raise AssertionError("dispatch_via_rest must not be called for invalid pack")
+        monkeypatch.setattr(_dispatch_pkg, "dispatch_via_rest", spy_dispatch_via_rest)
+
+        config_path = tmp_path / "aidp.config.yaml"
+        config_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: invalid-pack-test\n"
+            "environments:\n"
+            "  dev:\n"
+            "    workspaceKey: w\n"
+            "    ociProfile: DEFAULT\n",
+            encoding="utf-8",
+        )
+
+        exit_code = run_impl(
+            bundle_path=bundle_path,
+            config_path=config_path,
+            env_name="dev",
+            mode="seed",
+            inline=False,
+            execution_backend="content-pack",
+            console=Console(),
+        )
+
+        # Non-zero exit.
+        assert exit_code == 2
+        # dispatch_via_rest was NEVER reached.
+        assert dispatch_calls == []
 
 
 # ---------------------------------------------------------------------------

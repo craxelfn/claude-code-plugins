@@ -47,6 +47,12 @@ AIDPF_1037_INSTALLED_PACK_NOT_FOUND = "AIDPF-1037"
 AIDPF_1038_RESOLVED_ROOT_NO_PACK_YAML = "AIDPF-1038"
 """Resolved content-pack root does not contain `pack.yaml` at the resolved path."""
 
+AIDPF_1036_PACK_VALIDATION_FAILED = "AIDPF-1036"
+"""Content-pack failed `validate_pack_full(...)` at run-start. The transport
+code at the CLI/run boundary; the per-error AIDPF codes from the Phase 1
+validator carry the specific problems (orphan overrides, DAG cycles,
+unresolved variation points, etc.)."""
+
 
 class ContentPackRootNotFoundError(Exception):
     """Installed pack not found at `<plugin>/content_packs/<name>/`. AIDPF-1037."""
@@ -54,6 +60,25 @@ class ContentPackRootNotFoundError(Exception):
 
 class ContentPackRootInvalidError(Exception):
     """Resolved content-pack root exists but contains no `pack.yaml`. AIDPF-1038."""
+
+
+class ContentPackValidationFailedError(Exception):
+    """Resolved pack failed `validate_pack_full(...)` at run-start. Carries
+    the full validation report so operators see every per-error code
+    (AIDPF-2003, 2040, 2041, 5002, 5003, 7001, 7003, 7004, 7005, 8002, etc.)
+    in addition to the aggregate AIDPF-1036 transport code."""
+
+    def __init__(self, *, report: "Any") -> None:
+        self.report = report
+        per_error = "\n".join(
+            f"  - {e.code} [{e.location}]: {e.message}"
+            for e in (report.errors if hasattr(report, "errors") else [])
+        )
+        super().__init__(
+            f"{AIDPF_1036_PACK_VALIDATION_FAILED}: content pack failed "
+            f"validate_pack_full at run-start. Refusing to execute or stage "
+            f"the pack. Per-error report:\n{per_error}"
+        )
 
 
 # ---------------------------------------------------------------------------
