@@ -45,8 +45,11 @@ refresh:
 # and (c) live evidence of any tenant exceeding the v1 threshold.
 #
 # Output schema below matches v1 ap_aging.py:475-505 with
-# due_date_mode='proxy' — 19 columns aligned to the dashboards' bindings
-# (age_bucket name, decimal(28,8) widths).
+# due_date_mode='proxy' — 19 columns at v1's cents precision
+# (decimal(28,2) widths per ap_aging.py:463-490). Dashboards rebind
+# to decimal(28,2) accordingly. Round-3 review caught a precision
+# drift where round-2 widened these to decimal(28,8); the parity
+# harness's schema-type check now guards against regression.
 outputSchema:
   columns:
     - name: vendor_id

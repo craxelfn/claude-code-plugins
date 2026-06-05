@@ -248,6 +248,20 @@ def ap_invoices_rows() -> list[dict[str, Any]]:
          "ApInvoicesInvoiceAmount": 1234.5678,
          "ApInvoicesAmountPaid": 100.1234,
          "ApInvoicesInvoiceDate": datetime(2026, 5, 25, tzinfo=timezone.utc)},
+        # Sub-cent residual — both amounts round to 100.00 at v1's
+        # DECIMAL(28,2) precision, so the v1 open-invoice filter
+        # excludes the row (100.00 - 100.00 = 0). Round-4 review caught
+        # that the v2 filter predicate had stayed at DECIMAL(28,8) and
+        # was including this row as open with a 0.004 residual that
+        # rounded down to 0.00 in the output — inflating
+        # open_invoice_count and emitting a zero-open ghost row. Both
+        # filter predicates now use DECIMAL(28,2); this fixture row
+        # MUST NOT appear in either v1 or v2 output.
+        {**base, "ApInvoicesVendorId": 101,
+         "ApInvoicesInvoiceCurrencyCode": "USD",
+         "ApInvoicesInvoiceAmount": 100.004,
+         "ApInvoicesAmountPaid": 100.000,
+         "ApInvoicesInvoiceDate": datetime(2026, 5, 28, tzinfo=timezone.utc)},
     ]
 
 

@@ -12,8 +12,8 @@ WITH open_invoices AS (
   WHERE ApInvoicesVendorId IS NOT NULL
     AND ApInvoicesInvoiceDate IS NOT NULL
     AND {{ semantic.cancelled_status }}
-    AND CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 8))
-      - CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 8)) <> 0
+    AND CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 2))
+      - CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 2)) <> 0
 )
 SELECT
   o.vendor_id                                                       AS vendor_id,
