@@ -57,9 +57,83 @@ class MissingDependencyError(OrchestratorConfigError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Phase 3c — runtime schema-fingerprint drift detection
+# ---------------------------------------------------------------------------
+
+
+EXIT_CODE_SCHEMA_DRIFT = 14
+"""Process exit code emitted by the CLI when bronze-schema fingerprint
+drift is detected at runtime (PLAN §9.5.5).
+
+Reserved exit codes Phase 3a/3b/3c:
+* 11 — AIDPF-1020 (operator identity unresolved)
+* 12 — AIDPF-2010 (columnAlias unresolved)
+* 13 — AIDPF-2011 (semanticVariant unresolved)
+* 14 — AIDPF-2012 (bronze-schema fingerprint drift) ← Phase 3c
+"""
+
+
+class SchemaDriftDetectedError(Exception):
+    """Raised when ``check_bronze_fingerprint_drift`` finds the live
+    bronze fingerprint differs from the value pinned in the tenant
+    profile (PLAN §9.5.5 / AIDPF-2012).
+
+    **Boundary placement**: this exception lives in ``schema/errors.py``
+    (neutral module) — NOT in ``orchestrator/`` — because
+    ``dispatch/__init__.py:8`` explicitly forbids dispatch from
+    importing ``orchestrator/*``. Both the inline path
+    (``orchestrator.preflight_evidence``) and the REST-dispatch path
+    (``dispatch/__init__.py``) need to raise this exception, so it
+    has to live on the dispatch-allowed side. Inheriting from plain
+    ``Exception`` (NOT :class:`OrchestratorConfigError`) prevents the
+    existing CLI exit-2 catch arm from swallowing it; the CLI gets a
+    dedicated arm that maps to :data:`EXIT_CODE_SCHEMA_DRIFT` (14).
+
+    Carries enough context for the CLI hand-off message + audit
+    correlation:
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        diagnostic_path: "Path",
+        summary: str,
+        prior_fingerprint: str,
+        current_fingerprint: str,
+    ) -> None:
+        self.run_id = run_id
+        """Bootstrap-run identifier. SAME ``run_id`` as the eventual
+        ``RunSummary``'s — the gate runs after the run's run_id mint
+        inside ``_run_content_pack_backend`` so the drift artifact,
+        any force-skip audit row, and the run-summary all correlate."""
+
+        self.diagnostic_path = diagnostic_path
+        """Absolute path to the written ``AIDPF-2012.json`` artifact.
+        Under REST dispatch, the dispatcher reconstructs the file from
+        the marker payload at the same shape before raising."""
+
+        self.summary = summary
+        """The multi-line §9.5.5 hand-off message the CLI prints on
+        stderr."""
+
+        self.prior_fingerprint = prior_fingerprint
+        self.current_fingerprint = current_fingerprint
+
+        super().__init__(
+            f"AIDPF-2012: bronze schema fingerprint drift detected "
+            f"(run_id={run_id}; "
+            f"prior={prior_fingerprint[:24]}... → "
+            f"current={current_fingerprint[:24]}...)"
+        )
+
+
 __all__ = [
+    "EXIT_CODE_SCHEMA_DRIFT",
     "OrchestratorConfigError",
     "BundleLoadError",
     "BundleVersionMismatchError",
     "MissingDependencyError",
+    "SchemaDriftDetectedError",
 ]

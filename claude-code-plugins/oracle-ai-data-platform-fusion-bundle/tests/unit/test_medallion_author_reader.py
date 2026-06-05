@@ -26,13 +26,18 @@ from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
     AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED,
     AIDPF_2010_COLUMN_ALIAS_UNRESOLVED,
     AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED,
+    AIDPF_2012_SCHEMA_DRIFT_DETECTED,
+    AffectedVariationPoint,
     CandidateProbeOutcome,
     IdentityDiagnosticV1,
     IdentityProbeFailure,
     ObservedColumn,
+    SchemaDriftDiagnosticV1,
+    SchemaDriftFailure,
     VariationPointDiagnosticV1,
     VariationPointFailure,
     write_identity_diagnostic,
+    write_schema_drift_diagnostic,
     write_variation_diagnostic,
 )
 
@@ -62,6 +67,25 @@ def _variation_artifact(
             observedBronzeSchema=[
                 ObservedColumn(name="ApInvoicesXCurrCode", type="string"),
             ],
+        ),
+    )
+
+
+def _drift_artifact(
+    *,
+    affected_vps: list[AffectedVariationPoint] | None = None,
+) -> SchemaDriftDiagnosticV1:
+    return SchemaDriftDiagnosticV1(
+        runId="run-test",
+        tenant="finance-default",
+        errorCode=AIDPF_2012_SCHEMA_DRIFT_DETECTED,
+        errorMessage="drift",
+        generatedAt=_TS,
+        schemaDrift=SchemaDriftFailure(
+            priorFingerprint="sha256:" + "a" * 64,
+            currentFingerprint="sha256:" + "b" * 64,
+            pinnedAt=_TS,
+            affectedVariationPoints=affected_vps or [],
         ),
     )
 
@@ -158,6 +182,41 @@ class TestRefuseGates:
     def test_missing_diagnostics_root(self, tmp_path: Path) -> None:
         result = read_run(tmp_path / ".aidp" / "diagnostics", "anything")
         assert result.is_empty
+
+
+class TestSchemaDriftRecognition:
+    """Phase 3c — reader recognizes AIDPF-2012 artifacts."""
+
+    def test_drift_artifact_parses(self, tmp_path: Path) -> None:
+        write_schema_drift_diagnostic(tmp_path, "run-drift-1", _drift_artifact())
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-drift-1")
+        assert result.schema_drift_failure is not None
+        assert result.schema_drift_failure.error_code == "AIDPF-2012"
+
+    def test_drift_only_directory_refuses_proceed(
+        self, tmp_path: Path
+    ) -> None:
+        """Drift-only (no 2010/2011) → skill should refuse: drift
+        recovery is `bootstrap --refresh`, not a skill draft."""
+        write_schema_drift_diagnostic(tmp_path, "run-drift-only", _drift_artifact())
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-drift-only")
+        assert result.schema_drift_failure is not None
+        assert result.has_drift_only
+        assert not result.can_proceed()
+
+    def test_drift_plus_2010_proceeds_on_2010(self, tmp_path: Path) -> None:
+        """Drift + 2010 in the same directory → skill surfaces both;
+        operator can still act on 2010."""
+        write_schema_drift_diagnostic(tmp_path, "run-mixed-1", _drift_artifact())
+        write_variation_diagnostic(
+            tmp_path, "run-mixed-1",
+            _variation_artifact(name="invoice_currency_code"),
+        )
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-mixed-1")
+        assert result.schema_drift_failure is not None
+        assert result.variation_failures  # non-empty
+        assert not result.has_drift_only
+        assert result.can_proceed()
 
 
 class TestRunIdResolution:

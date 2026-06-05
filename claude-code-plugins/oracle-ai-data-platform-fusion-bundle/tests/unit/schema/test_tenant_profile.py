@@ -128,15 +128,20 @@ bronzeSchemaFingerprint: "sha256:x"
         assert AIDPF_1050_TENANT_PROFILE_SCHEMA_MISMATCH in str(exc_info.value)
         assert "tenant" in str(exc_info.value)
 
-    def test_missing_required_field_fingerprint_raises_1050(self) -> None:
+    def test_missing_fingerprint_is_legacy_profile_not_error(self) -> None:
+        """Phase 3c (ADR-0017 §11.6) — ``bronzeSchemaFingerprint`` is
+        Optional. Profiles authored before Phase 3c bootstrap landed
+        won't have it; the runtime drift gate treats them as legacy
+        (skip with warning), not as a schema error. The field is the
+        Phase 3c addition, not the v1 baseline."""
         yaml_text = """
 schemaVersion: 1
 tenant: x
 pinnedAt: 2026-06-01T00:00:00+00:00
 """
-        with pytest.raises(TenantProfileSchemaError) as exc_info:
-            load_tenant_profile_from_string(yaml_text)
-        assert AIDPF_1050_TENANT_PROFILE_SCHEMA_MISMATCH in str(exc_info.value)
+        profile = load_tenant_profile_from_string(yaml_text)
+        assert profile.tenant == "x"
+        assert profile.bronze_schema_fingerprint is None
 
     def test_unknown_top_level_key_rejected(self) -> None:
         """``extra='forbid'`` rejects typos in top-level keys."""

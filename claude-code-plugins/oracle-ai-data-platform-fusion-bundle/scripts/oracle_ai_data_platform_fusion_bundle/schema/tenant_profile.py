@@ -111,11 +111,22 @@ class TenantProfile(BaseModel):
     pinned_at: datetime = Field(alias="pinnedAt")
     """When bootstrap pinned this profile (used in evidence snapshots)."""
 
-    bronze_schema_fingerprint: str = Field(alias="bronzeSchemaFingerprint")
+    bronze_schema_fingerprint: str | None = Field(
+        default=None, alias="bronzeSchemaFingerprint"
+    )
     """Fingerprint of the bronze schema this profile was resolved against.
 
-    PLAN §11.6 Gate 4 drift-detection compares this against the live
-    bronze schema each run; mismatch blocks the run until a re-bootstrap.
+    PLAN §11.6 Gate 4 drift-detection (Phase 3c) compares this against
+    the live bronze schema each run; mismatch blocks the run until a
+    re-bootstrap.
+
+    Optional with ``default=None`` so legacy profiles (pre-Phase-3a /
+    pre-Phase-3c) load without the field — Phase 3c's
+    ``check_bronze_fingerprint_drift`` treats ``None`` and the
+    placeholder sentinel pattern (e.g. ``sha256:placeholder-...``) as
+    "no real pin" and emits a single WARN log per run before
+    proceeding without the drift gate. The first ``bootstrap --refresh``
+    after Phase 3a pins a real value; from then on the gate fires.
     """
 
     resolved: ResolvedVariationPoints = Field(default_factory=ResolvedVariationPoints)

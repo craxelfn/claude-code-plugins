@@ -37,6 +37,7 @@ import oci
 _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
+from ..schema.errors import SchemaDriftDetectedError
 from ..schema.run_summary import RunSummary
 from .errors import (
     DispatchAuthError,
@@ -120,6 +121,12 @@ def dispatch_via_rest(
         :class:`DispatchRunFailedError`: terminal status FAILED/CANCELED/TIMED_OUT.
         :class:`DispatchFetchOutputError`: ``fetchOutput`` non-200.
         :class:`DispatchMarkerMissingError`: SUCCESS but no marker.
+        :class:`SchemaDriftDetectedError`: Phase 3c — the cluster-side
+            run cell caught a drift, emitted a discriminated marker
+            (``_kind == "schema_drift"``), and re-raised; this function
+            translates the marker back into a SchemaDriftDetectedError
+            after writing the artifact locally so the CLI can return
+            exit 14 (NOT exit 2 via DispatchRunFailedError).
 
     No ``resume_run_id`` parameter — REST-dispatch resume is out of scope
     in this PR (see plan §3.1). Tracked as ``P1.5ε-fix5``.
@@ -305,12 +312,9 @@ def dispatch_via_rest(
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
 
-    if result.status != "SUCCESS":
-        raise DispatchRunFailedError(
-            f"job_run_key={job_run_key} reached terminal status "
-            f"{result.status!r}; see AIDP console / executed notebook for details"
-        )
-
+    # Phase 3c — parse marker FIRST so a drift marker (emitted by the
+    # run cell before re-raising SchemaDriftDetectedError) takes
+    # precedence over DispatchRunFailedError. Status check moves below.
     try:
         marker = AidpRestClient.parse_marker(
             executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
@@ -325,6 +329,40 @@ def dispatch_via_rest(
             f"evidence-capture failure — underlying: "
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
+
+    # Phase 3c — drift marker takes precedence over status. The notebook
+    # caught SchemaDriftDetectedError, emitted this marker carrying the
+    # artifact JSON, then re-raised — so the cluster-side cell errored
+    # and result.status is FAILED. We translate the marker back into a
+    # SchemaDriftDetectedError on the laptop, reconstructing the
+    # diagnostic file locally so the operator can run `bootstrap
+    # --refresh` against it.
+    if isinstance(marker, dict) and marker.get("_kind") == "schema_drift":
+        drift_run_id = str(marker.get("run_id", "unknown"))
+        diagnostic_path = (
+            bundle_path.resolve().parent
+            / ".aidp"
+            / "diagnostics"
+            / drift_run_id
+            / "AIDPF-2012.json"
+        )
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic_path.write_text(
+            str(marker.get("artifact_json", "")), encoding="utf-8"
+        )
+        raise SchemaDriftDetectedError(
+            run_id=drift_run_id,
+            diagnostic_path=diagnostic_path,
+            summary=str(marker.get("summary", "schema drift detected")),
+            prior_fingerprint=str(marker.get("prior_fingerprint", "")),
+            current_fingerprint=str(marker.get("current_fingerprint", "")),
+        )
+
+    if result.status != "SUCCESS":
+        raise DispatchRunFailedError(
+            f"job_run_key={job_run_key} reached terminal status "
+            f"{result.status!r}; see AIDP console / executed notebook for details"
+        )
 
     if marker is None:
         raise DispatchMarkerMissingError(

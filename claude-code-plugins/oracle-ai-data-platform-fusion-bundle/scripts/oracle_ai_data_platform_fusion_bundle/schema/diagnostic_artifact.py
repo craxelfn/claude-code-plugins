@@ -59,6 +59,11 @@ AIDPF_2010_COLUMN_ALIAS_UNRESOLVED = "AIDPF-2010"
 AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED = "AIDPF-2011"
 """``required: true`` ``semanticVariants.<name>`` has no matching detect clause on the tenant's bronze."""
 
+AIDPF_2012_SCHEMA_DRIFT_DETECTED = "AIDPF-2012"
+"""Bronze schema fingerprint drift detected at runtime preflight (Phase 3c).
+Live bronze fingerprint differs from the value pinned in the tenant profile;
+the run blocks until the operator runs ``aidp-fusion-bundle bootstrap --refresh``."""
+
 
 # ---------------------------------------------------------------------------
 # Failure payload sub-models
@@ -196,6 +201,112 @@ class IdentityDiagnosticV1(DiagnosticArtifactBase):
 
 
 # ---------------------------------------------------------------------------
+# Phase 3c — schema-drift artifact (AIDPF-2012)
+# ---------------------------------------------------------------------------
+
+
+class ColumnTypeChange(BaseModel):
+    """One observed column whose type changed since pin time.
+
+    Phase 3c v0.3 does NOT populate this — it requires a separate
+    pinned-schema snapshot file (deferred to
+    ``v2-phase-3d-pinned-schema-diff``). The model ships in v0.3 so
+    feature #3d can extend the artifact without a schemaVersion bump.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str
+    prior_type: str = Field(alias="priorType")
+    current_type: str = Field(alias="currentType")
+
+
+class DatasetSchemaDelta(BaseModel):
+    """Per-dataset description of what changed since pin time.
+
+    All three lists are optional / default-empty in Phase 3c v0.3 —
+    only ``affectedVariationPoints`` is computable from the pinned
+    profile + live observation. ``datasetDeltas`` lands when the
+    follow-up pinned-schema-snapshot feature ships.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    dataset_id: str = Field(alias="datasetId")
+    added_columns: list[ObservedColumn] = Field(
+        default_factory=list, alias="addedColumns"
+    )
+    removed_columns: list[ObservedColumn] = Field(
+        default_factory=list, alias="removedColumns"
+    )
+    type_changed_columns: list[ColumnTypeChange] = Field(
+        default_factory=list, alias="typeChangedColumns"
+    )
+
+
+class AffectedVariationPoint(BaseModel):
+    """Per-pinned-VP impact summary for the drift artifact.
+
+    Computed by diffing each ``profile.resolved.{column,semantic}.<name>``
+    pinned candidate against the live observed bronze schema. ``True``
+    means the pinned column still exists on bronze (drift cause is
+    elsewhere); ``False`` means the pinned column was dropped /
+    renamed (skill recovery target).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str
+    kind: Literal["columnAliases", "semanticVariants"]
+    pinned_candidate: str = Field(alias="pinnedCandidate")
+    still_exists_on_bronze: bool = Field(alias="stillExistsOnBronze")
+
+
+class SchemaDriftFailure(BaseModel):
+    """Structured drift-context payload for the AIDPF-2012 artifact."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    prior_fingerprint: str = Field(alias="priorFingerprint")
+    current_fingerprint: str = Field(alias="currentFingerprint")
+    pinned_at: datetime = Field(alias="pinnedAt")
+    """When bootstrap pinned the prior fingerprint (from the profile)."""
+
+    dataset_deltas: list[DatasetSchemaDelta] = Field(
+        default_factory=list, alias="datasetDeltas"
+    )
+    """Per-dataset column-level deltas. Empty in Phase 3c v0.3 — the
+    fingerprint hash is one-way; reconstructing per-column diff needs a
+    separate pinned-schema snapshot deferred to
+    ``v2-phase-3d-pinned-schema-diff``."""
+
+    affected_variation_points: list[AffectedVariationPoint] = Field(
+        default_factory=list, alias="affectedVariationPoints"
+    )
+    """Per-pinned-VP impact. Computable from pinned profile + live
+    observation; populated unconditionally on drift. Skill (Phase 3b)
+    consumes this to decide which VPs need re-resolution."""
+
+
+class SchemaDriftDiagnosticV1(DiagnosticArtifactBase):
+    """Diagnostic artifact for AIDPF-2012 schema-fingerprint drift
+    (Phase 3c).
+
+    One file per drifted run at
+    ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json`` — no
+    discriminator (one fingerprint per run, not per-VP).
+    """
+
+    error_code: Literal["AIDPF-2012"] = Field(alias="errorCode")
+    tenant: str
+    """Drift always happens in a known-tenant context (unlike 1020
+    where tenant is unknown at gate-fire time). Override the base's
+    ``str | None`` to require a value."""
+
+    schema_drift: SchemaDriftFailure = Field(alias="schemaDrift")
+
+
+# ---------------------------------------------------------------------------
 # Writers
 # ---------------------------------------------------------------------------
 
@@ -317,18 +428,51 @@ def write_identity_diagnostic(
     return target
 
 
+def write_schema_drift_diagnostic(
+    workdir: Path,
+    run_id: str,
+    artifact: SchemaDriftDiagnosticV1,
+) -> Path:
+    """Write a Phase 3c schema-drift diagnostic artifact (AIDPF-2012).
+
+    Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json``.
+    Only one ``AIDPF-2012`` artifact per run (no discriminator); drift
+    is detected once at preflight.
+
+    Raises:
+        UnsafePathSegmentError: ``run_id`` is not a safe filesystem
+            segment.
+    """
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    target = diag_dir / "AIDPF-2012.json"
+    assert_within_root(target, diag_dir, field="run_id")
+    payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
+    _atomic_write_json(target, payload)
+    return target
+
+
 __all__ = [
     "AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED",
     "AIDPF_2010_COLUMN_ALIAS_UNRESOLVED",
     "AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED",
+    "AIDPF_2012_SCHEMA_DRIFT_DETECTED",
+    "AffectedVariationPoint",
     "CandidateProbeOutcome",
+    "ColumnTypeChange",
+    "DatasetSchemaDelta",
     "DiagnosticArtifactAlreadyExistsError",
     "DiagnosticArtifactBase",
     "IdentityDiagnosticV1",
     "IdentityProbeFailure",
     "ObservedColumn",
+    "SchemaDriftDiagnosticV1",
+    "SchemaDriftFailure",
     "VariationPointDiagnosticV1",
     "VariationPointFailure",
     "write_identity_diagnostic",
+    "write_schema_drift_diagnostic",
     "write_variation_diagnostic",
 ]

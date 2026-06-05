@@ -122,6 +122,7 @@ modules drive every default run.
 | `AIDPF-1040` | Staging source root not in `chain_roots` (programmer error) |
 | `AIDPF-1050` | Tenant profile YAML schema validation failed |
 | `AIDPF-1051` | Unsupported tenant profile `schemaVersion` |
+| `AIDPF-2012` | Bronze schema fingerprint diverged from pinned profile (Phase 3c) |
 | `AIDPF-4030` | Strategy not supported in v0.3 (only `replace` and `merge`) |
 | `AIDPF-4031` | Target identifier failed allowlist |
 | `AIDPF-4040` | Plan-hash drift on resume |
@@ -260,6 +261,86 @@ detects the skill-authored overlay (via
 
 See [v2-medallion-author-skill.md](v2-medallion-author-skill.md)
 for the operator UX walkthrough.
+
+## Phase 3c additions — runtime drift detection
+
+`aidp-fusion-bundle run --execution-backend content-pack --mode incremental`
+gains a **bronze-schema fingerprint preflight gate** (PLAN §9.5.5). The
+gate fires inside `_run_content_pack_backend` AFTER Spark acquisition +
+`run_id` mint but BEFORE any state-table write or node execution, and
+compares the live bronze schema fingerprint against the value pinned at
+the last `bootstrap` / `bootstrap --refresh`.
+
+Outcomes (`PreflightOutcome.kind`):
+
+* `match` — fingerprints byte-identical → proceed.
+* `drift` — fingerprints differ → write `AIDPF-2012` diagnostic at
+  `<bundle.yaml.parent>/.aidp/diagnostics/<run_id>/AIDPF-2012.json`
+  with the pinned + observed fingerprints and a per-VP delta
+  (`affectedVariationPoints` — VPs whose pinned candidate is no
+  longer present in the live schema). Raise
+  `SchemaDriftDetectedError`; CLI maps to exit **14**
+  (`EXIT_CODE_SCHEMA_DRIFT`).
+* `skip_seed` — `--mode seed` always skips (seed re-baselines bronze).
+* `skip_legacy_profile` — profile has no `bronzeSchemaFingerprint`
+  pinned (pre-3a profile, sentinel value, or malformed). Emits a
+  WARN, proceeds. Remediation: run `bootstrap --refresh` to pin a
+  real fingerprint. Tracked as **`P3c-L1`** in `LIMITS.md`.
+* `skip_force_flag` — operator passed `--force-fingerprint-skip` (a
+  hidden break-glass knob; not in `--help`). Writes an audit row to
+  `fusion_bundle_state` with `mode='fingerprint_skip'`,
+  `status='success'`, and a `skip_reason` carrying truncated prior +
+  current fingerprints. Use sparingly — the audit row is the SOX trail.
+
+On `drift`, the closed-loop recovery story is:
+
+1. Operator sees exit 14 + a stderr hand-off message pointing at the
+   diagnostic file.
+2. Operator runs `aidp-fusion-bundle bootstrap --refresh` —
+   re-resolves variation points against the live schema and re-pins
+   the fingerprint.
+3. If `bootstrap --refresh` itself fails with `AIDPF-2010` /
+   `AIDPF-2011`, the `/medallion-author` skill (Phase 3b) drafts an
+   overlay.
+4. Re-run `aidp-fusion-bundle run`. Match → proceeds.
+
+Architectural notes:
+
+* `SchemaDriftDetectedError` lives in `schema/errors.py` (neutral
+  module — the dispatch package can import it without violating the
+  §4.3 boundary).
+* The CLI catch arm for drift sits **before** the existing
+  `OrchestratorConfigError` arm so drift surfaces as exit 14, not
+  exit 2.
+* The hand-off message lands on `stderr` via a dedicated
+  `Console(stderr=True)` so stdout stays clean for piping.
+* **REST-dispatch path**: the cluster-side notebook catches the
+  exception, emits a discriminated marker (`_kind == "schema_drift"`)
+  carrying the artifact JSON, then re-raises. The laptop-side
+  dispatcher parses the marker **before** the SUCCESS/FAILED status
+  check, reconstructs the diagnostic file locally under
+  `<bundle_dir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json`, and
+  raises `SchemaDriftDetectedError` — so a drift surfaces as exit 14
+  whether the operator ran with `--inline` or via REST dispatch.
+* **No per-dataset column-level diff in v0.3** — the pinned
+  fingerprint is a one-way hash, so reconstructing the prior schema
+  requires bootstrap to also write a pinned-schema snapshot
+  (deferred to `v2-phase-3d-pinned-schema-diff`). The actionable
+  diff that IS available — pinned variation points → observed bronze
+  columns — IS what the recovery flow needs. Tracked as **`P3c-L2`**
+  in `LIMITS.md`.
+
+Error code added by this phase:
+
+| Code | Meaning |
+|------|---------|
+| `AIDPF-2012` | Bronze schema fingerprint diverged from pinned profile (runtime preflight). |
+
+Reserved exit code added:
+
+| Code | Meaning |
+|------|---------|
+| `14` (`EXIT_CODE_SCHEMA_DRIFT`) | `AIDPF-2012` raised on the active run. |
 
 ## Reference fixtures
 

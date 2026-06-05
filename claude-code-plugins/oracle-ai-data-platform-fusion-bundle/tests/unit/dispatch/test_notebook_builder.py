@@ -230,6 +230,55 @@ class TestRunCell:
         sig = inspect.signature(build_notebook)
         assert "resume_run_id" not in sig.parameters
 
+    def test_run_cell_catches_schema_drift_and_emits_drift_marker(
+        self, wheel: Path
+    ) -> None:
+        """Phase 3c — the run cell must wrap ``orchestrator.run`` in
+        ``try/except SchemaDriftDetectedError``, emit a discriminated
+        marker (``_kind == "schema_drift"``) carrying the artifact JSON,
+        and then re-raise. Without this the laptop dispatcher cannot
+        translate cluster-side drift into exit 14."""
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        # Import is wired (must exist for the except clause to work).
+        assert "SchemaDriftDetectedError" in run
+        # Wrapped in try/except.
+        assert "try:" in run
+        assert "except SchemaDriftDetectedError" in run
+        # Drift marker discriminator + artifact handoff.
+        assert "_kind" in run and "schema_drift" in run
+        assert "artifact_json" in run
+        # Re-raise so the cluster cell ends in error state (matches the
+        # marker-precedence contract in dispatch_via_rest).
+        assert "raise" in run
+
+    def test_run_cell_compiles_as_python(self, wheel: Path) -> None:
+        """The run cell source must be valid Python — a stray indentation
+        bug in the try/except would surface as a SyntaxError on the
+        cluster, masking the drift hand-off."""
+        for backend in ("legacy-python", "content-pack"):
+            nb = build_notebook(
+                wheel_path=wheel,
+                bundle_yaml="",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+                execution_backend=backend,
+                profile_yaml="x" if backend == "content-pack" else None,
+                pack_files={"a": "b"} if backend == "content-pack" else None,
+                pack_manifest={"k": "v"} if backend == "content-pack" else None,
+            )
+            # Index depends on backend (content-pack inserts a bootstrap cell).
+            run_idx = 4 if backend == "content-pack" else 3
+            run = "".join(nb["cells"][run_idx]["source"])
+            compile(run, "<run_cell>", "exec")
+
 
 class TestVerifyCell:
     def test_imports_load_bundle_from_schema_not_runtime(
