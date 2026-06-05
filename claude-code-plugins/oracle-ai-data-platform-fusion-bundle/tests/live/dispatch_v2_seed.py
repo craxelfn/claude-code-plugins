@@ -23,10 +23,28 @@ Key differences from ``dev/`` version:
    ``datasetDeltas`` evidence Phase 3d was supposed to surface.
 
 3. **A/B mode.** Pass ``--ab`` to run BOTH backends back-to-back against
-   the SAME shared bronze snapshot (the dispatcher creates two isolated
-   silver/gold schema sets and copies bronze into both). Outputs land
-   in ``--out-dir`` as ``TC<N>_v1_seed.md`` + ``TC<N>_v2_seed.md`` +
-   ``TC<N>_v2_vs_v1_parity.md``.
+   a shared frozen bronze snapshot. **A/B mode is isolation-strict**:
+   the dispatcher REQUIRES separate ``--v1-bundle`` and ``--v2-bundle``
+   files with distinct ``aidp.bronzeSchema`` / ``aidp.silverSchema`` /
+   ``aidp.goldSchema`` keys per backend, and validates the distinction
+   before any cluster work. Operators set up the shared frozen bronze
+   snapshot themselves (one-shot bronze extract into
+   ``bronze_live_snapshot`` then
+   ``CREATE TABLE bronze_v{1,2}.<id> AS SELECT * FROM bronze_live_snapshot.<id>``
+   for each dataset) — the dispatcher cannot prevent contamination
+   if you point both bundles at the same bronze schema.
+
+   The dispatcher writes one structured JSON per backend
+   (``phase4_dispatch_<mode>_<backend>_<ts>.json``) carrying the
+   ``AIDP_PHASE4_LIVE_RESULT`` marker payload. The operator pastes
+   these into the ``TC<N>_v{1,2}_seed.md`` / ``TC<N>_v2_vs_v1_parity.md``
+   templates per ``plan.md`` Step 8, including the per-migrated-node
+   row-count diff, ``DESCRIBE TABLE`` schema diff, ``xxhash64_agg``
+   non-audit checksum, and audit-column presence verification. The
+   dispatcher CANNOT compute the checksums itself (the agg needs to
+   run server-side on the cluster's silver/gold schemas, with per-table
+   natural-key projections that differ per node) — operator-runbook
+   responsibility, not dispatcher logic.
 
 NOT executed by CI — operator-driven only. The evidence files this
 produces are committed to ``tests/live/`` once captured.
@@ -103,15 +121,31 @@ def _parse_args() -> argparse.Namespace:
         "--secret-key", dest="secret_key",
         default=os.environ.get("AIDP_FUSION_SECRET_KEY", "password"),
     )
-    p.add_argument("--bundle", required=True, help="Path to local bundle.yaml.")
+    p.add_argument(
+        "--bundle", default=None,
+        help="Single-backend mode: path to local bundle.yaml. "
+             "Mutually exclusive with --v1-bundle/--v2-bundle.",
+    )
+    p.add_argument(
+        "--v1-bundle", dest="v1_bundle", default=None,
+        help="A/B mode: path to the legacy-python bundle. MUST have "
+             "distinct aidp.bronzeSchema / silverSchema / goldSchema "
+             "from --v2-bundle (dispatcher enforces).",
+    )
+    p.add_argument(
+        "--v2-bundle", dest="v2_bundle", default=None,
+        help="A/B mode: path to the content-pack bundle. MUST have "
+             "distinct aidp.bronzeSchema / silverSchema / goldSchema "
+             "from --v1-bundle.",
+    )
     p.add_argument(
         "--profile", required=True,
         help="Profile name (looked up at <bundle.parent>/profiles/<name>.yaml).",
     )
     p.add_argument(
         "--ab", action="store_true",
-        help="A/B mode — dispatch v1 (legacy-python) and v2 (content-pack) "
-             "back-to-back over the same shared bronze snapshot.",
+        help="A/B mode — REQUIRES --v1-bundle + --v2-bundle (refuses to "
+             "run with a single shared --bundle). See module docstring.",
     )
     p.add_argument(
         "--mode", default="seed", choices=("seed", "incremental"),
@@ -306,6 +340,64 @@ def dispatch_one(
                                 end="AIDP_PHASE4_LIVE_RESULT_END")
 
 
+def _read_bundle_schemas(bundle_path: Path) -> tuple[str, str, str]:
+    """Parse a bundle YAML and return ``(bronzeSchema, silverSchema,
+    goldSchema)`` from its ``aidp:`` block. Used by ``--ab`` mode to
+    enforce isolation between the v1 and v2 bundles BEFORE any cluster
+    work fires — a contaminated A/B is unciteable and any later
+    enforcement is moot."""
+    import yaml  # type: ignore[import-not-found]
+    obj = yaml.safe_load(bundle_path.read_text())
+    aidp = obj.get("aidp", {}) if isinstance(obj, dict) else {}
+    return (
+        str(aidp.get("bronzeSchema", "")),
+        str(aidp.get("silverSchema", "")),
+        str(aidp.get("goldSchema", "")),
+    )
+
+
+def _assert_ab_bundle_isolation(v1: Path, v2: Path) -> None:
+    """A/B isolation precondition. Refuses to proceed when the two
+    bundles point at the same target schemas — that's the contamination
+    failure mode the reviewer flagged.
+
+    Per ``plan.md`` Step 8: bundle isolation is non-negotiable. The
+    dispatcher cannot guarantee a shared-frozen-bronze setup
+    (operators do that out of band), but it CAN block obvious
+    contamination."""
+    v1_b, v1_s, v1_g = _read_bundle_schemas(v1)
+    v2_b, v2_s, v2_g = _read_bundle_schemas(v2)
+    issues = []
+    if v1_b == v2_b:
+        issues.append(
+            f"aidp.bronzeSchema identical ({v1_b!r}) — both backends "
+            "would write to the same fusion_bundle_state table and "
+            "contaminate each other's state rows"
+        )
+    if v1_s == v2_s:
+        issues.append(
+            f"aidp.silverSchema identical ({v1_s!r}) — the second "
+            "backend's silver writes would clobber the first's"
+        )
+    if v1_g == v2_g:
+        issues.append(
+            f"aidp.goldSchema identical ({v1_g!r}) — the second "
+            "backend's gold writes would clobber the first's"
+        )
+    if issues:
+        raise SystemExit(
+            "A/B mode refuses to run with non-isolated bundles. "
+            "Phase 4 ship-ready evidence is unciteable if backends "
+            "share target schemas. Issues found:\n  - "
+            + "\n  - ".join(issues)
+            + "\nRemediate: edit --v1-bundle and --v2-bundle so each "
+            "carries DISTINCT bronzeSchema / silverSchema / goldSchema "
+            "(e.g. bronze_live_v1 / bronze_live_v2). The shared "
+            "frozen bronze snapshot copy is an operator pre-step; "
+            "see the module docstring."
+        )
+
+
 def main() -> int:
     args = _parse_args()
     region = _env_or(args.region, "AIDP_REGION")
@@ -314,14 +406,50 @@ def main() -> int:
     cluster_key = _env_or(args.cluster_key, "AIDP_CLUSTER_KEY")
     cluster_name = _env_or(args.cluster_name, "AIDP_CLUSTER_NAME")
 
-    bundle = Path(args.bundle).resolve()
-    if not bundle.exists():
-        raise SystemExit(f"bundle not found: {bundle}")
+    # ----- Validate bundle args + A/B isolation ----------------------
+    if args.ab:
+        if not (args.v1_bundle and args.v2_bundle):
+            raise SystemExit(
+                "A/B mode requires --v1-bundle AND --v2-bundle (--bundle "
+                "is single-backend only). The two bundles MUST carry "
+                "distinct aidp.bronzeSchema / silverSchema / goldSchema; "
+                "the dispatcher validates this before any cluster work."
+            )
+        if args.bundle:
+            raise SystemExit(
+                "A/B mode rejects --bundle: pass --v1-bundle + --v2-bundle. "
+                "A shared --bundle would point both backends at the same "
+                "schemas, which the dispatcher cannot allow."
+            )
+        v1_bundle = Path(args.v1_bundle).resolve()
+        v2_bundle = Path(args.v2_bundle).resolve()
+        if not v1_bundle.exists():
+            raise SystemExit(f"--v1-bundle not found: {v1_bundle}")
+        if not v2_bundle.exists():
+            raise SystemExit(f"--v2-bundle not found: {v2_bundle}")
+        _assert_ab_bundle_isolation(v1_bundle, v2_bundle)
+        bundle_for_backend = {
+            "legacy-python": v1_bundle,
+            "content-pack": v2_bundle,
+        }
+    else:
+        if not args.bundle:
+            raise SystemExit(
+                "Single-backend mode requires --bundle. For A/B parity, "
+                "use --ab --v1-bundle <p1> --v2-bundle <p2>."
+            )
+        single = Path(args.bundle).resolve()
+        if not single.exists():
+            raise SystemExit(f"--bundle not found: {single}")
+        bundle_for_backend = {"content-pack": single}
 
+    # Profile + snapshot live next to one of the bundles (operator
+    # convention: both bundles share a `profiles/` sibling dir, since
+    # the profile is tenant-identity-bound, not backend-bound).
+    profile_anchor = next(iter(bundle_for_backend.values()))
     profile_text, snapshot_text = _load_profile_with_snapshot(
-        bundle, args.profile,
+        profile_anchor, args.profile,
     )
-    bundle_text = bundle.read_text()
 
     print(f"==> building wheel from {REPO}")
     wheel = build_wheel(REPO)
@@ -338,6 +466,8 @@ def main() -> int:
     backends = ("legacy-python", "content-pack") if args.ab else ("content-pack",)
     results: dict[str, dict] = {}
     for backend in backends:
+        backend_bundle = bundle_for_backend[backend]
+        bundle_text = backend_bundle.read_text()
         notebook = build_notebook(
             wheel=wheel, bundle_yaml=bundle_text,
             profile_name=args.profile,
@@ -357,10 +487,34 @@ def main() -> int:
         results[backend] = marker
         print(f"==> {backend} marker: {json.dumps(marker, indent=2)[:800]}")
 
+        # One per-backend marker JSON so operators can paste them into
+        # the TC<N>_v{1,2}_seed.md templates verbatim. The combined
+        # parity report (TC<N>_v2_vs_v1_parity.md) is operator-written
+        # because it needs server-side xxhash64_agg checksums that the
+        # dispatcher cannot compute from the marker payload alone.
+        per_backend_path = out_dir / (
+            f"phase4_dispatch_{args.mode}_"
+            f"{backend.replace('-', '_')}_{int(time.time())}.json"
+        )
+        per_backend_path.write_text(json.dumps(marker, indent=2))
+        print(f"==> {backend} marker written to {per_backend_path}")
+
     payload = {"region": region, "mode": args.mode, "results": results}
-    out_path = out_dir / f"phase4_dispatch_{args.mode}_{int(time.time())}.json"
+    out_path = out_dir / f"phase4_dispatch_{args.mode}_combined_{int(time.time())}.json"
     out_path.write_text(json.dumps(payload, indent=2))
-    print(f"==> dispatch payload written to {out_path}")
+    print(f"==> combined dispatch payload written to {out_path}")
+    if args.ab:
+        print(
+            "==> A/B run complete. Next steps (operator runbook):\n"
+            "    1. Copy the v1 + v2 marker JSONs into the matching\n"
+            "       tests/live/TC<N>_v{1,2}_seed.md templates.\n"
+            "    2. Run server-side `SELECT xxhash64_agg(struct(<non-audit cols>) ORDER BY <natural_key>) "
+            "FROM <silver|gold>_<v1,v2>.<dataset>` for every migrated node\n"
+            "       and paste the checksum pair verbatim into TC<N>_v2_vs_v1_parity.md.\n"
+            "    3. Run `DESCRIBE TABLE` on each (v1, v2) pair and commit the diff (must be empty\n"
+            "       modulo audit cols).\n"
+            "    4. Run `SELECT COUNT(*)` on each (v1, v2) pair and confirm delta = 0.\n"
+        )
     return 0
 
 

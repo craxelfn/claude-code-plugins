@@ -1,10 +1,25 @@
 """Phase 4 Step 7 — preflight + drift gate verification (5 gates).
 
-VERIFIES existing gates; does NOT introduce new ones. Each test asserts
-against the actual current code path for one gate; documented
-divergences (e.g. legacy-python has no fingerprint gate by design)
-land in ``docs/v2-phase-4-preflight-coverage.md`` rather than failing
-the test.
+VERIFIES existing gates at the **structural** level only — exception
+classes, error-code constants, ``NodeExecutionResult`` status literals,
+``check_bronze_fingerprint_drift`` outcome enum on the seed-mode and
+placeholder-fingerprint branches, ``resolve_snapshot_path`` shape.
+
+**Reviewer Round-1 finding (acknowledged + tracked as Phase 4.1)**:
+structural shape checks alone CAN regress while the production
+content-pack incremental flow remains broken. The five gates contracted
+by ``plan.md`` Step 7 — dropped-target / tenant fingerprint /
+profile-hash drift / schema-snapshot drift / missing cursor — require
+**behavioral** end-to-end coverage that drives each gate through its
+production entrypoint with a real failing input + asserts the observable
+side effects (exit code, diagnostic JSON written, state row absent,
+``--force-fingerprint-skip`` audit row written, etc.). That work is
+gated by P4-L2 (the dual-runner runtime fixes) because the behavioral
+tests share the same Spark+Delta orchestrator boot path.
+
+This file's tests STAY structural for Phase 4; Phase 4.1 ships the
+behavioral upgrades. ``docs/v2-phase-4-shipready-report.md`` row 10
+is SCAFFOLD-COMMITTED with ``BLOCKS_PHASE_5: true`` until that lands.
 
 Gates covered:
 

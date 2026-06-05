@@ -139,6 +139,7 @@ def seeded_bundles(
     tmp_path_factory: pytest.TempPathFactory,
     resolved_pack,
     tenant_profile,
+    monkeypatch_module,  # module-scoped monkeypatch (defined below)
 ) -> dict[str, Any]:
     """Produce the dual bundles + run seed on both backends ONCE per
     test session. Per-node tests interrogate the resulting state +
@@ -148,7 +149,16 @@ def seeded_bundles(
     A per-test fresh-seed fixture would multiply the runtime cost by
     ~6 (one cycle per per-node test). Module scope keeps the harness
     fast enough to run in CI under the existing parity marker.
+
+    **BICC IO spy installed for both seed runs.** Per ``plan.md`` Step 2:
+    silver+gold-only runs MUST NOT fire any BICC PVO read. The spy
+    counts ``extractors.bicc.extract_pvo`` calls; the post-seed
+    assertion below confirms zero calls landed during BOTH legs.
+    A future refactor that re-enables bronze extraction in a
+    silver-only run trips this assertion immediately.
     """
+    bicc_call_count = install_bicc_io_spy(monkeypatch_module)
+
     tmp = tmp_path_factory.mktemp("phase4-seed")
     artifacts = make_dual_bundles(
         tmp,
@@ -196,11 +206,40 @@ def seeded_bundles(
         tenant_profile=tenant_profile,
     )
 
+    # ----- BICC IO spy assertion --------------------------------------
+    # Both backends ran with ``layers=["silver","gold"]`` — the BICC
+    # extractor MUST NOT have been called. A non-zero count means the
+    # legacy backend silently re-enabled bronze extraction OR the
+    # content-pack backend dispatched bronze (Phase 2 deferral). Either
+    # is a regression that must be diagnosed before the dual-runner
+    # results can be trusted.
+    bicc_calls = bicc_call_count()
+    assert bicc_calls == 0, (
+        f"Phase 4 BICC-IO invariant violated: extract_pvo was called "
+        f"{bicc_calls} times during silver+gold-only seed runs. Both "
+        f"backends were invoked with layers=['silver','gold']; bronze "
+        f"reads MUST NOT fire. Diagnose: most likely a silver/gold node "
+        f"acquired a bronze-layer dependency that wasn't routed through "
+        f"the pre-seeded bronze schemas."
+    )
+
     return {
         "artifacts": artifacts,
         "v1_summary": v1_summary,
         "v2_summary": v2_summary,
     }
+
+
+@pytest.fixture(scope="module")
+def monkeypatch_module(request):
+    """Module-scoped monkeypatch — pytest's built-in ``monkeypatch``
+    fixture is function-scoped and can't be used by the module-scoped
+    ``seeded_bundles`` fixture above. Implement the same patch+undo
+    semantics manually."""
+    from _pytest.monkeypatch import MonkeyPatch  # type: ignore[import-not-found]
+    mp = MonkeyPatch()
+    yield mp
+    mp.undo()
 
 
 # ---------------------------------------------------------------------------
