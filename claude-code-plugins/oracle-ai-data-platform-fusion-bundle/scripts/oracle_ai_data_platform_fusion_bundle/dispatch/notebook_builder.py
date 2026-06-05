@@ -252,10 +252,22 @@ def _build_content_pack_bootstrap_cell(
         snapshot_stage = ""
     else:
         snapshot_yaml_b64 = _encode_text_b64(schema_snapshot_yaml)
+        # Key the cluster-side snapshot path by `bundle.contentPack.profile`
+        # — the SAME key bootstrap writes under on the laptop. NOT
+        # `_tenant_profile.tenant`: a pre-3d profile YAML may carry a
+        # hand-authored `tenant:` field that differs from the active
+        # profile name; using the YAML field as the path key would
+        # write to (and later read from) the wrong file.
         snapshot_stage = (
             f"from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import resolve_snapshot_path\n"
+            f"from oracle_ai_data_platform_fusion_bundle.schema.bundle import load_bundle as _load_bundle_for_snapshot\n"
             f"_SCHEMA_SNAPSHOT_YAML = _b64.b64decode({snapshot_yaml_b64!r}).decode('utf-8')\n"
-            f"_snapshot_path = resolve_snapshot_path(BUNDLE_PATH, _tenant_profile.tenant)  # noqa: F821\n"
+            f"_bundle_for_snapshot, _ = _load_bundle_for_snapshot(BUNDLE_PATH)  # noqa: F821\n"
+            f"_snapshot_profile_name = (\n"
+            f"    _bundle_for_snapshot.content_pack.profile\n"
+            f"    or _bundle_for_snapshot.content_pack.name\n"
+            f")\n"
+            f"_snapshot_path = resolve_snapshot_path(BUNDLE_PATH, _snapshot_profile_name)  # noqa: F821\n"
             f"_snapshot_path.parent.mkdir(parents=True, exist_ok=True)\n"
             f"_snapshot_path.write_text(_SCHEMA_SNAPSHOT_YAML, encoding='utf-8')\n"
             f'print(f"phase 3d snapshot staged at {{_snapshot_path}}")\n'

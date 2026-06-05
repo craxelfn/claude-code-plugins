@@ -398,13 +398,24 @@ a one-time WARN log; never crashes):
 | Snapshot metadata fingerprint ≠ live fingerprint OR snapshot content recompute disagrees | Same. |
 | Snapshot fingerprint ≠ profile fingerprint (profile/snapshot desync) | Same. |
 
+**Snapshot path key is `bundle.contentPack.profile`** — NOT the loaded
+profile's in-YAML `tenant:` field. Bootstrap writes the snapshot under
+`<contentPack.profile>.schema-snapshot.yaml`; preflight reads from the
+SAME key; the cluster-side bootstrap cell resolves the SAME key by
+re-loading `bundle.yaml`. This matters when a pre-3d profile YAML
+carries a hand-authored `tenant:` value that diverges from the active
+profile name — the active profile name (`contentPack.profile`) is the
+single source of truth, and the loaded `TenantProfile.tenant` field is
+treated as opaque tenant metadata, not as a filesystem key.
+
 **REST dispatch** stages the snapshot YAML alongside the profile YAML
 via the same base64-encoded notebook channel. The cluster-side
 bootstrap cell materialises the snapshot at the resolved
-`profiles/<tenant>.schema-snapshot.yaml` path (using the shared
-`resolve_snapshot_path` helper) before `orchestrator.run` fires.
-Legacy-python REST runs cannot drift via the gate, so the staging is
-content-pack-only and asserted (programmer-error guard).
+`profiles/<contentPack.profile>.schema-snapshot.yaml` path (re-loading
+the bundle on the cluster + calling the shared `resolve_snapshot_path`
+helper) before `orchestrator.run` fires. Legacy-python REST runs cannot
+drift via the gate, so the staging is content-pack-only and asserted
+(programmer-error guard).
 
 Closes `LIMITS.md P3c-L2`. No schemaVersion bump on AIDPF-2012 — the
 `DatasetSchemaDelta` model already shipped in Phase 3c.

@@ -71,10 +71,15 @@ def _mock_spark(per_dataset_cols: dict[str, list[str]]) -> MagicMock:
     return spark
 
 
-def _mock_bundle():
+def _mock_bundle(*, profile_name: str = "finance-default"):
+    """Mock bundle. ``profile_name`` becomes ``bundle.content_pack.profile``
+    — the key Phase 3d uses to resolve the snapshot path (mirrors
+    bootstrap's `tenant_name = bundle.content_pack.profile or .name`)."""
     bundle = MagicMock(name="bundle")
     bundle.aidp.catalog = "cat"
     bundle.aidp.bronze_schema = "bronze"
+    bundle.content_pack.profile = profile_name
+    bundle.content_pack.name = "fusion-finance-starter"
     return bundle
 
 
@@ -848,7 +853,72 @@ class TestPhase3dDriftBranchPopulation:
         )
         loaded = _load_snapshot_if_present(
             bundle_path=tmp_path / "bundle.yaml",
+            profile_name="finance-default",
             profile=_mock_profile(pinned=prior_fingerprint),
         )
         assert isinstance(loaded, BronzeSchemaSnapshotV1)
         assert loaded.bronze_schema_fingerprint == prior_fingerprint
+
+    def test_profile_name_drives_snapshot_path_not_tenant_field(
+        self, tmp_path: Path
+    ) -> None:
+        """Reviewer-caught (round 1, BLOCKING): bootstrap keys the
+        snapshot on ``bundle.contentPack.profile``, but a pre-3d
+        profile YAML may carry a hand-authored ``tenant:`` value that
+        differs from the active profile name. Preflight MUST resolve
+        the snapshot by the active profile name (matching bootstrap's
+        key), NOT by the loaded ``TenantProfile.tenant`` field. Without
+        this, ``bootstrap --refresh`` back-fills the snapshot at
+        ``profiles/<contentPack.profile>.schema-snapshot.yaml`` but
+        preflight looks under ``profiles/<profile.tenant>.schema-snapshot.yaml``
+        and never finds it — the documented remediation appears
+        broken.
+        """
+        prior_observed = {
+            "ap_invoices": [
+                ColumnInfo(name="ApInvoicesInvoiceCurrencyCode", type="string"),
+            ]
+        }
+        prior_fingerprint = compute_bronze_fingerprint(observed=prior_observed)
+        # Bootstrap-side: write under the active profile name.
+        _write_snapshot(
+            tmp_path,
+            tenant="phase2-fixture",
+            pinned_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            fingerprint=prior_fingerprint,
+            observed=prior_observed,
+        )
+        # Profile YAML carries a DIFFERENT `tenant:` value (hand-authored
+        # pre-3d profile). Preflight must use bundle.contentPack.profile
+        # ("phase2-fixture"), not profile.tenant ("acme-prod").
+        profile = _mock_profile(pinned=prior_fingerprint)
+        profile.tenant = "acme-prod"
+
+        outcome = check_bronze_fingerprint_drift(
+            spark=_mock_spark(
+                {"ap_invoices": ["ApInvoicesCurrencyCode"]}  # renamed
+            ),
+            bundle=_mock_bundle(profile_name="phase2-fixture"),
+            bundle_path=tmp_path / "bundle.yaml",
+            pack=_mock_pack(["ap_invoices"]),
+            profile=profile,
+            run_id="cp-3d-key-mismatch",
+            mode="incremental",
+            workdir=tmp_path,
+        )
+        assert outcome.kind == "drift"
+        import json
+
+        payload = json.loads(
+            outcome.diagnostic_path.read_text(encoding="utf-8")
+        )
+        deltas = payload["schemaDrift"]["datasetDeltas"]
+        # If preflight had keyed on profile.tenant="acme-prod" the
+        # snapshot would have been absent and deltas would be empty.
+        # Keying on bundle.content_pack.profile="phase2-fixture" finds
+        # it and populates the diff.
+        assert len(deltas) == 1
+        added = {c["name"] for c in deltas[0]["addedColumns"]}
+        removed = {c["name"] for c in deltas[0]["removedColumns"]}
+        assert added == {"ApInvoicesCurrencyCode"}
+        assert removed == {"ApInvoicesInvoiceCurrencyCode"}

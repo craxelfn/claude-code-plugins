@@ -203,8 +203,16 @@ def check_bronze_fingerprint_drift(
     # degrades to empty `datasetDeltas` + a one-time WARN log; preflight
     # never crashes from this helper — drift signal must always reach
     # the artifact even when the snapshot path is unhealthy.
+    # Snapshot path is keyed by `bundle.contentPack.profile` (same key
+    # bootstrap writes under), NOT `profile.tenant` — a hand-authored
+    # pre-3d profile YAML may carry a different `tenant:` value than
+    # the active profile name, and using the YAML field as the path
+    # key would silently look in the wrong place after a healthy
+    # back-fill.
+    snapshot_key = bundle.content_pack.profile or bundle.content_pack.name
     snapshot = _load_snapshot_if_present(
         bundle_path=bundle_path,
+        profile_name=snapshot_key,
         profile=profile,
     )
     dataset_deltas: list[DatasetSchemaDelta] = (
@@ -419,6 +427,7 @@ def _build_handoff_message(
 def _load_snapshot_if_present(
     *,
     bundle_path: Path,
+    profile_name: str,
     profile: "TenantProfile",
 ) -> BronzeSchemaSnapshotV1 | None:
     """Read the Phase 3d pinned snapshot for the active profile.
@@ -447,14 +456,21 @@ def _load_snapshot_if_present(
         bundle_path: path to ``bundle.yaml`` — drives the snapshot
             file location via
             :func:`schema.bronze_schema_snapshot.resolve_snapshot_path`.
-        profile: loaded ``TenantProfile``; its ``tenant`` field names
-            the snapshot and its ``bronze_schema_fingerprint`` is the
-            cross-check anchor.
+        profile_name: the **active profile name** — same key bootstrap
+            writes the snapshot under (``bundle.contentPack.profile or
+            .name``). NOT ``profile.tenant``: a hand-authored pre-3d
+            profile YAML's ``tenant:`` value may differ from the
+            active profile name, and using the YAML field as the
+            path key would silently look in the wrong place after a
+            healthy back-fill.
+        profile: loaded ``TenantProfile``;
+            ``bronze_schema_fingerprint`` is the cross-check anchor
+            against the snapshot's own metadata fingerprint.
 
     Returns:
         ``BronzeSchemaSnapshotV1`` when healthy; ``None`` otherwise.
     """
-    snapshot_path = resolve_snapshot_path(bundle_path, profile.tenant)
+    snapshot_path = resolve_snapshot_path(bundle_path, profile_name)
     if not snapshot_path.exists():
         logger.warning(
             "Phase 3d snapshot absent — datasetDeltas will be empty in "
