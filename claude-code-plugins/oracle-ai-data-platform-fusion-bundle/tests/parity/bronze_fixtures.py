@@ -248,6 +248,19 @@ def ap_invoices_rows() -> list[dict[str, Any]]:
          "ApInvoicesInvoiceAmount": 1234.5678,
          "ApInvoicesAmountPaid": 100.1234,
          "ApInvoicesInvoiceDate": datetime(2026, 5, 25, tzinfo=timezone.utc)},
+        # Unknown vendor — ApInvoicesVendorId 999999 has no matching
+        # row in erp_suppliers, so the LEFT JOIN to dim_supplier leaves
+        # supplier_number / supplier_name / business_relationship NULL.
+        # Round-5 regression guard: round-4's ap_aging.yaml had
+        # `not_null` on supplier_number, which would have converted
+        # this v1-supported input into a quality_failed state row under
+        # the content-pack runner. The fixture proves the NULL-supplier
+        # path stays allowed end-to-end.
+        {**base, "ApInvoicesVendorId": 999999,
+         "ApInvoicesInvoiceCurrencyCode": "USD",
+         "ApInvoicesInvoiceAmount": 500.00,
+         "ApInvoicesAmountPaid": 0.00,
+         "ApInvoicesInvoiceDate": datetime(2026, 5, 15, tzinfo=timezone.utc)},
         # Sub-cent residual — both amounts round to 100.00 at v1's
         # DECIMAL(28,2) precision, so the v1 open-invoice filter
         # excludes the row (100.00 - 100.00 = 0). Round-4 review caught

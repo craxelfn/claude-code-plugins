@@ -131,8 +131,16 @@ outputSchema:
 
 quality:
   tests:
+    # supplier_number is intentionally nullable (LEFT JOIN to
+    # dim_supplier — v1 ap_aging.py:396-399 preserves invoices whose
+    # ApInvoicesVendorId has no matching dim_supplier.vendor_id with
+    # NULL supplier attributes). Including supplier_number in
+    # `not_null` would convert a v1-supported input shape into a
+    # `quality_failed` state row under the content-pack hard gate
+    # (sql_runner.py:291-304); the parity fixture exercises an
+    # unknown-vendor invoice to keep this gap closed.
     - type: not_null
-      columns: [supplier_number, aging_bucket]
+      columns: [aging_bucket]
     - type: accepted_values
       column: aging_bucket
       values: ["current", "1-30", "31-60", "61-90", "91+"]
