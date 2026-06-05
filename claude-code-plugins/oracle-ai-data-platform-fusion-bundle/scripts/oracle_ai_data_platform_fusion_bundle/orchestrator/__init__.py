@@ -806,6 +806,8 @@ def run(
     execution_backend: str = "legacy-python",
     resolved_pack: "Any | None" = None,
     tenant_profile: "Any | None" = None,
+    # Phase 3c — runtime drift gate bypass (dev/sandbox; hidden flag).
+    force_fingerprint_skip: bool = False,
 ) -> RunSummary:
     """Materialize bronze + silver + gold per the bundle.yaml plan.
 
@@ -880,6 +882,7 @@ def run(
             resume_run_id=resume_run_id,
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
         )
 
     # 1. Load bundle.yaml → (Bundle, TablePaths) via load_bundle (§4.4b).
@@ -1170,6 +1173,7 @@ def _run_content_pack_backend(
     resume_run_id: str | None,
     resolved_pack: "Any | None",
     tenant_profile: "Any | None",
+    force_fingerprint_skip: bool = False,
 ) -> RunSummary:
     """Execute the silver+gold layers via the content-pack runner (PLAN §15 Phase 2).
 
@@ -1252,6 +1256,41 @@ def _run_content_pack_backend(
 
     spark = spark or _bootstrap_spark()
 
+    # Mint run_id BEFORE the Phase 3c drift gate so the drift artifact
+    # + any force-skip audit row + the RunSummary all carry the SAME
+    # run_id. Round-2 audit-correlation requirement: lifting this above
+    # state.ensure_state_table keeps "gate runs before any state write"
+    # AND "one run_id across all Phase 3c artifacts" both true.
+    run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+
+    # Phase 3c — bronze-schema fingerprint drift gate. Runs BEFORE any
+    # Spark write and BEFORE state.ensure_state_table. Returns a
+    # `PreflightOutcome`; raises only via the SchemaDriftDetectedError
+    # constructor here (the helper itself never raises drift-typed
+    # exceptions — that's the CLI-mapping boundary).
+    from .preflight_evidence import check_bronze_fingerprint_drift
+    from ..schema.errors import SchemaDriftDetectedError
+
+    preflight = check_bronze_fingerprint_drift(
+        spark=spark,
+        bundle=bundle,
+        bundle_path=bundle_path,
+        pack=resolved_pack,
+        profile=tenant_profile,
+        run_id=run_id,
+        mode=mode,
+        workdir=bundle_path.resolve().parent,
+        force_skip=force_fingerprint_skip,
+    )
+    if preflight.kind == "drift":
+        raise SchemaDriftDetectedError(
+            run_id=run_id,
+            diagnostic_path=preflight.diagnostic_path,  # type: ignore[arg-type]
+            summary=preflight.summary,
+            prior_fingerprint=preflight.prior_fingerprint,  # type: ignore[arg-type]
+            current_fingerprint=preflight.current_fingerprint,  # type: ignore[arg-type]
+        )
+
     # State-table setup + Phase 2 additive migration. ensure_state_table
     # (v1) creates the base table if needed; ensure_state_columns_v2
     # adds the Phase 2 columns + redeploys the latest view with the
@@ -1259,12 +1298,21 @@ def _run_content_pack_backend(
     state.ensure_state_table(spark, paths)
     ensure_state_columns_v2(spark, paths)
 
+    # Phase 3c — force-skip audit row (after state-table exists; uses
+    # the SAME run_id as the rest of the run).
+    if preflight.kind == "skip_force_flag":
+        state.write_fingerprint_skip_row(
+            spark, paths,
+            run_id=run_id,
+            prior_fingerprint=preflight.prior_fingerprint,  # type: ignore[arg-type]
+            current_fingerprint=preflight.current_fingerprint,  # type: ignore[arg-type]
+        )
+
     # Build the run context the renderer needs. ``active_profile_name``
     # is the bundle's contentPack.profile — keyed by the renderer + builtin
     # adapters into pack.pack.profiles for pack-default lookups. Required
     # field (no default); the content-pack backend has already validated
     # that bundle.content_pack and bundle.content_pack.profile exist.
-    run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     active_profile_name = bundle.content_pack.profile  # type: ignore[union-attr]
     ctx = CpRunContext(
         catalog=bundle.aidp.catalog,

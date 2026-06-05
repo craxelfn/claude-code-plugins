@@ -636,6 +636,89 @@ def write_state_row(
     )
 
 
+def write_fingerprint_skip_row(
+    spark: "SparkSession",
+    paths: TablePaths,
+    *,
+    run_id: str,
+    prior_fingerprint: str,
+    current_fingerprint: str,
+) -> None:
+    """Append a Phase 3c ``--force-fingerprint-skip`` audit row to
+    ``fusion_bundle_state``.
+
+    Dedicated single-purpose helper because
+    :func:`write_state_row` takes a :class:`RunStep` whose
+    ``mode``/``status`` Literal types reject ``"fingerprint_skip"``
+    / ``"warn"``. The v1 DDL at ``state.py:135-152`` accepts any
+    string for those columns; this helper writes a raw INSERT
+    bypassing the Python-side Literal narrowing.
+
+    Row carries:
+
+    * ``dataset_id = "_fingerprint_skip"`` — sentinel; the prior
+      bootstrap/run queries never look it up by this id.
+    * ``layer = "bronze"`` (the fingerprint is whole-bronze-schema).
+    * ``mode = "fingerprint_skip"`` — distinguishes from
+      ``seed``/``incremental`` rows in audit queries.
+    * ``last_watermark = NULL`` — there's no watermark for this row.
+    * ``last_run_at = current_timestamp()`` — when the bypass fired.
+    * ``status = "success"`` — the existing schema accepts any
+      string at the DB level; "success" keeps the row from being
+      mistaken for a failure. The audit signal lives in
+      ``skip_reason``.
+    * ``skip_reason`` — encodes the bypass + prior/current
+      fingerprints (truncated to 24 chars each + ``...``).
+    * ``duration_seconds = 0.0``.
+
+    Args:
+        spark: active Spark session.
+        paths: bundle's ``TablePaths``.
+        run_id: SAME run_id the rest of the run would use — Phase 3c
+            audit-correlation invariant (drift artifact + this row +
+            RunSummary all share one id).
+        prior_fingerprint: pinned profile fingerprint.
+        current_fingerprint: live bronze fingerprint computed at
+            preflight.
+    """
+    table_path = _state_table_path(paths)
+
+    def _q(s: str) -> str:
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+
+    # Truncated fingerprints — 24 chars is enough to disambiguate
+    # in audit queries without bloating the column.
+    skip_reason = (
+        f"--force-fingerprint-skip; "
+        f"prior={prior_fingerprint[:24]}... "
+        f"current={current_fingerprint[:24]}..."
+    )
+
+    spark.sql(
+        f"""
+        INSERT INTO {table_path}
+          (run_id, dataset_id, layer, mode, last_watermark, last_run_at,
+           status, row_count, error_message, skip_reason, duration_seconds,
+           plan_hash, plan_snapshot)
+        VALUES
+          ({_q(run_id)},
+           '_fingerprint_skip',
+           'bronze',
+           'fingerprint_skip',
+           CAST(NULL AS TIMESTAMP),
+           current_timestamp(),
+           'success',
+           CAST(0 AS BIGINT),
+           CAST(NULL AS STRING),
+           {_q(skip_reason)},
+           CAST(0.0 AS DOUBLE),
+           CAST(NULL AS STRING),
+           CAST(NULL AS STRING))
+        """
+    )
+
+
 def _build_last_watermark_query(
     paths: TablePaths,
     dataset_id: str,
@@ -1098,6 +1181,7 @@ def read_resumable_state(
 __all__ = [
     "ensure_state_table",
     "write_state_row",
+    "write_fingerprint_skip_row",
     "read_last_watermark",
     "read_resumable_state",
     "ResumeContext",

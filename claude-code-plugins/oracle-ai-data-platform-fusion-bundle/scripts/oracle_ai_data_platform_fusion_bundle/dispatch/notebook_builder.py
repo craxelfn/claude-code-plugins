@@ -110,32 +110,57 @@ def _build_run_cell(
     datasets: list[str] | None,
     layers: list[str] | None,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
 ) -> str:
     # Phase 2: when execution_backend == "content-pack", the bootstrap
     # cell that ran just before this one set up _resolved_pack and
     # _tenant_profile; we thread them into orchestrator.run as kwargs.
     if execution_backend == "content-pack":
+        # 8-space indent — sits inside `try:` block + inside `orchestrator.run(` call.
         backend_kwargs = (
-            f'    execution_backend="content-pack",\n'
-            f"    resolved_pack=_resolved_pack,  # noqa: F821 — bootstrap cell\n"
-            f"    tenant_profile=_tenant_profile,  # noqa: F821 — bootstrap cell\n"
+            f'        execution_backend="content-pack",\n'
+            f"        resolved_pack=_resolved_pack,  # noqa: F821 — bootstrap cell\n"
+            f"        tenant_profile=_tenant_profile,  # noqa: F821 — bootstrap cell\n"
         )
     else:
-        backend_kwargs = f'    execution_backend="legacy-python",\n'
+        backend_kwargs = f'        execution_backend="legacy-python",\n'
 
     return (
         f"import json, time\n"
-        f"_tstart = time.time()\n"
-        f"summary = orchestrator.run(  # noqa: F821\n"
-        f"    bundle_path=BUNDLE_PATH,  # noqa: F821\n"
-        f"    spark=spark,  # noqa: F821\n"
-        f"    mode={mode!r},\n"
-        f"    datasets={datasets!r},\n"
-        f"    layers={layers!r},\n"
-        f"    dry_run=False,\n"
-        f"    resume_run_id=None,\n"
-        f"{backend_kwargs}"
+        f"from oracle_ai_data_platform_fusion_bundle.schema.errors import (\n"
+        f"    SchemaDriftDetectedError,\n"
         f")\n"
+        f"_tstart = time.time()\n"
+        f"try:\n"
+        f"    summary = orchestrator.run(  # noqa: F821\n"
+        f"        bundle_path=BUNDLE_PATH,  # noqa: F821\n"
+        f"        spark=spark,  # noqa: F821\n"
+        f"        mode={mode!r},\n"
+        f"        datasets={datasets!r},\n"
+        f"        layers={layers!r},\n"
+        f"        dry_run=False,\n"
+        f"        resume_run_id=None,\n"
+        f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
+        f"{backend_kwargs}"
+        f"    )\n"
+        f"except SchemaDriftDetectedError as _drift_exc:\n"
+        f"    # Phase 3c — emit drift marker (artifact_json carries the\n"
+        f"    # full AIDPF-2012 payload so the laptop dispatcher can\n"
+        f"    # reconstruct the diagnostic locally + raise\n"
+        f"    # SchemaDriftDetectedError on the operator's machine).\n"
+        f"    _drift_artifact_json = _drift_exc.diagnostic_path.read_text(\n"
+        f"        encoding='utf-8'\n"
+        f"    )\n"
+        f"    _drift_payload = {{\n"
+        f"        '_kind': 'schema_drift',\n"
+        f"        'run_id': _drift_exc.run_id,\n"
+        f"        'summary': _drift_exc.summary,\n"
+        f"        'prior_fingerprint': _drift_exc.prior_fingerprint,\n"
+        f"        'current_fingerprint': _drift_exc.current_fingerprint,\n"
+        f"        'artifact_json': _drift_artifact_json,\n"
+        f"    }}\n"
+        f"    print({MARKER_BEGIN!r}, json.dumps(_drift_payload), {MARKER_END!r})\n"
+        f"    raise\n"
         f"_twall = time.time() - _tstart\n"
         f'print(f"run_id={{summary.run_id}}")\n'
         f'print(f"steps: {{summary.succeeded}} ok, {{summary.failed}} failed, "\n'
@@ -286,6 +311,9 @@ def build_notebook(
     profile_yaml: str | None = None,
     pack_files: Mapping[str, str] | None = None,
     pack_manifest: dict[str, Any] | None = None,
+    # Phase 3c — splices into the orchestrator.run kwargs in the run
+    # cell so the cluster-side gate honours the break-glass intent.
+    force_fingerprint_skip: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -352,6 +380,7 @@ def build_notebook(
             _build_run_cell(
                 mode=mode, datasets=datasets, layers=layers,
                 execution_backend=execution_backend,
+                force_fingerprint_skip=force_fingerprint_skip,
             )
         ),
         _code_cell(_build_verify_cell()),

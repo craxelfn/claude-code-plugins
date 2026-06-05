@@ -50,6 +50,7 @@ def run(
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -122,6 +123,7 @@ def run(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
             execution_backend=execution_backend,
+            force_fingerprint_skip=force_fingerprint_skip,
         )
     if resume_run_id is not None:
         # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
@@ -138,6 +140,7 @@ def run(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
         execution_backend=execution_backend,
+        force_fingerprint_skip=force_fingerprint_skip,
     )
 
 
@@ -151,6 +154,7 @@ def _run_inline(
     console: Console,
     *,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -169,6 +173,15 @@ def _run_inline(
     from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
         OrchestratorConfigError,
     )
+    from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+        EXIT_CODE_SCHEMA_DRIFT,
+        SchemaDriftDetectedError,
+    )
+
+    # Phase 3c — dedicated stderr console for AIDPF hand-off messages.
+    # Rich Console.print does NOT accept a stdlib `file=` kwarg
+    # (round-4 finding); the constructor binds to its output stream.
+    error_console = Console(stderr=True)
 
     if resume_run_id is not None:
         console.print(
@@ -248,7 +261,19 @@ def _run_inline(
             execution_backend=execution_backend,
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
         )
+    except SchemaDriftDetectedError as exc:
+        # Phase 3c — runtime preflight detected bronze-schema drift.
+        # Print the multi-line §9.5.5 hand-off message on STDERR (via
+        # the dedicated error_console — Rich `Console.print(file=...)`
+        # is not a valid shape, round-4 finding) and exit 14. This arm
+        # MUST precede the OrchestratorConfigError arm because the
+        # exception does NOT inherit from OrchestratorConfigError —
+        # otherwise it'd be swallowed and we'd return exit 2 instead
+        # of the documented 14.
+        error_console.print(f"[red]{exc.summary}[/red]")
+        return EXIT_CODE_SCHEMA_DRIFT
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
         # single-line message and no traceback. The error class is
@@ -272,6 +297,7 @@ def _run_via_aidp_dispatch(
     console: Console,
     *,
     execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
@@ -290,7 +316,13 @@ def _run_via_aidp_dispatch(
     from ._config_helpers import env_or_error, load_aidp_config
     from ..dispatch import dispatch_via_rest
     from ..dispatch.errors import DispatchError
-    from ..schema.errors import OrchestratorConfigError
+    from ..schema.errors import (
+        EXIT_CODE_SCHEMA_DRIFT,
+        OrchestratorConfigError,
+        SchemaDriftDetectedError,
+    )
+
+    error_console = Console(stderr=True)
 
     # Phase 2: when --execution-backend content-pack, prepare the
     # staging primitives at the CLI layer (orchestrator-side imports
@@ -370,7 +402,16 @@ def _run_via_aidp_dispatch(
             profile_yaml=profile_yaml,
             pack_files=pack_files,
             pack_manifest=pack_manifest,
+            force_fingerprint_skip=force_fingerprint_skip,
         )
+    except SchemaDriftDetectedError as exc:
+        # Phase 3c — drift surfaces from REST-dispatch via the marker
+        # translation in `dispatch_via_rest` (the cluster-side run cell
+        # caught + re-raised; dispatcher reconstructed the artifact
+        # locally). Same exit-14 contract as the inline path; hand-off
+        # message lands on stderr so stdout stays clean for piping.
+        error_console.print(f"[red]{exc.summary}[/red]")
+        return EXIT_CODE_SCHEMA_DRIFT
     except (DispatchError, OrchestratorConfigError) as exc:
         console.print(f"[red]{exc}[/red]")
         return 2

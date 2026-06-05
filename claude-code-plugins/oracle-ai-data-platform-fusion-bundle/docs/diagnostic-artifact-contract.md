@@ -17,7 +17,8 @@ so multiple failures in one run never collide:
 <bundle.yaml.parent>/.aidp/diagnostics/<run_id>/
 ├── AIDPF-1020.json                       # identity gate (one per run)
 ├── AIDPF-2010__<vp-name>.json            # one per failing columnAlias
-└── AIDPF-2011__<vp-name>.json            # one per failing semanticVariant
+├── AIDPF-2011__<vp-name>.json            # one per failing semanticVariant
+└── AIDPF-2012.json                       # Phase 3c — runtime drift (at most one)
 ```
 
 `<run_id>` is opaque (ISO-timestamp + short uuid). `<vp-name>` is the
@@ -49,6 +50,11 @@ Defined in
   `identityProbe: IdentityProbeFailure` payload. `errorCode` is
   constrained to `AIDPF-1020`. `tenant` MUST be `null` (identity gate
   fires before tenant context is loaded).
+* `SchemaDriftDiagnosticV1` — Phase 3c. Extends the base with a
+  required `schemaDrift: SchemaDriftFailure` payload. `errorCode` is
+  constrained to `AIDPF-2012`. `tenant` is required (drift fires
+  AFTER the tenant profile is loaded, so the context is always
+  available — unlike `AIDPF-1020`).
 
 ## AIDPF-2010 / 2011 — variation-point unresolved
 
@@ -124,6 +130,62 @@ Example: `AIDPF-1020.json`
 `tenant` is `null` because identity gate fires BEFORE bootstrap loads
 the tenant profile. Skill (feature #3) shows the operator the probed
 sources and suggests which env var to set.
+
+## AIDPF-2012 — bronze schema fingerprint drift (Phase 3c)
+
+Emitted by the runtime preflight gate inside
+`_run_content_pack_backend` (NOT bootstrap) when
+`--mode incremental` runs against a bronze schema whose fingerprint
+diverges from the value pinned in the tenant profile. The artifact has
+no `<vp-name>` discriminator — at most one drift artifact per run.
+
+Example: `AIDPF-2012.json`
+
+```json
+{
+  "schemaVersion": 1,
+  "runId": "cp-20260606120000-abcdef12",
+  "tenant": "finance-default",
+  "errorCode": "AIDPF-2012",
+  "errorMessage": "AIDPF-2012: bronze schema fingerprint diverged from pinned profile; run `aidp-fusion-bundle bootstrap --refresh` to re-pin.",
+  "generatedAt": "2026-06-06T12:00:00+00:00",
+  "schemaDrift": {
+    "priorFingerprint": "sha256:aaa…",
+    "currentFingerprint": "sha256:bbb…",
+    "pinnedAt": "2026-06-01T08:00:00+00:00",
+    "affectedVariationPoints": [
+      {
+        "name": "invoice_currency_code",
+        "kind": "columnAliases",
+        "pinnedCandidate": "ApInvoicesInvoiceCurrencyCode",
+        "stillPresent": false
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `tenant` | Required (drift is a per-tenant event; profile must be loaded for the gate to fire). |
+| `schemaDrift.priorFingerprint` | Value pinned in the tenant profile (last `bootstrap` / `bootstrap --refresh`). |
+| `schemaDrift.currentFingerprint` | Live bronze fingerprint computed during preflight. |
+| `schemaDrift.pinnedAt` | Timestamp the prior fingerprint was pinned. |
+| `schemaDrift.affectedVariationPoints[]` | Per-VP deltas — for each VP resolved in the profile, whether its pinned candidate is still present in the live bronze. Empty if every pinned candidate still matches (the fingerprint shifted for an unrelated reason — added/removed/retyped columns outside any VP). |
+
+The `medallion_author.reader.read_run` parses this alongside the
+`AIDPF-2010` / `AIDPF-2011` artifacts, surfacing
+`result.schema_drift_failure`. A directory containing ONLY a drift
+artifact (no 2010/2011) sets `result.has_drift_only`, in which case
+the skill **refuses to draft** — drift recovery is
+`bootstrap --refresh`, not an overlay.
+
+When emitted via REST dispatch, the cluster-side notebook embeds the
+full artifact JSON in the marker payload's `artifact_json` field; the
+laptop dispatcher writes it to the laptop-side
+`.aidp/diagnostics/<run_id>/AIDPF-2012.json` so the operator's
+workflow (skill / `bootstrap --refresh`) finds it at the same path
+regardless of execution mode.
 
 ## `--resolutions <json-file>` file format
 

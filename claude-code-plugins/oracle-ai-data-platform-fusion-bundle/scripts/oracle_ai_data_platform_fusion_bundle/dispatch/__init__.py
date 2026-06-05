@@ -37,6 +37,13 @@ import oci
 _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
+from ..schema.diagnostic_artifact import (
+    DiagnosticArtifactAlreadyExistsError,
+    SchemaDriftDiagnosticV1,
+    write_schema_drift_diagnostic,
+)
+from ..schema.errors import SchemaDriftDetectedError
+from ..schema.path_segment import UnsafePathSegmentError, validate_path_segment
 from ..schema.run_summary import RunSummary
 from .errors import (
     DispatchAuthError,
@@ -94,6 +101,10 @@ def dispatch_via_rest(
     profile_yaml: str | None = None,
     pack_files: "Mapping[str, str] | None" = None,
     pack_manifest: "dict[str, Any] | None" = None,
+    # Phase 3c — passthrough only; dispatch never inspects it. Threaded
+    # into the generated notebook's orchestrator.run(...) call so the
+    # cluster-side gate honours the operator's break-glass intent.
+    force_fingerprint_skip: bool = False,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -120,6 +131,12 @@ def dispatch_via_rest(
         :class:`DispatchRunFailedError`: terminal status FAILED/CANCELED/TIMED_OUT.
         :class:`DispatchFetchOutputError`: ``fetchOutput`` non-200.
         :class:`DispatchMarkerMissingError`: SUCCESS but no marker.
+        :class:`SchemaDriftDetectedError`: Phase 3c — the cluster-side
+            run cell caught a drift, emitted a discriminated marker
+            (``_kind == "schema_drift"``), and re-raised; this function
+            translates the marker back into a SchemaDriftDetectedError
+            after writing the artifact locally so the CLI can return
+            exit 14 (NOT exit 2 via DispatchRunFailedError).
 
     No ``resume_run_id`` parameter — REST-dispatch resume is out of scope
     in this PR (see plan §3.1). Tracked as ``P1.5ε-fix5``.
@@ -212,6 +229,7 @@ def dispatch_via_rest(
         profile_yaml=profile_yaml,
         pack_files=pack_files,
         pack_manifest=pack_manifest,
+        force_fingerprint_skip=force_fingerprint_skip,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")
@@ -305,12 +323,9 @@ def dispatch_via_rest(
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
 
-    if result.status != "SUCCESS":
-        raise DispatchRunFailedError(
-            f"job_run_key={job_run_key} reached terminal status "
-            f"{result.status!r}; see AIDP console / executed notebook for details"
-        )
-
+    # Phase 3c — parse marker FIRST so a drift marker (emitted by the
+    # run cell before re-raising SchemaDriftDetectedError) takes
+    # precedence over DispatchRunFailedError. Status check moves below.
     try:
         marker = AidpRestClient.parse_marker(
             executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
@@ -325,6 +340,125 @@ def dispatch_via_rest(
             f"evidence-capture failure — underlying: "
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
+
+    # Phase 3c — drift marker takes precedence over status. The notebook
+    # caught SchemaDriftDetectedError, emitted this marker carrying the
+    # artifact JSON, then re-raised — so the cluster-side cell errored
+    # and result.status is FAILED. We translate the marker back into a
+    # SchemaDriftDetectedError on the laptop, reconstructing the
+    # diagnostic file locally so the operator can run `bootstrap
+    # --refresh` against it.
+    #
+    # Validate the marker before honouring it: a truncated / malformed
+    # drift marker (missing run_id, summary, fingerprints, or
+    # artifact_json that isn't a parseable AIDPF-2012 payload) must NOT
+    # silently write an unusable artifact + exit 14 — that would put
+    # the operator into the drift recovery flow with no actionable
+    # diagnostic. Reject as DispatchMarkerMissingError so the standard
+    # evidence-capture failure path runs.
+    if isinstance(marker, dict) and marker.get("_kind") == "schema_drift":
+        required_fields = (
+            "run_id",
+            "summary",
+            "prior_fingerprint",
+            "current_fingerprint",
+            "artifact_json",
+        )
+        missing = [f for f in required_fields if not marker.get(f)]
+        if missing:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"missing required field(s): {', '.join(missing)}. "
+                f"Cannot reconstruct local AIDPF-2012 artifact — "
+                f"evidence-capture failure."
+            )
+        artifact_text = marker["artifact_json"]
+        if not isinstance(artifact_text, str):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not a string "
+                f"(got {type(artifact_text).__name__})."
+            )
+        try:
+            artifact_obj = json.loads(artifact_text)
+        except json.JSONDecodeError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not valid JSON: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        if (
+            not isinstance(artifact_obj, dict)
+            or artifact_obj.get("errorCode") != "AIDPF-2012"
+        ):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json payload is not an AIDPF-2012 diagnostic "
+                f"(errorCode={artifact_obj.get('errorCode') if isinstance(artifact_obj, dict) else type(artifact_obj).__name__})."
+            )
+        # Treat marker payloads as untrusted: validate run_id is a safe
+        # path segment + cross-check the inner artifact's runId matches
+        # before letting it drive a filesystem write. A malicious or
+        # corrupted marker with ``run_id="../outside"`` would otherwise
+        # write outside the workdir's .aidp/diagnostics tree.
+        drift_run_id = str(marker["run_id"])
+        try:
+            validate_path_segment(drift_run_id, field="marker.run_id")
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"{exc}"
+            ) from exc
+        if str(artifact_obj.get("runId", "")) != drift_run_id:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json.runId={artifact_obj.get('runId')!r} does "
+                f"not match marker.run_id={drift_run_id!r}."
+            )
+        # Reconstruct via the Pydantic model + canonical writer so the
+        # laptop-side artifact uses the same path-segment validation,
+        # within-root assertion, and atomic-no-overwrite semantics as
+        # the cluster-side write.
+        try:
+            artifact_model = SchemaDriftDiagnosticV1.model_validate(artifact_obj)
+        except Exception as exc:  # ValidationError, ValueError, etc.
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json failed Pydantic validation: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        try:
+            diagnostic_path = write_schema_drift_diagnostic(
+                bundle_path.resolve().parent,
+                drift_run_id,
+                artifact_model,
+            )
+        except DiagnosticArtifactAlreadyExistsError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused: a local "
+                f"AIDPF-2012 artifact already exists for "
+                f"run_id={drift_run_id!r} "
+                f"(jobRunKey={job_run_key}). Delete the prior file or "
+                f"re-run with a fresh run_id to overwrite."
+            ) from exc
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused (jobRunKey="
+                f"{job_run_key}); {exc}"
+            ) from exc
+        raise SchemaDriftDetectedError(
+            run_id=drift_run_id,
+            diagnostic_path=diagnostic_path,
+            summary=str(marker["summary"]),
+            prior_fingerprint=str(marker["prior_fingerprint"]),
+            current_fingerprint=str(marker["current_fingerprint"]),
+        )
+
+    if result.status != "SUCCESS":
+        raise DispatchRunFailedError(
+            f"job_run_key={job_run_key} reached terminal status "
+            f"{result.status!r}; see AIDP console / executed notebook for details"
+        )
 
     if marker is None:
         raise DispatchMarkerMissingError(

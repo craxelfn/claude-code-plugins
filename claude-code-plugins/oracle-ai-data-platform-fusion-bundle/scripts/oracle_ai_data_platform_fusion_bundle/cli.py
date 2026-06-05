@@ -201,10 +201,21 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "pack declared in bundle.yaml's `contentPack:` block. Phase 4's "
          "dual-runner parity gate decides when (or if) the default flips.",
 )
+@click.option(
+    "--force-fingerprint-skip", "force_fingerprint_skip",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Phase 3c — dev/sandbox: bypass the bronze-schema fingerprint "
+         "drift gate. Records an audit warn row in fusion_bundle_state "
+         "with mode='fingerprint_skip'. Production runs MUST NOT use "
+         "this; SOX-audit environments should policy-disable.",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
-        poll_timeout_s: int, execution_backend: str) -> None:
+        poll_timeout_s: int, execution_backend: str,
+        force_fingerprint_skip: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -219,6 +230,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
         execution_backend=execution_backend,
+        force_fingerprint_skip=force_fingerprint_skip,
         console=console,
     ))
 

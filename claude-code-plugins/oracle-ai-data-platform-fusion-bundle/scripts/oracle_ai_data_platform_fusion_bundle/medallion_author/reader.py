@@ -25,7 +25,9 @@ from ..schema.diagnostic_artifact import (
     AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED,
     AIDPF_2010_COLUMN_ALIAS_UNRESOLVED,
     AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED,
+    AIDPF_2012_SCHEMA_DRIFT_DETECTED,
     IdentityDiagnosticV1,
+    SchemaDriftDiagnosticV1,
     VariationPointDiagnosticV1,
 )
 
@@ -57,6 +59,15 @@ class DiagnosticReadResult:
     identity_failure: IdentityDiagnosticV1 | None = None
     """Set if ``AIDPF-1020.json`` is present. Skill refuses to draft
     when this is non-None — identity gate must be fixed first."""
+
+    schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
+    """Set if ``AIDPF-2012.json`` is present. Phase 3c — drift is
+    bootstrap's domain; if a drift artifact is present without any
+    2010/2011 in the same directory, the skill refuses with a
+    "wrong recovery flow" message (operator should run
+    ``bootstrap --refresh`` first). If 2012 + 2010/2011 both
+    present, the skill surfaces both and proceeds on the
+    2010/2011 work."""
 
     unknown_schema_paths: list[Path] = field(default_factory=list)
     """Artifact files whose ``schemaVersion`` is not in
@@ -93,8 +104,30 @@ class DiagnosticReadResult:
             and not self.malformed_paths
         )
 
+    @property
+    def has_drift_only(self) -> bool:
+        """Phase 3c — drift artifact present BUT no variation-point
+        failures to act on.
+
+        Drift artifacts are produced by ``run``-time preflight; the
+        recovery is ``bootstrap --refresh``, not a skill-drafted
+        overlay. A drift-only directory means the operator is in
+        the wrong recovery flow — skill refuses with a clear
+        hand-off message.
+        """
+        return (
+            self.schema_drift_failure is not None
+            and not self.variation_failures
+        )
+
     def can_proceed(self) -> bool:
-        """``True`` iff the skill should proceed to the propose phase."""
+        """``True`` iff the skill should proceed to the propose phase.
+
+        Phase 3c addition: drift-only directories refuse (operator
+        should run ``bootstrap --refresh`` first). Drift +
+        2010/2011 in the same directory proceeds on the 2010/2011
+        work; the drift artifact is surfaced as context.
+        """
         return (
             bool(self.variation_failures)
             and not self.has_identity_failure
@@ -134,6 +167,7 @@ def read_run(
 
     variation_failures: list[VariationPointDiagnosticV1] = []
     identity_failure: IdentityDiagnosticV1 | None = None
+    schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
     unknown_schema_paths: list[Path] = []
     malformed_paths: list[Path] = []
 
@@ -160,6 +194,11 @@ def read_run(
                 variation_failures.append(
                     VariationPointDiagnosticV1.model_validate(payload)
                 )
+            elif error_code == AIDPF_2012_SCHEMA_DRIFT_DETECTED:
+                # Phase 3c — runtime drift artifact. Surfaced to the
+                # operator but doesn't make the skill proceed: drift
+                # recovery is `bootstrap --refresh`, not a skill draft.
+                schema_drift_failure = SchemaDriftDiagnosticV1.model_validate(payload)
             else:
                 malformed_paths.append(artifact_path)
         except Exception:  # noqa: BLE001 — Pydantic raises a variety of types
@@ -170,6 +209,7 @@ def read_run(
         run_dir=run_dir,
         variation_failures=variation_failures,
         identity_failure=identity_failure,
+        schema_drift_failure=schema_drift_failure,
         unknown_schema_paths=unknown_schema_paths,
         malformed_paths=malformed_paths,
     )
