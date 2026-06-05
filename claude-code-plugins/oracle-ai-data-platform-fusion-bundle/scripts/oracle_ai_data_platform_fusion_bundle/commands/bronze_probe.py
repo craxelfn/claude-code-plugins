@@ -12,12 +12,54 @@ Spark session whose ``sql("DESCRIBE TABLE ...")`` returns fixture rows.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from ..schema.bronze_fingerprint import ColumnInfo
 
 if TYPE_CHECKING:  # pragma: no cover — Spark import-guard
     from pyspark.sql import SparkSession
+
+
+# SQL identifier allowlist. Standard unquoted Spark SQL identifier
+# shape: alphanumeric / underscore start, alphanumeric / underscore
+# body. No dots (each part of the three-part name is validated
+# separately), no whitespace, no shell metacharacters, no quoting
+# tokens. Rejects semicolons, backticks, single/double quotes,
+# parentheses, dashes — anything that could alter the SQL text
+# bootstrap issues. Matches the spirit of the renderer's identifier
+# allowlist (``schema.identifier_validation``) — the bootstrap path
+# enforces the same invariant before any Spark call.
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class UnsafeIdentifierError(ValueError):
+    """Raised when an SQL identifier (catalog / schema / dataset)
+    fails the allowlist regex.
+
+    Without this check the f-string interpolation in
+    :func:`describe_bronze` would allow a malformed or malicious bundle
+    to inject arbitrary SQL into the DESCRIBE TABLE statement
+    (semicolons, backticks, whitespace, dotted IDs). Validation
+    fails closed BEFORE any Spark call.
+    """
+
+    def __init__(self, *, value: str, field: str) -> None:
+        self.value = value
+        self.field = field
+        super().__init__(
+            f"unsafe SQL identifier for {field}={value!r}; must match "
+            f"^[A-Za-z_][A-Za-z0-9_]*$. No semicolons, backticks, "
+            f"whitespace, or dotted IDs."
+        )
+
+
+def _validate_identifier(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise UnsafeIdentifierError(value=str(value), field=field)
+    if not _SQL_IDENT_RE.match(value):
+        raise UnsafeIdentifierError(value=value, field=field)
+    return value
 
 
 def describe_bronze(
@@ -32,10 +74,13 @@ def describe_bronze(
 
     Args:
         spark: an active Spark session.
-        catalog: e.g. ``"fusion_catalog"``.
-        bronze_schema: e.g. ``"bronze"``.
+        catalog: e.g. ``"fusion_catalog"``. Validated against the
+            SQL-identifier allowlist; rejected with
+            :class:`UnsafeIdentifierError` on failure.
+        bronze_schema: e.g. ``"bronze"``. Same allowlist.
         dataset_ids: bronze dataset ids declared in the pack's
             ``bronze.yaml`` (e.g. ``["erp_suppliers", "ap_invoices"]``).
+            Each id is validated.
 
     Returns:
         ``{dataset_id: [ColumnInfo, ...]}``. The walker takes a
@@ -44,10 +89,19 @@ def describe_bronze(
         from this single probe.
 
     Raises:
+        UnsafeIdentifierError: any of ``catalog`` / ``bronze_schema`` /
+            one of ``dataset_ids`` failed the SQL-identifier allowlist.
+            Bootstrap fails closed BEFORE issuing the Spark query.
         BronzeProbeFailure: a ``DESCRIBE`` query failed for any dataset.
             Wraps the underlying Spark exception with the dataset id so
             the operator knows which bronze table was unreachable.
     """
+    # Fail-closed identifier validation BEFORE any Spark call.
+    _validate_identifier(catalog, field="aidp.catalog")
+    _validate_identifier(bronze_schema, field="aidp.bronzeSchema")
+    for dataset_id in dataset_ids:
+        _validate_identifier(dataset_id, field="bronze.dataset.id")
+
     out: dict[str, list[ColumnInfo]] = {}
     for dataset_id in dataset_ids:
         fully_qualified = f"{catalog}.{bronze_schema}.{dataset_id}"
@@ -140,4 +194,4 @@ def _row_field(row, name: str, index: int):
         return None
 
 
-__all__ = ["BronzeProbeFailure", "describe_bronze"]
+__all__ = ["BronzeProbeFailure", "UnsafeIdentifierError", "describe_bronze"]

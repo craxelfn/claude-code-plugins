@@ -210,10 +210,22 @@ def write_evidence_snapshot(
             same ISO-timestamp stem already exists. Tests rely on this
             for the "preserves old snapshots" invariant — the writer
             cannot silently overwrite history.
+        UnsafePathSegmentError: ``snapshot.tenant`` is not a safe
+            filesystem segment, or the resolved target escapes
+            ``<workdir>/evidence/``.
     """
-    tenant_dir = _evidence_dir(workdir, snapshot.tenant)
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(snapshot.tenant, field="evidence.tenant")
+    workdir_resolved = workdir.resolve()
+    evidence_root = workdir_resolved / "evidence"
+    tenant_dir = (evidence_root / snapshot.tenant).resolve()
+    assert_within_root(tenant_dir, evidence_root, field="evidence.tenant")
     tenant_dir.mkdir(parents=True, exist_ok=True)
     target = tenant_dir / (_iso_timestamp_filename(snapshot.generated_at) + ".yaml")
+    # Defence-in-depth: assert the timestamp-driven filename stays
+    # under the tenant dir.
+    assert_within_root(target, tenant_dir, field="evidence.snapshot")
     if target.exists():
         raise EvidenceSnapshotAlreadyExistsError(
             errno.EEXIST,

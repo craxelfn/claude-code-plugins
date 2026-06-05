@@ -64,6 +64,7 @@ from ..schema.evidence_snapshot import (
     SnapshotProvenance,
     write_evidence_snapshot,
 )
+from ..schema.path_segment import UnsafePathSegmentError, validate_path_segment
 from ..schema.resolutions_input import (
     ResolutionsFileError,
     ResolutionsInputV1,
@@ -110,6 +111,11 @@ class VariationPhaseOptions:
     spark_factory: Callable[[], Any] | None = None
     """Test injection — replace local-Spark acquisition. The CLI never sets
     this directly; tests use it to inject a mock without monkeypatching."""
+
+    input_fn: Callable[[str], str] | None = None
+    """Test injection for the interactive y/N confirmation prompt during
+    ``--refresh`` when a pinned value would change. ``None`` falls back
+    to stdlib ``input()``. Tests pass a lambda to drive accept/decline."""
 
 
 @dataclass
@@ -174,6 +180,23 @@ def run_variation_phase(
     workdir = bundle_path.resolve().parent
     run_id = _generate_run_id()
 
+    # --- Path-traversal hard-fail (defence-in-depth) ---
+    # The bundle's contentPack.profile is a free-form string. A malformed
+    # or malicious bundle could pass `../../outside`, which after .resolve()
+    # would land profiles/evidence/diagnostics OUTSIDE the bundle's
+    # persistence root. Validate up-front so the failure surfaces with a
+    # clear AIDPF-style message rather than as a vague write failure (or
+    # silent arbitrary-write success). The writers also re-validate as
+    # defence-in-depth.
+    tenant_name = bundle.content_pack.profile or bundle.content_pack.name
+    try:
+        validate_path_segment(tenant_name, field="contentPack.profile")
+    except UnsafePathSegmentError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return VariationPhaseOutcome(
+            exit_code=1, summary=f"unsafe contentPack.profile: {tenant_name!r}"
+        )
+
     # --- Step 5: operator identity gate ---
     try:
         operator = resolve_operator(options.operator)
@@ -219,7 +242,6 @@ def run_variation_phase(
     fingerprint = compute_bronze_fingerprint(observed=observed)
 
     # --- --refresh drift detection (Step 9) ---
-    tenant_name = bundle.content_pack.profile or bundle.content_pack.name
     profile_path = resolve_profile_path(bundle_path, tenant_name)
     prior_profile: TenantProfile | None = None
     if options.refresh and profile_path.exists():
@@ -301,26 +323,69 @@ def run_variation_phase(
         picks[key] = result
 
     # --- Step 9 (cont.): if --refresh changes a pinned value, prompt confirm ---
+    # Per §9.5.5: no silent change to a previously-pinned value. Three
+    # acceptance paths:
+    #   1. ``--resolutions`` (scripted) — caller supplied an explicit
+    #      cli_flag pick; trust it. The picks loop above already routes
+    #      MultiMatch picks through the resolutions file; an AutoResolved
+    #      change is acceptable when the operator also passed a matching
+    #      ``--resolutions`` entry — see ``_scripted_change_accepted``.
+    #   2. ``--non-interactive`` (no resolutions file) — refuses to make
+    #      a silent decision; raises ``RefreshRequiresConfirmation``.
+    #   3. Interactive y/N prompt — must read a real answer and abort
+    #      on no/default. The prior print-only branch fell through and
+    #      wrote the profile silently — that was the round-2 blocking bug.
     if options.refresh and prior_profile is not None:
+        scripted = _scripted_picks_for_refresh(options, expected_tenant=tenant_name)
         for (name, kind), outcome in walker_results.items():
             chosen = _chosen_value(outcome, picks.get((name, kind)))
             if chosen is None:
                 continue  # NoMatch (optional VP) — skip silently.
             prior = _prior_pinned(prior_profile, name, kind)
             if prior is not None and prior != chosen:
+                # Path 1: scripted via ``--resolutions``. Treat any
+                # ``--resolutions`` entry that names this (name, kind) as
+                # explicit operator approval of the change. Record the
+                # mechanism as cli_flag.
+                if scripted is not None and (name, kind) in scripted:
+                    picks[(name, kind)] = PromptResult(
+                        chosen=chosen, mechanism="cli_flag"
+                    )
+                    continue
+                # Path 2: --non-interactive without scripted approval → abort.
                 if options.non_interactive:
                     raise RefreshRequiresConfirmation(
                         f"refresh would change pinned {kind}.{name} from "
                         f"{prior!r} to {chosen!r}; re-run without "
-                        f"--non-interactive to confirm, or supply --resolutions."
+                        f"--non-interactive to confirm, or supply "
+                        f"--resolutions with an entry for ({name!r}, {kind!r})."
                     )
-                console.print(
-                    f"[yellow]Variation {name!r} would change from "
-                    f"{prior!r} → {chosen!r}. Confirm? (y/N)[/yellow]"
+                # Path 3: interactive y/N prompt — actually read input.
+                if not _prompt_confirm_change(
+                    name=name,
+                    kind=kind,
+                    prior=prior,
+                    chosen=chosen,
+                    console=console,
+                    input_fn=options.input_fn or input,
+                ):
+                    console.print(
+                        f"[yellow]Operator declined to change pinned "
+                        f"{kind}.{name}; refresh aborted. Profile + evidence "
+                        f"unchanged.[/yellow]"
+                    )
+                    return VariationPhaseOutcome(
+                        exit_code=1,
+                        summary=(
+                            f"refresh aborted — operator declined to change "
+                            f"pinned {kind}.{name}"
+                        ),
+                    )
+                # Operator confirmed — record mechanism as terminal_prompt
+                # so the evidence trail reflects the y/N decision.
+                picks[(name, kind)] = PromptResult(
+                    chosen=chosen, mechanism="terminal_prompt"
                 )
-                # Treat the prompt as informational + accept any non-"n" input
-                # so test injection is straightforward. The terminal-prompt
-                # confirmation is captured in the evidence-snapshot mechanism.
 
     # --- Profile + evidence ---
     resolutions, snapshot_entry_resolutions, mechanism_record = _assemble_resolutions(
@@ -517,8 +582,16 @@ def _assemble_resolutions(
     for key, outcome in sorted(walker_results.items()):
         name, kind = key
         if isinstance(outcome, AutoResolved):
+            # For AutoResolved outcomes the picks map normally has no
+            # entry — but the --refresh confirmation path stamps one
+            # when the operator explicitly approves a pinned-value
+            # change. Prefer that mechanism over the bare auto_resolve.
             chosen = outcome.chosen
-            mechanism = "auto_resolve"
+            override = picks.get(key)
+            if override is not None and override.chosen == chosen:
+                mechanism = override.mechanism
+            else:
+                mechanism = "auto_resolve"
             considered = [
                 CandidateConsidered(candidate=chosen, outcome="matched")
             ]
@@ -698,6 +771,61 @@ def _load_resolutions(
         (entry.name, entry.kind): entry.chosen_candidate
         for entry in input_data.resolutions
     }
+
+
+def _scripted_picks_for_refresh(
+    options: VariationPhaseOptions,
+    *,
+    expected_tenant: str,
+) -> dict[tuple[str, str], str] | None:
+    """Load the ``--resolutions`` file (if any) WITHOUT the pack-aware
+    validator — refresh's "accept changed AutoResolved" path needs to
+    consult entries that the strict validator rejects as extraneous
+    (they target AutoResolved outcomes, not multi-matches).
+
+    Returns ``{(name, kind): chosen}`` or ``None`` when no
+    ``--resolutions`` file was supplied.
+
+    The strict validator still runs for the multi-match picks loop via
+    :func:`_load_resolutions`; this loader is the lenient variant the
+    refresh-change-acceptance path uses.
+    """
+    if options.resolutions_path is None:
+        return None
+    with options.resolutions_path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+    input_data = ResolutionsInputV1.model_validate(raw)
+    if input_data.tenant != expected_tenant:
+        # The strict validator would raise here; for the lenient path
+        # we treat a tenant mismatch as "no scripted acceptance".
+        return None
+    return {
+        (entry.name, entry.kind): entry.chosen_candidate
+        for entry in input_data.resolutions
+    }
+
+
+def _prompt_confirm_change(
+    *,
+    name: str,
+    kind: str,
+    prior: str,
+    chosen: str,
+    console: Console,
+    input_fn: Callable[[str], str],
+) -> bool:
+    """Prompt the operator to confirm a pinned-value change during
+    ``--refresh``. Default is **no** — operator must explicitly type
+    ``y`` / ``yes`` to accept.
+
+    Returns ``True`` on accept, ``False`` on decline / default.
+    """
+    console.print(
+        f"[yellow]Variation {name!r} would change from "
+        f"{prior!r} → {chosen!r}.[/yellow]"
+    )
+    raw = input_fn(f"Confirm change to {kind}.{name}? (y/N): ").strip().lower()
+    return raw in ("y", "yes")
 
 
 __all__ = [

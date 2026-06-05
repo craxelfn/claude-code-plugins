@@ -270,10 +270,22 @@ def write_variation_diagnostic(
         DiagnosticArtifactAlreadyExistsError: a file already exists at
             the target path (the ``run_id``/``vpName`` combination has
             been used before).
+        UnsafePathSegmentError: ``run_id`` or
+            ``artifact.variation_point.name`` is not a safe filesystem
+            segment, or the resolved target escapes
+            ``<workdir>/.aidp/diagnostics/<run_id>/``.
     """
-    target = _diagnostics_dir(workdir, run_id) / (
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    validate_path_segment(
+        artifact.variation_point.name, field="variationPoint.name"
+    )
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    target = diag_dir / (
         f"{artifact.error_code}__{artifact.variation_point.name}.json"
     )
+    assert_within_root(target, diag_dir, field="variationPoint.name")
     payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
     _atomic_write_json(target, payload)
     return target
@@ -289,8 +301,17 @@ def write_identity_diagnostic(
     Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-1020.json``.
     Only one ``AIDPF-1020`` artifact per run (no discriminator); identity
     gate fires once.
+
+    Raises:
+        UnsafePathSegmentError: ``run_id`` is not a safe filesystem
+            segment.
     """
-    target = _diagnostics_dir(workdir, run_id) / "AIDPF-1020.json"
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    target = diag_dir / "AIDPF-1020.json"
+    assert_within_root(target, diag_dir, field="run_id")
     payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
     _atomic_write_json(target, payload)
     return target

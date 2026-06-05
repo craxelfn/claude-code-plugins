@@ -153,8 +153,25 @@ def resolve_profile_path(bundle_path: Path, profile_name: str) -> Path:
     Returns:
         ``<bundle.yaml.parent>/profiles/<profile_name>.yaml`` (absolute
         after ``.resolve()``).
+
+    Raises:
+        UnsafePathSegmentError: ``profile_name`` is not a safe filesystem
+            segment (contains separators, ``..``, whitespace, etc.).
+            Defence against malformed / untrusted bundle YAML — a
+            profile name of ``../../outside`` would otherwise produce
+            ``profiles/../../outside.yaml`` which collapses to a path
+            outside the bundle's persistence root after ``.resolve()``.
     """
-    return (bundle_path.parent / "profiles" / f"{profile_name}.yaml").resolve()
+    # Import here to avoid a circular import at module load time.
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(profile_name, field="contentPack.profile")
+    bundle_root = bundle_path.parent.resolve()
+    target = (bundle_root / "profiles" / f"{profile_name}.yaml").resolve()
+    # Defence-in-depth: even with the segment validator, assert the final
+    # resolved path lives under the bundle's profiles/ directory.
+    assert_within_root(target, bundle_root / "profiles", field="contentPack.profile")
+    return target
 
 
 def load_tenant_profile(path: Path) -> TenantProfile:
