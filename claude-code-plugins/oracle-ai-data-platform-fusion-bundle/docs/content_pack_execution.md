@@ -469,3 +469,60 @@ single shared bronze schema (per-backend table-name suffixes prevent
 cross-contamination without two state-table setups). The module
 docstring expands on the trade-off. A future `orchestrator.run`-based
 harness can layer on top once the Delta-local-mode story is solved.
+
+## Phase 4 — dual-runner parity gate (shipped)
+
+`tests/parity/test_dual_runner_e2e.py` is the orchestrator-driven
+harness Phase 3 deferred. It drives BOTH backends through
+`orchestrator.run` end-to-end on the same bronze fixture (isolated
+per-backend bronze / silver / gold schemas) and asserts the
+**three-tier state-row contract** documented in
+`tests/parity/dual_runner_helpers.py::assert_state_rows_equiv`:
+
+- **Tier A** — common semantic fields (`dataset_id` / `layer` /
+  `mode` / `row_count` / `status`) with failure-path normalization
+  (v1 carries `row_count=None` on failed rows; v2 carries `0`;
+  normalized before equality).
+- **Tier B** — watermark cross-shape (v1's `last_watermark` ↔ v2
+  primary row's `last_watermark` / `output_watermark`).
+- **Tier C** — v2-only fields (`pack_id`, `node_implementation_type`,
+  `rendered_sql_hash`, `profile_hash`) asserted present + correct on
+  v2 success rows; lookup rows asserted via `assert_v2_lookup_row`.
+
+`plan_hash` is excluded from cross-backend equality (v1 and v2 hash
+different inputs by design); same-backend stability is verified by
+the incremental scenario (Step 3).
+
+Scenario coverage:
+
+- **Step 2** — seed-mode parity, 6 nodes parametrized (state-row +
+  materialized-output row count + schema).
+- **Step 3** — incremental mode (new bronze row past seed
+  watermark; plan-hash stability; affected-node row-count
+  agreement).
+- **Step 4** — cascade-abort (v1 `_abort_remaining` sweeps all plan
+  nodes; v2 cascade-only-on-dependents; documented divergence).
+- **Step 5** — resume on legacy-python; xfail-strict on content-pack
+  (AIDPF-1032 Phase 2 deferral → Phase 5 prerequisite).
+- **Step 7a** — hard cursor commit failure (`StateCommitError`
+  injection; §11.9 atomic-commit invariant + prior-cursor authority
+  + retry-advances-correctly).
+
+`tests/parity/test_dual_runner_profiles.py` parametrizes the harness
+over `finance-default` + `finance-alt-cancelled-flag` profiles —
+verifies the `cancelled_status` semantic variant + non-default
+`snapshotDate` flow through both backends identically.
+
+`tests/unit/test_v2_preflight_gates.py` verifies the five preflight
+gates (dropped-target / tenant fingerprint / profile-hash drift /
+schema drift / missing cursor); the v1↔v2 asymmetry on the
+fingerprint gate is documented as EXPLAINED-DIVERGENCE in
+`docs/v2-phase-4-preflight-coverage.md` rather than a parity
+failure.
+
+Live A/B evidence is captured by the parametrized dispatcher at
+`tests/live/dispatch_v2_seed.py` (operator-driven, no hardcoded
+identifiers). Default backend STILL stays `legacy-python` until
+Phase 5 reviews `docs/v2-phase-4-shipready-report.md` and merges
+the default-flip PR.
+
