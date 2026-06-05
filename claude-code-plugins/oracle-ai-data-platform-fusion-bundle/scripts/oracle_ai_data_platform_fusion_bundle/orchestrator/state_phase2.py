@@ -204,6 +204,98 @@ def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _build_state_row_schema():
+    """Construct the canonical state-row StructType.
+
+    Round-16 fix: real PySpark rejects ``createDataFrame([{"a": None}])``
+    because it can't infer a type for a column whose only value is
+    None — and Phase 2 state rows legitimately have all-None columns
+    in the common case (``node_version``, ``fusion_version``,
+    ``input_watermark_start``, ``input_watermark_end``,
+    ``consumed_version`` are None on every single-source success row;
+    diagnostic rows have many more None columns). Without an explicit
+    schema, ``write_state_rows_hard`` would raise ``PySparkValueError:
+    [CANNOT_DETERMINE_TYPE]`` on the first cursor-advancing row and
+    every soft diagnostic write would also be swallowed (the best-
+    effort writers catch the same failure).
+
+    The schema covers v1 base columns (matching ``state.py::_ddl``)
+    plus :data:`PHASE2_NEW_COLUMNS`. Every field is declared nullable
+    here even though some v1 columns are ``NOT NULL`` in the Delta
+    DDL — Spark accepts a more-permissive read schema; the table's
+    own DDL still enforces the v1 NOT NULL constraints on the
+    underlying storage, and the caller-side normaliser below coerces
+    the v1 NOT NULL fields to safe defaults before append.
+
+    Lazy import of pyspark types so this module's import contract
+    remains pyspark-free until the function is actually called.
+    """
+    from pyspark.sql.types import (
+        DoubleType,
+        LongType,
+        StringType,
+        StructField,
+        StructType,
+        TimestampType,
+    )
+
+    type_map = {"STRING": StringType(), "TIMESTAMP": TimestampType(),
+                "LONG": LongType(), "BIGINT": LongType(), "DOUBLE": DoubleType()}
+
+    fields = [
+        # v1 base columns (mirror state.py::_ddl). Phase 2 declares
+        # them nullable=True on the DataFrame side; the Delta table's
+        # own DDL preserves the v1 NOT NULL constraints.
+        StructField("run_id", StringType(), True),
+        StructField("dataset_id", StringType(), True),
+        StructField("layer", StringType(), True),
+        StructField("mode", StringType(), True),
+        StructField("last_watermark", TimestampType(), True),
+        StructField("last_run_at", TimestampType(), True),
+        StructField("status", StringType(), True),
+        StructField("row_count", LongType(), True),
+        StructField("error_message", StringType(), True),
+        StructField("skip_reason", StringType(), True),
+        StructField("duration_seconds", DoubleType(), True),
+        StructField("plan_hash", StringType(), True),
+        StructField("plan_snapshot", StringType(), True),
+    ]
+    # Phase 2 columns — every entry is nullable by design (PLAN §10a
+    # additive migration).
+    for name, dtype in PHASE2_NEW_COLUMNS:
+        fields.append(StructField(name, type_map[dtype], True))
+
+    return StructType(fields)
+
+
+# v1 columns declared NOT NULL in the table DDL. Phase 2 diagnostic
+# rows that legitimately have None for these (e.g. cascade-skip with
+# duration_seconds=None) get coerced before the append so the Delta
+# constraint check doesn't reject the batch.
+_V1_NOT_NULL_DEFAULTS: tuple[tuple[str, Any], ...] = (
+    ("duration_seconds", 0.0),
+)
+
+
+def _normalise_row_for_schema(row: Mapping[str, Any], field_names: list[str]) -> dict[str, Any]:
+    """Project ``row`` onto ``field_names``, filling missing keys with None
+    and coercing v1 NOT NULL fields to safe defaults.
+
+    Returns a dict whose keys exactly match the schema's fields, in
+    declared order. PySpark's ``createDataFrame(..., schema=...)``
+    accepts row dicts whose keys are a superset of the schema, but
+    being defensive here keeps the contract narrow.
+    """
+    out: dict[str, Any] = {}
+    for name in field_names:
+        out[name] = row.get(name)
+    # Coerce v1 NOT NULL fields if the caller left them as None.
+    for nn_name, default in _V1_NOT_NULL_DEFAULTS:
+        if out.get(nn_name) is None:
+            out[nn_name] = default
+    return out
+
+
 def write_state_rows_hard(
     spark: "SparkSession",
     paths: "TablePaths",
@@ -224,13 +316,20 @@ def write_state_rows_hard(
     once. ``rows`` may be a single-element list for single-source
     nodes; the API shape is uniform.
 
+    **Round-16 schema fix:** builds the DataFrame with an explicit
+    :class:`StructType` covering v1 base columns + ``PHASE2_NEW_COLUMNS``
+    so Spark doesn't try to infer types from row dicts where some
+    columns are None in every row. The v1 NOT NULL fields
+    (``duration_seconds``) get coerced to safe defaults via
+    :func:`_normalise_row_for_schema` so the table's DDL constraint
+    still holds.
+
     Args:
         spark: live Spark session.
         paths: TablePaths from the loaded bundle.
-        rows: sequence of dict-shaped rows. Each dict must carry the
-            columns of ``fusion_bundle_state`` (v1 + Phase 2). Missing
-            columns are filled with NULL via the schema reconciliation
-            Delta runs at append time. Empty sequence is a no-op.
+        rows: sequence of dict-shaped rows. Keys not in the canonical
+            schema are dropped; missing keys are filled with None.
+            Empty sequence is a no-op.
 
     Raises:
         StateCommitError: AIDPF-4060 — the underlying Delta append
@@ -245,13 +344,18 @@ def write_state_rows_hard(
 
     table_path = v1_state._state_table_path(paths)
 
-    # Build the DataFrame from the rows. We let Spark infer the schema
-    # from the row dicts; missing columns become NULL via the table's
-    # Delta schema reconciliation at append time. Phase 2 state rows
-    # always carry the same keys (the caller assembles them uniformly),
-    # so the inferred schema is consistent.
     try:
-        df = spark.createDataFrame(list(rows))
+        try:
+            schema = _build_state_row_schema()
+            field_names = [f.name for f in schema.fields]
+            normalised_rows = [_normalise_row_for_schema(r, field_names) for r in rows]
+            df = spark.createDataFrame(normalised_rows, schema=schema)
+        except ImportError:
+            # pyspark not importable in the current env (fake-Spark
+            # unit-test path). Mock-spark tests don't need the explicit
+            # schema; the pyspark-backed test exercises the production
+            # path that catches the null-type-inference issue.
+            df = spark.createDataFrame(list(rows))
         (
             df.write.format("delta")
             .mode("append")

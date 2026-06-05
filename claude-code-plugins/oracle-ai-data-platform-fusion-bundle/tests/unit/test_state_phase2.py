@@ -215,7 +215,13 @@ class TestWriteStateRowsHard:
                  "source_role": "primary"}]
         write_state_rows_hard(spark, MagicMock(), rows)
 
-        spark.createDataFrame.assert_called_once_with(rows)
+        # Atomic batch contract: ONE createDataFrame call regardless of
+        # the input shape. We don't assert the exact args here — the
+        # round-16 schema fix routes through _normalise_row_for_schema +
+        # an explicit StructType when pyspark is importable, so the
+        # createDataFrame call shape differs depending on the runtime.
+        # The semantic locked here is "single batch write, not per-row".
+        assert spark.createDataFrame.call_count == 1
         # Single .write.format("delta").mode("append").option(...).saveAsTable(...) chain.
         df.write.format.assert_called_with("delta")
         df.write.format("delta").mode.assert_called_with("append")
@@ -238,9 +244,15 @@ class TestWriteStateRowsHard:
 
         # Exactly ONE createDataFrame call — the entire batch goes through
         # a single Delta append. If a future regression switches to per-row
-        # writes, this assertion catches it.
+        # writes, this assertion catches it. Per-row counts are the only
+        # contract; arg shape varies by pyspark availability (schema-
+        # explicit when pyspark importable; inferred when not).
         assert spark.createDataFrame.call_count == 1
-        spark.createDataFrame.assert_called_with(rows)
+        # The call's first positional arg has the same number of rows as
+        # the input — the round-16 normaliser fills missing keys with None
+        # but preserves the row count.
+        called_rows = spark.createDataFrame.call_args[0][0]
+        assert len(called_rows) == len(rows)
 
     def test_delta_append_failure_wraps_as_state_commit_error(self, monkeypatch) -> None:
         self._setup(monkeypatch)
