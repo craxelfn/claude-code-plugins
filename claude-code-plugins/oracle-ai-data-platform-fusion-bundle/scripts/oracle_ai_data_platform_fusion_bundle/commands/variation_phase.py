@@ -664,8 +664,18 @@ def _assemble_resolutions(
             chosen = pick.chosen
             mechanism = pick.mechanism
             # Phase 3b: cli_flag picks driven by a skill-authored overlay
-            # become skill_proposed.
-            if skill_authored and mechanism == "cli_flag" and name in skill_proposals:
+            # become skill_proposed — BUT only when the operator actually
+            # picked the skill-proposed candidate. A scripted
+            # resolutions.json may legitimately edit the choice (e.g.
+            # operator overrides the skill's proposal with a different
+            # MultiMatch candidate); in that case the audit trail
+            # records cli_flag (not skill_proposed) because the chosen
+            # value didn't come from the skill.
+            if (
+                skill_authored
+                and mechanism == "cli_flag"
+                and skill_proposals.get(name) == chosen
+            ):
                 mechanism = "skill_proposed"
             considered = [
                 CandidateConsidered(candidate=c, outcome="matched")
@@ -676,13 +686,25 @@ def _assemble_resolutions(
 
         resolutions[key] = chosen
         mechanisms.append(mechanism)
+        # Phase 3b: copy incrementalImpact onto the resolution ONLY when
+        # the chosen candidate matches the skill-proposed candidate.
+        # If the operator edited the resolutions.json to pick a
+        # DIFFERENT MultiMatch candidate, the skill's impact analysis
+        # was computed for a value that didn't get pinned — copying it
+        # would mislabel the audit trail (e.g. claim a "promotion"
+        # happened when the operator overrode that exact promotion).
+        impact_for_resolution = _impact_if_candidate_matches(
+            skill_incremental_impacts.get(name),
+            skill_proposals.get(name),
+            chosen,
+        )
         snapshot_resolutions.append(
             ResolvedVariationPoint(
                 name=name,
                 kind=kind,  # type: ignore[arg-type]
                 chosenCandidate=chosen,
                 candidatesConsidered=considered,
-                incrementalImpact=skill_incremental_impacts.get(name),
+                incrementalImpact=impact_for_resolution,
             )
         )
 
@@ -740,6 +762,38 @@ def _load_entry_overlay_provenance(pack_root: Path):
         # The entry root IS the base pack (no overlay layer).
         return None
     return entry
+
+
+def _impact_if_candidate_matches(
+    impact: IncrementalImpact | None,
+    skill_proposal: str | None,
+    chosen: str,
+) -> IncrementalImpact | None:
+    """Return ``impact`` iff the chosen candidate matches what the skill
+    proposed — otherwise ``None``.
+
+    Phase 3b round-5 finding: the skill's per-VP ``incrementalImpact``
+    is computed for its proposed candidate. If the operator edits
+    ``resolutions.json`` to pick a different MultiMatch candidate, the
+    skill's impact analysis no longer applies. Copying it onto the
+    resolution would mislabel the audit trail (e.g. record a "promotion
+    from X to Y" when in fact the operator stayed on X).
+
+    Match-or-drop rule:
+
+    * ``skill_proposal`` set AND equal to ``chosen`` → copy impact.
+    * ``impact.new_candidate`` set AND equal to ``chosen`` → copy impact
+      (defensive — covers the case where the overlay provides impact
+      but no explicit proposal entry).
+    * Otherwise → return None, drop the impact silently.
+    """
+    if impact is None:
+        return None
+    if skill_proposal is not None and skill_proposal == chosen:
+        return impact
+    if impact.new_candidate == chosen:
+        return impact
+    return None
 
 
 def _is_skill_authored_overlay(entry_overlay_pack) -> bool:

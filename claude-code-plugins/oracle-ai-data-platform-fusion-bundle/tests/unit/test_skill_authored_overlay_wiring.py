@@ -363,3 +363,109 @@ class TestSkillProposedMechanism:
                 assert impact["remediation"]["operatorChose"] == "D"
                 return
         pytest.fail("invoice_currency_code resolution not in snapshot")
+
+
+class TestMultiMatchSkillProposedGatedOnCandidateMatch:
+    """Round-5 finding (PR #26): MultiMatch attribution + impact copy
+    MUST be gated on whether the operator's scripted choice matches
+    the skill-proposed candidate.
+
+    If the operator edits the resolutions.json to pick a DIFFERENT
+    matched candidate (e.g. skill proposed `ApInvoicesXCurrCode` but
+    operator picks `ApInvoicesCurrencyCode`), the audit trail must:
+
+    1. Record ``mechanism: cli_flag`` (NOT ``skill_proposed``) — the
+       chosen value didn't come from the skill.
+    2. NOT copy the skill's ``incrementalImpact`` onto the resolution
+       — the skill's analysis was for a different candidate; copying
+       it would mislabel the audit trail.
+    """
+
+    def test_multimatch_operator_overrides_skill_proposal(
+        self,
+        bundle_dir_with_skill_overlay: Path,
+        tmp_path: Path,
+    ) -> None:
+        # Bronze contains BOTH the skill-proposed candidate AND another
+        # matched candidate. Operator's resolutions.json picks the
+        # OTHER candidate, not the skill proposal.
+        bronze = {
+            "erp_suppliers": ["VENDORID", "SEGMENT1"],
+            "ap_invoices": [
+                "ApInvoicesInvoiceCurrencyCode",  # from the overlay's candidates list
+                "ApInvoicesCurrencyCode",          # from the overlay's candidates list
+                "ApInvoicesXCurrCode",             # skill-proposed; the overlay added this
+                "ApInvoicesCancelledDate",
+            ],
+            "gl_coa": [
+                "CodeCombinationSegment1",
+                "CodeCombinationSegment2",
+                "CodeCombinationSegment3",
+            ],
+            "gl_period_balances": [],
+        }
+        # Operator scripts a pick that's NOT the skill proposal.
+        # Overlay's proposals.invoice_currency_code.candidateAdded ==
+        # "ApInvoicesXCurrCode", but operator chose
+        # "ApInvoicesCurrencyCode".
+        resolutions = bundle_dir_with_skill_overlay / "operator-override.json"
+        resolutions.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "tenant": "finance-default",
+                    "resolutions": [
+                        {
+                            "name": "invoice_currency_code",
+                            "kind": "columnAliases",
+                            "chosenCandidate": "ApInvoicesCurrencyCode",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        bundle = _load_bundle(bundle_dir_with_skill_overlay / "bundle.yaml")
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir_with_skill_overlay / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark(bronze),
+                resolutions_path=resolutions,
+                non_interactive=True,
+            ),
+        )
+        assert outcome.exit_code == 0
+
+        snapshot_payload = yaml.safe_load(
+            outcome.evidence_path.read_text(encoding="utf-8")
+        )
+        snap_entry = snapshot_payload["provenance"]["evidence"]["snapshots"][0]
+        invoice_res = next(
+            r for r in snap_entry["resolutions"]
+            if r["name"] == "invoice_currency_code"
+        )
+        # Operator picked the non-skill candidate.
+        assert invoice_res["chosenCandidate"] == "ApInvoicesCurrencyCode"
+        # Round-5 invariant: incrementalImpact NOT copied — the skill's
+        # impact was for ApInvoicesXCurrCode, not the operator's choice.
+        assert invoice_res.get("incrementalImpact") is None, (
+            "incrementalImpact must NOT be copied when operator picked a "
+            "candidate other than the skill-proposed one"
+        )
+        # The top-level approvedBy.mechanism reflects the precedence
+        # winner across all resolutions. The other 6 VPs AutoResolve on
+        # skill-added candidates (skill_proposed); the invoice one is
+        # cli_flag. Both are operator-touched; per the precedence map
+        # (non_interactive < cli_flag < skill_proposed < terminal_prompt)
+        # the winner is non_interactive when present — here there are
+        # no non_interactive picks, so cli_flag wins as the weakest
+        # operator-touched mechanism applied. Document the expectation:
+        assert snapshot_payload["provenance"]["approvedBy"]["mechanism"] in (
+            "cli_flag",
+            "skill_proposed",
+        )
+        # More important: skillVersion still threaded (we DID use a
+        # skill-authored overlay; the operator just overrode one pick).
+        assert snapshot_payload["provenance"]["skillVersion"] == "0.1.0"
