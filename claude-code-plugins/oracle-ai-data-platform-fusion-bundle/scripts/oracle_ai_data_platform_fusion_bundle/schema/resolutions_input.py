@@ -107,6 +107,7 @@ def validate_against_pack(
     column_alias_names: set[str],
     semantic_variant_names: set[str],
     walker_outcomes: dict[tuple[str, str], list[str]],
+    accepted_autoresolved: dict[tuple[str, str], str] | None = None,
 ) -> None:
     """Apply the pack-aware validation rules to a parsed
     :class:`ResolutionsInputV1`.
@@ -121,13 +122,24 @@ def validate_against_pack(
         walker_outcomes: ``{(name, kind): [matched_candidate, ...]}``
             for every variation point with a :class:`MultiMatch`
             outcome. AutoResolved / NoMatch variation points should
-            NOT appear in this map; entries for them in the file are
-            rejected as extraneous.
+            NOT appear in this map.
+        accepted_autoresolved: ``{(name, kind): walker_chosen}`` for
+            AutoResolved variation points whose chosen value differs
+            from the prior profile's pinned value — i.e. ``--refresh``
+            promotions / demotions the operator is allowed to accept
+            via a scripted ``--resolutions`` entry. ``None`` (the
+            default) means "no AutoResolved entries permitted"
+            (initial-onboarding or refresh-without-change cases).
+            Entries for these keys are accepted under Rule 7 and the
+            ``chosen_candidate`` must equal ``walker_chosen`` under
+            Rule 4.
 
     Raises:
         ResolutionsFileError or a more specific subclass on the first
         rule violation found.
     """
+    accepted_autoresolved = accepted_autoresolved or {}
+
     if input_data.tenant != expected_tenant:
         raise ResolutionsFileTenantMismatch(
             f"resolutions file tenant {input_data.tenant!r} does not match "
@@ -172,26 +184,45 @@ def validate_against_pack(
                 f"but pack declares it as semanticVariants"
             )
 
-        # Rule 4 + Rule 7: candidate must be in the current MultiMatch set.
-        if key not in walker_outcomes:
+        # Rule 4 + Rule 7: candidate must be in the current MultiMatch
+        # set OR (under --refresh) match a permitted AutoResolved change.
+        if key in walker_outcomes:
+            if entry.chosen_candidate not in walker_outcomes[key]:
+                raise ResolutionsFileBadCandidate(
+                    f"chosenCandidate {entry.chosen_candidate!r} for "
+                    f"({entry.name!r}, {entry.kind!r}) is not in the matched "
+                    f"candidate set {walker_outcomes[key]}"
+                )
+        elif key in accepted_autoresolved:
+            # Refresh: this VP auto-resolves to a new value relative to
+            # the prior profile. Operator's scripted entry MUST match
+            # the walker's single chosen — accepting a candidate other
+            # than what the walker picked would silently pin a value
+            # that isn't actually present on the bronze.
+            expected = accepted_autoresolved[key]
+            if entry.chosen_candidate != expected:
+                raise ResolutionsFileBadCandidate(
+                    f"chosenCandidate {entry.chosen_candidate!r} for "
+                    f"({entry.name!r}, {entry.kind!r}) does not match the "
+                    f"walker's AutoResolved value {expected!r}. The scripted "
+                    f"acceptance must pin the candidate that actually exists "
+                    f"on the current bronze schema."
+                )
+        else:
             raise ResolutionsFileExtraneousEntry(
                 f"variation point ({entry.name!r}, {entry.kind!r}) is not "
-                f"a multi-match — either it auto-resolved or it has no match. "
-                f"Remove the entry."
-            )
-        if entry.chosen_candidate not in walker_outcomes[key]:
-            raise ResolutionsFileBadCandidate(
-                f"chosenCandidate {entry.chosen_candidate!r} for "
-                f"({entry.name!r}, {entry.kind!r}) is not in the matched "
-                f"candidate set {walker_outcomes[key]}"
+                f"a multi-match and does not represent a changed "
+                f"AutoResolved value under --refresh — either it "
+                f"auto-resolved to its prior pinned value or it has no "
+                f"match. Remove the entry."
             )
 
     # Rule 6: every multi-match must have an entry.
-    missing = sorted(walker_outcomes.keys() - seen)
-    if missing:
+    missing_multimatch = sorted(walker_outcomes.keys() - seen)
+    if missing_multimatch:
         raise ResolutionsFileIncomplete(
             f"--resolutions file is missing entries for multi-match "
-            f"variation points: {missing}"
+            f"variation points: {missing_multimatch}"
         )
 
 

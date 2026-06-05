@@ -298,3 +298,106 @@ class TestPackAwareValidation:
                 ],
             },
         )
+
+
+class TestAcceptedAutoresolvedBranch:
+    """Round-2 review (should-fix): the validator must accept
+    ``--resolutions`` entries that target an AutoResolved outcome
+    whose chosen value differs from the prior profile's pinned value —
+    i.e. the ``--refresh`` AutoResolved-promotion case. Without this,
+    an operator running ``--refresh --non-interactive --resolutions
+    approve.json`` cannot accept a higher-priority candidate that
+    became available."""
+
+    def test_changed_autoresolved_entry_accepted(self) -> None:
+        # Entry names a VP that ISN'T in walker_outcomes (no MultiMatch)
+        # but IS in accepted_autoresolved (changed AutoResolved). Must
+        # validate without raising — this is the case the prior round
+        # missed.
+        input_data = _valid_input()
+        validate_against_pack(
+            input_data=input_data,
+            expected_tenant="finance-default",
+            column_alias_names=_DECLARED_COLUMNS,
+            semantic_variant_names=_DECLARED_SEMANTICS,
+            walker_outcomes={},  # no MultiMatch
+            accepted_autoresolved={
+                ("invoice_currency_code", "columnAliases"): (
+                    "ApInvoicesInvoiceCurrencyCode"
+                ),
+            },
+        )
+
+    def test_changed_autoresolved_wrong_candidate_rejected(self) -> None:
+        """If the scripted entry names a candidate other than the
+        walker's AutoResolved value, reject — accepting it would pin a
+        value that doesn't exist on bronze."""
+        input_data = _valid_input()  # chosen = ApInvoicesInvoiceCurrencyCode
+        with pytest.raises(ResolutionsFileBadCandidate):
+            validate_against_pack(
+                input_data=input_data,
+                expected_tenant="finance-default",
+                column_alias_names=_DECLARED_COLUMNS,
+                semantic_variant_names=_DECLARED_SEMANTICS,
+                walker_outcomes={},
+                accepted_autoresolved={
+                    # Walker picked a different candidate than the entry.
+                    ("invoice_currency_code", "columnAliases"): (
+                        "ApInvoicesCurrencyCode"
+                    ),
+                },
+            )
+
+    def test_entry_for_unchanged_autoresolved_still_rejected(self) -> None:
+        """When refresh sees no change for an AutoResolved VP (chosen
+        == prior pinned), the validator does NOT include it in
+        ``accepted_autoresolved``. A scripted entry naming it is
+        rejected as extraneous — the operator's approval is
+        unnecessary."""
+        input_data = _valid_input()
+        with pytest.raises(ResolutionsFileExtraneousEntry):
+            validate_against_pack(
+                input_data=input_data,
+                expected_tenant="finance-default",
+                column_alias_names=_DECLARED_COLUMNS,
+                semantic_variant_names=_DECLARED_SEMANTICS,
+                walker_outcomes={},
+                accepted_autoresolved={},
+            )
+
+    def test_mixed_multimatch_and_autoresolved_change(self) -> None:
+        """File covers both a MultiMatch and a changed AutoResolved —
+        both validated in the same pass."""
+        input_data = ResolutionsInputV1.model_validate(
+            {
+                "schemaVersion": 1,
+                "tenant": "finance-default",
+                "resolutions": [
+                    {
+                        "name": "invoice_currency_code",
+                        "kind": "columnAliases",
+                        "chosenCandidate": "ApInvoicesInvoiceCurrencyCode",
+                    },
+                    {
+                        "name": "supplier_natural_key",
+                        "kind": "columnAliases",
+                        "chosenCandidate": "SEGMENT1",
+                    },
+                ],
+            }
+        )
+        validate_against_pack(
+            input_data=input_data,
+            expected_tenant="finance-default",
+            column_alias_names=_DECLARED_COLUMNS,
+            semantic_variant_names=_DECLARED_SEMANTICS,
+            walker_outcomes={
+                ("invoice_currency_code", "columnAliases"): [
+                    "ApInvoicesInvoiceCurrencyCode",
+                    "ApInvoicesCurrencyCode",
+                ],
+            },
+            accepted_autoresolved={
+                ("supplier_natural_key", "columnAliases"): "SEGMENT1",
+            },
+        )

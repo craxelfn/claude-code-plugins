@@ -243,9 +243,14 @@ class TestRefreshAcceptPath:
 
 
 class TestRefreshScriptedAcceptance:
-    """`--resolutions` accepting an AutoResolved promotion records the
-    cli_flag mechanism and proceeds without an interactive prompt — the
-    round-1 should-fix #1 case."""
+    """`--resolutions` accepting a CHANGED AutoResolved promotion
+    records the cli_flag mechanism and proceeds without an interactive
+    prompt — the round-1 should-fix #1 case. Round-2 review caught that
+    the original test used a MultiMatch bronze rather than an
+    AutoResolved-only one, masking the bug; this test now uses
+    `_DRIFTED_BRONZE` (only the higher-priority candidate present) so
+    the walker returns AutoResolved and the scripted-acceptance path
+    actually fires."""
 
     def test_resolutions_accepts_autoresolved_promotion(
         self, bundle_dir: Path
@@ -274,7 +279,12 @@ class TestRefreshScriptedAcceptance:
             bundle,
             bundle_dir / "bundle.yaml",
             options=VariationPhaseOptions(
-                spark_session=_mock_spark(_DRIFTED_BRONZE_MULTI),
+                # AutoResolved-only: only the higher-priority candidate
+                # is present on the refreshed bronze. Walker returns
+                # AutoResolved(chosen=ApInvoicesInvoiceCurrencyCode);
+                # prior pinned = ApInvoicesCurrencyCode → change requires
+                # operator approval. --resolutions supplies that approval.
+                spark_session=_mock_spark(_DRIFTED_BRONZE),
                 refresh=True,
                 non_interactive=True,  # would otherwise refuse silent change
                 resolutions_path=resolutions,
@@ -288,6 +298,53 @@ class TestRefreshScriptedAcceptance:
         )
         # cli_flag wins precedence over auto_resolve.
         assert profile["provenance"]["approvedBy"]["mechanism"] == "cli_flag"
+
+    def test_resolutions_rejects_candidate_not_on_bronze(
+        self, bundle_dir: Path
+    ) -> None:
+        """The scripted entry's chosenCandidate MUST equal the
+        walker's AutoResolved value. Naming a candidate the walker did
+        NOT pick (e.g. one that doesn't exist on the refreshed bronze)
+        is a rejected as a bad candidate — accepting it would silently
+        pin a value that isn't actually on bronze."""
+        _do_initial_bootstrap(bundle_dir)
+        resolutions = bundle_dir / "bad.json"
+        resolutions.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "tenant": "finance-default",
+                    "resolutions": [
+                        {
+                            "name": "invoice_currency_code",
+                            "kind": "columnAliases",
+                            # The walker picked ApInvoicesInvoiceCurrencyCode
+                            # because that's the only candidate present in
+                            # _DRIFTED_BRONZE. Pinning ApInvoicesCurrencyCode
+                            # would be a lie — it's not on bronze any more.
+                            "chosenCandidate": "ApInvoicesCurrencyCode",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+        from oracle_ai_data_platform_fusion_bundle.schema.resolutions_input import (
+            ResolutionsFileBadCandidate,
+        )
+        with pytest.raises(ResolutionsFileBadCandidate):
+            run_variation_phase(
+                bundle,
+                bundle_dir / "bundle.yaml",
+                options=VariationPhaseOptions(
+                    spark_session=_mock_spark(_DRIFTED_BRONZE),
+                    refresh=True,
+                    non_interactive=True,
+                    resolutions_path=resolutions,
+                ),
+            )
 
 
 class TestNonInteractiveStillRefusesWithoutResolutions:

@@ -297,15 +297,37 @@ def run_variation_phase(
             summary=f"{len(failure_paths)} variation point(s) unresolved",
         )
 
-    # --- Multi-match resolution (interactive / scripted / non-interactive) ---
+    # --- Build the walker-outcome maps the resolutions validator uses ---
     multi_match_outcomes: dict[tuple[str, str], list[str]] = {
         key: outcome.matched
         for key, outcome in walker_results.items()
         if isinstance(outcome, MultiMatch)
     }
-    scripted = _load_resolutions(options, expected_tenant=tenant_name, walker_outcomes=multi_match_outcomes,
-                                  pack=pack)
+    # Under --refresh, AutoResolved outcomes whose chosen value differs
+    # from the prior profile's pinned value are eligible for scripted
+    # acceptance via --resolutions (mechanism: cli_flag). The validator
+    # accepts such entries; the chosen_candidate MUST equal the
+    # walker's value (the candidate that actually exists on bronze).
+    accepted_autoresolved: dict[tuple[str, str], str] = {}
+    if options.refresh and prior_profile is not None:
+        for (name, kind), outcome in walker_results.items():
+            if not isinstance(outcome, AutoResolved):
+                continue
+            prior = _prior_pinned(prior_profile, name, kind)
+            if prior is not None and prior != outcome.chosen:
+                accepted_autoresolved[(name, kind)] = outcome.chosen
 
+    # Single validated load — strict on unknown names / kind / duplicates,
+    # permissive on AutoResolved changes under --refresh.
+    scripted = _load_resolutions(
+        options,
+        expected_tenant=tenant_name,
+        walker_outcomes=multi_match_outcomes,
+        accepted_autoresolved=accepted_autoresolved,
+        pack=pack,
+    )
+
+    # --- Multi-match resolution (interactive / scripted / non-interactive) ---
     picks: dict[tuple[str, str], PromptResult] = {}
     for key in sorted(multi_match_outcomes):
         if scripted is not None and key in scripted:
@@ -325,28 +347,24 @@ def run_variation_phase(
     # --- Step 9 (cont.): if --refresh changes a pinned value, prompt confirm ---
     # Per §9.5.5: no silent change to a previously-pinned value. Three
     # acceptance paths:
-    #   1. ``--resolutions`` (scripted) — caller supplied an explicit
-    #      cli_flag pick; trust it. The picks loop above already routes
-    #      MultiMatch picks through the resolutions file; an AutoResolved
-    #      change is acceptable when the operator also passed a matching
-    #      ``--resolutions`` entry — see ``_scripted_change_accepted``.
-    #   2. ``--non-interactive`` (no resolutions file) — refuses to make
-    #      a silent decision; raises ``RefreshRequiresConfirmation``.
+    #   1. ``--resolutions`` (scripted) — operator supplied an entry
+    #      that names this VP; the validator above confirmed it matches
+    #      either a MultiMatch outcome or an AutoResolved-change
+    #      outcome. Record ``mechanism: cli_flag`` and skip the prompt.
+    #   2. ``--non-interactive`` (no resolutions file) — refuses to
+    #      make a silent decision; raises ``RefreshRequiresConfirmation``.
     #   3. Interactive y/N prompt — must read a real answer and abort
     #      on no/default. The prior print-only branch fell through and
     #      wrote the profile silently — that was the round-2 blocking bug.
     if options.refresh and prior_profile is not None:
-        scripted = _scripted_picks_for_refresh(options, expected_tenant=tenant_name)
         for (name, kind), outcome in walker_results.items():
             chosen = _chosen_value(outcome, picks.get((name, kind)))
             if chosen is None:
                 continue  # NoMatch (optional VP) — skip silently.
             prior = _prior_pinned(prior_profile, name, kind)
             if prior is not None and prior != chosen:
-                # Path 1: scripted via ``--resolutions``. Treat any
-                # ``--resolutions`` entry that names this (name, kind) as
-                # explicit operator approval of the change. Record the
-                # mechanism as cli_flag.
+                # Path 1: scripted via ``--resolutions``. The validator
+                # already confirmed the entry is valid for this VP.
                 if scripted is not None and (name, kind) in scripted:
                     picks[(name, kind)] = PromptResult(
                         chosen=chosen, mechanism="cli_flag"
@@ -747,11 +765,19 @@ def _load_resolutions(
     *,
     expected_tenant: str,
     walker_outcomes: dict[tuple[str, str], list[str]],
+    accepted_autoresolved: dict[tuple[str, str], str],
     pack: ResolvedPack,
 ) -> dict[tuple[str, str], str] | None:
-    """Parse + validate the ``--resolutions`` file if provided. Returns
-    ``{(name, kind): chosen}`` for the picks loop. ``None`` when the flag
-    was not supplied."""
+    """Parse + validate the ``--resolutions`` file if provided.
+
+    Returns ``{(name, kind): chosen}`` covering BOTH the multi-match
+    picks loop AND the refresh-change acceptance path. The validator
+    runs once with the full set of permitted entries — entries for
+    multi-matches, plus (when ``--refresh`` is in play) entries for
+    AutoResolved outcomes whose value differs from the prior profile.
+
+    ``None`` when the flag was not supplied.
+    """
     if options.resolutions_path is None:
         return None
 
@@ -765,40 +791,9 @@ def _load_resolutions(
         column_alias_names=set(pack.pack.column_aliases.keys()),
         semantic_variant_names=set(pack.pack.semantic_variants.keys()),
         walker_outcomes=walker_outcomes,
+        accepted_autoresolved=accepted_autoresolved,
     )
 
-    return {
-        (entry.name, entry.kind): entry.chosen_candidate
-        for entry in input_data.resolutions
-    }
-
-
-def _scripted_picks_for_refresh(
-    options: VariationPhaseOptions,
-    *,
-    expected_tenant: str,
-) -> dict[tuple[str, str], str] | None:
-    """Load the ``--resolutions`` file (if any) WITHOUT the pack-aware
-    validator — refresh's "accept changed AutoResolved" path needs to
-    consult entries that the strict validator rejects as extraneous
-    (they target AutoResolved outcomes, not multi-matches).
-
-    Returns ``{(name, kind): chosen}`` or ``None`` when no
-    ``--resolutions`` file was supplied.
-
-    The strict validator still runs for the multi-match picks loop via
-    :func:`_load_resolutions`; this loader is the lenient variant the
-    refresh-change-acceptance path uses.
-    """
-    if options.resolutions_path is None:
-        return None
-    with options.resolutions_path.open("r", encoding="utf-8") as f:
-        raw = json.load(f)
-    input_data = ResolutionsInputV1.model_validate(raw)
-    if input_data.tenant != expected_tenant:
-        # The strict validator would raise here; for the lenient path
-        # we treat a tenant mismatch as "no scripted acceptance".
-        return None
     return {
         (entry.name, entry.kind): entry.chosen_candidate
         for entry in input_data.resolutions
