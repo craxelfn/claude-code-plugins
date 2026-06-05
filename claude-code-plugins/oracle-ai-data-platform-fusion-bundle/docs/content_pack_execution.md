@@ -218,6 +218,49 @@ Diagnostic artifact contract for feature #3
 (`v2-phase-3b-medallion-author-skill`) consumption:
 [`docs/diagnostic-artifact-contract.md`](./diagnostic-artifact-contract.md).
 
+## Phase 3b additions — `medallion-author` Tier-2 overlay skill
+
+When bootstrap (Phase 3a) exits 1 with `AIDPF-2010` / `AIDPF-2011`,
+the operator's Tier-2 recovery path is the
+[`medallion-author` Claude Code plugin skill](v2-medallion-author-skill.md).
+
+The skill:
+
+- Reads diagnostic artifacts feature #2 wrote under
+  `<bundle.yaml.parent>/.aidp/diagnostics/<run_id>/`.
+- Proposes new variation-point candidates from the tenant's
+  observed bronze schema (seeded with `known-deltas.yaml`
+  Fusion-release patterns).
+- After operator approval, drafts an overlay at
+  `<bundle.yaml.parent>/overlays/<overlay-name>/pack.yaml` that
+  `extends:` the starter pack and ADDS candidates to existing
+  `columnAliases` / `semanticVariants` (per §9.5.6 #1 MAY-NOT,
+  never authors net-new SQL templates).
+- Drafts a backend-aware remediation runbook recommending
+  **Option D (targeted re-seed of affected nodes)** as the v0.3
+  default. Options A (no-action), B (surgical MERGE), E (full
+  re-seed) also surfaced. Option C (watermark rewind) is **deferred
+  to v0.4** — requires an `aidp-fusion-bundle rewind` verb.
+
+The skill is **operator-initiated** per ADR-0017; the CLI does NOT
+auto-invoke Claude Code. Bootstrap is still the only writer to
+`profiles/` and `evidence/` per §9.5.7 #6.
+
+When the operator commits via `bootstrap --refresh` (or just
+`bootstrap` for initial-onboarding AutoResolved flows), feature #2
+detects the skill-authored overlay (via
+`provenance.skillId == "aidp-fusion-medallion-author"`) and records:
+
+- `mechanism: skill_proposed` on resolutions driven by the overlay
+  (including AutoResolved on a skill-added candidate — Phase 3b
+  round-2 finding).
+- `SnapshotProvenance.skill_version` populated from the overlay.
+- Per-resolution `incremental_impact` mirroring the overlay's
+  `provenance.incrementalImpact[vp]`.
+
+See [v2-medallion-author-skill.md](v2-medallion-author-skill.md)
+for the operator UX walkthrough.
+
 ## Reference fixtures
 
 Two layers of test fixtures live in the tree:
