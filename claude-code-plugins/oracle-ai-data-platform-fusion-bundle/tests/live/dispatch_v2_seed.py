@@ -67,6 +67,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -152,6 +153,13 @@ def _parse_args() -> argparse.Namespace:
         help="orchestrator.run mode.",
     )
     p.add_argument(
+        "--layers", default="silver,gold",
+        help="Comma-separated layers to run (orchestrator.run --layers). "
+             "Default 'silver,gold' assumes a pre-populated bronze (A/B "
+             "shared-frozen-bronze pattern). For a fresh dispatch with no "
+             "cached bronze, pass 'bronze,silver,gold'.",
+    )
+    p.add_argument(
         "--out-dir", dest="out_dir", default="tests/live/",
         help="Where evidence markdown files are written (post-dispatch).",
     )
@@ -187,7 +195,7 @@ def build_notebook(
     wheel: Path, bundle_yaml: str, profile_name: str,
     profile_yaml: str, snapshot_yaml: str | None,
     secret_name: str, secret_key: str,
-    backend: str, mode: str,
+    backend: str, mode: str, layers: list[str],
 ) -> dict:
     """Generate the executable notebook payload.
 
@@ -266,20 +274,20 @@ def build_notebook(
         f'        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import load_tenant_profile\n'
         f'        bundle_obj, _paths = load_bundle(BUNDLE_PATH)\n'
         f'        pack_root = resolve_content_pack_root(BUNDLE_PATH, bundle_obj.content_pack)\n'
-        f'        resolved_pack = load_full_chain(pack_root, overlay_paths=())\n'
+        f'        resolved_pack = load_full_chain(pack_root)\n'
         f'        profile_path = BUNDLE_PATH.parent / "profiles" / f"{{bundle_obj.content_pack.profile}}.yaml"\n'
         f'        tenant_profile = load_tenant_profile(profile_path)\n'
         f'        payload["pinned_fingerprint"] = tenant_profile.bronze_schema_fingerprint\n'
         f'        summary = orchestrator.run(\n'
         f'            bundle_path=BUNDLE_PATH, spark=spark, mode={mode!r},\n'
-        f'            layers=["silver","gold"], dry_run=False,\n'
+        f'            layers={layers!r}, dry_run=False,\n'
         f'            execution_backend="content-pack",\n'
         f'            resolved_pack=resolved_pack, tenant_profile=tenant_profile,\n'
         f'        )\n'
         f'    else:\n'
         f'        summary = orchestrator.run(\n'
         f'            bundle_path=BUNDLE_PATH, spark=spark, mode={mode!r},\n'
-        f'            layers=["silver","gold"], dry_run=False,\n'
+        f'            layers={layers!r}, dry_run=False,\n'
         f'            execution_backend="legacy-python",\n'
         f'        )\n'
         f'    for s in summary.steps: _fmt_step(s)\n'
@@ -300,7 +308,13 @@ def build_notebook(
         f'except Exception as e:\n'
         f'    traceback.print_exc()\n'
         f'    payload["error"] = str(e); payload["traceback"] = traceback.format_exc()[-2000:]\n'
-        f'print("AIDP_PHASE4_LIVE_RESULT_BEGIN", json.dumps(payload), "AIDP_PHASE4_LIVE_RESULT_END")\n'
+        # AIDP cluster Jupyter wraps stdout as display_data text/plain and
+        # strips JSON-escape backslashes, corrupting embedded quotes. Wrap
+        # the payload in base64 so the on-cluster encoding can be lossy
+        # without breaking the marker.
+        f'import base64 as _b64\n'
+        f'_b64_payload = _b64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")\n'
+        f'print("AIDP_PHASE4_LIVE_RESULT_BEGIN", _b64_payload, "AIDP_PHASE4_LIVE_RESULT_END")\n'
     )
 
     def code_cell(src: str) -> dict:
@@ -319,25 +333,84 @@ def build_notebook(
     }
 
 
+def _parse_b64_marker(
+    executed: dict,
+    *,
+    begin: str = "AIDP_PHASE4_LIVE_RESULT_BEGIN",
+    end: str = "AIDP_PHASE4_LIVE_RESULT_END",
+) -> dict | None:
+    """Walk executed-notebook outputs for a base64-wrapped marker block.
+
+    The cluster-side payload is base64-encoded JSON to survive AIDP's
+    display_data text/plain formatter (which strips JSON-escape
+    backslashes). Producer side: ``build_notebook`` ``run_cell``.
+    """
+    for cell in executed.get("cells", []):
+        for output in cell.get("outputs", []):
+            for src in ("text", "data"):
+                value = output.get(src)
+                if value is None:
+                    continue
+                if src == "data":
+                    value = value.get("text/plain", "")
+                if isinstance(value, list):
+                    value = "".join(value)
+                if begin in value:
+                    b = value.index(begin) + len(begin)
+                    e = value.index(end, b)
+                    token = value[b:e].strip()
+                    try:
+                        raw = base64.b64decode(token).decode("utf-8")
+                        return json.loads(raw)
+                    except Exception:
+                        return {"_marker_decode_error": token[:200]}
+    return None
+
+
 def dispatch_one(
     client: "AidpRestClient", *,
-    workspace_dir: str, notebook_name: str, notebook: dict, cluster_key: str,
+    workspace_dir: str, notebook_name: str, notebook: dict,
+    cluster_key: str, cluster_name: str, task_key: str,
+    poll_timeout_s: int = 1800, poll_interval_s: int = 20,
 ) -> dict:
     """Upload notebook + create Job + JobRun + poll to terminal +
-    fetch executed notebook. Returns the parsed marker payload.
+    fetch executed notebook. Returns the parsed marker payload (empty
+    dict on failure-without-marker — caller decides how to surface).
     """
     print(f"==> uploading {notebook_name} to {workspace_dir}/")
     nb_path = f"{workspace_dir}/{notebook_name}"
     client.upload_notebook(nb_path, notebook)
-    job_key = client.create_job(name=notebook_name, notebook_path=nb_path,
-                                cluster_key=cluster_key)
-    run_key = client.start_job_run(job_key)
+
+    # AIDP job names: letter-start, [A-Za-z0-9_/] only — strip the
+    # `.ipynb` extension and any other punctuation the timestamp/path
+    # may have carried in.
+    job_name = notebook_name.removesuffix(".ipynb").replace(".", "_")
+    job_key = client.create_notebook_job(
+        name=job_name,
+        description=f"Phase 4 dispatch ({task_key})",
+        notebook_path=nb_path,
+        cluster_key=cluster_key, cluster_name=cluster_name,
+        task_key=task_key,
+    )
+    run_key = client.submit_run(job_key)
     print(f"==> job={job_key} run={run_key} — polling")
-    terminal = client.wait_for_job_run(run_key, poll_seconds=10)
-    print(f"==> terminal state: {terminal!r}")
-    executed = client.fetch_executed_notebook(run_key)
-    return client.parse_marker(executed, begin="AIDP_PHASE4_LIVE_RESULT_BEGIN",
-                                end="AIDP_PHASE4_LIVE_RESULT_END")
+    result = client.poll_run(
+        run_key, timeout_s=poll_timeout_s, interval_s=poll_interval_s,
+    )
+    print(f"==> terminal status: {result.status}")
+    task_run_key = client.resolve_task_run_key(result.raw, task_key)
+    nb_str = client.fetch_output(task_run_key)
+    executed = json.loads(nb_str) if nb_str else {}
+    marker = _parse_b64_marker(executed) or {}
+    marker.setdefault("_terminal_status", result.status)
+    marker.setdefault("_job_key", job_key)
+    marker.setdefault("_run_key", run_key)
+    marker.setdefault("_task_run_key", task_run_key)
+    if result.status != "SUCCESS":
+        cell_errs = client.extract_cell_errors(executed)
+        if cell_errs:
+            marker.setdefault("_cell_errors", cell_errs[:5])
+    return marker
 
 
 def _read_bundle_schemas(bundle_path: Path) -> tuple[str, str, str]:
@@ -452,12 +525,16 @@ def main() -> int:
     )
 
     print(f"==> building wheel from {REPO}")
-    wheel = build_wheel(REPO)
+    workdir = Path(tempfile.mkdtemp(prefix="phase4_dispatch_"))
+    wheel = build_wheel(REPO, workdir / "dist")
     print(f"==> wheel: {wheel.name} ({wheel.stat().st_size // 1024} KiB)")
 
+    # cluster_name is collected for operator readability in the marker
+    # payload + audit trail, but AidpRestClient itself addresses the
+    # cluster by key; cluster_name is not passed to __init__.
+    _ = cluster_name
     client = AidpRestClient(
         region=region, aidp_id=aidp_id, workspace_key=workspace_key,
-        cluster_name=cluster_name,
     )
 
     out_dir = Path(args.out_dir)
@@ -474,6 +551,7 @@ def main() -> int:
             profile_yaml=profile_text, snapshot_yaml=snapshot_text,
             secret_name=args.secret_name, secret_key=args.secret_key,
             backend=backend, mode=args.mode,
+            layers=[s.strip() for s in args.layers.split(",") if s.strip()],
         )
         notebook_name = (
             f"phase4_{args.mode}_{backend.replace('-', '_')}_"
@@ -482,7 +560,8 @@ def main() -> int:
         marker = dispatch_one(
             client, workspace_dir=args.workspace_dir,
             notebook_name=notebook_name, notebook=notebook,
-            cluster_key=cluster_key,
+            cluster_key=cluster_key, cluster_name=cluster_name,
+            task_key=f"phase4_{backend.replace('-', '_')}_{args.mode}",
         )
         results[backend] = marker
         print(f"==> {backend} marker: {json.dumps(marker, indent=2)[:800]}")

@@ -26,9 +26,24 @@ from ..schema.diagnostic_artifact import (
     AIDPF_2010_COLUMN_ALIAS_UNRESOLVED,
     AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED,
     AIDPF_2012_SCHEMA_DRIFT_DETECTED,
+    AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED,
+    AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID,
     IdentityDiagnosticV1,
     SchemaDriftDiagnosticV1,
     VariationPointDiagnosticV1,
+)
+
+# Phase 4.1 / D3 — cluster-dispatch failures are operator-actionable,
+# not skill-recoverable. The reader recognises them by errorCode +
+# surfaces them in a dedicated field so the `/medallion-author` skill
+# can refuse with a "fix the dispatch issue and rerun bootstrap"
+# message instead of misclassifying them as malformed and offering a
+# nonsensical overlay draft.
+_CLUSTER_DISPATCH_INFRASTRUCTURE_CODES = frozenset(
+    {
+        AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED,
+        AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID,
+    }
 )
 
 SUPPORTED_SCHEMA_VERSIONS: tuple[int, ...] = (1,)
@@ -78,6 +93,21 @@ class DiagnosticReadResult:
     """Artifact files that failed JSON parse or Pydantic validation.
     Surface to the operator with the path so they can inspect."""
 
+    cluster_dispatch_skipped_paths: list[Path] = field(default_factory=list)
+    """Phase 4.1 / D3 — artifact files the reader recognised as
+    cluster-dispatch failures (``AIDPF-2048`` / ``AIDPF-2049``) and
+    deliberately did NOT parse into skill-actionable state. These
+    failures are operator-actionable (re-auth, fix cluster config,
+    retry) and not skill-recoverable; the skill refuses to draft when
+    this list is non-empty, with reason
+    ``cluster_dispatch_failure_not_skill_recoverable`` and a hand-off
+    to the bootstrap diagnostic.
+
+    Distinct from ``malformed_paths`` — these files are well-formed and
+    semantically valid; they're just outside the skill's scope. Keeping
+    the two lists separate means the skill can give the operator a
+    targeted message instead of a vague "your diagnostics are broken"."""
+
     @property
     def has_identity_failure(self) -> bool:
         """``AIDPF-1020`` present → refuse to draft."""
@@ -93,6 +123,14 @@ class DiagnosticReadResult:
         return bool(self.malformed_paths)
 
     @property
+    def has_cluster_dispatch_failures(self) -> bool:
+        """``True`` iff the run dir carries any ``AIDPF-2048`` or
+        ``AIDPF-2049`` artifact. Phase 4.1 / D3 — skill refuses to
+        draft when this is set; cluster-dispatch failures are
+        operator-actionable and outside the skill's scope."""
+        return bool(self.cluster_dispatch_skipped_paths)
+
+    @property
     def is_empty(self) -> bool:
         """No variation-point failures + no identity failure → nothing
         to draft (the operator may have pointed at the wrong run_id, or
@@ -102,6 +140,7 @@ class DiagnosticReadResult:
             and self.identity_failure is None
             and not self.unknown_schema_paths
             and not self.malformed_paths
+            and not self.cluster_dispatch_skipped_paths
         )
 
     @property
@@ -133,6 +172,7 @@ class DiagnosticReadResult:
             and not self.has_identity_failure
             and not self.has_unknown_schema_version
             and not self.has_malformed_artifacts
+            and not self.has_cluster_dispatch_failures
         )
 
 
@@ -170,6 +210,7 @@ def read_run(
     schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
     unknown_schema_paths: list[Path] = []
     malformed_paths: list[Path] = []
+    cluster_dispatch_skipped_paths: list[Path] = []
 
     for artifact_path in sorted(run_dir.glob("*.json")):
         try:
@@ -184,6 +225,13 @@ def read_run(
             continue
 
         error_code = payload.get("errorCode")
+        # Phase 4.1 / D3 — cluster-dispatch artifacts get recognised
+        # but NOT parsed into skill state. Operator-actionable, not
+        # skill-recoverable.
+        if error_code in _CLUSTER_DISPATCH_INFRASTRUCTURE_CODES:
+            cluster_dispatch_skipped_paths.append(artifact_path)
+            continue
+
         try:
             if error_code == AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED:
                 identity_failure = IdentityDiagnosticV1.model_validate(payload)
@@ -212,6 +260,7 @@ def read_run(
         schema_drift_failure=schema_drift_failure,
         unknown_schema_paths=unknown_schema_paths,
         malformed_paths=malformed_paths,
+        cluster_dispatch_skipped_paths=cluster_dispatch_skipped_paths,
     )
 
 

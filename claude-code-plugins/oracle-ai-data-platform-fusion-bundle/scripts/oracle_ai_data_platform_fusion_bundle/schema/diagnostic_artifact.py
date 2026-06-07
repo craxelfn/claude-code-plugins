@@ -64,6 +64,25 @@ AIDPF_2012_SCHEMA_DRIFT_DETECTED = "AIDPF-2012"
 Live bronze fingerprint differs from the value pinned in the tenant profile;
 the run blocks until the operator runs ``aidp-fusion-bundle bootstrap --refresh``."""
 
+AIDPF_2047_CLUSTER_BOOTSTRAP_PREDISPATCH = "AIDPF-2047"
+"""Phase 4.1 / D3 — cluster-mode bootstrap pre-dispatch readiness failure.
+CLI-level only (no artifact). Sub-reason in the message: ``missing_config`` /
+``aidp_rest_probe_failed`` / ``conflicting_flags``. Operator fixes the
+CLI / config and reruns; not a skill-recoverable condition."""
+
+AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED = "AIDPF-2048"
+"""Phase 4.1 / D3 — cluster-mode probe dispatch failed before producing
+a valid marker. Diagnostic at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json``
+carries the failed step + cause; operator-actionable (re-auth, fix
+cluster, retry); NOT consumed by ``medallion-author`` skill."""
+
+AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID = "AIDPF-2049"
+"""Phase 4.1 / D3 — cluster ran but the laptop couldn't use the marker
+(envelope missing, cluster reported error, marker-version mismatch,
+validation failure). Diagnostic at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2049.json``
++ companion ``cluster_stdout.log`` carries the full cluster output.
+Operator-actionable; NOT consumed by ``medallion-author`` skill."""
+
 
 # ---------------------------------------------------------------------------
 # Failure payload sub-models
@@ -288,6 +307,135 @@ class SchemaDriftFailure(BaseModel):
     consumes this to decide which VPs need re-resolution."""
 
 
+class ClusterDispatchFailure(BaseModel):
+    """Phase 4.1 / D3 — payload of ``AIDPF-2048`` (cluster dispatch failed).
+
+    Captures which step of the dispatch chain raised + the typed
+    exception's cause + the cluster/workspace coords for operator
+    triage. Operator-actionable, not skill-actionable — see plan.md
+    Step 8 scope note.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    failed_step: Literal[
+        "build_wheel",
+        "stage_pack",
+        "upload_notebook",
+        "create_notebook_job",
+        "submit_run",
+        "poll_run",
+        "fetch_output",
+    ] = Field(alias="failedStep")
+    """Stable artifact-side enum derived from the dispatch helper's
+    typed-exception ``.code`` ClassVar (see
+    ``commands.cluster_bootstrap_probe._dispatch_step_from_code``)."""
+
+    cause_type: str = Field(alias="causeType")
+    """``type(exc).__name__`` of the underlying exception."""
+
+    cause_message: str = Field(alias="causeMessage")
+    """``str(exc)[:2000]`` — bounded to keep the artifact small."""
+
+    workspace_path: str | None = Field(default=None, alias="workspacePath")
+    """Server-side notebook path the helper attempted to upload to.
+    ``None`` when the failure happened before path construction (wheel
+    build / pack staging)."""
+
+    cluster_key: str | None = Field(default=None, alias="clusterKey")
+    """The cluster UUID dispatch was targeting. ``None`` for very-early
+    failures."""
+
+    run_state: str | None = Field(default=None, alias="runState")
+    """Terminal state from ``poll_run`` when the failure was a RUN_FAILED
+    outcome (one of ``FAILED`` / ``CANCELED`` / ``TIMED_OUT``)."""
+
+    poll_elapsed_seconds: float | None = Field(
+        default=None, alias="pollElapsedSeconds"
+    )
+
+
+class ClusterDispatchDiagnosticV1(DiagnosticArtifactBase):
+    """Diagnostic artifact for ``AIDPF-2048``.
+
+    One file per dispatch-failure at
+    ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json``. No
+    discriminator — bootstrap attempts one cluster dispatch per run,
+    so at most one 2048 artifact exists per run."""
+
+    error_code: Literal["AIDPF-2048"] = Field(alias="errorCode")
+    tenant: str
+    cluster_dispatch: ClusterDispatchFailure = Field(alias="clusterDispatch")
+
+
+class ClusterMarkerFailure(BaseModel):
+    """Phase 4.1 / D3 — payload of ``AIDPF-2049`` (cluster marker invalid)."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    kind: Literal[
+        "envelope_missing",
+        "cluster_reported_error",
+        "marker_version_unsupported",
+        "validation_failed",
+    ]
+    """Discriminator across the four marker-failure flavours.
+
+    * ``envelope_missing`` — no ``MARKER_BEGIN/END`` envelope in the
+      executed-notebook stdout.
+    * ``cluster_reported_error`` — envelope present with ``ok=false`` —
+      ``cluster_error_*`` fields carry the in-cell exception details.
+    * ``marker_version_unsupported`` — envelope present, inner marker
+      ``markerVersion`` ≠ 1.
+    * ``validation_failed`` — envelope or marker failed Pydantic
+      validation for any other reason; ``validation_errors`` carries
+      the Pydantic error string(s).
+    """
+
+    cluster_error_type: str | None = Field(
+        default=None, alias="clusterErrorType"
+    )
+    """Set iff ``kind == "cluster_reported_error"``."""
+
+    cluster_error_message: str | None = Field(
+        default=None, alias="clusterErrorMessage"
+    )
+
+    cluster_traceback: str | None = Field(
+        default=None, alias="clusterTraceback"
+    )
+
+    validation_errors: list[str] = Field(
+        default_factory=list, alias="validationErrors"
+    )
+    """Pydantic error strings — populated for ``validation_failed`` and
+    ``marker_version_unsupported`` kinds."""
+
+    stdout_excerpt: str = Field(alias="stdoutExcerpt")
+    """Last ~4 KiB of the cluster's stdout — what goes inside the
+    artifact JSON. Full stdout is mirrored to the companion
+    ``cluster_stdout.log`` file."""
+
+    stdout_log_path: str = Field(alias="stdoutLogPath")
+    """Relative path (from the diagnostics dir) to the companion
+    ``cluster_stdout.log`` file. Always set — the writer guarantees
+    the file exists alongside the JSON."""
+
+
+class ClusterMarkerDiagnosticV1(DiagnosticArtifactBase):
+    """Diagnostic artifact for ``AIDPF-2049``.
+
+    One file per marker-failure at
+    ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2049.json``. Mutually
+    exclusive with ``AIDPF-2048.json`` — marker parsing only runs on
+    a successful fetch. A companion ``cluster_stdout.log`` lives in
+    the same directory."""
+
+    error_code: Literal["AIDPF-2049"] = Field(alias="errorCode")
+    tenant: str
+    cluster_marker: ClusterMarkerFailure = Field(alias="clusterMarker")
+
+
 class SchemaDriftDiagnosticV1(DiagnosticArtifactBase):
     """Diagnostic artifact for AIDPF-2012 schema-fingerprint drift
     (Phase 3c).
@@ -454,13 +602,103 @@ def write_schema_drift_diagnostic(
     return target
 
 
+def write_cluster_dispatch_diagnostic(
+    workdir: Path,
+    run_id: str,
+    artifact: ClusterDispatchDiagnosticV1,
+) -> Path:
+    """Write a Phase 4.1 cluster-dispatch diagnostic artifact
+    (``AIDPF-2048``).
+
+    Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json``.
+    Mutually exclusive with ``AIDPF-2049.json`` in the same run
+    directory — dispatch failures fire before marker parsing.
+
+    Raises:
+        UnsafePathSegmentError: ``run_id`` is not a safe filesystem segment.
+        DiagnosticArtifactAlreadyExistsError: a file already exists at
+            the target path.
+    """
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    target = diag_dir / "AIDPF-2048.json"
+    assert_within_root(target, diag_dir, field="run_id")
+    payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
+    _atomic_write_json(target, payload)
+    return target
+
+
+def write_cluster_marker_diagnostic(
+    workdir: Path,
+    run_id: str,
+    artifact: ClusterMarkerDiagnosticV1,
+    *,
+    stdout_full: str,
+) -> Path:
+    """Write a Phase 4.1 cluster-marker diagnostic artifact
+    (``AIDPF-2049``) PLUS the companion ``cluster_stdout.log`` file.
+
+    Two files written in one call so the operator inspecting
+    ``AIDPF-2049.json`` always has the matching log next to it:
+
+    * ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2049.json``
+    * ``<workdir>/.aidp/diagnostics/<run_id>/cluster_stdout.log``
+
+    The artifact's ``cluster_marker.stdoutLogPath`` field MUST equal
+    ``"cluster_stdout.log"`` (the writer enforces this — programmer
+    error if the caller passes a different value).
+
+    Args:
+        workdir: persistence-root anchor.
+        run_id: bootstrap-run identifier.
+        artifact: the diagnostic payload.
+        stdout_full: untruncated cluster stdout. Written to the
+            companion log file verbatim; the artifact JSON carries
+            only the last ~4 KiB excerpt.
+
+    Returns:
+        The absolute path of the JSON artifact (the companion log
+        sits next to it).
+    """
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    if artifact.cluster_marker.stdout_log_path != "cluster_stdout.log":
+        raise ValueError(
+            f"ClusterMarkerFailure.stdoutLogPath must be "
+            f"'cluster_stdout.log' (artifact + log are siblings); got "
+            f"{artifact.cluster_marker.stdout_log_path!r}"
+        )
+
+    target = diag_dir / "AIDPF-2049.json"
+    log_target = diag_dir / "cluster_stdout.log"
+    assert_within_root(target, diag_dir, field="run_id")
+    assert_within_root(log_target, diag_dir, field="run_id")
+
+    payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
+    _atomic_write_json(target, payload)
+    # Write the companion log separately — same atomic-write pattern.
+    _atomic_write_json(log_target, stdout_full)
+    return target
+
+
 __all__ = [
     "AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED",
     "AIDPF_2010_COLUMN_ALIAS_UNRESOLVED",
     "AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED",
     "AIDPF_2012_SCHEMA_DRIFT_DETECTED",
+    "AIDPF_2047_CLUSTER_BOOTSTRAP_PREDISPATCH",
+    "AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED",
+    "AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID",
     "AffectedVariationPoint",
     "CandidateProbeOutcome",
+    "ClusterDispatchDiagnosticV1",
+    "ClusterDispatchFailure",
+    "ClusterMarkerDiagnosticV1",
+    "ClusterMarkerFailure",
     "ColumnTypeChange",
     "DatasetSchemaDelta",
     "DiagnosticArtifactAlreadyExistsError",
@@ -472,6 +710,8 @@ __all__ = [
     "SchemaDriftFailure",
     "VariationPointDiagnosticV1",
     "VariationPointFailure",
+    "write_cluster_dispatch_diagnostic",
+    "write_cluster_marker_diagnostic",
     "write_identity_diagnostic",
     "write_schema_drift_diagnostic",
     "write_variation_diagnostic",

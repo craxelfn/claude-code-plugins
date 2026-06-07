@@ -52,6 +52,20 @@ AIDPF_2044_PARTITION_COLUMN_MISSING = "AIDPF-2044"
 """``replace_partition`` strategy partition column missing on target
 (deferred strategy; validate-only)."""
 
+AIDPF_2046_REQUIRED_COLUMN_UNRESOLVED_REF = "AIDPF-2046"
+"""A ``requiredColumns`` entry uses the ``$column.<key>`` reference
+syntax but the key is either (a) not declared in ``pack.yaml``'s
+``columnAliases``, or (b) declared but missing from the tenant profile's
+``resolved.column`` map (bootstrap not run, or alias was added after
+last bootstrap)."""
+
+
+_COLUMN_REF_PREFIX = "$column."
+"""YAML prefix marking a ``requiredColumns`` entry as a reference to a
+``columnAliases.<key>`` resolved value in the tenant profile, rather
+than a literal column name. Backward-compatible: entries without the
+prefix are still treated as literals."""
+
 
 # ---------------------------------------------------------------------------
 # Preflight result
@@ -139,7 +153,7 @@ def preflight_node(
     errors: list[PreflightError] = []
 
     # 1. Required columns on each declared source.
-    errors.extend(_check_required_columns(spark, node, ctx))
+    errors.extend(_check_required_columns(spark, node, pack, profile, ctx))
 
     # 2. Watermark column for merge-strategy nodes.
     if _is_merge_strategy(node):
@@ -172,17 +186,26 @@ def _is_replace_partition_strategy(node: NodeYaml) -> bool:
 
 
 def _check_required_columns(
-    spark: "SparkSession", node: NodeYaml, ctx: "RunContext"
+    spark: "SparkSession",
+    node: NodeYaml,
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: "RunContext",
 ) -> list[PreflightError]:
     """For each entry in ``node.requiredColumns.<source>``, DESCRIBE the
     source's bronze table and assert the column exists.
 
     The ``requiredColumns`` map is keyed by source id (matching
     ``dependsOn.bronze[*].id``). Each value is a list of column names
-    that MUST be present in the live bronze schema.
+    that MUST be present in the live bronze schema. Entries beginning
+    with ``$column.`` are references into ``pack.columnAliases`` —
+    resolved against the tenant profile's ``resolved.column`` map
+    before the live-column check.
     """
     errors: list[PreflightError] = []
     required = getattr(node, "required_columns", None) or {}
+    pack_alias_keys = set(pack.pack.column_aliases.keys())
+
     for source_id, required_cols in required.items():
         table = ctx.bronze_table_for_source.get(source_id)
         if table is None:
@@ -200,20 +223,78 @@ def _check_required_columns(
             )
             continue
         present = _describe_columns(spark, table)
-        for col in required_cols:
-            if col not in present:
+        present_ci = {c.lower(): c for c in present}
+        for entry in required_cols:
+            resolved, ref_error = _resolve_required_column_entry(
+                entry, profile, source_id, pack_alias_keys
+            )
+            if ref_error is not None:
+                errors.append(ref_error)
+                continue
+            assert resolved is not None  # mypy: ref_error None ⇒ resolved set
+            if resolved.lower() not in present_ci:
+                # Diagnostic names BOTH the YAML entry (for traceability
+                # back to the pack source) and the resolved physical
+                # column (for "go look in DESCRIBE"). When `entry` is a
+                # literal these are the same — the message stays terse.
+                resolved_hint = (
+                    f" (resolved from {entry!r})" if entry != resolved else ""
+                )
                 errors.append(
                     PreflightError(
                         code=AIDPF_2042_REQUIRED_COLUMN_MISSING,
                         source=source_id,
                         message=(
-                            f"required column {col!r} missing from live bronze "
-                            f"schema for source {source_id!r} (table {table!r}). "
-                            f"Live columns: {sorted(present)!r}."
+                            f"required column {resolved!r}{resolved_hint} missing "
+                            f"from live bronze schema for source {source_id!r} "
+                            f"(table {table!r}). Live columns: {sorted(present)!r}."
                         ),
                     )
                 )
     return errors
+
+
+def _resolve_required_column_entry(
+    entry: str,
+    profile: "TenantProfile",  # noqa: F821
+    source_id: str,
+    pack_alias_keys: set[str],
+) -> tuple[str | None, PreflightError | None]:
+    """Resolve a ``requiredColumns`` entry to a physical column name.
+
+    Returns ``(resolved, None)`` on success, or ``(None, error)`` when
+    the entry uses ``$column.<key>`` syntax but the key cannot be
+    resolved. A literal entry (no prefix) returns ``(entry, None)``
+    unchanged — backward-compatible with v0.3 packs.
+    """
+    if not entry.startswith(_COLUMN_REF_PREFIX):
+        return entry, None
+    key = entry[len(_COLUMN_REF_PREFIX) :]
+    if key not in pack_alias_keys:
+        return None, PreflightError(
+            code=AIDPF_2046_REQUIRED_COLUMN_UNRESOLVED_REF,
+            source=source_id,
+            message=(
+                f"requiredColumns entry {entry!r} references columnAlias key "
+                f"{key!r} which is not declared in pack.yaml's `columnAliases`. "
+                f"Known keys: {sorted(pack_alias_keys)!r}. "
+                f"Fix the pack YAML — either declare the alias or use a literal "
+                f"column name."
+            ),
+        )
+    resolved = profile.resolved.column.get(key)
+    if not resolved:
+        return None, PreflightError(
+            code=AIDPF_2046_REQUIRED_COLUMN_UNRESOLVED_REF,
+            source=source_id,
+            message=(
+                f"requiredColumns entry {entry!r} references columnAlias key "
+                f"{key!r} declared in pack.yaml, but the tenant profile has no "
+                f"resolved value for it. Re-run `aidp-fusion-bundle bootstrap` "
+                f"to populate the profile."
+            ),
+        )
+    return resolved, None
 
 
 def _check_watermark_column(
@@ -243,7 +324,8 @@ def _check_watermark_column(
             )
         ]
     present = _describe_columns(spark, table)
-    if column not in present:
+    present_ci = {c.lower(): c for c in present}
+    if column.lower() not in present_ci:
         return [
             PreflightError(
                 code=AIDPF_2043_WATERMARK_COLUMN_MISSING,

@@ -8,7 +8,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig, Bundle, EnvSpec
+from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig, Bundle, Defaults, EnvSpec
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -236,3 +236,35 @@ class TestAidpConfigSchema:
         # ``clustreKey`` slipping through silently.
         with pytest.raises(ValidationError):
             EnvSpec.model_validate({"workspaceKey": "wk-123", "clustreKey": "typo"})
+
+
+class TestDefaultsWorkspaceDir:
+    """Phase 4.1 / D3 — ``Defaults.workspaceDir`` covers the server-side
+    notebook upload root for cluster-mode bootstrap. Optional; absent on
+    legacy configs."""
+
+    def test_workspace_dir_default_none(self) -> None:
+        # Pre-Phase-4.1 configs have no `workspaceDir` field; Defaults
+        # must still load.
+        defaults = Defaults.model_validate({})
+        assert defaults.workspace_dir is None
+        # workspace_root default unchanged from before — the new field
+        # doesn't perturb existing semantics.
+        assert defaults.workspace_root == "Shared"
+
+    def test_workspace_dir_round_trips_via_alias(self) -> None:
+        defaults = Defaults.model_validate(
+            {"workspaceDir": "/Workspace/Shared/fusion-bundle-bootstrap"}
+        )
+        assert defaults.workspace_dir == "/Workspace/Shared/fusion-bundle-bootstrap"
+
+    def test_workspace_dir_round_trips_via_python_name(self) -> None:
+        defaults = Defaults.model_validate(
+            {"workspace_dir": "/Workspace/Team/custom-bootstrap"}
+        )
+        assert defaults.workspace_dir == "/Workspace/Team/custom-bootstrap"
+
+    def test_defaults_still_rejects_unknown_field(self) -> None:
+        # extra="forbid" guards against typos like `worksapceDir`.
+        with pytest.raises(ValidationError):
+            Defaults.model_validate({"worksapceDir": "/typo/path"})

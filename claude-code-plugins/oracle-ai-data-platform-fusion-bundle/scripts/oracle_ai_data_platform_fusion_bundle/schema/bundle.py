@@ -129,6 +129,15 @@ class Defaults(BaseModel):
     api_base: str | None = Field(default=None, alias="apiBase")
     workspace_root: str = Field(default="Shared", alias="workspaceRoot")
 
+    workspace_dir: str | None = Field(default=None, alias="workspaceDir")
+    """Server-side notebook upload root for cluster-mode bootstrap
+    (Phase 4.1 / D3). ``None`` ⇒ dispatch derives
+    ``/Workspace/{workspace_root}/fusion-bundle-bootstrap`` at call time.
+    Only consulted by ``aidp-fusion-bundle bootstrap --dispatch-mode=cluster``;
+    local-mode bootstrap + the existing ``run`` dispatcher both ignore
+    it (the run dispatcher builds its own ``/Workspace/{workspace_root}/aidp-fusion-bundle-{project}``
+    path at ``dispatch/__init__.py:243``)."""
+
 
 class AidpConfig(BaseModel):
     """Top-level ``aidp.config.yaml`` schema."""
