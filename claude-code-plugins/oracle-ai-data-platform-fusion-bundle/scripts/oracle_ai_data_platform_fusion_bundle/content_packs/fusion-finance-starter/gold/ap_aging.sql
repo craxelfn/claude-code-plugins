@@ -30,11 +30,13 @@ SELECT
   END                                                               AS aging_bucket,
   'invoice_date'                                                    AS bucket_basis,
   COUNT(*)                                                          AS open_invoice_count,
-  ROUND(SUM(o.open_amount), 2)                                      AS open_amount,
-  ROUND(SUM(o.invoice_amount), 2)                                   AS invoice_amount_total,
-  ROUND(SUM(o.amount_paid), 2)                                      AS amount_paid_total,
-  ROUND(SUM(CASE WHEN o.open_amount < 0 THEN o.open_amount ELSE 0 END), 2)
-                                                                    AS credit_open_amount,
+  CAST(ROUND(SUM(o.open_amount), 2)        AS DECIMAL(28, 2))       AS open_amount,
+  CAST(ROUND(SUM(o.invoice_amount), 2)     AS DECIMAL(28, 2))       AS invoice_amount_total,
+  CAST(ROUND(SUM(o.amount_paid), 2)        AS DECIMAL(28, 2))       AS amount_paid_total,
+  CAST(
+    ROUND(SUM(CASE WHEN o.open_amount < 0 THEN o.open_amount ELSE 0 END), 2)
+    AS DECIMAL(28, 2)
+  )                                                                 AS credit_open_amount,
   SUM(CASE WHEN o.open_amount < 0 THEN 1 ELSE 0 END)                AS credit_open_count,
   MIN(o.invoice_date)                                               AS oldest_invoice_date,
   MAX(DATEDIFF({{ snapshot_date }}, o.invoice_date))                AS max_days_outstanding,
