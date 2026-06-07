@@ -107,6 +107,19 @@ def test_import_dispatch_wheel_builder_does_not_pull_engine() -> None:
     assert not leaks, f"wheel_builder leaked: {leaks}"
 
 
+def test_import_dispatch_notebook_dispatch_does_not_pull_engine() -> None:
+    """Phase 4.1 / D3 — the neutral end-to-end helper that wraps the
+    AidpRestClient sequence. The bootstrap-specific orchestration lives
+    in ``commands/cluster_bootstrap_probe.py``; this helper stays
+    orchestrator-free per the boundary."""
+    loaded = _modules_loaded_by(
+        "from oracle_ai_data_platform_fusion_bundle.dispatch.notebook_dispatch "
+        "import dispatch_notebook_and_fetch_marker"
+    )
+    leaks = {m for m in loaded if any(m.startswith(p) for p in FORBIDDEN_PREFIXES)}
+    assert not leaks, f"notebook_dispatch leaked: {leaks}"
+
+
 def test_schema_imports_are_permitted() -> None:
     """Sanity check — the schema-level imports the dispatch package
     relies on are reachable from the same clean subprocess. If this test

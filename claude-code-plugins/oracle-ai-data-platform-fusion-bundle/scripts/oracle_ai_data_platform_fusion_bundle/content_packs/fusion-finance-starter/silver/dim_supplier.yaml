@@ -28,8 +28,8 @@ refresh:
 
 requiredColumns:
   erp_suppliers:
-    - SEGMENT1
-    - VENDORID
+    - $column.supplier_natural_key
+    - $column.vendor_id
     - PARTYID
     - BUSINESSRELATIONSHIP
     - _extract_ts

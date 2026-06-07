@@ -92,7 +92,49 @@ def validate(ctx: click.Context) -> None:
 )
 @click.option(
     "--skip-preonboarding-probes", is_flag=True,
-    help="Skip phase-1 BICC / AIDP probes; useful for --refresh after initial onboarding succeeded.",
+    help=(
+        "Skip phase-1 BICC / AIDP probes; useful for --refresh after initial "
+        "onboarding succeeded. INCOMPATIBLE with --dispatch-mode=cluster "
+        "(the aidp-rest probe is load-bearing in cluster mode — see "
+        "Phase 4.1 / AIDPF-2047 reason=conflicting_flags)."
+    ),
+)
+@click.option(
+    "--dispatch-mode",
+    "dispatch_mode",
+    type=click.Choice(["cluster", "local"]),
+    default="cluster",
+    show_default=True,
+    help=(
+        "Where the variation-phase bronze probe runs. 'cluster' "
+        "(default, Phase 4.1) dispatches a notebook to the AIDP cluster "
+        "where 3-part-namespace DESCRIBE works natively. 'local' uses "
+        "the laptop's in-process Spark session — backward-compat for "
+        "unit tests and laptop-POC bundles."
+    ),
+)
+@click.option(
+    "--cluster-key", "cluster_key", type=str, default=None,
+    help=(
+        "Cluster UUID for cluster-mode dispatch; overrides "
+        "EnvSpec.clusterKey. Env var: AIDP_FUSION_CLUSTER_KEY."
+    ),
+)
+@click.option(
+    "--cluster-name", "cluster_name", type=str, default=None,
+    help=(
+        "Cluster display name for cluster-mode dispatch; overrides "
+        "EnvSpec.clusterName. Env var: AIDP_FUSION_CLUSTER_NAME."
+    ),
+)
+@click.option(
+    "--workspace-dir", "workspace_dir", type=str, default=None,
+    help=(
+        "Server-side notebook upload root for cluster-mode dispatch; "
+        "overrides Defaults.workspaceDir. Env var: "
+        "AIDP_FUSION_WORKSPACE_DIR. When unset (and not in EnvSpec / "
+        "Defaults), derives '/Workspace/{workspace_root}/fusion-bundle-bootstrap'."
+    ),
 )
 @click.pass_context
 def bootstrap(
@@ -103,6 +145,10 @@ def bootstrap(
     non_interactive: bool,
     resolutions_path: Path | None,
     skip_preonboarding_probes: bool,
+    dispatch_mode: str,
+    cluster_key: str | None,
+    cluster_name: str | None,
+    workspace_dir: str | None,
 ) -> None:
     """Probe all prerequisites + run the variation-resolution phase when content-pack-enabled."""
     from .commands.bootstrap import bootstrap as bootstrap_impl
@@ -117,6 +163,10 @@ def bootstrap(
         non_interactive=non_interactive,
         resolutions_path=resolutions_path,
         skip_preonboarding_probes=skip_preonboarding_probes,
+        dispatch_mode=dispatch_mode,
+        cluster_key_override=cluster_key,
+        cluster_name_override=cluster_name,
+        workspace_dir_override=workspace_dir,
     ))
 
 

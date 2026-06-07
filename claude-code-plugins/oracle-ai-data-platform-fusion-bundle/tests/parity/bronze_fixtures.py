@@ -285,3 +285,100 @@ def all_fixtures() -> dict[str, list[dict[str, Any]]]:
         "gl_period_balances": gl_period_balances_rows(),
         "ap_invoices": ap_invoices_rows(),
     }
+
+
+def bronze_pyspark_schemas():
+    """Return Spark StructType per dataset. Phase 4's dual-runner
+    harness needs explicit schemas to create the seed DataFrames; the
+    Phase 3 harness inlined the same structs in its fixture module.
+
+    Lazy import of pyspark.sql.types so this module stays importable
+    when PySpark isn't installed (CI image without Spark).
+    """
+    from pyspark.sql.types import (  # type: ignore[import-not-found]
+        StructType, StructField, StringType, IntegerType, LongType,
+        DoubleType, TimestampType,
+    )
+    return {
+        "erp_suppliers": StructType([
+            StructField("SEGMENT1", StringType(), True),
+            StructField("VENDORID", LongType(), True),
+            StructField("PARTYID", LongType(), True),
+            StructField("PARENTVENDORID", LongType(), True),
+            StructField("PARENTPARTYID", LongType(), True),
+            StructField("AlternateNamePartyName", StringType(), True),
+            StructField("AliasPartyName", StringType(), True),
+            StructField("TaxReportingName", StringType(), True),
+            StructField("BUSINESSRELATIONSHIP", StringType(), True),
+            StructField("ENDDATEACTIVE", TimestampType(), True),
+            StructField("CREATIONDATE", TimestampType(), True),
+            StructField("LASTUPDATEDATE", TimestampType(), True),
+            StructField("_extract_ts", TimestampType(), True),
+            StructField("_source_pvo", StringType(), True),
+            StructField("_run_id", StringType(), True),
+            StructField("_watermark_used", TimestampType(), True),
+        ]),
+        "gl_coa": StructType([
+            StructField("CodeCombinationCodeCombinationId", LongType(), True),
+            StructField("CodeCombinationChartOfAccountsId", LongType(), True),
+            # Segments 1-30: Fusion COA defines up to 30 positional
+            # segments. The fixture populates 1-6 with real values via
+            # ``gl_coa_rows()``; segments 7-30 are absent from each
+            # row dict and so land as NULL in the DataFrame (Spark
+            # createDataFrame fills missing keys with None).
+            # Phase 4 needs the full 30-segment schema because the
+            # legacy backend's ``dim_account.build`` defaults to
+            # ``n_segments=MAX_FUSION_SEGMENTS=30`` and references
+            # Segment1..Segment30 in the generated SQL. Phase 3's
+            # direct-SQL harness explicitly overrode to n_segments=6;
+            # the orchestrator-driven Phase 4 harness can't.
+            *[
+                StructField(f"CodeCombinationSegment{i}", StringType(), True)
+                for i in range(1, 31)
+            ],
+            StructField("CodeCombinationAccountType", StringType(), True),
+            StructField("CodeCombinationEnabledFlag", StringType(), True),
+            StructField("CodeCombinationSummaryFlag", StringType(), True),
+            StructField("CodeCombinationDetailPostingAllowedFlag", StringType(), True),
+            StructField("CodeCombinationFinancialCategory", StringType(), True),
+            StructField("CodeCombinationStartDateActive", TimestampType(), True),
+            StructField("CodeCombinationEndDateActive", TimestampType(), True),
+            StructField("_extract_ts", TimestampType(), True),
+            StructField("_source_pvo", StringType(), True),
+            StructField("_run_id", StringType(), True),
+            StructField("_watermark_used", TimestampType(), True),
+        ]),
+        "gl_period_balances": StructType([
+            StructField("BalanceLedgerId", LongType(), True),
+            StructField("BalanceCodeCombinationId", LongType(), True),
+            StructField("BalancePeriodYear", IntegerType(), True),
+            StructField("BalancePeriodNum", IntegerType(), True),
+            StructField("BalancePeriodName", StringType(), True),
+            StructField("BalanceCurrencyCode", StringType(), True),
+            StructField("BalanceActualFlag", StringType(), True),
+            StructField("BalanceTranslatedFlag", StringType(), True),
+            StructField("BalanceBeginBalanceDr", DoubleType(), True),
+            StructField("BalanceBeginBalanceCr", DoubleType(), True),
+            StructField("BalancePeriodNetDr", DoubleType(), True),
+            StructField("BalancePeriodNetCr", DoubleType(), True),
+            StructField("_extract_ts", TimestampType(), True),
+            StructField("_source_pvo", StringType(), True),
+            StructField("_run_id", StringType(), True),
+            StructField("_watermark_used", TimestampType(), True),
+        ]),
+        "ap_invoices": StructType([
+            StructField("ApInvoicesVendorId", LongType(), True),
+            StructField("ApInvoicesInvoiceCurrencyCode", StringType(), True),
+            StructField("ApInvoicesInvoiceAmount", DoubleType(), True),
+            StructField("ApInvoicesAmountPaid", DoubleType(), True),
+            StructField("ApInvoicesInvoiceDate", TimestampType(), True),
+            StructField("ApInvoicesCancelledDate", TimestampType(), True),
+            StructField("ApInvoicesApprovalStatus", StringType(), True),
+            StructField("ApInvoicesTermsDate", TimestampType(), True),
+            StructField("ApInvoicesDueDate", TimestampType(), True),
+            StructField("_extract_ts", TimestampType(), True),
+            StructField("_source_pvo", StringType(), True),
+            StructField("_run_id", StringType(), True),
+            StructField("_watermark_used", TimestampType(), True),
+        ]),
+    }

@@ -39,12 +39,15 @@ SELECT
   b.begin_balance_cr                                                AS begin_balance_cr,
   b.period_net_dr                                                   AS period_net_dr,
   b.period_net_cr                                                   AS period_net_cr,
-  ROUND(
-      COALESCE(b.begin_balance_dr, 0)
-    - COALESCE(b.begin_balance_cr, 0)
-    + COALESCE(b.period_net_dr,    0)
-    - COALESCE(b.period_net_cr,    0),
-    2
+  CAST(
+    ROUND(
+        COALESCE(b.begin_balance_dr, 0)
+      - COALESCE(b.begin_balance_cr, 0)
+      + COALESCE(b.period_net_dr,    0)
+      - COALESCE(b.period_net_cr,    0),
+      2
+    )
+    AS DECIMAL(28, 2)
   )                                                                 AS closing_balance,
   b.bronze_extract_ts                                               AS bronze_extract_ts,
   current_timestamp()                                               AS gold_built_at,

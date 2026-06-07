@@ -242,3 +242,123 @@ class TestRunIdResolution:
             tmp_path / ".aidp" / "diagnostics", "20260601T120000Z-aaa"
         )
         assert result.run_id == "20260601T120000Z-aaa"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1 / D3 — cluster-dispatch artifacts (AIDPF-2048 / 2049)
+# are recognised + skipped, not parsed into skill state
+# ---------------------------------------------------------------------------
+
+
+class TestPhase41ClusterDispatchScope:
+    """The skill exists to recover from variation-point failures
+    (2010/2011) and surface drift remediation (2012). Cluster-dispatch
+    failures (2048/2049) are operator-actionable infrastructure issues
+    — the skill recognises them but refuses to draft, with a
+    structured hand-off rather than the wrong-flow remediation that
+    would come from misclassifying them as ``malformed_paths``.
+    """
+
+    def _write_2048(self, tmp_path: Path, run_id: str = "run-cluster") -> Path:
+        from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+            ClusterDispatchDiagnosticV1,
+            write_cluster_dispatch_diagnostic,
+        )
+
+        artifact = ClusterDispatchDiagnosticV1(
+            runId=run_id,
+            tenant="saasfademo1",
+            errorCode="AIDPF-2048",
+            errorMessage="upload failed",
+            generatedAt=_TS,
+            clusterDispatch={
+                "failedStep": "upload_notebook",
+                "causeType": "DispatchUploadError",
+                "causeMessage": "HTTP 500",
+            },
+        )
+        return write_cluster_dispatch_diagnostic(tmp_path, run_id, artifact)
+
+    def _write_2049(self, tmp_path: Path, run_id: str = "run-cluster") -> Path:
+        from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+            ClusterMarkerDiagnosticV1,
+            write_cluster_marker_diagnostic,
+        )
+
+        artifact = ClusterMarkerDiagnosticV1(
+            runId=run_id,
+            tenant="saasfademo1",
+            errorCode="AIDPF-2049",
+            errorMessage="envelope missing",
+            generatedAt=_TS,
+            clusterMarker={
+                "kind": "envelope_missing",
+                "stdoutExcerpt": "no marker here\n",
+                "stdoutLogPath": "cluster_stdout.log",
+            },
+        )
+        return write_cluster_marker_diagnostic(
+            tmp_path, run_id, artifact, stdout_full="no marker here\n"
+        )
+
+    def test_2048_lands_in_cluster_dispatch_skipped_paths(
+        self, tmp_path: Path
+    ) -> None:
+        path = self._write_2048(tmp_path)
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-cluster")
+        # Recognised + skipped, NOT misclassified as malformed.
+        assert path in result.cluster_dispatch_skipped_paths
+        assert path not in result.malformed_paths
+        assert result.variation_failures == []
+        assert result.has_cluster_dispatch_failures is True
+
+    def test_2049_lands_in_cluster_dispatch_skipped_paths(
+        self, tmp_path: Path
+    ) -> None:
+        path = self._write_2049(tmp_path)
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-cluster")
+        assert path in result.cluster_dispatch_skipped_paths
+        # The companion `cluster_stdout.log` lives in the same dir
+        # but isn't a *.json artifact — the reader's glob excludes it.
+
+    def test_2048_present_blocks_can_proceed(self, tmp_path: Path) -> None:
+        # Even with a real 2010 failure ready to draft, a 2048 in the
+        # same dir blocks the skill — operator must fix the dispatch
+        # issue and re-run bootstrap before the skill is useful.
+        write_variation_diagnostic(
+            tmp_path, "run-cluster", _variation_artifact(name="x")
+        )
+        self._write_2048(tmp_path)
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-cluster")
+        assert result.has_cluster_dispatch_failures is True
+        assert result.can_proceed() is False
+
+    def test_2048_alone_makes_dir_non_empty(self, tmp_path: Path) -> None:
+        # ``is_empty`` must return False so the skill surfaces the
+        # cluster-dispatch failure (and its remediation hint) rather
+        # than the "nothing to draft" no-op message.
+        self._write_2048(tmp_path)
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-cluster")
+        assert result.is_empty is False
+
+    def test_unknown_code_still_lands_in_malformed(self, tmp_path: Path) -> None:
+        # Regression check — the new scope branch is additive; codes
+        # that aren't in either the parse set OR the cluster-dispatch
+        # set still land in malformed_paths (today's existing
+        # behaviour).
+        run_id = "run-unknown"
+        from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+            _atomic_write_json,
+            _diagnostics_dir,
+        )
+
+        diag_dir = _diagnostics_dir(tmp_path, run_id)
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        unknown = diag_dir / "AIDPF-9999.json"
+        _atomic_write_json(
+            unknown,
+            json.dumps({"schemaVersion": 1, "errorCode": "AIDPF-9999"}),
+        )
+        result = read_run(tmp_path / ".aidp" / "diagnostics", run_id)
+        assert unknown in result.malformed_paths
+        assert result.cluster_dispatch_skipped_paths == []

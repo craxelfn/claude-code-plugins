@@ -1,0 +1,100 @@
+# Phase 4 Step 6 — paired bronze-schema snapshot for parity-tenant-b.
+#
+# Mirrors the four-dataset bronze shape exercised by
+# `bronze_fixtures_tenant_b.py`. The bronzeSchemaFingerprint MUST equal
+# the profile's (`finance-alt-cancelled-flag.yaml`); mismatch triggers
+# the desynced graceful-degrade branch and weakens Step 7's
+# `datasetDeltas` assertions.
+#
+# Synthetic snapshot — does NOT reflect a live tenant pod. The schema
+# matches the bronze fixture rows exactly so runtime preflight resolves
+# fingerprint equality (no spurious AIDPF-2012 during the multi-tenant
+# parity test).
+schemaVersion: 1
+tenant: parity-tenant-b
+pinnedAt: 2026-06-05T00:00:00+00:00
+bronzeSchemaFingerprint: "sha256:placeholder-parity-tenant-b-2026-06-05"
+
+datasets:
+  - datasetId: erp_suppliers
+    columns:
+      - {name: SEGMENT1, type: string}
+      - {name: VENDORID, type: bigint}
+      - {name: PARTYID, type: bigint}
+      - {name: PARENTVENDORID, type: bigint}
+      - {name: PARENTPARTYID, type: bigint}
+      - {name: AlternateNamePartyName, type: string}
+      - {name: AliasPartyName, type: string}
+      - {name: TaxReportingName, type: string}
+      - {name: BUSINESSRELATIONSHIP, type: string}
+      - {name: ENDDATEACTIVE, type: timestamp}
+      - {name: CREATIONDATE, type: timestamp}
+      - {name: LASTUPDATEDATE, type: timestamp}
+      - {name: _extract_ts, type: timestamp}
+      - {name: _source_pvo, type: string}
+      - {name: _run_id, type: string}
+      - {name: _watermark_used, type: timestamp}
+
+  - datasetId: gl_coa
+    columns:
+      - {name: CodeCombinationCodeCombinationId, type: bigint}
+      - {name: CodeCombinationChartOfAccountsId, type: bigint}
+      - {name: CodeCombinationSegment1, type: string}
+      - {name: CodeCombinationSegment2, type: string}
+      - {name: CodeCombinationSegment3, type: string}
+      - {name: CodeCombinationSegment4, type: string}
+      - {name: CodeCombinationSegment5, type: string}
+      - {name: CodeCombinationSegment6, type: string}
+      - {name: CodeCombinationAccountType, type: string}
+      - {name: CodeCombinationEnabledFlag, type: string}
+      - {name: CodeCombinationSummaryFlag, type: string}
+      - {name: CodeCombinationDetailPostingAllowedFlag, type: string}
+      - {name: CodeCombinationFinancialCategory, type: string}
+      - {name: CodeCombinationStartDateActive, type: timestamp}
+      - {name: CodeCombinationEndDateActive, type: timestamp}
+      - {name: _extract_ts, type: timestamp}
+      - {name: _source_pvo, type: string}
+      - {name: _run_id, type: string}
+      - {name: _watermark_used, type: timestamp}
+
+  - datasetId: gl_period_balances
+    columns:
+      - {name: BalanceLedgerId, type: bigint}
+      - {name: BalanceCodeCombinationId, type: bigint}
+      - {name: BalancePeriodYear, type: int}
+      - {name: BalancePeriodNum, type: int}
+      - {name: BalancePeriodName, type: string}
+      - {name: BalanceCurrencyCode, type: string}
+      - {name: BalanceActualFlag, type: string}
+      - {name: BalanceTranslatedFlag, type: string}
+      - {name: BalanceBeginBalanceDr, type: double}
+      - {name: BalanceBeginBalanceCr, type: double}
+      - {name: BalancePeriodNetDr, type: double}
+      - {name: BalancePeriodNetCr, type: double}
+      - {name: _extract_ts, type: timestamp}
+      - {name: _source_pvo, type: string}
+      - {name: _run_id, type: string}
+      - {name: _watermark_used, type: timestamp}
+
+  - datasetId: ap_invoices
+    columns:
+      # Phase 4 Step 6 — alternate cancelled-status variant uses
+      # ApInvoicesCancelledFlag (NOT ...CancelledDate). The flag IS
+      # listed in this snapshot so the semantic-variant fragment
+      # resolves cleanly when SQL renders; the date column is also
+      # listed for shape continuity with finance-default but goes
+      # unused by the cancelled_flag semantic fragment.
+      - {name: ApInvoicesVendorId, type: bigint}
+      - {name: ApInvoicesInvoiceCurrencyCode, type: string}
+      - {name: ApInvoicesInvoiceAmount, type: double}
+      - {name: ApInvoicesAmountPaid, type: double}
+      - {name: ApInvoicesInvoiceDate, type: timestamp}
+      - {name: ApInvoicesCancelledDate, type: timestamp}
+      - {name: ApInvoicesCancelledFlag, type: string}
+      - {name: ApInvoicesApprovalStatus, type: string}
+      - {name: ApInvoicesTermsDate, type: timestamp}
+      - {name: ApInvoicesDueDate, type: timestamp}
+      - {name: _extract_ts, type: timestamp}
+      - {name: _source_pvo, type: string}
+      - {name: _run_id, type: string}
+      - {name: _watermark_used, type: timestamp}

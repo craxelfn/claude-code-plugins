@@ -19,10 +19,14 @@ SELECT
   ds.business_relationship                                          AS business_relationship,
   inv.ApInvoicesApprovalStatus                                      AS approval_status,
   COUNT(*)                                                          AS invoice_count,
-  ROUND(SUM(COALESCE(CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(20, 2)), 0)), 2)
-                                                                    AS total_invoice_amount,
-  ROUND(SUM(COALESCE(CAST(inv.ApInvoicesAmountPaid    AS DECIMAL(20, 2)), 0)), 2)
-                                                                    AS total_paid,
+  CAST(
+    ROUND(SUM(COALESCE(CAST(inv.ApInvoicesInvoiceAmount AS DECIMAL(20, 2)), 0)), 2)
+    AS DECIMAL(20, 2)
+  )                                                                 AS total_invoice_amount,
+  CAST(
+    ROUND(SUM(COALESCE(CAST(inv.ApInvoicesAmountPaid    AS DECIMAL(20, 2)), 0)), 2)
+    AS DECIMAL(20, 2)
+  )                                                                 AS total_paid,
   MAX(inv.invoice_date)                                             AS last_invoice_date,
   MAX(inv.bronze_extract_ts)                                        AS bronze_extract_ts,
   current_timestamp()                                               AS gold_built_at,

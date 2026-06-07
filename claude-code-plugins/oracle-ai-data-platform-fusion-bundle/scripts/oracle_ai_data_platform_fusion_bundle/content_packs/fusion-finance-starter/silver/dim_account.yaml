@@ -25,9 +25,9 @@ refresh:
 requiredColumns:
   gl_coa:
     - CodeCombinationCodeCombinationId
-    - CodeCombinationSegment1
-    - CodeCombinationSegment2
-    - CodeCombinationSegment3
+    - $column.coa_balancing_segment
+    - $column.coa_cost_center_segment
+    - $column.coa_natural_account_segment
     - _extract_ts
     - _source_pvo
 
@@ -124,11 +124,11 @@ outputSchema:
       nullable: true
       pii: none
     - name: start_date_active
-      type: timestamp
+      type: date
       nullable: true
       pii: none
     - name: end_date_active
-      type: timestamp
+      type: date
       nullable: true
       pii: none
     - name: bronze_extract_ts

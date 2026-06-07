@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import yaml
 from rich.console import Console
@@ -116,7 +116,8 @@ class VariationPhaseOptions:
     non_interactive: bool = False
     resolutions_path: Path | None = None
     spark_session: Any | None = None
-    """Caller-provided Spark session. ``None`` → acquire local-mode session."""
+    """Caller-provided Spark session. ``None`` → acquire local-mode session.
+    Only consulted when ``dispatch_mode == "local"``."""
 
     spark_factory: Callable[[], Any] | None = None
     """Test injection — replace local-Spark acquisition. The CLI never sets
@@ -126,6 +127,43 @@ class VariationPhaseOptions:
     """Test injection for the interactive y/N confirmation prompt during
     ``--refresh`` when a pinned value would change. ``None`` falls back
     to stdlib ``input()``. Tests pass a lambda to drive accept/decline."""
+
+    # --- Phase 4.1 / D3 — cluster-side bootstrap dispatcher knobs ---
+    dispatch_mode: Literal["cluster", "local"] = "local"
+    """``"local"`` (default in this dataclass to keep existing test
+    behaviour) runs today's in-process Spark + walker path.
+    ``"cluster"`` dispatches a notebook to the AIDP cluster via
+    :func:`commands.cluster_bootstrap_probe.dispatch_cluster_probe` and
+    converts the returned marker into the same internal shape — the
+    resolution + write code below is identical for both modes."""
+
+    dispatch_config: Any | None = None
+    """When ``dispatch_mode == "cluster"``, the resolved
+    :class:`commands.bootstrap.ResolvedClusterDispatchConfig` carrying
+    cluster coords (post-CLI-override). ``None`` is a programmer error
+    in cluster mode and surfaces as a ``ValueError`` from
+    :func:`_acquire_probe_result`."""
+
+    env: Any | None = None
+    """When ``dispatch_mode == "cluster"``, the resolved
+    :class:`schema.bundle.EnvSpec` carrying OCI profile + AIDP id /
+    region. Same null contract as ``dispatch_config``."""
+
+
+@dataclass(frozen=True)
+class _ProbeResult:
+    """Internal payload threaded between :func:`_acquire_probe_result`
+    and the rest of :func:`run_variation_phase`.
+
+    Identical data shape across local and cluster modes — the resolve
+    + write code below treats both sources uniformly. Cluster mode
+    rehydrates this from a :class:`ClusterProbeMarker` (the
+    laptop-only conversion lives in :func:`_probe_result_from_marker`).
+    """
+
+    observed: dict[str, list[ColumnInfo]]
+    fingerprint: str
+    walker_results: dict[tuple[str, str], CandidateWalkResult]
 
 
 @dataclass
@@ -239,22 +277,63 @@ def run_variation_phase(
     # the entry root to detect skill-authored overlays.
     entry_overlay_pack = _load_entry_overlay_provenance(pack_root)
 
-    dataset_ids = _bronze_dataset_ids(pack)
-    catalog = bundle.aidp.catalog
-    bronze_schema = bundle.aidp.bronze_schema
-
-    spark = _resolve_spark(options)
     try:
-        observed = describe_bronze(
-            spark,
-            catalog=catalog,
-            bronze_schema=bronze_schema,
-            dataset_ids=dataset_ids,
+        probe_result = _acquire_probe_result(
+            bundle=bundle,
+            bundle_path=bundle_path,
+            pack=pack,
+            tenant=tenant_name,
+            options=options,
+            console=console,
         )
-    finally:
-        _close_spark_if_owned(spark, options)
+    except Exception as exc:  # noqa: BLE001 — typed by class below
+        # Phase 4.1 / D3 — translate cluster-dispatch failures into
+        # diagnostic artifacts + a non-zero VariationPhaseOutcome.
+        # Local imports keep the cluster-side module out of the
+        # local-mode import graph.
+        from .cluster_bootstrap_probe import (
+            ClusterDispatchError,
+            ClusterMarkerError,
+        )
 
-    fingerprint = compute_bronze_fingerprint(observed=observed)
+        if isinstance(exc, ClusterDispatchError):
+            diag_path = _write_cluster_dispatch_diagnostic(
+                workdir, run_id, tenant_name, exc.failure_context
+            )
+            console.print(
+                f"[red]AIDPF-2048: cluster dispatch failed at "
+                f"{exc.failure_context.failed_step}. "
+                f"Diagnostic at {diag_path}.[/red]"
+            )
+            return VariationPhaseOutcome(
+                exit_code=1,
+                diagnostic_paths=[diag_path],
+                summary=(
+                    f"AIDPF-2048 cluster dispatch failed "
+                    f"({exc.failure_context.failed_step})"
+                ),
+            )
+        if isinstance(exc, ClusterMarkerError):
+            diag_path = _write_cluster_marker_diagnostic(
+                workdir, run_id, tenant_name, exc
+            )
+            console.print(
+                f"[red]AIDPF-2049: cluster marker invalid "
+                f"({exc.failure_context.kind}). "
+                f"Diagnostic at {diag_path}.[/red]"
+            )
+            return VariationPhaseOutcome(
+                exit_code=1,
+                diagnostic_paths=[diag_path],
+                summary=(
+                    f"AIDPF-2049 cluster marker invalid "
+                    f"({exc.failure_context.kind})"
+                ),
+            )
+        raise
+
+    observed = probe_result.observed
+    fingerprint = probe_result.fingerprint
 
     # --- --refresh drift detection (Step 9) ---
     profile_path = resolve_profile_path(bundle_path, tenant_name)
@@ -305,17 +384,10 @@ def run_variation_phase(
                 ),
             )
 
-    # --- Steps 6/7: walk every variation point ---
-    walker_results: dict[tuple[str, str], CandidateWalkResult] = {}
-    column_alias_specs = pack.pack.column_aliases
-    semantic_variant_specs = pack.pack.semantic_variants
-
-    for name, spec in column_alias_specs.items():
-        cols = _columns_for_applies_to(observed, spec.appliesTo)
-        walker_results[(name, "columnAliases")] = walk_column_alias(spec, cols)
-    for name, spec in semantic_variant_specs.items():
-        cols = _columns_for_applies_to(observed, spec.appliesTo)
-        walker_results[(name, "semanticVariants")] = walk_semantic_variant(spec, cols)
+    # --- Steps 6/7: walker results sourced from the probe (local
+    # mode runs the walkers in-process; cluster mode receives them
+    # in the marker payload).
+    walker_results = probe_result.walker_results
 
     # --- Step 8: aggregate failures, write one artifact per failing VP ---
     failure_paths: list[Path] = []
@@ -979,6 +1051,204 @@ def _snapshot_needs_repair(
         # snapshot. Surface it as a repair so the next read works.
         return "snapshot content does not match live fingerprint"
     return None
+
+
+def _write_cluster_dispatch_diagnostic(
+    workdir: Path, run_id: str, tenant: str, failure_context
+) -> Path:
+    """Translate a :class:`ClusterDispatchFailureContext` into an
+    ``AIDPF-2048.json`` artifact via the canonical writer.
+
+    Lives here (not inside `cluster_bootstrap_probe.py`) so the
+    `dispatch/`-touching module stays decoupled from the artifact
+    contract; the artifact writer + Pydantic models live in `schema/`
+    where every diagnostic surface is centralised."""
+    from ..schema.diagnostic_artifact import (
+        ClusterDispatchDiagnosticV1,
+        ClusterDispatchFailure,
+        write_cluster_dispatch_diagnostic,
+    )
+
+    artifact = ClusterDispatchDiagnosticV1(
+        runId=run_id,
+        tenant=tenant,
+        errorCode="AIDPF-2048",
+        errorMessage=(
+            f"cluster dispatch failed at {failure_context.failed_step}: "
+            f"{failure_context.cause_message}"
+        ),
+        generatedAt=_now(),
+        clusterDispatch=ClusterDispatchFailure(
+            failedStep=failure_context.failed_step,
+            causeType=failure_context.cause_type,
+            causeMessage=failure_context.cause_message,
+            workspacePath=failure_context.workspace_path,
+            clusterKey=failure_context.cluster_key,
+            runState=failure_context.run_state,
+            pollElapsedSeconds=failure_context.poll_elapsed_seconds,
+        ),
+    )
+    return write_cluster_dispatch_diagnostic(workdir, run_id, artifact)
+
+
+def _write_cluster_marker_diagnostic(
+    workdir: Path, run_id: str, tenant: str, exc
+) -> Path:
+    """Translate a :class:`ClusterMarkerError` into an
+    ``AIDPF-2049.json`` artifact + the companion ``cluster_stdout.log``
+    via the canonical writer."""
+    from ..schema.diagnostic_artifact import (
+        ClusterMarkerDiagnosticV1,
+        ClusterMarkerFailure,
+        write_cluster_marker_diagnostic,
+    )
+
+    ctx = exc.failure_context
+    artifact = ClusterMarkerDiagnosticV1(
+        runId=run_id,
+        tenant=tenant,
+        errorCode="AIDPF-2049",
+        errorMessage=f"cluster marker invalid ({ctx.kind})",
+        generatedAt=_now(),
+        clusterMarker=ClusterMarkerFailure(
+            kind=ctx.kind,
+            clusterErrorType=ctx.cluster_error_type,
+            clusterErrorMessage=ctx.cluster_error_message,
+            clusterTraceback=ctx.cluster_traceback,
+            validationErrors=list(ctx.validation_errors),
+            stdoutExcerpt=ctx.stdout_excerpt,
+            stdoutLogPath="cluster_stdout.log",
+        ),
+    )
+    return write_cluster_marker_diagnostic(
+        workdir,
+        run_id,
+        artifact,
+        stdout_full=ctx.stdout_full,
+    )
+
+
+def _acquire_probe_result(
+    *,
+    bundle: Bundle,
+    bundle_path: Path,
+    pack: ResolvedPack,
+    tenant: str,
+    options: VariationPhaseOptions,
+    console: Console,
+) -> _ProbeResult:
+    """Run the bronze probe + variation walkers; return the shared
+    :class:`_ProbeResult` payload.
+
+    Local mode (the default + every test that doesn't opt in):
+    today's path — acquire local Spark, ``describe_bronze``,
+    ``compute_bronze_fingerprint``, walk each variation point
+    in-process.
+
+    Cluster mode (Phase 4.1 / D3): dispatch a notebook to the AIDP
+    cluster via
+    :func:`commands.cluster_bootstrap_probe.dispatch_cluster_probe`,
+    convert the returned :class:`ClusterProbeMarker` into the same
+    ``_ProbeResult`` shape. The probe never touches a local Spark
+    session in cluster mode.
+    """
+    if options.dispatch_mode == "cluster":
+        if options.dispatch_config is None or options.env is None:
+            raise ValueError(
+                "VariationPhaseOptions.dispatch_mode='cluster' requires "
+                "both `dispatch_config` and `env` to be set. The CLI "
+                "(commands/bootstrap.py) populates both; tests calling "
+                "run_variation_phase directly must do the same or use "
+                "dispatch_mode='local'."
+            )
+        # Local import to keep the boundary direction explicit — this
+        # module pulls in the cluster-dispatch path only when actually
+        # entering cluster mode. Local-mode test runs stay free of the
+        # dispatch import (and its transitive REST / oci deps).
+        from .cluster_bootstrap_probe import dispatch_cluster_probe
+
+        marker = dispatch_cluster_probe(
+            env=options.env,
+            bundle=bundle,
+            bundle_path=bundle_path,
+            pack=pack,
+            dispatch_config=options.dispatch_config,
+            tenant=tenant,
+            console=console,
+        )
+        return _probe_result_from_marker(marker)
+
+    # ---- Local mode (today's path) ----
+    dataset_ids = _bronze_dataset_ids(pack)
+    catalog = bundle.aidp.catalog
+    bronze_schema = bundle.aidp.bronze_schema
+
+    spark = _resolve_spark(options)
+    try:
+        observed = describe_bronze(
+            spark,
+            catalog=catalog,
+            bronze_schema=bronze_schema,
+            dataset_ids=dataset_ids,
+        )
+    finally:
+        _close_spark_if_owned(spark, options)
+
+    fingerprint = compute_bronze_fingerprint(observed=observed)
+
+    walker_results: dict[tuple[str, str], CandidateWalkResult] = {}
+    for name, spec in pack.pack.column_aliases.items():
+        cols = _columns_for_applies_to(observed, spec.appliesTo)
+        walker_results[(name, "columnAliases")] = walk_column_alias(spec, cols)
+    for name, spec in pack.pack.semantic_variants.items():
+        cols = _columns_for_applies_to(observed, spec.appliesTo)
+        walker_results[(name, "semanticVariants")] = walk_semantic_variant(spec, cols)
+
+    return _ProbeResult(
+        observed=observed,
+        fingerprint=fingerprint,
+        walker_results=walker_results,
+    )
+
+
+def _probe_result_from_marker(marker) -> _ProbeResult:
+    """Convert a :class:`schema.cluster_probe_marker.ClusterProbeMarker`
+    back to the internal :class:`_ProbeResult` shape.
+
+    Per-walker-outcome conversion: the cluster's
+    :class:`WalkerOutcomeMarker` Pydantic models translate to the
+    laptop's :class:`AutoResolved` / :class:`MultiMatch` /
+    :class:`NoMatch` dataclasses (same fields, just JSON-friendly
+    wrappers stripped).
+    """
+    observed: dict[str, list[ColumnInfo]] = {
+        ds: [c.to_column_info() for c in cols]
+        for ds, cols in marker.observed_schema.items()
+    }
+    walker_results: dict[tuple[str, str], CandidateWalkResult] = {}
+    for entry in marker.walker_results:
+        key = (entry.name, entry.kind)
+        if entry.outcome == "auto_resolved":
+            assert entry.chosen is not None  # envelope validator guarantees this
+            walker_results[key] = AutoResolved(chosen=entry.chosen)
+        elif entry.outcome == "multi_match":
+            walker_results[key] = MultiMatch(matched=list(entry.matched))
+        else:  # no_match
+            walker_results[key] = NoMatch(
+                candidates_tried=[
+                    CandidateAttempt(
+                        candidate=a.candidate,
+                        outcome=a.outcome,
+                        detail=a.detail,
+                    )
+                    for a in entry.candidates_tried
+                ]
+            )
+    return _ProbeResult(
+        observed=observed,
+        fingerprint=marker.bronze_fingerprint,
+        walker_results=walker_results,
+    )
 
 
 def _resolve_spark(options: VariationPhaseOptions):

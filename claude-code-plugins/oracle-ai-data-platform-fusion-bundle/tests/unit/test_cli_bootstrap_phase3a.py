@@ -131,6 +131,11 @@ class TestClickEntryPoint:
         assert "--non-interactive" in result.output
         assert "--resolutions" in result.output
         assert "--skip-preonboarding-probes" in result.output
+        # Phase 4.1 / D3 — cluster-dispatch flags ship in --help.
+        assert "--dispatch-mode" in result.output
+        assert "--cluster-key" in result.output
+        assert "--cluster-name" in result.output
+        assert "--workspace-dir" in result.output
 
     def test_happy_path_writes_profile_and_evidence(
         self,
@@ -152,6 +157,11 @@ class TestClickEntryPoint:
                     "--bundle", str(bundle),
                     "--config", str(config),
                     "bootstrap",
+                    # Phase 4.1: explicit opt-in to laptop-Spark mode
+                    # — the CLI default flipped to `--dispatch-mode=cluster`
+                    # per Decision 2; this test uses a mocked local Spark
+                    # session, so it stays on the local path.
+                    "--dispatch-mode", "local",
                     "--skip-preonboarding-probes",
                     "--non-interactive",
                 ],
@@ -185,6 +195,11 @@ class TestClickEntryPoint:
                     "--bundle", str(bundle),
                     "--config", str(config),
                     "bootstrap",
+                    # Phase 4.1: explicit opt-in to laptop-Spark mode
+                    # — the CLI default flipped to `--dispatch-mode=cluster`
+                    # per Decision 2; this test uses a mocked local Spark
+                    # session, so it stays on the local path.
+                    "--dispatch-mode", "local",
                     "--skip-preonboarding-probes",
                     "--non-interactive",
                 ],
