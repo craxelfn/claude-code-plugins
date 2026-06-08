@@ -49,6 +49,7 @@ from .errors import OrchestratorConfigError
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema.bronze_schema_snapshot import BronzeSchemaSnapshotV1
+    from ..schema.tenant_profile import TenantProfile
     from .content_pack import ResolvedPack
 
 
@@ -85,6 +86,7 @@ class FusionPvoDriftError(OrchestratorConfigError):
 def _required_columns_union(
     in_scope_silver_gold_nodes: list[Any],
     resolved_pack: "ResolvedPack",
+    tenant_profile: "TenantProfile | None",
 ) -> dict[str, set[str]]:
     """Same algorithm as ``bronze_readiness._compute_required_columns``
     but re-implemented locally to keep the two gates independent and
@@ -92,14 +94,30 @@ def _required_columns_union(
 
     Walks ``dependsOn.silver`` transitively so a gold node depending on
     a silver dim picks up the dim's bronze deps too.
+
+    ``$column.<key>`` references in ``requiredColumns`` are resolved
+    against the pack's ``columnAliases`` + the tenant profile's
+    ``resolved.column`` map BEFORE union. Without this, the live-PVO
+    diff at :func:`assert_fusion_pvo_compatibility` compares literal
+    alias-reference strings against the physical Fusion column names
+    and false-fails any pack that uses the alias syntax (the shipped
+    starter pack does).
     """
+    from .required_column_resolver import resolve_required_column_entries
+
     required_columns: dict[str, set[str]] = defaultdict(set)
     visited_silver: set[str] = set()
 
     def _add_node(node: Any) -> None:
         node_required = getattr(node, "required_columns", None) or {}
         for src_id, cols in node_required.items():
-            required_columns[src_id].update(cols)
+            required_columns[src_id].update(
+                resolve_required_column_entries(
+                    cols,
+                    resolved_pack=resolved_pack,
+                    tenant_profile=tenant_profile,
+                )
+            )
         inc = node.refresh.incremental if node.refresh else None
         if inc is not None and inc.watermark is not None:
             wm_source = inc.watermark.source
@@ -158,6 +176,7 @@ def assert_fusion_pvo_compatibility(
     schema_snapshot: "BronzeSchemaSnapshotV1 | None",
     run_id: str,
     diagnostics_root: Path | None = None,
+    tenant_profile: "TenantProfile | None" = None,
 ) -> None:
     """Compare live Fusion PVO schemas against pack + snapshot expectations.
 
@@ -198,7 +217,9 @@ def assert_fusion_pvo_compatibility(
     required: dict[str, set[str]] = {}
     if resolved_pack is not None and cp_filter is not None:
         in_scope_nodes = _resolve_in_scope_silver_gold(resolved_pack, cp_filter)
-        required = _required_columns_union(in_scope_nodes, resolved_pack)
+        required = _required_columns_union(
+            in_scope_nodes, resolved_pack, tenant_profile,
+        )
 
     # Snapshot columns by dataset.
     snapshot_by_ds = _snapshot_columns_by_dataset(schema_snapshot)

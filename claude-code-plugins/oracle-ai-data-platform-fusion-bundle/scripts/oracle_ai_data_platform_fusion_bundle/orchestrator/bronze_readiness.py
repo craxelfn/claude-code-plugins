@@ -41,6 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from ..config.paths import TablePaths
     from ..schema.medallion_pack import NodeYaml
+    from ..schema.tenant_profile import TenantProfile
     from .content_pack import ResolvedPack
 
 
@@ -142,20 +143,42 @@ def _walk_transitive_bronze_deps(
 def _compute_required_columns(
     in_scope_nodes: list["NodeYaml"],
     resolved_pack: "ResolvedPack",
+    tenant_profile: "TenantProfile | None",
 ) -> dict[str, set[str]]:
     """Union the per-bronze required-column declarations across every
     in-scope silver/gold node AND every silver dim they transitively
     depend on. Also folds in each node's ``watermark.column`` (when
     the watermark source matches the bronze id) — operators sometimes
     list joined cols in ``requiredColumns`` but forget the lineage col.
+
+    ``$column.<key>`` references in ``requiredColumns`` are resolved
+    against the pack's ``columnAliases`` + the tenant profile's
+    ``resolved.column`` map BEFORE adding to the required set. Without
+    this, the live-column comparison at :func:`assert_bronze_readiness`
+    would compare literal alias-reference strings against physical
+    Fusion column names and false-fail on any pack that uses the alias
+    syntax (the shipped starter pack does).
+
+    The watermark column is treated as a literal (not alias-resolved)
+    because ``NodeYaml.refresh.incremental.watermark.column`` is
+    schema-typed as a plain identifier in v0.3 — the alias substitution
+    surface is ``requiredColumns`` only.
     """
+    from .required_column_resolver import resolve_required_column_entries
+
     required_columns: dict[str, set[str]] = defaultdict(set)
     visited_silver: set[str] = set()
 
     def _add_node(node: "NodeYaml") -> None:
         node_required = getattr(node, "required_columns", None) or {}
         for src_id, cols in node_required.items():
-            required_columns[src_id].update(cols)
+            required_columns[src_id].update(
+                resolve_required_column_entries(
+                    cols,
+                    resolved_pack=resolved_pack,
+                    tenant_profile=tenant_profile,
+                )
+            )
 
         inc = node.refresh.incremental if node.refresh else None
         if inc is not None and inc.watermark is not None:
@@ -220,6 +243,7 @@ def assert_bronze_readiness(
     paths: "TablePaths",
     run_id: str,
     diagnostics_root: Path | None = None,
+    tenant_profile: "TenantProfile | None" = None,
 ) -> None:
     """Verify every in-scope silver/gold node's bronze deps are landable.
 
@@ -238,6 +262,14 @@ def assert_bronze_readiness(
         run_id: shared run identifier used for the diagnostic path.
         diagnostics_root: override for diagnostics directory (mostly
             useful in tests). Defaults to ``./.aidp/diagnostics``.
+        tenant_profile: loaded tenant profile, used to resolve
+            ``$column.<key>`` references in ``requiredColumns``
+            against the profile's ``resolved.column`` map. When
+            ``None`` (legacy callers), ``$column.*`` entries fall
+            through unresolved — per-node preflight will surface
+            AIDPF-2046 as it always has. New callers MUST pass the
+            tenant profile for AIDPF-2071 to compare resolved
+            physical columns against the live bronze schema.
 
     Raises:
         BronzeReadinessGateError: AIDPF-2071. The exception's ``gaps``
@@ -251,7 +283,7 @@ def assert_bronze_readiness(
         in_scope_nodes, resolved_pack
     )
     required_columns = _compute_required_columns(
-        in_scope_nodes, resolved_pack
+        in_scope_nodes, resolved_pack, tenant_profile
     )
 
     gaps: dict[str, dict[str, Any]] = {}

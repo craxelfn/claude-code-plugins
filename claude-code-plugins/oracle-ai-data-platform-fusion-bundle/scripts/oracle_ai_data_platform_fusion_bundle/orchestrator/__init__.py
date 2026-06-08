@@ -1272,16 +1272,25 @@ def _phase5_top_level_dispatch(
     # Phase 5 Step 9b — content-pack resume: read fusion_bundle_state
     # BEFORE the scope split so the dispatcher can:
     #
-    #   1. Reject unknown / non-resumable run_ids via the existing
-    #      ``ResumeRunNotFoundError`` / ``ResumeRunNotResumableError``
-    #      contract (CLI maps to exit 2).
-    #   2. Reconstruct the original (datasets, layers) scope from the
-    #      stored ``plan_snapshot`` when ``--resume`` is bare (no
-    #      explicit filters) — so a resumed run gates over the SAME
-    #      plan shape as the original.
+    #   1. Reject unknown run_ids via ``ResumeRunNotFoundError``
+    #      (CLI maps to exit 2).
+    #   2. Reconstruct the original (datasets, layers) scope so a
+    #      resumed run gates over the SAME plan shape as the original.
+    #      Source of truth, in order of preference:
+    #        a. Bronze-row ``plan_snapshot`` lifted from any v1-shape
+    #           bronze row (default-flipped runs that included bronze).
+    #        b. ``(dataset_id, layer)`` set observed across the run's
+    #           rows — for pure silver/gold-only runs where no v1
+    #           bronze row was written.
     #   3. Surface the per-node ``succeeded`` set to the bronze + cp
     #      branches so already-completed work emits ``resumed_skip``
     #      rows instead of re-dispatching.
+    #
+    # Uses ``read_content_pack_resumable_state`` instead of the v1
+    # ``read_resumable_state`` because the CP write path
+    # (``sql_runner._write_success_rows``) persists per-node
+    # ``plan_hash`` values with ``plan_snapshot=None`` — invariants
+    # the v1 reader rejects. The CP reader tolerates that shape.
     #
     # Dry-run is excluded — planning runs need no state I/O.
     resume_context = None
@@ -1292,25 +1301,37 @@ def _phase5_top_level_dispatch(
         spark = spark or _bootstrap_spark()
         state.ensure_state_table(spark, paths)
         _state_phase2.ensure_state_columns_v2(spark, paths)
-        # Propagates ResumeRunNotFoundError / ResumeRunNotResumableError.
-        resume_context = state.read_resumable_state(spark, paths, resume_run_id)
-
-        # Identity drift gate — fires BEFORE preflight / BICC so a
-        # drifted serviceUrl / username never sends credentials to the
-        # wrong endpoint.
-        from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
-        check_identity_drift(
-            resume_context.plan_snapshot,
-            bundle=bundle, paths=paths, plugin_version=_pv,
-            run_id=resume_context.run_id,
+        # Propagates ResumeRunNotFoundError if the run_id has no rows.
+        resume_context = state.read_content_pack_resumable_state(
+            spark, paths, resume_run_id,
         )
 
-        # Bare-resume: reconstruct the (datasets, layers) scope from
-        # the stored snapshot so the scope-split below sees the same
-        # filter the original run had. Explicit filters from the
-        # caller override (matches the v1 contract — explicit wins).
+        # Identity drift gate — only when a bronze-row snapshot is
+        # available (a v1-shape snapshot is required to reconstruct
+        # the stored identity). Pure silver/gold-only runs have no
+        # snapshot, so the gate is a no-op for them; the per-node
+        # AIDPF-4040 drift gate (in sql_runner) still catches
+        # identity-affecting changes at dispatch time.
+        if resume_context.bronze_plan_snapshot is not None:
+            from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+            check_identity_drift(
+                resume_context.bronze_plan_snapshot,
+                bundle=bundle, paths=paths, plugin_version=_pv,
+                run_id=resume_context.run_id,
+            )
+
+        # Bare-resume: reconstruct (datasets, layers) from the stored
+        # bronze snapshot if present, else from the observed scope.
+        # Explicit filters from the caller override (matches v1
+        # semantics — explicit wins).
         if datasets is None and layers is None:
-            datasets, layers = reconstruct_resume_scope(resume_context.plan_snapshot)
+            if resume_context.bronze_plan_snapshot is not None:
+                datasets, layers = reconstruct_resume_scope(
+                    resume_context.bronze_plan_snapshot,
+                )
+            else:
+                datasets = list(resume_context.scope_datasets)
+                layers = list(resume_context.scope_layers)
 
     # Scope-split. raises AIDPF-1035 on unsatisfiable filters.
     scope = split_run_scope_from_bundle(
@@ -1632,6 +1653,7 @@ def _phase5_run_fusion_pvo_drift_gate(
             schema_snapshot=schema_snapshot,
             run_id=run_id,
             diagnostics_root=diagnostics_root,
+            tenant_profile=tenant_profile,
         )
     except FusionPvoDriftError as exc:
         return RunStep.gate_failed(
@@ -1730,12 +1752,17 @@ def _emit_dispatcher_resumed_skip_for_bronze(
         return None
 
     key = (bronze_id, "bronze")
+    # CPResumeContext carries ``bronze_plan_snapshot`` (lifted from a
+    # v1-shape bronze row, may be None for pure cp-only runs) and no
+    # run-level ``plan_hash`` (CP writes per-node hashes). Resumed-skip
+    # rows propagate the snapshot for audit-trail continuity; plan_hash
+    # stays None — read_content_pack_resumable_state tolerates that.
     step = RunStep.resumed_skip(
         spec, run_id, mode,
         row_count=resume_context.succeeded_row_counts.get(key),
         last_watermark=resume_context.succeeded_last_watermarks.get(key),
-        plan_hash=resume_context.plan_hash,
-        plan_snapshot=resume_context.plan_snapshot,
+        plan_hash=None,
+        plan_snapshot=resume_context.bronze_plan_snapshot,
     )
     _safe_write_state_row(spark, paths, step)
     return step
@@ -2191,6 +2218,7 @@ def _run_content_pack_backend(
                     paths=paths,
                     run_id=run_id,
                     diagnostics_root=(bundle_path.resolve().parent / ".aidp" / "diagnostics"),
+                    tenant_profile=tenant_profile,
                 )
             except BronzeReadinessGateError as gate_exc:
                 gate_step = RunStep.gate_failed(
@@ -2476,8 +2504,12 @@ def _emit_content_pack_resumed_skip(
     key = (node.id, node.layer)
     row_count = resume_context.succeeded_row_counts.get(key)
     last_watermark = resume_context.succeeded_last_watermarks.get(key)
-    plan_hash = resume_context.plan_hash
-    plan_snapshot = resume_context.plan_snapshot
+    # CPResumeContext: no run-level plan_hash (CP writes per-node).
+    # bronze_plan_snapshot lifted from any v1-shape bronze row; None
+    # for pure silver/gold runs. read_content_pack_resumable_state
+    # tolerates both fields being NULL on a resumed-skip row.
+    plan_hash = None
+    plan_snapshot = resume_context.bronze_plan_snapshot
 
     primary_source = _resolve_primary_source_id_for_state_read(node)
     now = _dt.now(_tz.utc)

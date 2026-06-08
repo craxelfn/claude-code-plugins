@@ -243,10 +243,13 @@ def _state_rows(
     *,
     succeeded: list[tuple[str, str]],
     failed: list[tuple[str, str]],
-    snapshot: str,
+    snapshot: str | None,
     plan_hash: str = "cp-resume-test-hash",
     succeeded_row_count: int = 42,
 ) -> list[_FakeRow]:
+    """Build canned state rows. Pass ``snapshot=None`` AND a varying
+    ``plan_hash`` (via callers) to model the real CP write path's
+    shape (per-node hash + null snapshot)."""
     from datetime import datetime
     rows: list[_FakeRow] = []
     base_time = datetime(2026, 5, 21, 12, 0, 0)
@@ -262,6 +265,42 @@ def _state_rows(
             dataset_id=ds_id, layer=layer, status="failed",
             row_count=None, last_watermark=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
+            last_run_at=base_time,
+        ))
+    return rows
+
+
+def _cp_shape_state_rows(
+    *,
+    succeeded: list[tuple[str, str]],
+    failed: list[tuple[str, str]],
+    succeeded_row_count: int = 42,
+) -> list[_FakeRow]:
+    """Build rows in the shape ``sql_runner._write_success_rows`` actually
+    persists for the content-pack write path:
+
+    * ``plan_snapshot=None`` (CP doesn't store a run-level snapshot).
+    * Per-node ``plan_hash`` (each row gets its own hash) — modelled
+      by appending the node id, mimicking real per-node hash variance.
+
+    The v1 ``read_resumable_state`` rejects this shape; the CP-tolerant
+    reader (``read_content_pack_resumable_state``) MUST accept it.
+    """
+    from datetime import datetime
+    rows: list[_FakeRow] = []
+    base_time = datetime(2026, 5, 21, 12, 0, 0)
+    for ds_id, layer in succeeded:
+        rows.append(_FakeRow(
+            dataset_id=ds_id, layer=layer, status="success",
+            row_count=succeeded_row_count, last_watermark=None,
+            plan_hash=f"cp-node-hash-{ds_id}", plan_snapshot=None,
+            last_run_at=base_time,
+        ))
+    for ds_id, layer in failed:
+        rows.append(_FakeRow(
+            dataset_id=ds_id, layer=layer, status="failed",
+            row_count=None, last_watermark=None,
+            plan_hash=f"cp-node-hash-{ds_id}", plan_snapshot=None,
             last_run_at=base_time,
         ))
     return rows
@@ -468,6 +507,50 @@ class TestContentPackResume:
         retry_step = next(s for s in summary.steps if s.dataset_id == "dim_supplier")
         assert retry_step.status == "success"
         assert retry_step.run_id == original_run_id
+
+    def test_real_cp_shape_state_rows_accepted(
+        self, monkeypatch, fixture,
+    ) -> None:
+        """Real content-pack runs persist per-node ``plan_hash`` values
+        with ``plan_snapshot=None`` (see
+        ``sql_runner._write_success_rows``). The v1 resume reader
+        rejects that shape; the CP-tolerant reader the dispatcher uses
+        MUST accept it and treat the run as resumable.
+
+        Scope reconstruction in this case falls back to the
+        ``(dataset_id, layer)`` set observed in the rows since there's
+        no snapshot to parse.
+        """
+        bundle_path, pack, profile = fixture
+        original_run_id = "cp-real-shape-id"
+        # NO snapshot, per-node hashes — the actual CP write-path shape.
+        rows = _cp_shape_state_rows(
+            succeeded=[("dim_supplier", "silver")],
+            failed=[],
+        )
+        fake_spark = _FakeSpark(state_rows=rows)
+        execute_calls = _stub_downstream(monkeypatch, fake_spark)
+
+        summary = orchestrator.run(
+            bundle_path=bundle_path,
+            spark=fake_spark,
+            execution_backend="content-pack",
+            resolved_pack=pack,
+            tenant_profile=profile,
+            resume_run_id=original_run_id,
+            # No explicit filters — must reconstruct from row set.
+            mode="seed",
+        )
+        assert summary.run_id == original_run_id
+        # The silver node carried forward; ``execute_node`` never fired.
+        silver_steps = [s for s in summary.steps if s.dataset_id == "dim_supplier"]
+        assert len(silver_steps) == 1
+        assert silver_steps[0].status == "resumed_skipped"
+        assert execute_calls == [], (
+            "execute_node was called even though the only node in the "
+            "reconstructed scope already succeeded — the CP resume "
+            "reader's null-snapshot path mis-classified the row"
+        )
 
     def test_bare_resume_reconstructs_scope_from_snapshot(
         self, monkeypatch, fixture,

@@ -774,8 +774,60 @@ def _builtin_rendered_sql_hash_substitute(callable_id: str, version: str) -> str
     ``<callable_id>:<version>``. Bumping the adapter's VERSION constant
     flips this hash, triggering the AIDPF-4040 drift gate just like a
     SQL-template edit does.
+
+    Used for ``type: builtin`` dispatch where the callable is
+    plugin-internal (the dim_calendar adapter today) — its source code
+    moves with the plugin version, so the version constant is a
+    sufficient drift signal. For ``type: python_legacy``, where the
+    callable is an external v1 module the customer may edit
+    independently of the adapter, use
+    :func:`_python_legacy_rendered_sql_hash_substitute` instead so a
+    code-only change still flips the hash.
     """
     return hashlib.sha256(f"{callable_id}:{version}".encode("utf-8")).hexdigest()
+
+
+def _python_legacy_rendered_sql_hash_substitute(
+    callable_id: str,
+    version: str,
+    resolved_callable: "Any",
+) -> str:
+    """Compute the rendered_sql_hash substitute for a python_legacy dispatch.
+
+    Hashes ``<callable_id>:<version>:<source_file_sha256>`` so a
+    code-only edit to the legacy transform (e.g. a behaviour change in
+    ``dimensions/dim_supplier.py`` without bumping the adapter
+    VERSION) flips the rendered_sql_hash and triggers the AIDPF-4040
+    drift gate on the next incremental run. The pre-fix substitute
+    used only ``<callable_id>:<version>``, which let a code-only
+    legacy change evade drift detection — a SQL-template edit on a
+    ``type: sql`` node would have triggered the gate but the
+    equivalent transform edit on a ``type: python_legacy`` node would
+    not.
+
+    ``inspect.getsourcefile`` is best-effort: a callable defined in
+    REPL / dynamically constructed has no source file. In that case
+    we fall back to the id+version pair — the adapter VERSION
+    constant remains the floor signal. Customers who care about
+    runtime drift detection should always have a real source file
+    backing the callable.
+    """
+    import inspect
+
+    source_sha = ""
+    try:
+        source_file = inspect.getsourcefile(resolved_callable)
+        if source_file:
+            from pathlib import Path as _Path
+            source_bytes = _Path(source_file).read_bytes()
+            source_sha = hashlib.sha256(source_bytes).hexdigest()
+    except (OSError, TypeError):
+        # OSError → file unreadable; TypeError → builtin / no source.
+        # Drop to the id+version floor.
+        source_sha = ""
+
+    payload = f"{callable_id}:{version}:{source_sha}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _execute_builtin_node(
@@ -1010,8 +1062,12 @@ def _execute_python_legacy_node(
         return NodeExecutionResult(status="preflight_blocked", error_message=message)
 
     # ----- Step 4: compute plan-hash inputs --------------------------
-    rendered_sql_hash = _builtin_rendered_sql_hash_substitute(
-        callable_id, _legacy.VERSION
+    # python_legacy uses a different rendered_sql_hash substitute than
+    # builtin — the callable lives outside the plugin so a code-only
+    # edit (no adapter VERSION bump) must still flip the hash to keep
+    # AIDPF-4040 drift detection honest.
+    rendered_sql_hash = _python_legacy_rendered_sql_hash_substitute(
+        callable_id, _legacy.VERSION, legacy_callable,
     )
     output_schema_hash = plan_hash_module.compute_output_schema_hash(node)
     expected_plan_hash = plan_hash_module.compute_content_pack_plan_hash(
