@@ -111,6 +111,13 @@ def dispatch_via_rest(
     # populate `datasetDeltas` on drift. ``None`` preserves pre-3d
     # behaviour (preflight degrades to empty `datasetDeltas` + WARN).
     schema_snapshot_yaml: str | None = None,
+    # Phase 5 P1.5ε-fix5 — REST-dispatch resume. When provided, the
+    # generated notebook cell passes ``resume_run_id=<id>`` to the
+    # cluster-side ``orchestrator.run(...)`` call so the resumed run
+    # adopts the supplied id and joins state rows with the prior
+    # failed run. ``None`` preserves the original "fresh run only"
+    # behaviour.
+    resume_run_id: str | None = None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -144,8 +151,11 @@ def dispatch_via_rest(
             after writing the artifact locally so the CLI can return
             exit 14 (NOT exit 2 via DispatchRunFailedError).
 
-    No ``resume_run_id`` parameter — REST-dispatch resume is out of scope
-    in this PR (see plan §3.1). Tracked as ``P1.5ε-fix5``.
+    Phase 5 P1.5ε-fix5: ``resume_run_id`` is supported on the REST
+    dispatch path. The notebook cell threads it into
+    ``orchestrator.run(..., resume_run_id=<id>)`` so the cluster-side
+    run adopts the supplied id and writes state rows under the same
+    identifier as the prior failed run.
     """
     # ---- Phase A — local preflight ---------------------------------------
     local_results = run_local_preflight(
@@ -237,6 +247,8 @@ def dispatch_via_rest(
         pack_manifest=pack_manifest,
         force_fingerprint_skip=force_fingerprint_skip,
         schema_snapshot_yaml=schema_snapshot_yaml,
+        # Phase 5 P1.5ε-fix5 — pass through to the cluster-side cell.
+        resume_run_id=resume_run_id,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")

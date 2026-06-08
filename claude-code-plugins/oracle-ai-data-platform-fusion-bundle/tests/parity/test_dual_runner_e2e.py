@@ -669,30 +669,51 @@ class TestStep5_Resume:
                 f"got {step.status if step else 'MISSING'!r}"
             )
 
-    @pytest.mark.xfail(
-        reason="AIDPF-1032 — content-pack backend rejects --resume per Phase 2 "
-        "deferral; tracked as Phase 5 prerequisite in the ship-ready report.",
-        strict=True,
-    )
-    def test_v2_resume_currently_rejected(
+    def test_v2_resume_unknown_run_id_raises_not_found(
         self, spark, tmp_path, resolved_pack, tenant_profile,
     ) -> None:
-        """xfail-strict: the day AIDPF-1032 is resolved, this test
-        starts passing AND xpasses, which surfaces as a CI failure
-        prompting Phase 5 to remove the xfail and assert the resumed
-        run_id parity claim."""
+        """Phase 5 Step 9b — content-pack resume reads
+        ``fusion_bundle_state`` via :func:`state.read_resumable_state`
+        BEFORE the scope split. Supplying a run_id that has no rows
+        raises :class:`ResumeRunNotFoundError` cleanly so the CLI
+        exits 2 and operators see a typo'd ``--resume`` argument
+        instead of silently re-dispatching everything under a brand
+        new id.
+
+        This supersedes the pre-fix
+        ``test_v2_resume_adopts_supplied_run_id`` which asserted the
+        broken contract (arbitrary id silently adopted, every node
+        re-dispatched). Full resume correctness — succeeded nodes
+        emit ``resumed_skipped``, failed nodes retry — is exercised
+        at unit level in ``tests/unit/test_content_pack_resume.py``;
+        live retry-correctness still needs the v1 sibling test above
+        as a model.
+        """
+        import pytest
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
+            ResumeRunNotFoundError,
+        )
+
         artifacts = make_dual_bundles(
             tmp_path, catalog=CATALOG,
             v1_suffix="v2resume_v1", v2_suffix="v2resume_v2",
             pack_path=PACK_PATH, profile_src=PROFILE_SRC,
             profile_name="finance-default",
         )
-        orchestrator.run(
-            bundle_path=artifacts.v2_bundle, spark=spark,
-            mode="seed", execution_backend="content-pack",
-            resolved_pack=resolved_pack, tenant_profile=tenant_profile,
-            resume_run_id="phase4-fake-resume-id",
-        )
+        seed_bronze(spark, catalog=CATALOG,
+                    schema=artifacts.v2_schemas.bronze,
+                    fixtures_module=bronze_fixtures)
+        create_target_schemas(spark, catalog=CATALOG,
+                              schemas=artifacts.v2_schemas)
+
+        with pytest.raises(ResumeRunNotFoundError):
+            orchestrator.run(
+                bundle_path=artifacts.v2_bundle, spark=spark,
+                mode="seed", layers=["silver"],
+                execution_backend="content-pack",
+                resolved_pack=resolved_pack, tenant_profile=tenant_profile,
+                resume_run_id="phase5-resume-unknown-id-test",
+            )
 
 
 # ---------------------------------------------------------------------------

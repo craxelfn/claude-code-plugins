@@ -223,12 +223,38 @@ class TestRunCell:
         assert "dataclasses.asdict" not in run
         assert "asdict(summary)" not in run
 
-    def test_no_resume_run_id_parameter_on_builder(self) -> None:
-        # Locks the §3.1 scope boundary at the API level.
+    def test_resume_run_id_parameter_threads_into_run_cell(self, wheel: Path) -> None:
+        """Phase 5 P1.5ε-fix5 — REST-dispatch resume is supported.
+        The notebook cell threads ``resume_run_id`` into the cluster-
+        side ``orchestrator.run(...)`` call so the resumed run adopts
+        the supplied id.
+        """
         import inspect
 
+        # Locks the API: build_notebook accepts resume_run_id.
         sig = inspect.signature(build_notebook)
-        assert "resume_run_id" not in sig.parameters
+        assert "resume_run_id" in sig.parameters
+        # When None (default), the cell still emits a literal `None`.
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        assert "resume_run_id=None" in run
+        # When set, the cell emits the literal id.
+        nb_with_id = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="phase5-resume-id-007",
+        )
+        run_with_id = "".join(nb_with_id["cells"][3]["source"])
+        assert "resume_run_id='phase5-resume-id-007'" in run_with_id
 
     def test_run_cell_catches_schema_drift_and_emits_drift_marker(
         self, wheel: Path

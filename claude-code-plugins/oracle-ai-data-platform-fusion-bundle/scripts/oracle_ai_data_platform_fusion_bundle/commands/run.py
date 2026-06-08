@@ -49,7 +49,7 @@ def run(
     resume_run_id: str | None = None,
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
-    execution_backend: str = "legacy-python",
+    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
     console: Console | None = None,
 ) -> int:
@@ -105,15 +105,30 @@ def run(
         if layers else None
     )
 
-    # Phase 2 (PLAN §11.9 / Step 12b): --resume + content-pack rejected.
-    if resume_run_id is not None and execution_backend == "content-pack":
-        from ..schema.bundle import AIDPF_1032_RESUME_NOT_SUPPORTED
+    # Phase 5 Step 4 — deprecation warning on the explicit legacy-python
+    # opt-in. Emitted once at the top of every invocation that explicitly
+    # selects the legacy backend (default backend is content-pack per Phase
+    # 5 Step 3); structured log entry at INFO so programmatic callers can
+    # detect the deprecation without parsing console output.
+    if execution_backend == "legacy-python":
         console.print(
-            f"[red]{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
-            f"with --execution-backend content-pack in v0.3. Re-run with "
-            f"--execution-backend legacy-python (the default) or without --resume.[/red]"
+            "[yellow]DEPRECATED:[/yellow] --execution-backend=legacy-python "
+            "is on the deprecation path. v2 content-pack is the default; "
+            "the legacy-python path will be removed in a future release. "
+            "Drop the flag (or pass --execution-backend=content-pack "
+            "explicitly) to silence this warning."
         )
-        return 2
+        logging.getLogger(__name__).info(
+            "phase5.legacy_python_backend.deprecated",
+            extra={"execution_backend": execution_backend},
+        )
+
+    # Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack backend's
+    # per-node atomic-commit model (preflight → render → drift → execute
+    # → quality → state) is the resume unit; supplying --resume with the
+    # content-pack backend is now legal. The orchestrator adopts
+    # ``resume_run_id`` as the run_id so the resumed run's state rows
+    # join with the prior failed run's rows under one identifier.
 
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
@@ -125,22 +140,17 @@ def run(
             execution_backend=execution_backend,
             force_fingerprint_skip=force_fingerprint_skip,
         )
-    if resume_run_id is not None:
-        # P1.5ε §3.1 — REST-dispatch resume is out of scope in this PR.
-        # The dispatcher's notebook builder hardcodes resume_run_id=None;
-        # the orchestrator-side resume code path requires in-process state
-        # access that doesn't surface cleanly over the marker channel.
-        # Tracked as follow-up P1.5ε-fix5.
-        console.print(
-            "[red]--resume requires --inline; REST-dispatch resume is "
-            "tracked as BACKLOG P1.5ε-fix5[/red]"
-        )
-        return 2
+    # Phase 5 P1.5ε-fix5 — REST-dispatch resume is now supported. The
+    # generated notebook cell threads `resume_run_id` into the
+    # cluster-side `orchestrator.run(...)` call so the resumed run
+    # adopts the supplied id and joins state rows with the prior
+    # failed run.
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
         execution_backend=execution_backend,
         force_fingerprint_skip=force_fingerprint_skip,
+        resume_run_id=resume_run_id,
     )
 
 
@@ -153,7 +163,7 @@ def _run_inline(
     dry_run: bool,
     console: Console,
     *,
-    execution_backend: str = "legacy-python",
+    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
@@ -296,8 +306,9 @@ def _run_via_aidp_dispatch(
     poll_timeout_s: int,
     console: Console,
     *,
-    execution_backend: str = "legacy-python",
+    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
+    resume_run_id: str | None = None,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
@@ -416,6 +427,7 @@ def _run_via_aidp_dispatch(
             pack_manifest=pack_manifest,
             force_fingerprint_skip=force_fingerprint_skip,
             schema_snapshot_yaml=schema_snapshot_yaml,
+            resume_run_id=resume_run_id,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — drift surfaces from REST-dispatch via the marker
@@ -501,6 +513,23 @@ def _render_summary(console: Console, summary) -> None:
             f"{step.duration_seconds:.2f}",
         )
     console.print(table)
+
+    # Phase 5 — synthetic gate-failure RunSteps (dataset_id starts +
+    # ends with double-underscore) carry a multi-line error_message
+    # with the AIDPF code + remediation runbook. The table cell would
+    # truncate the message; render the full text below the table so
+    # operators see the actionable guidance.
+    for step in summary.steps:
+        if (
+            step.status == "failed"
+            and step.dataset_id.startswith("__")
+            and step.dataset_id.endswith("__")
+            and step.error_message
+        ):
+            console.print(
+                f"\n[bold red]Gate failure — {step.dataset_id}[/bold red]"
+            )
+            console.print(step.error_message)
 
     # Summary counters. `resumed_skipped` shows up only on a resumed
     # run — kept off the line for normal runs so the common case stays

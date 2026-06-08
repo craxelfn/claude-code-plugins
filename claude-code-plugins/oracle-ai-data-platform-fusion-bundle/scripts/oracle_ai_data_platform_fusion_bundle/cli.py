@@ -217,7 +217,9 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "stored plan_snapshot when --datasets/--layers are omitted. Drift "
          "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
          "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch. "
-         "Requires --inline in P1.5ε; REST-dispatch resume is BACKLOG P1.5ε-fix5.",
+         "Supported on both --inline and REST dispatch (P1.5ε-fix5): the "
+         "generated cluster notebook threads the run_id into the orchestrator "
+         "call so the resumed run adopts the original id end-to-end.",
 )
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False,
@@ -243,13 +245,16 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
 @click.option(
     "--execution-backend", "execution_backend",
     type=click.Choice(["legacy-python", "content-pack"]),
-    default="legacy-python",
+    default="content-pack",
     show_default=True,
-    help="Execution backend (Phase 2): `legacy-python` runs the v1 "
-         "hardcoded dim_*.py / gold_*.py modules (unchanged from v0.3); "
-         "`content-pack` runs the content-pack SQL runner against the "
-         "pack declared in bundle.yaml's `contentPack:` block. Phase 4's "
-         "dual-runner parity gate decides when (or if) the default flips.",
+    help="Execution backend (Phase 5 default flip): `content-pack` "
+         "(default) runs the content-pack SQL runner against the pack "
+         "declared in bundle.yaml's `contentPack:` block. `legacy-python` "
+         "runs the v1 hardcoded dim_*.py / gold_*.py modules and emits a "
+         "deprecation warning — kept for backward compatibility through "
+         "Phase 9. Phase 4's dual-runner parity gate (live evidence on "
+         "saasfademo1, 2026-06-07) plus Phase 5's bronze-readiness + "
+         "Fusion-PVO-drift preflight gates close the gate on flipping.",
 )
 @click.option(
     "--force-fingerprint-skip", "force_fingerprint_skip",

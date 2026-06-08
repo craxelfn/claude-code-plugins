@@ -90,6 +90,9 @@ AIDPF_5014_UNKNOWN_BUILTIN_DISPATCH = "AIDPF-5014"
 contract is strict: the registry is the allowlist, missing entries fail
 fast rather than auto-importing arbitrary callables."""
 
+# AIDPF-2061 is owned by ``orchestrator/builtins/python_legacy_adapter.py``;
+# imported below for re-export visibility from sql_runner's symbol surface.
+
 
 class ExecuteNodeError(Exception):
     """Base error class for execute_node failures."""
@@ -205,15 +208,31 @@ def execute_node(
             prior_plan_hash=prior_plan_hash,
             target_override=target_override,
         )
+    if impl_type == "python_legacy":
+        # Phase 5 — bridge to v1 ``dimensions/dim_*.py`` /
+        # ``transforms/gold/*.py`` modules through the python_legacy
+        # adapter. Same lifecycle as the builtin dispatch (preflight →
+        # plan-hash → drift gate → invoke → quality → schema → state).
+        return _execute_python_legacy_node(
+            spark,
+            node=node,
+            pack=pack,
+            profile=profile,
+            ctx=ctx,
+            paths=paths,
+            mode=mode,
+            profile_hash=profile_hash,
+            prior_plan_hash=prior_plan_hash,
+            target_override=target_override,
+        )
     if impl_type != "sql":
         # Defensive — the loader's discriminated union already rejects
-        # everything outside {sql, builtin, python_legacy}, and Phase 2's
-        # content-pack backend rejects python_legacy. Reaching here means
-        # a future implementation type slipped through the loader gate
-        # without being wired in. Hard-raise so the bug is visible.
+        # everything outside {sql, builtin, python_legacy}. Reaching here
+        # means a future implementation type slipped through the loader
+        # gate without being wired in. Hard-raise so the bug is visible.
         raise ValueError(
             f"execute_node: unsupported implementation.type={impl_type!r} "
-            f"for node {node.id!r}. Expected 'sql' or 'builtin'."
+            f"for node {node.id!r}. Expected 'sql', 'builtin', or 'python_legacy'."
         )
 
     # ----- Step 1: static schema validation (Phase 1; loader did this).
@@ -755,8 +774,60 @@ def _builtin_rendered_sql_hash_substitute(callable_id: str, version: str) -> str
     ``<callable_id>:<version>``. Bumping the adapter's VERSION constant
     flips this hash, triggering the AIDPF-4040 drift gate just like a
     SQL-template edit does.
+
+    Used for ``type: builtin`` dispatch where the callable is
+    plugin-internal (the dim_calendar adapter today) — its source code
+    moves with the plugin version, so the version constant is a
+    sufficient drift signal. For ``type: python_legacy``, where the
+    callable is an external v1 module the customer may edit
+    independently of the adapter, use
+    :func:`_python_legacy_rendered_sql_hash_substitute` instead so a
+    code-only change still flips the hash.
     """
     return hashlib.sha256(f"{callable_id}:{version}".encode("utf-8")).hexdigest()
+
+
+def _python_legacy_rendered_sql_hash_substitute(
+    callable_id: str,
+    version: str,
+    resolved_callable: "Any",
+) -> str:
+    """Compute the rendered_sql_hash substitute for a python_legacy dispatch.
+
+    Hashes ``<callable_id>:<version>:<source_file_sha256>`` so a
+    code-only edit to the legacy transform (e.g. a behaviour change in
+    ``dimensions/dim_supplier.py`` without bumping the adapter
+    VERSION) flips the rendered_sql_hash and triggers the AIDPF-4040
+    drift gate on the next incremental run. The pre-fix substitute
+    used only ``<callable_id>:<version>``, which let a code-only
+    legacy change evade drift detection — a SQL-template edit on a
+    ``type: sql`` node would have triggered the gate but the
+    equivalent transform edit on a ``type: python_legacy`` node would
+    not.
+
+    ``inspect.getsourcefile`` is best-effort: a callable defined in
+    REPL / dynamically constructed has no source file. In that case
+    we fall back to the id+version pair — the adapter VERSION
+    constant remains the floor signal. Customers who care about
+    runtime drift detection should always have a real source file
+    backing the callable.
+    """
+    import inspect
+
+    source_sha = ""
+    try:
+        source_file = inspect.getsourcefile(resolved_callable)
+        if source_file:
+            from pathlib import Path as _Path
+            source_bytes = _Path(source_file).read_bytes()
+            source_sha = hashlib.sha256(source_bytes).hexdigest()
+    except (OSError, TypeError):
+        # OSError → file unreadable; TypeError → builtin / no source.
+        # Drop to the id+version floor.
+        source_sha = ""
+
+    payload = f"{callable_id}:{version}:{source_sha}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _execute_builtin_node(
@@ -928,6 +999,210 @@ def _execute_builtin_node(
         status="success",
         row_count=strategy_result.rows_scanned,
         output_watermark=None,
+        materialized_schema_hash=materialized_schema_hash,
+        plan_hash=expected_plan_hash,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Step 1 — python_legacy dispatch
+# ---------------------------------------------------------------------------
+
+
+def _execute_python_legacy_node(
+    spark: "SparkSession",
+    *,
+    node: "NodeYaml",  # noqa: F821
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: RunContext,
+    paths: "TablePaths",  # noqa: F821
+    mode: Literal["seed", "incremental"],
+    profile_hash: str,
+    prior_plan_hash: str | None,
+    target_override: str | None,
+) -> NodeExecutionResult:
+    """Execute a ``type: python_legacy`` node via the v1 bridge adapter.
+
+    Lifecycle mirrors :func:`_execute_builtin_node` (preflight → plan-hash
+    → drift gate → invoke → quality → schema assertion → state-row
+    write); substitutes ``(<callable_spec>, <adapter VERSION>)`` for the
+    ``rendered_sql_hash`` so the §11.9 drift gate stays uniform.
+
+    The v1 builder is responsible for materialising its own target
+    (``CREATE OR REPLACE TABLE`` for replace strategy, ``MERGE INTO``
+    for merge strategy). The adapter does NOT write the returned
+    DataFrame back.
+    """
+    from .builtins import python_legacy_adapter as _legacy
+
+    callable_id = node.implementation.callable  # type: ignore[union-attr]
+
+    # ----- Step 0: resolve the v1 callable BEFORE preflight ----------
+    # AIDPF-2061 fires before any Spark work — a malformed spec is a
+    # YAML / pack authoring bug and shouldn't waste preflight cost.
+    try:
+        legacy_callable = _legacy.import_legacy_callable(callable_id)
+    except _legacy.LegacyCallableSpecError as exc:
+        message = str(exc)
+        _safe_write_render_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        )
+        return NodeExecutionResult(status="render_failed", error_message=message)
+
+    # ----- Step 1: static validation done by the loader. -------------
+
+    # ----- Step 2: preflight (column probes + identity validation). --
+    preflight = preflight_node(spark, node, pack, profile, ctx)
+    if not preflight.ok:
+        message = "; ".join(f"[{e.code}] {e.message}" for e in preflight.errors)
+        _safe_write_preflight_blocked_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        )
+        return NodeExecutionResult(status="preflight_blocked", error_message=message)
+
+    # ----- Step 4: compute plan-hash inputs --------------------------
+    # python_legacy uses a different rendered_sql_hash substitute than
+    # builtin — the callable lives outside the plugin so a code-only
+    # edit (no adapter VERSION bump) must still flip the hash to keep
+    # AIDPF-4040 drift detection honest.
+    rendered_sql_hash = _python_legacy_rendered_sql_hash_substitute(
+        callable_id, _legacy.VERSION, legacy_callable,
+    )
+    output_schema_hash = plan_hash_module.compute_output_schema_hash(node)
+    expected_plan_hash = plan_hash_module.compute_content_pack_plan_hash(
+        pack=pack,
+        node=node,
+        profile=profile,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+    )
+
+    # ----- Step 5: plan-hash drift gate (incremental only) ----------
+    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
+        message = (
+            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
+            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
+            f"Re-run with --mode seed (or revert the YAML / callable spec / "
+            f"profile change)."
+        )
+        _safe_write_resume_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="resume_drift_blocked",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 6: invoke the v1 callable ----------------------------
+    # The v1 builder materialises its own target (CREATE OR REPLACE
+    # TABLE / MERGE INTO) and returns a DataFrame backed by it.
+    target = target_override or _build_target_identifier(node, ctx)
+    try:
+        _legacy.invoke_legacy_callable(
+            legacy_callable, spark,
+            node=node, pack=pack, profile=profile, ctx=ctx, paths=paths,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface any v1 failure uniformly
+        message = f"python_legacy_failed: {exc}"
+        _safe_write_strategy_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="strategy_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 7: quality tests -------------------------------------
+    target_df = spark.table(target)
+    quality_report = run_quality_tests(spark, node, target_df, ctx)
+    if not quality_report.ok:
+        message = "; ".join(f"[{f.test_type}] {f.message}" for f in quality_report.failures)
+        _safe_write_quality_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="quality_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 8: materialised-schema assertion ---------------------
+    try:
+        materialized_schema_hash = _assert_materialized_matches_declared(
+            spark, target, node
+        )
+    except MaterializedSchemaDriftError as exc:
+        message = str(exc)
+        _safe_write_schema_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="output_schema_drift",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 9: compute output_watermark --------------------------
+    # Synthesise a thin strategy_result-shape so the existing helpers
+    # work uniformly. python_legacy nodes are at-the-callable's-mercy
+    # for empty-delta semantics — assume the call ran (we got here
+    # without an exception); set merge_skipped_empty_delta=False.
+    rows_scanned = target_df.count() if hasattr(target_df, "count") else 0
+
+    class _PythonLegacyStrategyResult:
+        merge_skipped_empty_delta = False
+
+    _PythonLegacyStrategyResult.rows_scanned = rows_scanned
+    strategy_result = _PythonLegacyStrategyResult()
+
+    # Synthesise a minimal RenderedSql-equivalent for the watermark
+    # probe. _compute_output_watermark only consults
+    # node.refresh.incremental.watermark + the target's max(column).
+    class _UnusedRendered:
+        bound_params: dict[str, Any] = {}
+
+    output_watermark = _compute_output_watermark(
+        spark, node, ctx, _UnusedRendered(), strategy_result,
+    )
+
+    # ----- Step 10: assemble + write success state rows --------------
+    state_rows = _assemble_success_state_rows(
+        node=node,
+        ctx=ctx,
+        pack=pack,
+        profile=profile,
+        mode=mode,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+        plan_hash=expected_plan_hash,
+        strategy_result=strategy_result,
+        output_watermark=output_watermark,
+    )
+
+    try:
+        state_phase2.write_state_rows_hard(spark, paths, state_rows)
+    except state_phase2.StateCommitError as exc:
+        message = f"state_commit_failed: {exc}"
+        return NodeExecutionResult(
+            status="state_commit_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+            row_count=rows_scanned,
+        )
+
+    return NodeExecutionResult(
+        status="success",
+        row_count=rows_scanned,
+        output_watermark=output_watermark,
         materialized_schema_hash=materialized_schema_hash,
         plan_hash=expected_plan_hash,
     )

@@ -802,12 +802,22 @@ def run(
     layers: list[str] | None = None,
     dry_run: bool = False,
     resume_run_id: str | None = None,
-    # Phase 2 additions (PLAN §15 Phase 2; default behaviour unchanged).
-    execution_backend: str = "legacy-python",
+    # Phase 5 Step 3 — default flipped to content-pack. The pre-Phase-5
+    # default was "legacy-python"; Phase 4's dual-runner parity gate +
+    # Phase 5's Step 9b resume work + Step 2c/2d preflight gates close
+    # the gate on flipping. Pass ``execution_backend="legacy-python"``
+    # explicitly to opt into the deprecated path (emits a CLI warning
+    # per Phase 5 Step 4).
+    execution_backend: str = "content-pack",
     resolved_pack: "Any | None" = None,
     tenant_profile: "Any | None" = None,
     # Phase 3c — runtime drift gate bypass (dev/sandbox; hidden flag).
     force_fingerprint_skip: bool = False,
+    # Phase 5 Step 5 — when the top-level dispatcher invokes the legacy
+    # bronze path recursively, this kwarg propagates the shared run_id so
+    # bronze + content-pack state rows join cleanly. Private contract;
+    # the CLI never passes this directly.
+    _forced_run_id: str | None = None,
 ) -> RunSummary:
     """Materialize bronze + silver + gold per the bundle.yaml plan.
 
@@ -865,14 +875,31 @@ def run(
     # write-strategy / state-contract pieces shipped together to keep the
     # destructive-write blast radius contained.
 
-    # Phase 2 — content-pack backend dispatch. When the operator opts
-    # in via `--execution-backend content-pack`, divert to the new
-    # silver/gold runner (PLAN §15 Phase 2). The default legacy-python
-    # path falls through unchanged, so every existing v0.3 behaviour is
-    # preserved. Resume + content-pack is not supported in v0.3
-    # (AIDPF-1032 — guarded at the CLI; defensive re-check here).
+    # Phase 5 Step 5 — top-level scope-split dispatcher for the
+    # content-pack backend. When the operator selects content-pack
+    # (now the default), classify the (datasets, layers) filter into
+    # bronze_filter + cp_filter, mint a SHARED run_id, then route:
+    #
+    #   * bronze_filter is not None → invoke the legacy bronze path
+    #     via a recursive run() call with execution_backend="legacy-
+    #     python", layers=["bronze"] (or explicit bronze ids), and
+    #     _forced_run_id=shared.
+    #   * cp_filter is not None → invoke _run_content_pack_backend
+    #     with shared_run_id=shared + enable_bronze_readiness_gate=
+    #     True (Step 2c).
+    #
+    # Both branches emit RunSteps under the shared run_id; the
+    # dispatcher merges them into one RunSummary so bronze + silver
+    # + gold rows in fusion_bundle_state and the medallion audit
+    # columns all join on the same identifier.
     if execution_backend == "content-pack":
-        return _run_content_pack_backend(
+        # Phase 5 — both run and dry-run route through the top-level
+        # dispatcher so the scope-split + bronze-plus-silver/gold
+        # plan-shape contract is consistent between planning and
+        # execution. The pre-fix dry-run path bypassed the dispatcher
+        # and returned silver/gold rows only, hiding the bronze work
+        # the real run would perform first.
+        return _phase5_top_level_dispatch(
             bundle_path=bundle_path,
             spark=spark,
             mode=mode,
@@ -1095,7 +1122,15 @@ def run(
     # On resume, preserve the original run_id so the state-table
     # audit trail (and the medallion `<layer>_run_id` invariant)
     # stays a single continuous record.
-    run_id = resume_context.run_id if resume_context is not None else _new_run_id()
+    # Phase 5 Step 5 — _forced_run_id from the top-level dispatcher wins
+    # over both resume and minting, so a bronze+cp full-medallion run
+    # shares a single run_id across both backends.
+    if _forced_run_id is not None:
+        run_id = _forced_run_id
+    elif resume_context is not None:
+        run_id = resume_context.run_id
+    else:
+        run_id = _new_run_id()
     started_at = _utc_now()
     steps: list[RunStep] = []
 
@@ -1158,6 +1193,752 @@ def run(
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — top-level dispatcher (scope-split, shared run_id, gates)
+# ---------------------------------------------------------------------------
+
+
+def _phase5_top_level_dispatch(
+    *,
+    bundle_path: "Path",
+    spark: "SparkSession | None",
+    mode: str,
+    datasets: list[str] | None,
+    layers: list[str] | None,
+    resume_run_id: str | None,
+    resolved_pack: "Any | None",
+    tenant_profile: "Any | None",
+    force_fingerprint_skip: bool,
+    dry_run: bool = False,
+) -> RunSummary:
+    """Top-level dispatcher for ``--execution-backend=content-pack`` runs.
+
+    Phase 5 Step 5 contract:
+
+    1. Classify ``(datasets, layers)`` via
+       :func:`orchestrator.scope.split_run_scope_from_bundle`. The
+       classifier raises AIDPF-1035 on unknown ids / unsatisfiable
+       combinations / empty effective scope. ``dry_run`` runs the same
+       classifier so a typoed ``--datasets`` fails the same way on
+       planning as it would on execution.
+    2. Mint a single shared ``run_id`` (or adopt ``resume_run_id``).
+    3. When ``dry_run`` is True: build a merged ``PlanNode`` tuple
+       carrying bronze rows (from the v1 spec list) AND silver/gold
+       rows (from the resolved pack), return ``RunSummary.empty``.
+       Without the merged plan, a no-filter dry-run lied to operators
+       — it omitted the bronze work the real run would do first.
+    4. When ``scope.bronze_filter is not None``: invoke the legacy
+       bronze path via a recursive ``run()`` call with
+       ``execution_backend="legacy-python"`` and
+       ``_forced_run_id=shared`` so the bronze state rows carry the
+       shared id.
+    5. When ``scope.cp_filter is not None``: invoke
+       :func:`_run_content_pack_backend` with
+       ``shared_run_id=shared`` + ``enable_bronze_readiness_gate=True``
+       so the Phase 5 Step 2c gate fires before any silver/gold node
+       dispatches.
+    6. Merge the two branches' ``RunStep`` lists into one
+       :class:`RunSummary` keyed by the shared id.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from .scope import split_run_scope_from_bundle, ScopeSplitError
+    from ..schema.bundle import (
+        AIDPF_1030_PROFILE_MISSING,
+        AIDPF_1031_CONTENT_PACK_MISSING,
+        load_bundle as _load_bundle_v2,
+    )
+
+    bundle, paths = _load_bundle_v2(bundle_path)
+
+    # Phase 5 — fail-closed: a content-pack run on a pack-less bundle
+    # raises AIDPF-1031 / AIDPF-1030 BEFORE the scope-split (per the
+    # plan's BLOCKING #2 contract). Bronze-only invocations from
+    # operators who didn't explicitly opt into legacy-python are not
+    # currently a fast-path through this dispatcher — they go through
+    # legacy-python via the explicit flag instead.
+    if bundle.content_pack is None:
+        raise OrchestratorConfigError(
+            f"{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+            f"`contentPack:` block; --execution-backend content-pack "
+            f"requires it. Either add the contentPack block to your "
+            f"bundle.yaml or re-run with "
+            f"--execution-backend=legacy-python."
+        )
+    if bundle.content_pack.profile is None:
+        raise OrchestratorConfigError(
+            f"{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+            f"contentPack.profile field is missing."
+        )
+
+    # Phase 5 Step 9b — content-pack resume: read fusion_bundle_state
+    # BEFORE the scope split so the dispatcher can:
+    #
+    #   1. Reject unknown run_ids via ``ResumeRunNotFoundError``
+    #      (CLI maps to exit 2).
+    #   2. Reconstruct the original (datasets, layers) scope so a
+    #      resumed run gates over the SAME plan shape as the original.
+    #      Source of truth, in order of preference:
+    #        a. Bronze-row ``plan_snapshot`` lifted from any v1-shape
+    #           bronze row (default-flipped runs that included bronze).
+    #        b. ``(dataset_id, layer)`` set observed across the run's
+    #           rows — for pure silver/gold-only runs where no v1
+    #           bronze row was written.
+    #   3. Surface the per-node ``succeeded`` set to the bronze + cp
+    #      branches so already-completed work emits ``resumed_skip``
+    #      rows instead of re-dispatching.
+    #
+    # Uses ``read_content_pack_resumable_state`` instead of the v1
+    # ``read_resumable_state`` because the CP write path
+    # (``sql_runner._write_success_rows``) persists per-node
+    # ``plan_hash`` values with ``plan_snapshot=None`` — invariants
+    # the v1 reader rejects. The CP reader tolerates that shape.
+    #
+    # Dry-run is excluded — planning runs need no state I/O.
+    resume_context = None
+    if resume_run_id is not None and not dry_run:
+        from . import state_phase2 as _state_phase2
+        from .resume import check_identity_drift, reconstruct_resume_scope
+
+        spark = spark or _bootstrap_spark()
+        state.ensure_state_table(spark, paths)
+        _state_phase2.ensure_state_columns_v2(spark, paths)
+        # Propagates ResumeRunNotFoundError if the run_id has no rows.
+        resume_context = state.read_content_pack_resumable_state(
+            spark, paths, resume_run_id,
+        )
+
+        # Identity drift gate — only when a bronze-row snapshot is
+        # available (a v1-shape snapshot is required to reconstruct
+        # the stored identity). Pure silver/gold-only runs have no
+        # snapshot, so the gate is a no-op for them; the per-node
+        # AIDPF-4040 drift gate (in sql_runner) still catches
+        # identity-affecting changes at dispatch time.
+        if resume_context.bronze_plan_snapshot is not None:
+            from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+            check_identity_drift(
+                resume_context.bronze_plan_snapshot,
+                bundle=bundle, paths=paths, plugin_version=_pv,
+                run_id=resume_context.run_id,
+            )
+
+        # Bare-resume: reconstruct (datasets, layers) from the stored
+        # bronze snapshot if present, else from the observed scope.
+        # Explicit filters from the caller override (matches v1
+        # semantics — explicit wins).
+        if datasets is None and layers is None:
+            if resume_context.bronze_plan_snapshot is not None:
+                datasets, layers = reconstruct_resume_scope(
+                    resume_context.bronze_plan_snapshot,
+                )
+            else:
+                datasets = list(resume_context.scope_datasets)
+                layers = list(resume_context.scope_layers)
+
+    # Scope-split. raises AIDPF-1035 on unsatisfiable filters.
+    scope = split_run_scope_from_bundle(
+        bundle, resolved_pack, datasets=datasets, layers=layers,
+    )
+
+    # Dry-run path — return the merged would-run plan + empty steps.
+    # No spark, no BICC, no state writes. Bronze rows come from the
+    # v1 spec list (same source the real run would use); silver/gold
+    # rows come from the resolved pack.
+    if dry_run:
+        plan_nodes = _build_phase5_merged_dry_run_plan(
+            bundle=bundle, paths=paths, scope=scope, resolved_pack=resolved_pack,
+        )
+        return RunSummary.empty(
+            bundle_project=bundle.project, mode=mode, plan=plan_nodes,
+        )
+
+    # Mint the shared run_id once. Resume reuses the stored id (so the
+    # state table's plan_hash invariant + medallion <layer>_run_id
+    # audit columns stay a single continuous record across the resume).
+    if resume_context is not None:
+        shared_run_id = resume_context.run_id
+    elif resume_run_id is not None:
+        # Defensive fall-through (dry-run path bypassed the state read).
+        shared_run_id = resume_run_id
+    else:
+        shared_run_id = _new_run_id()
+
+    bronze_steps: tuple[RunStep, ...] = ()
+    cp_steps: tuple[RunStep, ...] = ()
+    started_at = _dt.now(_tz.utc)
+
+    # Phase 5 Step 2d — Fusion PVO drift gate (AIDPF-2072). Runs BEFORE
+    # the bronze branch dispatches, on the metadata-only BICC probe
+    # primitive (no rows transferred). Only fires when bronze is in
+    # scope — silver/gold-only direct calls against pre-seeded bronze
+    # have no live PVO to probe.
+    #
+    # On resume, narrow the gate's bronze filter to non-succeeded ids
+    # only. A succeeded bronze that's since drifted is the next run's
+    # problem; failing the resume on it would block recovery of
+    # silver/gold work that doesn't read the drifted PVO.
+    if scope.bronze_filter is not None:
+        gate_bronze_filter = _narrow_bronze_filter_to_reattempt(
+            scope.bronze_filter, bundle, resume_context,
+        )
+        if gate_bronze_filter is not None:
+            gate_step = _phase5_run_fusion_pvo_drift_gate(
+                bundle=bundle,
+                bundle_path=bundle_path,
+                spark=spark,
+                bronze_filter=gate_bronze_filter,
+                cp_filter=scope.cp_filter,
+                resolved_pack=resolved_pack,
+                tenant_profile=tenant_profile,
+                run_id=shared_run_id,
+                mode=mode,
+            )
+            if gate_step is not None:
+                return RunSummary(
+                    run_id=shared_run_id,
+                    started_at=started_at,
+                    finished_at=_dt.now(_tz.utc),
+                    bundle_project=bundle.project,
+                    mode=mode,
+                    steps=(gate_step,),
+                )
+
+    # Bronze branch — emit resumed_skip rows for already-succeeded
+    # bronze ids in scope; pass the narrowed (reattempt-only) filter
+    # to the legacy recursive call so it only re-dispatches the
+    # bronze work that hasn't already completed.
+    if scope.bronze_filter is not None:
+        bronze_steps_list: list[RunStep] = []
+        if resume_context is not None:
+            scope_bronze_ids = _resolve_scope_bronze_ids(bundle, scope.bronze_filter)
+            for bronze_id in sorted(scope_bronze_ids):
+                if bronze_id in resume_context.succeeded:
+                    skip_step = _emit_dispatcher_resumed_skip_for_bronze(
+                        bronze_id=bronze_id,
+                        run_id=shared_run_id,
+                        mode=mode,
+                        resume_context=resume_context,
+                        spark=spark,
+                        paths=paths,
+                    )
+                    if skip_step is not None:
+                        bronze_steps_list.append(skip_step)
+        narrowed_bronze = _narrow_bronze_filter_to_reattempt(
+            scope.bronze_filter, bundle, resume_context,
+        )
+        if narrowed_bronze is not None:
+            bronze_datasets, bronze_layers = narrowed_bronze
+            bronze_summary = run(  # pylint: disable=protected-access
+                bundle_path=bundle_path,
+                spark=spark,
+                mode=mode,
+                datasets=bronze_datasets,
+                layers=bronze_layers,
+                dry_run=False,
+                resume_run_id=None,  # legacy resume semantics don't apply here
+                execution_backend="legacy-python",
+                resolved_pack=None,
+                tenant_profile=None,
+                force_fingerprint_skip=force_fingerprint_skip,
+                _forced_run_id=shared_run_id,
+            )
+            bronze_steps_list.extend(bronze_summary.steps)
+            # If any bronze step failed, stop here — silver/gold against
+            # broken bronze is worse than no silver/gold. Return the
+            # bronze summary as-is; cp branch never runs.
+            if any(s.status == "failed" for s in bronze_summary.steps):
+                return RunSummary(
+                    run_id=shared_run_id,
+                    started_at=started_at,
+                    finished_at=_dt.now(_tz.utc),
+                    bundle_project=bundle.project,
+                    mode=mode,
+                    steps=tuple(bronze_steps_list),
+                )
+        bronze_steps = tuple(bronze_steps_list)
+
+    # Content-pack branch — silver/gold. The Step 2c bronze readiness
+    # gate fires ONLY when this dispatcher just extracted bronze
+    # (Option A merged flow); silver/gold-only direct calls (against
+    # pre-seeded bronze) skip the gate because the caller is asserting
+    # the bronze invariant out of band. This matches the plan's
+    # "between bronze (d) and content-pack (f)" placement.
+    if scope.cp_filter is not None:
+        cp_datasets, cp_layers = scope.cp_filter
+        gate_enabled = scope.bronze_filter is not None
+        cp_summary = _run_content_pack_backend(
+            bundle_path=bundle_path,
+            spark=spark,
+            mode=mode,
+            datasets=cp_datasets,
+            layers=cp_layers,
+            dry_run=False,
+            resume_run_id=resume_run_id,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
+            shared_run_id=shared_run_id,
+            enable_bronze_readiness_gate=gate_enabled,
+            shared_resume_context=resume_context,
+        )
+        cp_steps = cp_summary.steps
+
+    # Merge.
+    finished_at = _dt.now(_tz.utc)
+    merged_steps = tuple(list(bronze_steps) + list(cp_steps))
+    return RunSummary(
+        run_id=shared_run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        bundle_project=bundle.project,
+        mode=mode,
+        steps=merged_steps,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Step 2d — Fusion PVO drift gate wiring (AIDPF-2072)
+# ---------------------------------------------------------------------------
+
+
+def _struct_type_to_columns_map(
+    struct_type: "Any",
+) -> dict[str, str]:
+    """Flatten a Spark ``StructType`` to ``{col_name_lower: type_string}``.
+
+    Used to feed ``assert_fusion_pvo_compatibility`` which expects the
+    live schema in dict form (case-insensitive keys, simple type
+    strings). Resilient to test fakes that don't expose
+    ``.fields`` — falls back to ``.names`` + ``.dataType`` if needed.
+    """
+    out: dict[str, str] = {}
+    fields = getattr(struct_type, "fields", None)
+    if fields is None:
+        return out
+    for f in fields:
+        name = getattr(f, "name", None)
+        if name is None:
+            continue
+        dtype = getattr(f, "dataType", None)
+        if dtype is None:
+            type_str = ""
+        else:
+            simple = getattr(dtype, "simpleString", None)
+            type_str = simple() if callable(simple) else str(dtype)
+        out[name.lower()] = type_str
+    return out
+
+
+def _phase5_run_fusion_pvo_drift_gate(
+    *,
+    bundle: "Any",
+    bundle_path: "Path",
+    spark: "SparkSession | None",
+    bronze_filter: tuple[list[str] | None, list[str] | None],
+    cp_filter: tuple[list[str] | None, list[str] | None] | None,
+    resolved_pack: "Any | None",
+    tenant_profile: "Any | None",
+    run_id: str,
+    mode: str,
+) -> "RunStep | None":
+    """Phase 5 Step 2d — fire the AIDPF-2072 PVO drift gate.
+
+    Runs BEFORE the bronze branch in ``_phase5_top_level_dispatch``.
+    Probes the live Fusion PVO schemas via the metadata-only BICC
+    primitive ``preflight_bronze_schemas`` (no row transfer), loads the
+    pinned per-dataset snapshot if present, then hands the pair off to
+    ``assert_fusion_pvo_compatibility``.
+
+    Args:
+        bundle: loaded ``Bundle``.
+        bundle_path: path to ``bundle.yaml`` (used to resolve the
+            snapshot file under ``profiles/``).
+        spark: caller-supplied session or ``None``. Bootstrapped if None.
+        bronze_filter: ``scope.bronze_filter`` from ``split_run_scope``;
+            limits which bronze ids the gate complains about.
+        cp_filter: ``scope.cp_filter`` from ``split_run_scope``;
+            narrows the silver/gold required-column union.
+        resolved_pack: loaded ``ResolvedPack`` or ``None`` (bronze-only
+            run — required-column check is skipped).
+        tenant_profile: loaded ``TenantProfile`` or ``None``.
+        run_id: shared run identifier; threaded into the diagnostic path.
+        mode: ``"seed"`` or ``"incremental"`` (carried on the
+            ``gate_failed`` RunStep).
+
+    Returns:
+        ``None`` when the gate passes (or has nothing to do — empty
+        bronze plan, all probes failed and surfaced elsewhere).
+        A synthetic :class:`RunStep` with ``status='failed'`` carrying
+        AIDPF-2072 when the gate detects drift. The dispatcher consumes
+        this and returns a one-step ``RunSummary`` — bronze never runs.
+
+    Notes:
+        * The dispatcher-level preflight call is intentionally distinct
+          from the legacy bronze path's own preflight inside the
+          recursive ``run()``. Both are metadata-only and idempotent;
+          the double-probe is wasteful but correct, and lifting the
+          preflight result down into the legacy path would require a
+          new ``_skip_preflight`` kwarg layered through ``run()``.
+          TODO(phase-6): factor the preflight to a single dispatcher-
+          owned probe and skip the legacy re-run.
+        * A snapshot YAML that's absent OR unparseable degrades the
+          gate to missing-column / renamed-column detection only —
+          matches the contract in ``fusion_pvo_drift.py``.
+        * Failures during preflight itself (BronzeSchemaProbeError,
+          credential failures) are NOT caught here — they propagate so
+          the operator sees the real probe error, not a synthetic
+          gate-failure step that hides the real cause.
+    """
+    from .fusion_pvo_drift import (
+        AIDPF_2072_FUSION_PVO_DRIFT_GATE_FAILED,
+        FusionPvoDriftError,
+        assert_fusion_pvo_compatibility,
+    )
+    from .preflight import preflight_bronze_schemas
+    from ..schema.bronze_schema_snapshot import (
+        BronzeSchemaSnapshotSchemaError,
+        load_bronze_schema_snapshot,
+        resolve_snapshot_path,
+    )
+
+    bundle_inst, paths = load_bundle(bundle_path)
+
+    # Build the bronze plan from the scope's bronze filter.
+    bronze_datasets, bronze_layers = bronze_filter
+    bronze_plan, _ = resolve_plan(
+        bundle_inst, bronze_datasets, bronze_layers, paths=paths,
+    )
+    # Filter to BronzeExtractSpec (deferred bronze ids contribute no
+    # live PVO to probe).
+    bronze_specs = [s for s in bronze_plan if isinstance(s, BronzeExtractSpec)]
+    if not bronze_specs:
+        return None
+
+    # Probe live PVO schemas. The probe is metadata-only — BICC's
+    # inferSchema roundtrip, no row transfer. Propagates probe
+    # failures so the operator sees BronzeSchemaProbeError directly
+    # rather than a misleading gate-failure step.
+    spark_session = spark or _bootstrap_spark()
+    resolved_password = _resolve_password(bundle_inst.fusion.password).get_secret_value()
+    preflight_result = preflight_bronze_schemas(
+        spark_session, bundle_inst, bronze_specs,
+        resolved_password=resolved_password,
+    )
+
+    # Convert per-PVO ``StructType`` -> ``{col_name_lower: type_string}``.
+    live_pvo_columns: dict[str, dict[str, str]] = {}
+    for ds_id, struct_type in preflight_result.live_pvo_schemas.items():
+        live_pvo_columns[ds_id] = _struct_type_to_columns_map(struct_type)
+
+    # Load the pinned snapshot. Absent / unparseable → degraded mode
+    # (None). Matches the Phase 3d graceful-degrade contract.
+    schema_snapshot = None
+    profile_name = (
+        bundle_inst.content_pack.profile if bundle_inst.content_pack else None
+    )
+    if profile_name is not None:
+        try:
+            snapshot_path = resolve_snapshot_path(bundle_path, profile_name)
+            if snapshot_path.exists():
+                schema_snapshot = load_bronze_schema_snapshot(snapshot_path)
+        except (BronzeSchemaSnapshotSchemaError, OSError):
+            schema_snapshot = None
+
+    diagnostics_root = bundle_path.resolve().parent / ".aidp" / "diagnostics"
+
+    try:
+        assert_fusion_pvo_compatibility(
+            live_pvo_columns=live_pvo_columns,
+            resolved_pack=resolved_pack,
+            cp_filter=cp_filter,
+            bronze_filter=bronze_filter,
+            schema_snapshot=schema_snapshot,
+            run_id=run_id,
+            diagnostics_root=diagnostics_root,
+            tenant_profile=tenant_profile,
+        )
+    except FusionPvoDriftError as exc:
+        return RunStep.gate_failed(
+            run_id=run_id,
+            mode=mode,
+            layer="bronze",
+            gate_dataset_id="__fusion_pvo_drift_gate__",
+            aidpf_code=AIDPF_2072_FUSION_PVO_DRIFT_GATE_FAILED,
+            error_message=str(exc),
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Step 9b — resume helpers (dispatcher-side narrowing + skip emission)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_scope_bronze_ids(
+    bundle: "Any",
+    bronze_filter: tuple[list[str] | None, list[str] | None],
+) -> set[str]:
+    """Return the set of bronze ids covered by ``bronze_filter``.
+
+    ``(None, ["bronze"])`` → every enabled bronze id in the bundle.
+    ``(["ap_invoices", "gl_coa"], None)`` → that intersection with
+    the enabled set (so a typo dataset never sneaks in).
+    """
+    datasets, _layers = bronze_filter
+    enabled_bronze_ids = {ds.id for ds in bundle.datasets if ds.enabled}
+    if datasets is None:
+        return enabled_bronze_ids
+    return {d for d in datasets if d in enabled_bronze_ids}
+
+
+def _narrow_bronze_filter_to_reattempt(
+    bronze_filter: tuple[list[str] | None, list[str] | None],
+    bundle: "Any",
+    resume_context: "Any | None",  # state.ResumeContext | None
+) -> tuple[list[str] | None, list[str] | None] | None:
+    """Return a bronze filter narrowed to bronze ids that still need work.
+
+    No resume → pass the filter through unchanged. With a resume
+    context: subtract the ``succeeded`` set from the scope's bronze
+    ids and rebuild a positive-list filter. All succeeded → return
+    ``None`` (nothing left to dispatch on the bronze branch).
+    """
+    if resume_context is None:
+        return bronze_filter
+    scope_ids = _resolve_scope_bronze_ids(bundle, bronze_filter)
+    reattempt_ids = sorted(scope_ids - resume_context.succeeded)
+    if not reattempt_ids:
+        return None
+    return (reattempt_ids, None)
+
+
+def _emit_dispatcher_resumed_skip_for_bronze(
+    *,
+    bronze_id: str,
+    run_id: str,
+    mode: str,
+    resume_context: "Any",  # state.ResumeContext
+    spark: "Any",
+    paths: "Any",
+) -> "RunStep | None":
+    """Emit a ``resumed_skip`` step + soft-write a state row for an
+    already-succeeded bronze id.
+
+    Resolves the registry spec (real :class:`BronzeExtractSpec` or
+    :class:`DeferredSpec` for deferred datasets) so the existing
+    ``RunStep.resumed_skip`` factory can compute the layer + carry
+    forward ``row_count`` / ``last_watermark`` from
+    ``resume_context``. State-row write is best-effort — a failure
+    only loses the audit trail and never raises.
+
+    Returns ``None`` when the id resolves to neither a runnable spec
+    nor a deferred entry (shouldn't happen in practice because
+    ``_resolve_scope_bronze_ids`` already filtered to enabled
+    bundle ids that v1 ``resolve_plan`` accepts).
+    """
+    from .registry import (
+        BRONZE_EXTRACTS,
+        DeferredSpec,
+        KNOWN_DEFERRED_DATASETS,
+    )
+
+    if bronze_id in BRONZE_EXTRACTS:
+        spec: "Any" = BRONZE_EXTRACTS[bronze_id]
+    elif bronze_id in KNOWN_DEFERRED_DATASETS:
+        spec = DeferredSpec(
+            dataset_id=bronze_id,
+            layer="bronze",
+            reason=KNOWN_DEFERRED_DATASETS[bronze_id],
+        )
+    else:
+        return None
+
+    key = (bronze_id, "bronze")
+    # CPResumeContext carries ``bronze_plan_snapshot`` (lifted from a
+    # v1-shape bronze row, may be None for pure cp-only runs) and no
+    # run-level ``plan_hash`` (CP writes per-node hashes). Resumed-skip
+    # rows propagate the snapshot for audit-trail continuity; plan_hash
+    # stays None — read_content_pack_resumable_state tolerates that.
+    step = RunStep.resumed_skip(
+        spec, run_id, mode,
+        row_count=resume_context.succeeded_row_counts.get(key),
+        last_watermark=resume_context.succeeded_last_watermarks.get(key),
+        plan_hash=None,
+        plan_snapshot=resume_context.bronze_plan_snapshot,
+    )
+    _safe_write_state_row(spark, paths, step)
+    return step
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — content-pack dry-run plan builder
+# ---------------------------------------------------------------------------
+
+
+def _build_phase5_merged_dry_run_plan(
+    *,
+    bundle: "Any",
+    paths: "TablePaths",
+    scope: "Any",  # RunScope
+    resolved_pack: "Any | None",
+) -> tuple[Any, ...]:
+    """Build the merged ``PlanNode`` tuple for the Phase 5 dry-run path.
+
+    Bronze rows come from the v1 spec list via :func:`resolve_plan` —
+    same source the legacy bronze recursive call would use during a
+    real run — and are coerced to ``PlanNode`` with the same shape the
+    v1 dry-run path emits (``status='eligible'`` for runnable specs,
+    ``status='deferred'`` carrying the reason for deferred ones).
+
+    Silver / gold rows come from the resolved pack via
+    :func:`_build_content_pack_dry_run_plan`.
+
+    Either side may be empty: ``--layers bronze`` produces bronze rows
+    only; ``--layers silver`` produces silver rows only; no filters
+    produces both.
+
+    The merge order is bronze-first then silver/gold, matching the
+    real run order and keeping the renderer's "what would run, in
+    what order" presentation honest.
+    """
+    plan_nodes: list[Any] = []
+
+    if scope.bronze_filter is not None:
+        bronze_datasets, bronze_layers = scope.bronze_filter
+        bronze_specs, _ = resolve_plan(
+            bundle, bronze_datasets, bronze_layers, paths=paths,
+        )
+        for spec in bronze_specs:
+            plan_nodes.append(
+                PlanNode(
+                    dataset_id=spec.dataset_id,
+                    layer=(
+                        spec.layer if isinstance(spec, DeferredSpec)
+                        else _layer_for_spec(spec)
+                    ),
+                    status=(
+                        "deferred" if isinstance(spec, DeferredSpec)
+                        else "eligible"
+                    ),
+                    reason=(
+                        spec.reason if isinstance(spec, DeferredSpec) else None
+                    ),
+                )
+            )
+
+    if scope.cp_filter is not None and resolved_pack is not None:
+        cp_datasets, cp_layers = scope.cp_filter
+        plan_nodes.extend(
+            _build_content_pack_dry_run_plan(
+                resolved_pack=resolved_pack,
+                datasets=cp_datasets,
+                layers=cp_layers,
+            )
+        )
+
+    return tuple(plan_nodes)
+
+
+def _build_content_pack_dry_run_plan(
+    *,
+    resolved_pack: "Any",
+    datasets: list[str] | None,
+    layers: list[str] | None,
+) -> tuple[Any, ...]:
+    """Return a tuple of :class:`PlanNode` for the content-pack dry-run path.
+
+    The legacy backend's ``run(..., dry_run=True)`` returns a
+    ``RunSummary.empty(...)`` carrying a ``plan`` of
+    :class:`PlanNode`-shaped tuples. Phase 5's content-pack default-
+    flipped backend mirrors that contract so the CLI's summary renderer
+    (``_render_summary``) shows the same shape regardless of backend.
+
+    The implementation walks ``resolve_content_pack_plan`` (the same
+    resolver the runtime uses) so the dry-run plan is byte-equivalent
+    to what would actually run — minus the side effects.
+    """
+    from .content_pack_plan_resolver import resolve_content_pack_plan
+
+    plan = resolve_content_pack_plan(
+        resolved_pack, datasets=datasets, layers=layers,
+    )
+    plan_nodes = tuple(
+        PlanNode(
+            dataset_id=node.id,
+            layer=node.layer,
+            status="eligible",
+            reason=None,
+        )
+        for node in plan
+    )
+    return plan_nodes
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — pack-driven node discovery
+# ---------------------------------------------------------------------------
+
+
+class PackNodeNotFoundError(OrchestratorRuntimeError):
+    """Requested node id is not in the resolved pack's silver/gold maps.
+
+    Raised by :func:`_resolve_node_from_pack` when a caller hands in a
+    layer + node_id pair that doesn't exist on the loaded pack. Surfaces
+    pack-author mistakes (typo in a YAML id) without conflating with
+    the registry-lookup errors raised under the legacy backend.
+    """
+
+
+def _resolve_node_from_pack(
+    pack: "Any",  # ResolvedPack — typed without import to avoid load-time cycles
+    layer: str,
+    node_id: str,
+) -> "Any":  # NodeYaml
+    """Look up a content-pack node by ``(layer, node_id)`` — Phase 5.
+
+    The orchestrator's per-node dispatch loop (
+    :func:`_run_content_pack_backend`) walks ``resolve_content_pack_plan``'s
+    output directly — that path already returns ``NodeYaml`` objects.
+    This helper exists so that direct callers (tests, future
+    integrations, dry-run plan renderers) can ask the pack the same
+    question without re-walking the plan resolver: "give me the
+    ``NodeYaml`` for silver/dim_supplier".
+
+    Per-node ``implementation.type`` (``sql`` / ``builtin`` /
+    ``python_legacy``) discriminates the runtime path; the dispatch
+    itself is inside ``sql_runner.execute_node``.
+
+    Args:
+        pack: the resolved content pack (``ResolvedPack``).
+        layer: ``"silver"`` or ``"gold"``.
+        node_id: pack-author node id (matches ``NodeYaml.id``).
+
+    Returns:
+        The :class:`NodeYaml` for that ``(layer, node_id)``.
+
+    Raises:
+        ValueError: ``layer`` not in ``{"silver", "gold"}``.
+        PackNodeNotFoundError: ``node_id`` is absent from
+            ``pack.silver`` / ``pack.gold``.
+    """
+    if layer == "silver":
+        bucket = getattr(pack, "silver", {})
+    elif layer == "gold":
+        bucket = getattr(pack, "gold", {})
+    else:
+        raise ValueError(
+            f"_resolve_node_from_pack: layer={layer!r} not in "
+            f"{{'silver', 'gold'}}. Bronze nodes are not pack-driven yet."
+        )
+    if node_id not in bucket:
+        available = sorted(bucket.keys())
+        raise PackNodeNotFoundError(
+            f"_resolve_node_from_pack: pack has no {layer} node "
+            f"{node_id!r}. Available {layer} node ids: {available!r}. "
+            f"Check the pack's {layer}/*.yaml files."
+        )
+    return bucket[node_id]
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — content-pack execution backend dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1174,6 +1955,23 @@ def _run_content_pack_backend(
     resolved_pack: "Any | None",
     tenant_profile: "Any | None",
     force_fingerprint_skip: bool = False,
+    # Phase 5 Step 5 — shared run_id contract. When the top-level
+    # dispatcher (the caller) already minted a run_id (because bronze
+    # + content-pack must share one), pass it in and the content-pack
+    # backend will adopt it instead of minting `cp-<timestamp>-<hex>`.
+    shared_run_id: str | None = None,
+    # Phase 5 Step 5 — enable the Step 2c bronze readiness gate.
+    # Default off so unit tests / direct callers that don't pre-seed
+    # bronze tables don't trip on missing tables; the top-level
+    # dispatcher in `run()` flips this on for full-medallion invocations.
+    enable_bronze_readiness_gate: bool = False,
+    # Phase 5 Step 9b — resume support. When the top-level dispatcher
+    # read fusion_bundle_state to build a ResumeContext, it threads
+    # the snapshot through here so the per-node loop can short-circuit
+    # already-succeeded nodes (emit ``resumed_skip`` instead of
+    # re-dispatching) and the bronze-readiness gate (above) narrows
+    # to the reattempt-only cp_filter. ``None`` outside a resume.
+    shared_resume_context: "Any | None" = None,
 ) -> RunSummary:
     """Execute the silver+gold layers via the content-pack runner (PLAN §15 Phase 2).
 
@@ -1226,11 +2024,19 @@ def _run_content_pack_backend(
     )
     from ..schema.tenant_profile import compute_profile_hash
 
-    if resume_run_id is not None:
-        raise OrchestratorConfigError(
-            f"{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
-            f"with --execution-backend content-pack in v0.3."
-        )
+    # Phase 5 Step 9b — AIDPF-1032 resolved. ``--resume`` on the content-
+    # pack backend is supported by:
+    #   1. Adopting the supplied ``resume_run_id`` as the shared run_id
+    #      (the per-node loop's prior-state hydration + plan-hash drift
+    #      gate already enforce the resume contract).
+    #   2. Falling through to the normal per-node dispatch — nodes whose
+    #      latest state row is already ``success`` for this run_id are
+    #      idempotent in the §11.9 atomic-commit model; non-success nodes
+    #      retry through the same dispatcher path.
+    # No bespoke "resume planner" is needed for v0.3 because the content-
+    # pack backend's per-node atomicity (each ``execute_node`` is a full
+    # preflight → render → drift → execute → quality → state commit) is
+    # the resume unit.
     if resolved_pack is None:
         raise ValueError(
             "_run_content_pack_backend: resolved_pack is None. The CLI / "
@@ -1249,10 +2055,18 @@ def _run_content_pack_backend(
     bundle_project = bundle.project
 
     if dry_run:
-        # Return a clean empty summary; the plan resolver is cheap so
-        # we could build the would-run plan here, but Phase 2 keeps the
-        # dry-run path minimal.
-        return RunSummary.empty(bundle_project=bundle_project, mode=mode)
+        # Phase 5 Step 6 — populate the content-pack dry-run plan so the
+        # renderer can show operators which silver/gold nodes would run +
+        # how each would be dispatched. Plan resolution is cheap (pure
+        # data walk; no Spark / BICC).
+        plan_nodes = _build_content_pack_dry_run_plan(
+            resolved_pack=resolved_pack,
+            datasets=datasets,
+            layers=layers,
+        )
+        return RunSummary.empty(
+            bundle_project=bundle_project, mode=mode, plan=plan_nodes,
+        )
 
     spark = spark or _bootstrap_spark()
 
@@ -1261,7 +2075,22 @@ def _run_content_pack_backend(
     # run_id. Round-2 audit-correlation requirement: lifting this above
     # state.ensure_state_table keeps "gate runs before any state write"
     # AND "one run_id across all Phase 3c artifacts" both true.
-    run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    #
+    # Phase 5 Step 5 — when the top-level dispatcher minted a shared
+    # run_id (so bronze + cp join cleanly on run_id), adopt it instead
+    # of minting a `cp-`-prefixed one. The prefix loses meaning once
+    # the same run also extracts bronze through the legacy path.
+    #
+    # Phase 5 Step 9b — also adopt ``resume_run_id`` when supplied so
+    # the resumed run writes state rows under the same id as the
+    # original failed run (joining cleanly with the prior state).
+    # Precedence: explicit shared_run_id > resume_run_id > newly minted.
+    if shared_run_id is not None:
+        run_id = shared_run_id
+    elif resume_run_id is not None:
+        run_id = resume_run_id
+    else:
+        run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
 
     # Phase 3c — bronze-schema fingerprint drift gate. Runs BEFORE any
     # Spark write and BEFORE state.ensure_state_table. Returns a
@@ -1351,6 +2180,65 @@ def _run_content_pack_backend(
         resolved_pack, datasets=datasets, layers=layers,
     )
 
+    # Phase 5 Step 2c — bronze readiness gate. Verify every in-scope
+    # silver/gold node's transitive bronze dependencies exist AND
+    # surface every required column BEFORE dispatching any node.
+    # When the gate fails, return a RunSummary with the (otherwise
+    # empty) plan plus a synthetic gate-failure RunStep so the CLI
+    # exits non-zero AND operators see the gap. No silver/gold state
+    # rows are written.
+    if enable_bronze_readiness_gate and not dry_run:
+        from .bronze_readiness import (
+            BronzeReadinessGateError,
+            AIDPF_2071_BRONZE_READINESS_GATE_FAILED,
+            assert_bronze_readiness,
+        )
+        # On resume, narrow the gate's cp_filter to the reattempt
+        # subset of nodes. A succeeded node's bronze dependency that
+        # was manually dropped post-success is not the resume's
+        # problem; gating over it would block recovery of unrelated
+        # silver/gold work. All-succeeded → skip the gate entirely
+        # (no node will dispatch this run).
+        gate_cp_filter: tuple[list[str] | None, list[str] | None] | None
+        if shared_resume_context is not None:
+            reattempt_ids = [
+                node.id for node in plan
+                if node.id not in shared_resume_context.succeeded
+            ]
+            gate_cp_filter = (reattempt_ids, None) if reattempt_ids else None
+        else:
+            gate_cp_filter = (datasets, layers)
+
+        if gate_cp_filter is not None:
+            try:
+                assert_bronze_readiness(
+                    spark,
+                    resolved_pack=resolved_pack,
+                    cp_filter=gate_cp_filter,
+                    paths=paths,
+                    run_id=run_id,
+                    diagnostics_root=(bundle_path.resolve().parent / ".aidp" / "diagnostics"),
+                    tenant_profile=tenant_profile,
+                )
+            except BronzeReadinessGateError as gate_exc:
+                gate_step = RunStep.gate_failed(
+                    run_id=run_id,
+                    mode=mode,
+                    layer="silver",
+                    gate_dataset_id="__bronze_readiness_gate__",
+                    aidpf_code=AIDPF_2071_BRONZE_READINESS_GATE_FAILED,
+                    error_message=str(gate_exc),
+                )
+                gate_now = _dt.now(_tz.utc)
+                return RunSummary(
+                    run_id=run_id,
+                    started_at=gate_now,
+                    finished_at=gate_now,
+                    bundle_project=bundle_project,
+                    mode=mode,  # type: ignore[arg-type]
+                    steps=(gate_step,),
+                )
+
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we
     # translate that into RunStep entries for the RunSummary.
@@ -1377,6 +2265,28 @@ def _run_content_pack_backend(
     steps: list[RunStep] = []
     failed_node_ids: set[str] = set()
     for node in plan:
+        # Phase 5 Step 9b — resume short-circuit. Nodes whose latest
+        # terminal state row under this run_id is 'success' (or a
+        # carry-forwarded 'resumed_skipped') emit a fresh
+        # resumed_skipped step instead of re-dispatching. The
+        # ResumeContext is the source of truth — even if the operator
+        # manually dropped the node's table between runs, we trust
+        # state; the bronze-readiness gate above catches a dropped
+        # upstream that a reattempt node actually reads.
+        if (
+            shared_resume_context is not None
+            and node.id in shared_resume_context.succeeded
+        ):
+            _emit_content_pack_resumed_skip(
+                steps=steps,
+                spark=spark, paths=paths,
+                node=node, run_id=run_id, mode=mode,
+                resume_context=shared_resume_context,
+                tenant_profile=tenant_profile,
+                resolved_pack=resolved_pack,
+            )
+            continue
+
         # Cascade-abort check — if any of this node's silver-deps is in
         # failed_node_ids, skip it with a 'cascade' RunStep instead of
         # dispatching to execute_node. Write a best-effort soft state
@@ -1534,6 +2444,118 @@ def _safe_write_content_pack_cascade_skip_row(
         "duration_seconds": None,
         "plan_hash": None,
         "plan_snapshot": None,
+        "pack_id": pack_id,
+        "pack_version": pack_version,
+        "node_version": None,
+        "node_implementation_type": getattr(node.implementation, "type", None),
+        "rendered_sql_hash": None,
+        "output_schema_hash": None,
+        "profile_hash": None,
+        "tenant_fingerprint": tenant,
+        "fusion_version": None,
+        "bronze_schema_fingerprint": fingerprint,
+        "source_id": primary_source,
+        "source_role": "primary",
+        "input_watermark_start": None,
+        "input_watermark_end": None,
+        "output_watermark": None,
+        "consumed_version": None,
+        "delta_row_count": None,
+    }
+    try:
+        _sp2.write_state_rows_hard(spark, paths, [row])
+    except Exception:  # noqa: BLE001 — diagnostic write is best-effort
+        return
+
+
+def _emit_content_pack_resumed_skip(
+    *,
+    steps: "list[RunStep]",
+    spark: "Any",
+    paths: "Any",
+    node: "Any",
+    run_id: str,
+    mode: str,
+    resume_context: "Any",
+    tenant_profile: "Any | None",
+    resolved_pack: "Any | None",
+) -> None:
+    """Append a ``resumed_skipped`` step + best-effort soft state row.
+
+    Used by ``_run_content_pack_backend``'s per-node loop when a node's
+    id is in ``resume_context.succeeded``. The shape mirrors the v1
+    resume path (RunStep.resumed_skip + a state row carrying the
+    original run's ``plan_hash`` / ``plan_snapshot`` so the resumed
+    row's drift-gate metadata is consistent with the prior success
+    row).
+
+    Carry-forwarded ``row_count`` / ``last_watermark`` come from
+    ``resume_context``'s tuple-keyed dicts so the
+    ``fusion_bundle_state_latest`` projection preserves the original
+    logical row count and bronze cursor instead of regressing them to
+    NULL.
+
+    State write is best-effort (matches the cascade-skip pattern at
+    :func:`_safe_write_content_pack_cascade_skip_row`).
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from . import state_phase2 as _sp2
+
+    key = (node.id, node.layer)
+    row_count = resume_context.succeeded_row_counts.get(key)
+    last_watermark = resume_context.succeeded_last_watermarks.get(key)
+    # CPResumeContext: no run-level plan_hash (CP writes per-node).
+    # bronze_plan_snapshot lifted from any v1-shape bronze row; None
+    # for pure silver/gold runs. read_content_pack_resumable_state
+    # tolerates both fields being NULL on a resumed-skip row.
+    plan_hash = None
+    plan_snapshot = resume_context.bronze_plan_snapshot
+
+    primary_source = _resolve_primary_source_id_for_state_read(node)
+    now = _dt.now(_tz.utc)
+    pack_id = getattr(getattr(resolved_pack, "pack", None), "id", None)
+    pack_version = getattr(getattr(resolved_pack, "pack", None), "version", None)
+    tenant = getattr(tenant_profile, "tenant", None)
+    fingerprint = getattr(tenant_profile, "bronze_schema_fingerprint", None)
+
+    steps.append(
+        RunStep(
+            run_id=run_id,
+            dataset_id=node.id,
+            layer=node.layer,
+            mode=mode,  # type: ignore[arg-type]
+            status="resumed_skipped",
+            row_count=row_count,
+            duration_seconds=0.0,
+            error_message=(
+                f"resume({run_id!r}): node already succeeded under this "
+                f"run_id — carrying forward."
+            ),
+            watermark_used=None,
+            last_watermark=last_watermark,
+            skip_reason="resume-skip",
+            plan_hash=plan_hash,
+            plan_snapshot=plan_snapshot,
+        )
+    )
+
+    row = {
+        "run_id": run_id,
+        "dataset_id": node.id,
+        "layer": node.layer,
+        "mode": mode,
+        "last_watermark": last_watermark,
+        "last_run_at": now,
+        "status": "resumed_skipped",
+        "row_count": row_count,
+        "error_message": (
+            f"resume({run_id!r}): node already succeeded under this "
+            f"run_id — carrying forward."
+        ),
+        "skip_reason": "resume-skip",
+        "duration_seconds": None,
+        "plan_hash": plan_hash,
+        "plan_snapshot": plan_snapshot,
         "pack_id": pack_id,
         "pack_version": pack_version,
         "node_version": None,
