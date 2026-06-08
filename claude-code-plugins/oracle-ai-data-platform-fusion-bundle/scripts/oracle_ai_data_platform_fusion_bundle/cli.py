@@ -217,7 +217,9 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "stored plan_snapshot when --datasets/--layers are omitted. Drift "
          "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
          "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch. "
-         "Requires --inline in P1.5ε; REST-dispatch resume is BACKLOG P1.5ε-fix5.",
+         "Supported on both --inline and REST dispatch (P1.5ε-fix5): the "
+         "generated cluster notebook threads the run_id into the orchestrator "
+         "call so the resumed run adopts the original id end-to-end.",
 )
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False,

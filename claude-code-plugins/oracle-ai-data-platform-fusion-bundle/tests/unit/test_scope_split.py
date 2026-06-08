@@ -105,17 +105,27 @@ class TestDatasetsOnly:
     def test_single_silver_id(self) -> None:
         scope = _split(datasets=["dim_supplier"])
         assert scope.bronze_filter is None
-        assert scope.cp_filter == (["dim_supplier"], None)
+        # cp_filter carries the layers actually present (silver here)
+        # so the resolver enforces the layer contract.
+        assert scope.cp_filter == (["dim_supplier"], ["silver"])
 
     def test_single_gold_id(self) -> None:
         scope = _split(datasets=["ap_aging"])
         assert scope.bronze_filter is None
-        assert scope.cp_filter == (["ap_aging"], None)
+        assert scope.cp_filter == (["ap_aging"], ["gold"])
+
+    def test_mixed_silver_gold_emits_both_layers(self) -> None:
+        scope = _split(datasets=["dim_supplier", "ap_aging"])
+        assert scope.bronze_filter is None
+        assert scope.cp_filter == (
+            ["dim_supplier", "ap_aging"],
+            ["silver", "gold"],
+        )
 
     def test_mixed_bronze_silver_routes_both(self) -> None:
         scope = _split(datasets=["ap_invoices", "dim_supplier"])
         assert scope.bronze_filter == (["ap_invoices"], None)
-        assert scope.cp_filter == (["dim_supplier"], None)
+        assert scope.cp_filter == (["dim_supplier"], ["silver"])
 
     def test_unknown_id_raises(self) -> None:
         with pytest.raises(ScopeSplitError) as exc:
@@ -153,7 +163,39 @@ class TestDatasetsPlusLayers:
     def test_silver_id_with_silver_layer_ok(self) -> None:
         scope = _split(datasets=["dim_supplier"], layers=["silver"])
         assert scope.bronze_filter is None
-        assert scope.cp_filter == (["dim_supplier"], None)
+        assert scope.cp_filter == (["dim_supplier"], ["silver"])
+
+    def test_silver_id_with_gold_only_layer_unsatisfiable(self) -> None:
+        # Regression: previously the disjoint-vs-{silver,gold} check
+        # passed for layers=["gold"] when only silver ids were named,
+        # then cp_filter dropped the layer list and the resolver ran
+        # the silver node anyway.
+        with pytest.raises(ScopeSplitError) as exc:
+            _split(datasets=["dim_supplier"], layers=["gold"])
+        assert AIDPF_1035_SCOPE_SPLIT_REJECTED in str(exc.value)
+        assert "excludes silver" in str(exc.value)
+        assert "unsatisfiable" in str(exc.value)
+
+    def test_gold_id_with_silver_only_layer_unsatisfiable(self) -> None:
+        with pytest.raises(ScopeSplitError) as exc:
+            _split(datasets=["ap_aging"], layers=["silver"])
+        assert AIDPF_1035_SCOPE_SPLIT_REJECTED in str(exc.value)
+        assert "excludes gold" in str(exc.value)
+
+    def test_mixed_silver_gold_with_silver_only_layer_unsatisfiable(self) -> None:
+        # When --datasets mixes silver + gold ids but --layers excludes
+        # one of them, reject — do NOT silently narrow.
+        with pytest.raises(ScopeSplitError) as exc:
+            _split(datasets=["dim_supplier", "ap_aging"], layers=["silver"])
+        assert AIDPF_1035_SCOPE_SPLIT_REJECTED in str(exc.value)
+        assert "excludes gold" in str(exc.value)
+
+    def test_silver_id_with_silver_gold_layer_emits_only_silver(self) -> None:
+        # Operator named only silver ids but allowed both layers; the
+        # emitted cp_filter narrows to silver (no point telling the
+        # resolver gold is in-scope when no gold ids are requested).
+        scope = _split(datasets=["dim_supplier"], layers=["silver", "gold"])
+        assert scope.cp_filter == (["dim_supplier"], ["silver"])
 
 
 # ---------------------------------------------------------------------------

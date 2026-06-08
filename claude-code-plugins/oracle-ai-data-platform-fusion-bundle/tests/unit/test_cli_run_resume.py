@@ -44,6 +44,27 @@ def test_resume_option_appears_in_help() -> None:
     assert "run_id" in result.output.lower() or "run id" in result.output.lower()
 
 
+def test_resume_help_describes_inline_and_rest_support() -> None:
+    """Help text MUST match runtime: ``--resume`` works on both
+    --inline AND REST dispatch since P1.5ε-fix5. The previous text
+    said REST resume was BACKLOG, which sent operators to the wrong
+    invocation (the dispatcher already threads ``resume_run_id`` into
+    the generated notebook cell — see ``test_resume_without_inline_
+    dispatches_via_rest`` below)."""
+    result = CliRunner().invoke(
+        cli.main, ["run", "--help", "--execution-backend", "legacy-python"],
+    )
+    assert result.exit_code == 0
+    # Normalise whitespace — Click wraps help text across lines.
+    flat = " ".join(result.output.split())
+    # Stale wording must be gone.
+    assert "BACKLOG P1.5ε-fix5" not in flat
+    assert "Requires --inline" not in flat
+    # New wording must mention both supported paths.
+    assert "REST" in flat
+    assert "inline" in flat.lower()
+
+
 def test_resume_without_inline_dispatches_via_rest(
     tmp_path: Path, monkeypatch,
 ) -> None:

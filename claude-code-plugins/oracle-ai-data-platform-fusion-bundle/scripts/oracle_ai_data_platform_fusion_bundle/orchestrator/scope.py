@@ -158,24 +158,34 @@ def split_run_scope(
             )
 
     if datasets is not None:
-        # Classify each dataset id against bronze vs silver/gold.
+        # Classify each dataset id by EXACT layer (bronze / silver / gold).
+        # Per-layer classification (not lumped "cp") is load-bearing: the
+        # cp_filter we emit must carry the narrowed CP layer list, else
+        # ``resolve_content_pack_plan`` sees ``layers=None`` and runs nodes
+        # from layers the operator excluded (e.g. --datasets dim_supplier
+        # --layers gold would otherwise run the silver dim_supplier node).
         bronze_in_filter: list[str] = []
-        cp_in_filter: list[str] = []
+        silver_in_filter: list[str] = []
+        gold_in_filter: list[str] = []
         unknown: list[str] = []
         for ds_id in datasets:
             in_bronze = ds_id in bronze_ids
-            in_cp = ds_id in silver_ids or ds_id in gold_ids
-            if in_bronze and not in_cp:
+            in_silver = ds_id in silver_ids
+            in_gold = ds_id in gold_ids
+            if in_silver and not in_bronze:
+                silver_in_filter.append(ds_id)
+            elif in_gold and not in_bronze:
+                gold_in_filter.append(ds_id)
+            elif in_bronze and not (in_silver or in_gold):
                 bronze_in_filter.append(ds_id)
-            elif in_cp and not in_bronze:
-                cp_in_filter.append(ds_id)
-            elif in_bronze and in_cp:
+            elif in_bronze and (in_silver or in_gold):
                 # Shouldn't happen in practice (registry ids are unique
-                # across layers), but if it does, prefer the higher
-                # layer because that's where the user-visible mart
-                # lives. Surface as a warning via the error message in
-                # the test path; for now resolve to cp.
-                cp_in_filter.append(ds_id)
+                # across layers). Prefer the higher layer because that's
+                # where the user-visible mart lives.
+                if in_silver:
+                    silver_in_filter.append(ds_id)
+                else:
+                    gold_in_filter.append(ds_id)
             else:
                 unknown.append(ds_id)
 
@@ -190,25 +200,44 @@ def split_run_scope(
 
         # Now apply --layers constraints, if present, to the classified ids.
         if layer_set is not None:
-            if bronze_in_filter and layer_set.isdisjoint({"bronze"}):
+            if bronze_in_filter and "bronze" not in layer_set:
                 raise ScopeSplitError(
                     f"{AIDPF_1035_SCOPE_SPLIT_REJECTED}: --datasets includes "
                     f"bronze id(s) {bronze_in_filter!r} but --layers="
                     f"{sorted(layer_set)!r} excludes bronze. The filter "
                     f"combination is semantically unsatisfiable."
                 )
-            if cp_in_filter and layer_set.isdisjoint({"silver", "gold"}):
+            if silver_in_filter and "silver" not in layer_set:
                 raise ScopeSplitError(
                     f"{AIDPF_1035_SCOPE_SPLIT_REJECTED}: --datasets includes "
-                    f"silver/gold id(s) {cp_in_filter!r} but --layers="
-                    f"{sorted(layer_set)!r} excludes silver and gold. The "
-                    f"filter combination is semantically unsatisfiable."
+                    f"silver id(s) {silver_in_filter!r} but --layers="
+                    f"{sorted(layer_set)!r} excludes silver. The filter "
+                    f"combination is semantically unsatisfiable."
                 )
+            if gold_in_filter and "gold" not in layer_set:
+                raise ScopeSplitError(
+                    f"{AIDPF_1035_SCOPE_SPLIT_REJECTED}: --datasets includes "
+                    f"gold id(s) {gold_in_filter!r} but --layers="
+                    f"{sorted(layer_set)!r} excludes gold. The filter "
+                    f"combination is semantically unsatisfiable."
+                )
+
+        cp_in_filter = silver_in_filter + gold_in_filter
+        # Narrow CP layers to those actually represented in the dataset
+        # filter (in medallion order). Defense-in-depth: the resolver
+        # ALSO enforces the layer filter, so a future code path that
+        # bypasses the per-layer dataset routing still can't cross
+        # layers the operator excluded.
+        cp_layers_present: list[str] = []
+        if silver_in_filter:
+            cp_layers_present.append("silver")
+        if gold_in_filter:
+            cp_layers_present.append("gold")
 
         bronze_filter = (
             (bronze_in_filter, None) if bronze_in_filter else None
         )
-        cp_filter = (cp_in_filter, None) if cp_in_filter else None
+        cp_filter = (cp_in_filter, cp_layers_present) if cp_in_filter else None
         scope = RunScope(bronze_filter=bronze_filter, cp_filter=cp_filter)
         if scope.is_empty:
             raise ScopeSplitError(
