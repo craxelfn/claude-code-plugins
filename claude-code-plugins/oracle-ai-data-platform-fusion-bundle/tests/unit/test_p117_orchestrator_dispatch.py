@@ -11,7 +11,7 @@ Covers (per docs/features/p1.17-incremental-merge/plan.md Stage D):
         RunStep.last_watermark in BOTH seed and incremental modes.
   - D6: dim_calendar dispatch does NOT pass refresh_mode/watermark
         kwargs (its build() signature doesn't accept them).
-  - D10: orchestrator.run(mode="incremental") no longer raises
+  - D10: orchestrator.run(mode="incremental", execution_backend="legacy-python") no longer raises
         NotImplementedError (the gate is gone).
   - D-fresh-tenant-bronze: bronze MERGE issues CREATE TABLE IF NOT
         EXISTS before MERGE INTO on first incremental for a fresh tenant.
@@ -961,7 +961,7 @@ gold:
 
         # Empty plan → run() returns RunSummary.empty BEFORE any
         # bootstrap_spark / preflight / dispatch.
-        result = orchestrator.run(bundle_path, mode="incremental")
+        result = orchestrator.run(bundle_path, mode="incremental", execution_backend="legacy-python")
         assert result.mode == "incremental"
         assert result.bundle_project == "p1.17-gate-removal-test"
         # No NotImplementedError raised — this assertion is the gate-

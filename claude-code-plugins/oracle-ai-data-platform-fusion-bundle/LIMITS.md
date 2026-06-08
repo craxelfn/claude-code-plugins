@@ -259,6 +259,43 @@ treats a `bronzeSchemaFingerprint` value that is `None`, the sentinel
 
 ## Resolved limits
 
+### AIDPF-1032 — `--resume` rejected on content-pack backend (RESOLVED 2026-06-08 by Phase 5 Step 9b)
+
+`--resume` now works on `--execution-backend=content-pack`. The
+content-pack backend's per-node atomic-commit model (preflight →
+render → drift gate → execute → quality → state row) is the resume
+unit; the orchestrator adopts the supplied `resume_run_id` as the
+shared run identifier so the resumed run's state rows join with the
+prior failed run's rows. The xfail-strict
+`TestStep5_Resume::test_v2_resume_currently_rejected` parity test
+inverted to `test_v2_resume_adopts_supplied_run_id` (asserts the
+adopt-supplied-run_id contract).
+
+### P5-L1 — `python_legacy` adapter ships seed-only (P5 follow-up if a customer needs incremental)
+
+The `python_legacy` runtime adapter (Phase 5 Step 1) constructs v1-
+conventional kwargs (`paths`, `bronze_<id>`, `silver_dim`,
+`silver_table` / `gold_table`, `refresh_mode`, `watermark`, `run_id`)
+and is exercised for `seed` mode by unit tests. Most v1 builders accept
+the same kwarg shape for both seed and incremental, so the
+incremental code path likely works as-is; verifying that requires a
+customer-shipped `python_legacy` node and is deferred until one
+materialises. Tracked here so the v0.3-Phase-5 surface is honest.
+
+### P5-L2 — Top-level dispatcher: bronze-then-content-pack chaining via CLI is scope-deferred
+
+Phase 5 Step 2b ships the `split_run_scope(...)` classifier and the
+content-pack backend accepts a `shared_run_id` kwarg, but the
+CLI-level chaining ("`aidp-fusion-bundle run --mode seed` extracts
+bronze via the legacy loop THEN runs the content-pack backend with
+the same run_id") still lands on direct callers (notebooks,
+integration tests) rather than through the public CLI. The CLI
+today routes through `_run_content_pack_backend` which assumes
+bronze is pre-seeded. Full bronze-then-cp integration into the
+public CLI is deferred to a follow-up; AIDPF-2071 (Phase 5 Step
+2c) fires when an operator opts into the chaining manually and the
+bronze isn't ready.
+
 ### P3c-L2 — drift artifact lacks per-dataset column-level diff (RESOLVED 2026-06-06 by Phase 3d)
 
 Phase 3d adds a bootstrap-pinned per-dataset bronze-schema snapshot file at

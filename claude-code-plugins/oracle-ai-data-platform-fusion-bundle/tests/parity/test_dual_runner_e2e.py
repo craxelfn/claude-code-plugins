@@ -669,30 +669,52 @@ class TestStep5_Resume:
                 f"got {step.status if step else 'MISSING'!r}"
             )
 
-    @pytest.mark.xfail(
-        reason="AIDPF-1032 — content-pack backend rejects --resume per Phase 2 "
-        "deferral; tracked as Phase 5 prerequisite in the ship-ready report.",
-        strict=True,
-    )
-    def test_v2_resume_currently_rejected(
+    def test_v2_resume_adopts_supplied_run_id(
         self, spark, tmp_path, resolved_pack, tenant_profile,
     ) -> None:
-        """xfail-strict: the day AIDPF-1032 is resolved, this test
-        starts passing AND xpasses, which surfaces as a CI failure
-        prompting Phase 5 to remove the xfail and assert the resumed
-        run_id parity claim."""
+        """Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack
+        backend accepts ``--resume`` and adopts the supplied
+        ``resume_run_id`` as the shared run identifier so the resumed
+        run's state rows join with the prior failed run's rows.
+
+        Smoke check: providing an arbitrary resume_run_id should NOT
+        raise; the returned :class:`RunSummary.run_id` matches the
+        supplied id (proves adoption). The dispatcher's per-node loop
+        handles non-success-row retries through the same atomic-commit
+        path; full retry-correctness is exercised by the v1 sibling
+        test above (``test_v1_resume_reattempts_non_success_nodes``).
+        """
         artifacts = make_dual_bundles(
             tmp_path, catalog=CATALOG,
             v1_suffix="v2resume_v1", v2_suffix="v2resume_v2",
             pack_path=PACK_PATH, profile_src=PROFILE_SRC,
             profile_name="finance-default",
         )
-        orchestrator.run(
+        seed_bronze(spark, catalog=CATALOG,
+                    schema=artifacts.v2_schemas.bronze,
+                    fixtures_module=bronze_fixtures)
+        create_target_schemas(spark, catalog=CATALOG,
+                              schemas=artifacts.v2_schemas)
+
+        supplied = "phase5-resume-adopt-test-id"
+        summary = orchestrator.run(
             bundle_path=artifacts.v2_bundle, spark=spark,
-            mode="seed", execution_backend="content-pack",
+            mode="seed", layers=["silver"],
+            execution_backend="content-pack",
             resolved_pack=resolved_pack, tenant_profile=tenant_profile,
-            resume_run_id="phase4-fake-resume-id",
+            resume_run_id=supplied,
         )
+        # The dispatcher adopted the supplied run_id (no `cp-` prefix).
+        assert summary.run_id == supplied, (
+            f"Phase 5 Step 9b adopt-supplied-run_id contract: expected "
+            f"run_id={supplied!r}, got {summary.run_id!r}."
+        )
+        # Every emitted RunStep also carries the same id.
+        for step in summary.steps:
+            assert step.run_id == supplied, (
+                f"RunStep for {step.dataset_id!r} drifted from the "
+                f"supplied resume_run_id: {step.run_id!r}."
+            )
 
 
 # ---------------------------------------------------------------------------

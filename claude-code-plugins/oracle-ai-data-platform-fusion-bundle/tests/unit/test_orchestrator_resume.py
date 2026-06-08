@@ -346,6 +346,7 @@ class TestResumeSkipByState:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id=original_run_id,
+                execution_backend="legacy-python",
             )
 
         # Original run_id preserved.
@@ -397,6 +398,7 @@ class TestResumeSkipByState:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="run-X",
+                execution_backend="legacy-python",
             )
         for step in summary.steps:
             assert step.status == "resumed_skipped"
@@ -451,6 +453,7 @@ class TestReResumeContract:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="run-A",
+                execution_backend="legacy-python",
             )
         # Every node re-emits resumed_skipped — NONE re-execute.
         assert all(s.status == "resumed_skipped" for s in summary.steps)
@@ -486,6 +489,7 @@ class TestResumeDrift:
                     _bundle_file(tmp_path),
                     spark=spark, mode="seed",
                     resume_run_id="run-A",
+                    execution_backend="legacy-python",
                 )
         # Drift renderer output present in the message.
         msg = str(exc_info.value)
@@ -507,6 +511,7 @@ class TestResumeFailureModes:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="ghost-run",
+                execution_backend="legacy-python",
             )
 
     def test_pre_fix21_run_raises_not_resumable_subcase_1(self, tmp_path: Path) -> None:
@@ -528,6 +533,7 @@ class TestResumeFailureModes:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="legacy-run",
+                execution_backend="legacy-python",
             )
 
     def test_partial_migration_raises_not_resumable_subcase_2(
@@ -551,6 +557,7 @@ class TestResumeFailureModes:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="partial-run",
+                execution_backend="legacy-python",
             )
 
 
@@ -590,6 +597,7 @@ class TestResumePreflightNarrowing:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="run-A",
+                execution_backend="legacy-python",
             )
         # Inspect the plan that preflight was called with.
         _, _, plan_arg = mock_preflight.call_args.args[:3]
@@ -657,6 +665,7 @@ class TestResumeExtraDepPreflight:
                 spark=spark, mode="seed",
                 layers=["gold"],          # filtered scope
                 resume_run_id="run-A",
+                execution_backend="legacy-python",
             )
         # No PrerequisiteError raised; resume completes as a no-op.
         # Every step is a resumed_skipped carry-forward.
@@ -706,6 +715,7 @@ class TestResumeExtraDepPreflight:
                     _bundle_file(tmp_path),
                     spark=spark, mode="seed",
                     resume_run_id="run-A",
+                    execution_backend="legacy-python",
                 )
 
 
@@ -746,6 +756,7 @@ class TestResumeIdentityDriftGateBeforePreflight:
                     _bundle_file(tmp_path),
                     spark=spark, mode="seed",
                     resume_run_id="run-A",
+                    execution_backend="legacy-python",
                 )
         # Preflight + password unwrap must NEVER be called.
         mock_preflight.assert_not_called()
@@ -779,6 +790,7 @@ class TestResumeIdentityDriftGateBeforePreflight:
                     _bundle_file(tmp_path),
                     spark=spark, mode="seed",
                     resume_run_id="run-A",
+                    execution_backend="legacy-python",
                 )
         mock_preflight.assert_not_called()
         assert "fusion.username" in str(exc_info.value)
@@ -832,6 +844,7 @@ class TestResumeRowCountCarryForward:
                 _bundle_file(tmp_path),
                 spark=spark, mode="seed",
                 resume_run_id="run-A",
+                execution_backend="legacy-python",
             )
         ap_invoices_step = next(s for s in summary.steps if s.dataset_id == "ap_invoices")
         assert ap_invoices_step.status == "resumed_skipped"
@@ -873,6 +886,7 @@ class TestResumeRowCountCarryForward:
                 spark=spark, mode="seed",
                 datasets=["ap_invoices", "erp_suppliers"],
                 resume_run_id="run-A",
+                execution_backend="legacy-python",
             )
         msg = str(exc_info.value)
         assert "fusion.serviceUrl" in msg

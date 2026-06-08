@@ -802,12 +802,22 @@ def run(
     layers: list[str] | None = None,
     dry_run: bool = False,
     resume_run_id: str | None = None,
-    # Phase 2 additions (PLAN §15 Phase 2; default behaviour unchanged).
-    execution_backend: str = "legacy-python",
+    # Phase 5 Step 3 — default flipped to content-pack. The pre-Phase-5
+    # default was "legacy-python"; Phase 4's dual-runner parity gate +
+    # Phase 5's Step 9b resume work + Step 2c/2d preflight gates close
+    # the gate on flipping. Pass ``execution_backend="legacy-python"``
+    # explicitly to opt into the deprecated path (emits a CLI warning
+    # per Phase 5 Step 4).
+    execution_backend: str = "content-pack",
     resolved_pack: "Any | None" = None,
     tenant_profile: "Any | None" = None,
     # Phase 3c — runtime drift gate bypass (dev/sandbox; hidden flag).
     force_fingerprint_skip: bool = False,
+    # Phase 5 Step 5 — when the top-level dispatcher invokes the legacy
+    # bronze path recursively, this kwarg propagates the shared run_id so
+    # bronze + content-pack state rows join cleanly. Private contract;
+    # the CLI never passes this directly.
+    _forced_run_id: str | None = None,
 ) -> RunSummary:
     """Materialize bronze + silver + gold per the bundle.yaml plan.
 
@@ -865,13 +875,37 @@ def run(
     # write-strategy / state-contract pieces shipped together to keep the
     # destructive-write blast radius contained.
 
-    # Phase 2 — content-pack backend dispatch. When the operator opts
-    # in via `--execution-backend content-pack`, divert to the new
-    # silver/gold runner (PLAN §15 Phase 2). The default legacy-python
-    # path falls through unchanged, so every existing v0.3 behaviour is
-    # preserved. Resume + content-pack is not supported in v0.3
-    # (AIDPF-1032 — guarded at the CLI; defensive re-check here).
+    # Phase 5 Step 5 — top-level scope-split dispatcher for the
+    # content-pack backend. When the operator selects content-pack
+    # (now the default), classify the (datasets, layers) filter into
+    # bronze_filter + cp_filter, mint a SHARED run_id, then route:
+    #
+    #   * bronze_filter is not None → invoke the legacy bronze path
+    #     via a recursive run() call with execution_backend="legacy-
+    #     python", layers=["bronze"] (or explicit bronze ids), and
+    #     _forced_run_id=shared.
+    #   * cp_filter is not None → invoke _run_content_pack_backend
+    #     with shared_run_id=shared + enable_bronze_readiness_gate=
+    #     True (Step 2c).
+    #
+    # Both branches emit RunSteps under the shared run_id; the
+    # dispatcher merges them into one RunSummary so bronze + silver
+    # + gold rows in fusion_bundle_state and the medallion audit
+    # columns all join on the same identifier.
+    if execution_backend == "content-pack" and not dry_run:
+        return _phase5_top_level_dispatch(
+            bundle_path=bundle_path,
+            spark=spark,
+            mode=mode,
+            datasets=datasets,
+            layers=layers,
+            resume_run_id=resume_run_id,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
+        )
     if execution_backend == "content-pack":
+        # dry_run path: skip scope-split, return populated plan
         return _run_content_pack_backend(
             bundle_path=bundle_path,
             spark=spark,
@@ -1095,7 +1129,15 @@ def run(
     # On resume, preserve the original run_id so the state-table
     # audit trail (and the medallion `<layer>_run_id` invariant)
     # stays a single continuous record.
-    run_id = resume_context.run_id if resume_context is not None else _new_run_id()
+    # Phase 5 Step 5 — _forced_run_id from the top-level dispatcher wins
+    # over both resume and minting, so a bronze+cp full-medallion run
+    # shares a single run_id across both backends.
+    if _forced_run_id is not None:
+        run_id = _forced_run_id
+    elif resume_context is not None:
+        run_id = resume_context.run_id
+    else:
+        run_id = _new_run_id()
     started_at = _utc_now()
     steps: list[RunStep] = []
 
@@ -1158,6 +1200,266 @@ def run(
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — top-level dispatcher (scope-split, shared run_id, gates)
+# ---------------------------------------------------------------------------
+
+
+def _phase5_top_level_dispatch(
+    *,
+    bundle_path: "Path",
+    spark: "SparkSession | None",
+    mode: str,
+    datasets: list[str] | None,
+    layers: list[str] | None,
+    resume_run_id: str | None,
+    resolved_pack: "Any | None",
+    tenant_profile: "Any | None",
+    force_fingerprint_skip: bool,
+) -> RunSummary:
+    """Top-level dispatcher for ``--execution-backend=content-pack`` runs.
+
+    Phase 5 Step 5 contract:
+
+    1. Classify ``(datasets, layers)`` via
+       :func:`orchestrator.scope.split_run_scope_from_bundle`. The
+       classifier raises AIDPF-1035 on unknown ids / unsatisfiable
+       combinations / empty effective scope.
+    2. Mint a single shared ``run_id`` (or adopt ``resume_run_id``).
+    3. When ``scope.bronze_filter is not None``: invoke the legacy
+       bronze path via a recursive ``run()`` call with
+       ``execution_backend="legacy-python"`` and
+       ``_forced_run_id=shared`` so the bronze state rows carry the
+       shared id.
+    4. When ``scope.cp_filter is not None``: invoke
+       :func:`_run_content_pack_backend` with
+       ``shared_run_id=shared`` + ``enable_bronze_readiness_gate=True``
+       so the Phase 5 Step 2c gate fires before any silver/gold node
+       dispatches.
+    5. Merge the two branches' ``RunStep`` lists into one
+       :class:`RunSummary` keyed by the shared id.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from .scope import split_run_scope_from_bundle, ScopeSplitError
+    from ..schema.bundle import (
+        AIDPF_1030_PROFILE_MISSING,
+        AIDPF_1031_CONTENT_PACK_MISSING,
+        load_bundle as _load_bundle_v2,
+    )
+
+    bundle, _ = _load_bundle_v2(bundle_path)
+
+    # Phase 5 — fail-closed: a content-pack run on a pack-less bundle
+    # raises AIDPF-1031 / AIDPF-1030 BEFORE the scope-split (per the
+    # plan's BLOCKING #2 contract). Bronze-only invocations from
+    # operators who didn't explicitly opt into legacy-python are not
+    # currently a fast-path through this dispatcher — they go through
+    # legacy-python via the explicit flag instead.
+    if bundle.content_pack is None:
+        raise OrchestratorConfigError(
+            f"{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+            f"`contentPack:` block; --execution-backend content-pack "
+            f"requires it. Either add the contentPack block to your "
+            f"bundle.yaml or re-run with "
+            f"--execution-backend=legacy-python."
+        )
+    if bundle.content_pack.profile is None:
+        raise OrchestratorConfigError(
+            f"{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+            f"contentPack.profile field is missing."
+        )
+
+    # Scope-split. raises AIDPF-1035 on unsatisfiable filters.
+    scope = split_run_scope_from_bundle(
+        bundle, resolved_pack, datasets=datasets, layers=layers,
+    )
+
+    # Mint the shared run_id once. Resume reuses the supplied id.
+    if resume_run_id is not None:
+        shared_run_id = resume_run_id
+    else:
+        shared_run_id = _new_run_id()
+
+    bronze_steps: tuple[RunStep, ...] = ()
+    cp_steps: tuple[RunStep, ...] = ()
+    started_at = _dt.now(_tz.utc)
+
+    # Bronze branch — recursive call into the legacy backend, forcing
+    # the shared run_id so bronze state rows join with the cp run_id.
+    if scope.bronze_filter is not None:
+        bronze_datasets, bronze_layers = scope.bronze_filter
+        bronze_summary = run(  # pylint: disable=protected-access
+            bundle_path=bundle_path,
+            spark=spark,
+            mode=mode,
+            datasets=bronze_datasets,
+            layers=bronze_layers,
+            dry_run=False,
+            resume_run_id=None,  # legacy resume semantics don't apply here
+            execution_backend="legacy-python",
+            resolved_pack=None,
+            tenant_profile=None,
+            force_fingerprint_skip=force_fingerprint_skip,
+            _forced_run_id=shared_run_id,
+        )
+        bronze_steps = bronze_summary.steps
+        # If any bronze step failed, stop here — silver/gold against
+        # broken bronze is worse than no silver/gold. Return the
+        # bronze summary as-is; cp branch never runs.
+        if any(s.status == "failed" for s in bronze_steps):
+            return RunSummary(
+                run_id=shared_run_id,
+                started_at=started_at,
+                finished_at=_dt.now(_tz.utc),
+                bundle_project=bundle.project,
+                mode=mode,
+                steps=bronze_steps,
+            )
+
+    # Content-pack branch — silver/gold. The Step 2c bronze readiness
+    # gate fires ONLY when this dispatcher just extracted bronze
+    # (Option A merged flow); silver/gold-only direct calls (against
+    # pre-seeded bronze) skip the gate because the caller is asserting
+    # the bronze invariant out of band. This matches the plan's
+    # "between bronze (d) and content-pack (f)" placement.
+    if scope.cp_filter is not None:
+        cp_datasets, cp_layers = scope.cp_filter
+        gate_enabled = scope.bronze_filter is not None
+        cp_summary = _run_content_pack_backend(
+            bundle_path=bundle_path,
+            spark=spark,
+            mode=mode,
+            datasets=cp_datasets,
+            layers=cp_layers,
+            dry_run=False,
+            resume_run_id=resume_run_id,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
+            shared_run_id=shared_run_id,
+            enable_bronze_readiness_gate=gate_enabled,
+        )
+        cp_steps = cp_summary.steps
+
+    # Merge.
+    finished_at = _dt.now(_tz.utc)
+    merged_steps = tuple(list(bronze_steps) + list(cp_steps))
+    return RunSummary(
+        run_id=shared_run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        bundle_project=bundle.project,
+        mode=mode,
+        steps=merged_steps,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — content-pack dry-run plan builder
+# ---------------------------------------------------------------------------
+
+
+def _build_content_pack_dry_run_plan(
+    *,
+    resolved_pack: "Any",
+    datasets: list[str] | None,
+    layers: list[str] | None,
+) -> tuple[Any, ...]:
+    """Return a tuple of :class:`PlanNode` for the content-pack dry-run path.
+
+    The legacy backend's ``run(..., dry_run=True)`` returns a
+    ``RunSummary.empty(...)`` carrying a ``plan`` of
+    :class:`PlanNode`-shaped tuples. Phase 5's content-pack default-
+    flipped backend mirrors that contract so the CLI's summary renderer
+    (``_render_summary``) shows the same shape regardless of backend.
+
+    The implementation walks ``resolve_content_pack_plan`` (the same
+    resolver the runtime uses) so the dry-run plan is byte-equivalent
+    to what would actually run — minus the side effects.
+    """
+    from .content_pack_plan_resolver import resolve_content_pack_plan
+
+    plan = resolve_content_pack_plan(
+        resolved_pack, datasets=datasets, layers=layers,
+    )
+    plan_nodes = tuple(
+        PlanNode(
+            dataset_id=node.id,
+            layer=node.layer,
+            status="eligible",
+            reason=None,
+        )
+        for node in plan
+    )
+    return plan_nodes
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — pack-driven node discovery
+# ---------------------------------------------------------------------------
+
+
+class PackNodeNotFoundError(OrchestratorRuntimeError):
+    """Requested node id is not in the resolved pack's silver/gold maps.
+
+    Raised by :func:`_resolve_node_from_pack` when a caller hands in a
+    layer + node_id pair that doesn't exist on the loaded pack. Surfaces
+    pack-author mistakes (typo in a YAML id) without conflating with
+    the registry-lookup errors raised under the legacy backend.
+    """
+
+
+def _resolve_node_from_pack(
+    pack: "Any",  # ResolvedPack — typed without import to avoid load-time cycles
+    layer: str,
+    node_id: str,
+) -> "Any":  # NodeYaml
+    """Look up a content-pack node by ``(layer, node_id)`` — Phase 5.
+
+    The orchestrator's per-node dispatch loop (
+    :func:`_run_content_pack_backend`) walks ``resolve_content_pack_plan``'s
+    output directly — that path already returns ``NodeYaml`` objects.
+    This helper exists so that direct callers (tests, future
+    integrations, dry-run plan renderers) can ask the pack the same
+    question without re-walking the plan resolver: "give me the
+    ``NodeYaml`` for silver/dim_supplier".
+
+    Per-node ``implementation.type`` (``sql`` / ``builtin`` /
+    ``python_legacy``) discriminates the runtime path; the dispatch
+    itself is inside ``sql_runner.execute_node``.
+
+    Args:
+        pack: the resolved content pack (``ResolvedPack``).
+        layer: ``"silver"`` or ``"gold"``.
+        node_id: pack-author node id (matches ``NodeYaml.id``).
+
+    Returns:
+        The :class:`NodeYaml` for that ``(layer, node_id)``.
+
+    Raises:
+        ValueError: ``layer`` not in ``{"silver", "gold"}``.
+        PackNodeNotFoundError: ``node_id`` is absent from
+            ``pack.silver`` / ``pack.gold``.
+    """
+    if layer == "silver":
+        bucket = getattr(pack, "silver", {})
+    elif layer == "gold":
+        bucket = getattr(pack, "gold", {})
+    else:
+        raise ValueError(
+            f"_resolve_node_from_pack: layer={layer!r} not in "
+            f"{{'silver', 'gold'}}. Bronze nodes are not pack-driven yet."
+        )
+    if node_id not in bucket:
+        available = sorted(bucket.keys())
+        raise PackNodeNotFoundError(
+            f"_resolve_node_from_pack: pack has no {layer} node "
+            f"{node_id!r}. Available {layer} node ids: {available!r}. "
+            f"Check the pack's {layer}/*.yaml files."
+        )
+    return bucket[node_id]
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — content-pack execution backend dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1174,6 +1476,16 @@ def _run_content_pack_backend(
     resolved_pack: "Any | None",
     tenant_profile: "Any | None",
     force_fingerprint_skip: bool = False,
+    # Phase 5 Step 5 — shared run_id contract. When the top-level
+    # dispatcher (the caller) already minted a run_id (because bronze
+    # + content-pack must share one), pass it in and the content-pack
+    # backend will adopt it instead of minting `cp-<timestamp>-<hex>`.
+    shared_run_id: str | None = None,
+    # Phase 5 Step 5 — enable the Step 2c bronze readiness gate.
+    # Default off so unit tests / direct callers that don't pre-seed
+    # bronze tables don't trip on missing tables; the top-level
+    # dispatcher in `run()` flips this on for full-medallion invocations.
+    enable_bronze_readiness_gate: bool = False,
 ) -> RunSummary:
     """Execute the silver+gold layers via the content-pack runner (PLAN §15 Phase 2).
 
@@ -1226,11 +1538,19 @@ def _run_content_pack_backend(
     )
     from ..schema.tenant_profile import compute_profile_hash
 
-    if resume_run_id is not None:
-        raise OrchestratorConfigError(
-            f"{AIDPF_1032_RESUME_NOT_SUPPORTED}: --resume is not supported "
-            f"with --execution-backend content-pack in v0.3."
-        )
+    # Phase 5 Step 9b — AIDPF-1032 resolved. ``--resume`` on the content-
+    # pack backend is supported by:
+    #   1. Adopting the supplied ``resume_run_id`` as the shared run_id
+    #      (the per-node loop's prior-state hydration + plan-hash drift
+    #      gate already enforce the resume contract).
+    #   2. Falling through to the normal per-node dispatch — nodes whose
+    #      latest state row is already ``success`` for this run_id are
+    #      idempotent in the §11.9 atomic-commit model; non-success nodes
+    #      retry through the same dispatcher path.
+    # No bespoke "resume planner" is needed for v0.3 because the content-
+    # pack backend's per-node atomicity (each ``execute_node`` is a full
+    # preflight → render → drift → execute → quality → state commit) is
+    # the resume unit.
     if resolved_pack is None:
         raise ValueError(
             "_run_content_pack_backend: resolved_pack is None. The CLI / "
@@ -1249,10 +1569,18 @@ def _run_content_pack_backend(
     bundle_project = bundle.project
 
     if dry_run:
-        # Return a clean empty summary; the plan resolver is cheap so
-        # we could build the would-run plan here, but Phase 2 keeps the
-        # dry-run path minimal.
-        return RunSummary.empty(bundle_project=bundle_project, mode=mode)
+        # Phase 5 Step 6 — populate the content-pack dry-run plan so the
+        # renderer can show operators which silver/gold nodes would run +
+        # how each would be dispatched. Plan resolution is cheap (pure
+        # data walk; no Spark / BICC).
+        plan_nodes = _build_content_pack_dry_run_plan(
+            resolved_pack=resolved_pack,
+            datasets=datasets,
+            layers=layers,
+        )
+        return RunSummary.empty(
+            bundle_project=bundle_project, mode=mode, plan=plan_nodes,
+        )
 
     spark = spark or _bootstrap_spark()
 
@@ -1261,7 +1589,22 @@ def _run_content_pack_backend(
     # run_id. Round-2 audit-correlation requirement: lifting this above
     # state.ensure_state_table keeps "gate runs before any state write"
     # AND "one run_id across all Phase 3c artifacts" both true.
-    run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    #
+    # Phase 5 Step 5 — when the top-level dispatcher minted a shared
+    # run_id (so bronze + cp join cleanly on run_id), adopt it instead
+    # of minting a `cp-`-prefixed one. The prefix loses meaning once
+    # the same run also extracts bronze through the legacy path.
+    #
+    # Phase 5 Step 9b — also adopt ``resume_run_id`` when supplied so
+    # the resumed run writes state rows under the same id as the
+    # original failed run (joining cleanly with the prior state).
+    # Precedence: explicit shared_run_id > resume_run_id > newly minted.
+    if shared_run_id is not None:
+        run_id = shared_run_id
+    elif resume_run_id is not None:
+        run_id = resume_run_id
+    else:
+        run_id = f"cp-{_dt.now(_tz.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
 
     # Phase 3c — bronze-schema fingerprint drift gate. Runs BEFORE any
     # Spark write and BEFORE state.ensure_state_table. Returns a
@@ -1350,6 +1693,47 @@ def _run_content_pack_backend(
     plan = resolve_content_pack_plan(
         resolved_pack, datasets=datasets, layers=layers,
     )
+
+    # Phase 5 Step 2c — bronze readiness gate. Verify every in-scope
+    # silver/gold node's transitive bronze dependencies exist AND
+    # surface every required column BEFORE dispatching any node.
+    # When the gate fails, return a RunSummary with the (otherwise
+    # empty) plan plus a synthetic gate-failure RunStep so the CLI
+    # exits non-zero AND operators see the gap. No silver/gold state
+    # rows are written.
+    if enable_bronze_readiness_gate and not dry_run:
+        from .bronze_readiness import (
+            BronzeReadinessGateError,
+            AIDPF_2071_BRONZE_READINESS_GATE_FAILED,
+            assert_bronze_readiness,
+        )
+        try:
+            assert_bronze_readiness(
+                spark,
+                resolved_pack=resolved_pack,
+                cp_filter=(datasets, layers),
+                paths=paths,
+                run_id=run_id,
+                diagnostics_root=(bundle_path.resolve().parent / ".aidp" / "diagnostics"),
+            )
+        except BronzeReadinessGateError as gate_exc:
+            gate_step = RunStep.gate_failed(
+                run_id=run_id,
+                mode=mode,
+                layer="silver",
+                gate_dataset_id="__bronze_readiness_gate__",
+                aidpf_code=AIDPF_2071_BRONZE_READINESS_GATE_FAILED,
+                error_message=str(gate_exc),
+            )
+            gate_now = _dt.now(_tz.utc)
+            return RunSummary(
+                run_id=run_id,
+                started_at=gate_now,
+                finished_at=gate_now,
+                bundle_project=bundle_project,
+                mode=mode,  # type: ignore[arg-type]
+                steps=(gate_step,),
+            )
 
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we

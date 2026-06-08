@@ -31,8 +31,8 @@ passes, real run still crashes with the same error).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Iterable
 
 from oracle_ai_data_platform_fusion_bundle import extractors
 from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
@@ -84,6 +84,13 @@ class PreflightResult:
 
     recommendations: tuple[str, ...]
     effective_schemas: dict[str, str]
+    # Phase 5 Step 2d — per-PVO live ``StructType`` captured during the
+    # metadata-only probe. The dispatcher feeds this into
+    # ``assert_fusion_pvo_compatibility(...)`` so Step 2d can
+    # diff the live schema against requiredColumns + pinned snapshot
+    # BEFORE bronze extraction starts. Empty dict for legacy callers
+    # that didn't pass through Phase 5's top-level dispatch.
+    live_pvo_schemas: dict[str, "Any"] = field(default_factory=dict)
 
 
 def _classify(exc: BaseException) -> str:
@@ -103,9 +110,10 @@ def _classify(exc: BaseException) -> str:
 def _try_schema(spark, pvo, bundle, password, schema):
     """Invoke extract_pvo + .schema with an explicit schema kwarg.
 
-    Returns None on success; raises whatever extract_pvo / .schema raise.
-    Factored out so the override-default-discovery flow has a single
-    "try this schema" primitive.
+    Returns the discovered ``StructType`` on success (Phase 5 Step 2d
+    extension — was previously ``None``); raises whatever extract_pvo
+    / .schema raise. Factored out so the override-default-discovery
+    flow has a single "try this schema" primitive.
     """
     df = extractors.bicc.extract_pvo(
         spark, pvo,
@@ -116,7 +124,7 @@ def _try_schema(spark, pvo, bundle, password, schema):
         schema=schema,
     )
     # Trigger inferSchema (metadata-only — no data rows transferred).
-    _ = df.schema
+    return df.schema
 
 
 def preflight_bronze_schemas(
@@ -153,6 +161,10 @@ def preflight_bronze_schemas(
     failures: list[dict] = []
     recommendations: list[str] = []
     effective_schemas: dict[str, str] = {}
+    # Phase 5 Step 2d — capture the live ``StructType`` per PVO so the
+    # top-level dispatcher can hand it to ``assert_fusion_pvo_
+    # compatibility(...)`` for the PVO drift gate.
+    live_pvo_schemas: dict[str, Any] = {}
 
     # Per-run discovery cache: None = not yet probed; dict = probe result
     # (may be empty if BICC returned no datastores); _DISC_PROBE_FAILED =
@@ -203,8 +215,11 @@ def preflight_bronze_schemas(
         effective_schema = override if from_override else pvo.schema
 
         try:
-            _try_schema(spark, pvo, bundle, resolved_password, effective_schema)
+            live_struct = _try_schema(
+                spark, pvo, bundle, resolved_password, effective_schema,
+            )
             effective_schemas[node.dataset_id] = effective_schema
+            live_pvo_schemas[node.dataset_id] = live_struct
             continue
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -272,7 +287,9 @@ def preflight_bronze_schemas(
             if len(candidates) == 1:
                 discovered = next(iter(candidates))
                 try:
-                    _try_schema(spark, pvo, bundle, resolved_password, discovered)
+                    discovered_struct = _try_schema(
+                        spark, pvo, bundle, resolved_password, discovered,
+                    )
                 except Exception as retry_exc:
                     failures.append({
                         "dataset_id": node.dataset_id, "pvo_id": node.pvo_id,
@@ -291,6 +308,7 @@ def preflight_bronze_schemas(
                     continue
                 # Auto-correction succeeded.
                 effective_schemas[node.dataset_id] = discovered
+                live_pvo_schemas[node.dataset_id] = discovered_struct
                 _LOG.warning(
                     "auto-corrected %s (pvo=%s): catalog=%r → discovered=%r",
                     node.dataset_id, node.pvo_id, pvo.schema, discovered,
@@ -337,6 +355,7 @@ def preflight_bronze_schemas(
         return PreflightResult(
             recommendations=tuple(recommendations),
             effective_schemas=effective_schemas,
+            live_pvo_schemas=live_pvo_schemas,
         )
 
     # Build a multi-line message that gives the operator everything they need

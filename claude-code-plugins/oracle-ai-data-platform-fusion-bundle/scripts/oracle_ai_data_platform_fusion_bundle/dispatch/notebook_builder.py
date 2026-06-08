@@ -111,6 +111,7 @@ def _build_run_cell(
     layers: list[str] | None,
     execution_backend: str = "legacy-python",
     force_fingerprint_skip: bool = False,
+    resume_run_id: str | None = None,
 ) -> str:
     # Phase 2: when execution_backend == "content-pack", the bootstrap
     # cell that ran just before this one set up _resolved_pack and
@@ -139,7 +140,7 @@ def _build_run_cell(
         f"        datasets={datasets!r},\n"
         f"        layers={layers!r},\n"
         f"        dry_run=False,\n"
-        f"        resume_run_id=None,\n"
+        f"        resume_run_id={resume_run_id!r},\n"
         f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
         f"{backend_kwargs}"
         f"    )\n"
@@ -355,6 +356,11 @@ def build_notebook(
     # preserves pre-3d behaviour (snapshot absent → empty
     # `datasetDeltas` + WARN).
     schema_snapshot_yaml: str | None = None,
+    # Phase 5 P1.5ε-fix5 — splices into the orchestrator.run kwargs
+    # in the run cell so the cluster-side run adopts the supplied
+    # resume run_id. ``None`` preserves the original fresh-run
+    # behaviour.
+    resume_run_id: str | None = None,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -433,6 +439,7 @@ def build_notebook(
                 mode=mode, datasets=datasets, layers=layers,
                 execution_backend=execution_backend,
                 force_fingerprint_skip=force_fingerprint_skip,
+                resume_run_id=resume_run_id,
             )
         ),
         _code_cell(_build_verify_cell()),

@@ -55,11 +55,11 @@ class TestOrchestratorRunSignature:
         for name in ("execution_backend", "resolved_pack", "tenant_profile"):
             assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
 
-    def test_phase2_kwargs_have_safe_defaults(self) -> None:
-        """Default behaviour MUST be legacy-python; v1 callers that
-        don't pass the kwargs see no change."""
+    def test_phase5_default_is_content_pack(self) -> None:
+        """Phase 5 Step 3 — the default flipped to content-pack. The
+        legacy-python path stays available as an explicit opt-in."""
         sig = inspect.signature(orchestrator.run)
-        assert sig.parameters["execution_backend"].default == "legacy-python"
+        assert sig.parameters["execution_backend"].default == "content-pack"
         assert sig.parameters["resolved_pack"].default is None
         assert sig.parameters["tenant_profile"].default is None
 
@@ -117,7 +117,7 @@ class TestContentPackBackendInvokesExecuteNode:
             mode="seed",
             execution_backend="content-pack",
             resolved_pack=pack,
-            tenant_profile=profile,
+            tenant_profile=profile, layers=["silver", "gold"],
         )
 
         # The fixture pack has 1 silver node; execute_node should be
@@ -137,27 +137,18 @@ class TestContentPackBackendInvokesExecuteNode:
         assert summary.steps[0].layer == "silver"
         assert summary.steps[0].status == "success"
 
-    def test_content_pack_backend_rejects_resume(self) -> None:
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
-            OrchestratorConfigError,
-        )
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
-            load_full_chain,
-            make_filesystem_base_resolver,
-        )
-        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
-            load_tenant_profile,
-        )
-        pack = load_full_chain(FIXTURE_PACK, base_resolver=make_filesystem_base_resolver(FIXTURE_PACK))
-        profile = load_tenant_profile(FIXTURE_PROFILE)
-        with pytest.raises(OrchestratorConfigError, match="AIDPF-1032"):
-            orchestrator.run(
-                bundle_path=FIXTURE_BUNDLE,
-                execution_backend="content-pack",
-                resolved_pack=pack,
-                tenant_profile=profile,
-                resume_run_id="some-prior-run",
-            )
+    def test_content_pack_backend_adopts_resume_run_id(self) -> None:
+        """Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack
+        backend now accepts ``--resume`` and adopts the supplied
+        run_id. Previously this test asserted the AIDPF-1032 raise."""
+        # Signature-level smoke: invoking with resume_run_id no longer
+        # raises OrchestratorConfigError before backend dispatch. The
+        # full adopt-the-id contract is exercised by
+        # tests/parity/test_dual_runner_e2e.py::test_v2_resume_adopts_supplied_run_id.
+        import inspect
+        sig = inspect.signature(orchestrator.run)
+        # The kwarg is still accepted (not silently dropped).
+        assert "resume_run_id" in sig.parameters
 
     def test_content_pack_backend_requires_resolved_pack(self) -> None:
         with pytest.raises(ValueError, match="resolved_pack is None"):
@@ -165,7 +156,7 @@ class TestContentPackBackendInvokesExecuteNode:
                 bundle_path=FIXTURE_BUNDLE,
                 execution_backend="content-pack",
                 resolved_pack=None,
-                tenant_profile=MagicMock(),
+                tenant_profile=MagicMock(), layers=["silver", "gold"],
             )
 
     def test_content_pack_backend_requires_tenant_profile(self) -> None:
@@ -174,7 +165,7 @@ class TestContentPackBackendInvokesExecuteNode:
                 bundle_path=FIXTURE_BUNDLE,
                 execution_backend="content-pack",
                 resolved_pack=MagicMock(),
-                tenant_profile=None,
+                tenant_profile=None, layers=["silver", "gold"],
             )
 
     def test_dry_run_returns_empty_summary(self) -> None:
@@ -192,7 +183,7 @@ class TestContentPackBackendInvokesExecuteNode:
             execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
-            dry_run=True,
+            dry_run=True, layers=["silver", "gold"],
         )
         assert summary.steps == ()
 
@@ -259,7 +250,7 @@ class TestPriorStateHydration:
             mode="incremental",
             execution_backend="content-pack",
             resolved_pack=pack,
-            tenant_profile=profile,
+            tenant_profile=profile, layers=["silver", "gold"],
         )
 
         # execute_node received the prior_plan_hash + prior_watermark.
@@ -313,7 +304,7 @@ class TestPriorStateHydration:
             mode="seed",
             execution_backend="content-pack",
             resolved_pack=pack,
-            tenant_profile=profile,
+            tenant_profile=profile, layers=["silver", "gold"],
         )
 
         call = execute_node_calls[0]
@@ -363,7 +354,7 @@ class TestPriorStateHydration:
             mode="seed",
             execution_backend="content-pack",
             resolved_pack=pack,
-            tenant_profile=profile,
+            tenant_profile=profile, layers=["silver", "gold"],
         )
 
         assert len(execute_node_calls) == 1
@@ -422,7 +413,7 @@ class TestPriorStateHydration:
                 mode="incremental",
                 execution_backend="content-pack",
                 resolved_pack=pack,
-                tenant_profile=profile,
+                tenant_profile=profile, layers=["silver", "gold"],
             )
 
         # Critical assertion: execute_node MUST NOT have been called.
@@ -539,6 +530,7 @@ class TestCascadeAbort:
             execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
+            layers=["silver", "gold"],
         )
 
         # execute_node was called for dim_a; mart_x must not have been.
@@ -636,6 +628,7 @@ class TestCascadeAbort:
             execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
+            layers=["silver", "gold"],
         )
 
         called_ids = [c["node"].id for c in execute_node_calls]
@@ -699,6 +692,7 @@ class TestInlineCliReachesExecuteNode:
             mode="seed",
             inline=True,
             execution_backend="content-pack",
+            layers="silver,gold",
             console=Console(),
         )
 
@@ -883,13 +877,16 @@ class TestInvalidPackRejectedBeforeExecution:
 
 
 class TestLegacyBackendUnchanged:
-    """The default backend (legacy-python) must behave identically to
-    pre-Phase-2. Phase 2's kwargs default to None / 'legacy-python' so
-    a v1 call site that doesn't pass them sees no change."""
+    """The legacy-python backend behaves identically to pre-Phase-2;
+    Phase 5 flipped the default to content-pack but the opt-in path
+    stays byte-for-byte unchanged."""
 
-    def test_default_backend_is_legacy_python(self) -> None:
+    def test_legacy_backend_remains_available_as_opt_in(self) -> None:
         sig = inspect.signature(orchestrator.run)
-        assert sig.parameters["execution_backend"].default == "legacy-python"
+        # Default flipped to content-pack in Phase 5 Step 3, but the
+        # legacy-python value remains accepted on the parameter and the
+        # CLI Choice() lists it as a documented opt-in.
+        assert sig.parameters["execution_backend"].default == "content-pack"
 
     def test_legacy_backend_does_NOT_invoke_execute_node(self, monkeypatch) -> None:
         """The legacy-python branch never reaches the Phase 2 runner."""

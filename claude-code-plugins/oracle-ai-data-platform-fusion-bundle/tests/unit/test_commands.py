@@ -150,7 +150,7 @@ class TestRun:
         """
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+        result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--execution-backend", "legacy-python"])
         assert result.exit_code == 2
         # The new dispatch path raises a DispatchError; the code is
         # rendered as [DISPATCH_*] in the error message.
@@ -166,24 +166,35 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--datasets", "gl_journal_lines",
+            "run", "--mode", "seed", "--datasets", "gl_journal_lines", "--execution-backend", "legacy-python"
         ])
         assert result.exit_code == 2
 
-    def test_resume_without_inline_exits_2_with_fix5_hint(
+    def test_resume_without_inline_dispatches_via_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """P1.5ε §3.1 scope boundary: ``--resume`` requires ``--inline``
-        in this PR. The non-inline path rejects it with a hint pointing
-        at the follow-up ticket."""
+        """Phase 5 P1.5ε-fix5 — non-inline ``--resume`` is now
+        supported through the REST-dispatch path. The CLI no longer
+        rejects it with a "requires --inline" hint."""
+        from unittest.mock import patch
+
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--resume", "some-run-id",
-        ])
-        assert result.exit_code == 2
-        assert "--inline" in result.output
-        assert "fix5" in result.output.lower()
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.commands.run."
+            "_run_via_aidp_dispatch",
+            return_value=0,
+        ) as mock_dispatch:
+            result = CliRunner().invoke(cli.main, [
+                "run", "--mode", "seed", "--resume", "some-run-id",
+                "--execution-backend", "legacy-python",
+            ])
+        assert result.exit_code == 0
+        assert mock_dispatch.call_args is not None
+        assert (
+            mock_dispatch.call_args.kwargs.get("resume_run_id")
+            == "some-run-id"
+        )
 
     def test_run_dispatch_invokes_dispatch_via_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -202,7 +213,7 @@ class TestRun:
             return_value=fake_summary,
         ) as mock_dispatch:
             result = CliRunner().invoke(cli.main, [
-                "run", "--mode", "seed", "--datasets", "erp_suppliers",
+                "run", "--mode", "seed", "--datasets", "erp_suppliers", "--execution-backend", "legacy-python"
             ])
         assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
         assert mock_dispatch.called
@@ -230,7 +241,7 @@ class TestRun:
             "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
             return_value=RunSummary.empty("test", "seed"),
         ) as mock_dispatch:
-            CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+            CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--execution-backend", "legacy-python"])
         assert mock_dispatch.call_args.kwargs["poll_timeout_s"] == 3600
 
     def test_poll_timeout_override_propagated(
@@ -248,7 +259,7 @@ class TestRun:
             return_value=RunSummary.empty("test", "seed"),
         ) as mock_dispatch:
             CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed", "--poll-timeout", "7200"]
+                cli.main, ["run", "--mode", "seed", "--poll-timeout", "7200", "--execution-backend", "legacy-python"]
             )
         assert mock_dispatch.call_args.kwargs["poll_timeout_s"] == 7200
 
@@ -259,7 +270,7 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(
-            cli.main, ["run", "--mode", "seed", "--poll-timeout", "30"]
+            cli.main, ["run", "--mode", "seed", "--poll-timeout", "30", "--execution-backend", "legacy-python"]
         )
         assert result.exit_code == 2
         # Click's range-rejection message names the bound.
@@ -272,7 +283,7 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(
-            cli.main, ["run", "--mode", "seed", "--poll-timeout", "99999"]
+            cli.main, ["run", "--mode", "seed", "--poll-timeout", "99999", "--execution-backend", "legacy-python"]
         )
         assert result.exit_code == 2
         assert "14400" in result.output
@@ -283,7 +294,7 @@ class TestRun:
         """Locks the BACKLOG acceptance criterion that --poll-timeout's help
         text mentions the default + the slow-tenant use case — not just a
         bare flag declaration. Operator-actionable."""
-        result = CliRunner().invoke(cli.main, ["run", "--help"])
+        result = CliRunner().invoke(cli.main, ["run", "--help", "--execution-backend", "legacy-python"])
         assert result.exit_code == 0
         # Default value present (Click renders default via show_default=True).
         assert "3600" in result.output
@@ -313,7 +324,7 @@ class TestRun:
             side_effect=DispatchPreflightError("synthetic preflight fail"),
         ):
             result = CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed"]
+                cli.main, ["run", "--mode", "seed", "--execution-backend", "legacy-python"]
             )
         assert result.exit_code == 2
         assert "DISPATCH_PREFLIGHT_FAILED" in result.output
@@ -342,7 +353,7 @@ class TestRun:
             "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
             side_effect=DispatchWheelBuildError("`python -m build` failed: rc=1"),
         ):
-            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--execution-backend", "legacy-python"])
         assert result.exit_code == 2
         assert "DISPATCH_WHEEL_BUILD_FAILED" in result.output
         assert "python -m build" in result.output
@@ -391,7 +402,7 @@ class TestRun:
             "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
             return_value=summary,
         ):
-            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed", "--execution-backend", "legacy-python"])
         assert result.exit_code == 1, f"got {result.exit_code}: {result.output}"
 
     def test_run_inline_invokes_orchestrator_run(
@@ -416,7 +427,7 @@ class TestRun:
             return_value=fake_summary,
         ) as mock_run:
             result = CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed", "--inline"],
+                cli.main, ["run", "--mode", "seed", "--inline", "--execution-backend", "legacy-python"],
             )
         assert result.exit_code == 0, f"expected exit 0, got {result.exit_code}: {result.output}"
         # Assert the call shape — Path object, mode kwarg, datasets=None default
@@ -446,7 +457,7 @@ class TestRun:
         ) as mock_run:
             CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--inline",
-                "--datasets", " ap_aging , dim_supplier ,,",
+                "--datasets", " ap_aging , dim_supplier ,,", "--execution-backend", "legacy-python"
             ])
         # Whitespace trimmed; empty segments dropped
         assert mock_run.call_args.kwargs["datasets"] == ["ap_aging", "dim_supplier"]
@@ -478,7 +489,7 @@ class TestRun:
         ) as mock_run:
             result = CliRunner().invoke(
                 cli.main,
-                ["run", "--mode", "seed", "--inline", "--layers", "gold"],
+                ["run", "--mode", "seed", "--inline", "--layers", "gold", "--execution-backend", "legacy-python"],
             )
         assert result.exit_code == 0, (
             f"expected exit 0, got {result.exit_code}: {result.output}"
@@ -513,7 +524,7 @@ class TestRun:
             CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--inline",
                 "--layers", "bronze, silver",
-                "--datasets", "ap_invoices",
+                "--datasets", "ap_invoices", "--execution-backend", "legacy-python"
             ])
         # Both filters reach orchestrator.run; CSV whitespace trimmed
         call_kwargs = mock_run.call_args.kwargs
@@ -545,7 +556,7 @@ class TestRun:
             side_effect=ExceptionCls(msg_fragment),
         ):
             result = CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed", "--inline"],
+                cli.main, ["run", "--mode", "seed", "--inline", "--execution-backend", "legacy-python"],
             )
         assert result.exit_code == 2, f"expected exit 2, got {result.exit_code}"
         assert msg_fragment in result.output
@@ -566,7 +577,7 @@ class TestRun:
             side_effect=NotImplementedError("Incremental mode is P1.5β"),
         ):
             result = CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed", "--inline"],
+                cli.main, ["run", "--mode", "seed", "--inline", "--execution-backend", "legacy-python"],
             )
         assert result.exit_code == 2
         assert "P1.5β" in result.output
@@ -589,7 +600,7 @@ class TestRun:
         with patch(
             "oracle_ai_data_platform_fusion_bundle.orchestrator.run",
         ) as mock_run:
-            result = CliRunner().invoke(cli.main, ["run", "--mode", "full", "--inline"])
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "full", "--inline", "--execution-backend", "legacy-python"])
         assert result.exit_code == 2
         # Click's standard error format
         assert "'full' is not one of" in result.output or "Invalid value" in result.output
@@ -620,7 +631,7 @@ class TestRun:
             side_effect=RuntimeError("simulated orchestrator bug"),
         ):
             result = CliRunner().invoke(
-                cli.main, ["run", "--mode", "seed", "--inline"],
+                cli.main, ["run", "--mode", "seed", "--inline", "--execution-backend", "legacy-python"],
             )
 
         # Bug must NOT silently become exit 2 — that would mask real defects.
@@ -664,6 +675,7 @@ class TestRun:
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "seed", "--inline",
             "--datasets", "ap_invoies",  # typo of ap_invoices
+            "--execution-backend", "legacy-python",
         ])
         assert result.exit_code == 2, (
             f"typoed --datasets must hard-fail exit 2 (NOT exit 0 with empty "

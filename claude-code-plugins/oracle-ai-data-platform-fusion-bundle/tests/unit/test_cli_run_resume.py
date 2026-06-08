@@ -38,27 +38,38 @@ def _init_minimal_bundle(monkeypatch) -> None:
 
 
 def test_resume_option_appears_in_help() -> None:
-    result = CliRunner().invoke(cli.main, ["run", "--help"])
+    result = CliRunner().invoke(cli.main, ["run", "--help", "--execution-backend", "legacy-python"])
     assert result.exit_code == 0
     assert "--resume" in result.output
     assert "run_id" in result.output.lower() or "run id" in result.output.lower()
 
 
-def test_resume_without_inline_exits_2_with_clear_message(
+def test_resume_without_inline_dispatches_via_rest(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """The non-inline (REST dispatch) path is a stub; ``--resume`` is
-    only meaningful with ``--inline`` today. The CLI must reject
-    ``--resume`` without ``--inline`` with a clear message rather than
-    silently dispatching a non-resuming run."""
+    """Phase 5 P1.5ε-fix5 — non-inline ``--resume`` now dispatches via
+    REST. The CLI no longer rejects it; the dispatcher's notebook
+    cell threads the supplied id into the cluster-side
+    ``orchestrator.run(...)`` call.
+    """
+    from unittest.mock import patch
+
     monkeypatch.chdir(tmp_path)
     _init_minimal_bundle(monkeypatch)
-    result = CliRunner().invoke(cli.main, [
-        "run", "--mode", "seed", "--resume", "some-run-id",
-    ])
-    assert result.exit_code == 2
-    assert "--resume" in result.output
-    assert "--inline" in result.output
+    # Mock the dispatch path so we don't actually try to hit AIDP.
+    with patch(
+        "oracle_ai_data_platform_fusion_bundle.commands.run."
+        "_run_via_aidp_dispatch",
+        return_value=0,
+    ) as mock_dispatch:
+        result = CliRunner().invoke(cli.main, [
+            "run", "--mode", "seed", "--resume", "some-run-id",
+            "--execution-backend", "legacy-python",
+        ])
+    assert result.exit_code == 0
+    # The resume id flowed into the dispatcher.
+    assert mock_dispatch.call_args is not None
+    assert mock_dispatch.call_args.kwargs.get("resume_run_id") == "some-run-id"
 
 
 def test_resume_run_not_found_exits_2_no_traceback(
@@ -74,7 +85,7 @@ def test_resume_run_not_found_exits_2_no_traceback(
         side_effect=ResumeRunNotFoundError("--resume: no rows for run_id='ghost'"),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "ghost",
+            "run", "--mode", "seed", "--inline", "--resume", "ghost", "--execution-backend", "legacy-python"
         ])
     assert result.exit_code == 2
     assert "ghost" in result.output
@@ -96,7 +107,7 @@ def test_resume_run_not_resumable_exits_2_no_traceback(
         ),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "legacy",
+            "run", "--mode", "seed", "--inline", "--resume", "legacy", "--execution-backend", "legacy-python"
         ])
     assert result.exit_code == 2
     assert "not resumable" in result.output
@@ -121,7 +132,7 @@ def test_resume_bundle_mismatch_exits_2_no_traceback(
         side_effect=ResumeBundleMismatchError(msg),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "abc-123",
+            "run", "--mode", "seed", "--inline", "--resume", "abc-123", "--execution-backend", "legacy-python"
         ])
     assert result.exit_code == 2
     # The rendered diff sections surface to the operator.
@@ -145,7 +156,7 @@ def test_resume_banner_printed_before_orchestrator_call(
         return_value=RunSummary.empty("test-bundle", "seed"),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "abc-123",
+            "run", "--mode", "seed", "--inline", "--resume", "abc-123", "--execution-backend", "legacy-python"
         ])
     assert "Resuming run" in result.output
     assert "abc-123" in result.output

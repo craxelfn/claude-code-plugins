@@ -166,7 +166,7 @@ class TestModeValidation:
         """
         with patch("oracle_ai_data_platform_fusion_bundle.orchestrator.load_bundle") as mock_load:
             with pytest.raises(UnsupportedModeError, match="full") as exc_info:
-                orchestrator.run(Path("/nonexistent/bundle.yaml"), mode="full")
+                orchestrator.run(Path("/nonexistent/bundle.yaml"), mode="full", execution_backend="legacy-python")
             mock_load.assert_not_called()
         # Retired-alias hint must survive future message rewrites
         assert "retired" in str(exc_info.value), (
@@ -184,7 +184,7 @@ class TestModeValidation:
     def test_mode_typo_raises_before_any_io(self) -> None:
         with patch("oracle_ai_data_platform_fusion_bundle.orchestrator.load_bundle") as mock_load:
             with pytest.raises(UnsupportedModeError):
-                orchestrator.run(Path("/nope"), mode="seeed")
+                orchestrator.run(Path("/nope"), mode="seeed", execution_backend="legacy-python")
             mock_load.assert_not_called()
 
     def test_mode_incremental_passes_guard_after_p117_gate_removal(self) -> None:
@@ -197,13 +197,13 @@ class TestModeValidation:
         the gate.
         """
         with pytest.raises(orchestrator.BundleLoadError):
-            orchestrator.run(Path("/nope"), mode="incremental")
+            orchestrator.run(Path("/nope"), mode="incremental", execution_backend="legacy-python")
 
     def test_mode_seed_passes_guard(self, tmp_path: Path) -> None:
         # Seed should pass the guard and proceed to load_bundle (which then fails
         # because the path doesn't exist).
         with pytest.raises(orchestrator.BundleLoadError):
-            orchestrator.run(tmp_path / "nope.yaml", mode="seed")
+            orchestrator.run(tmp_path / "nope.yaml", mode="seed", execution_backend="legacy-python")
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ class TestRunDryRun:
         never touches Spark or credentials."""
         with patch("oracle_ai_data_platform_fusion_bundle.orchestrator._bootstrap_spark") as mock_spark, \
              patch("oracle_ai_data_platform_fusion_bundle.orchestrator._resolve_password") as mock_cred:
-            summary = orchestrator.run(_bundle_file(tmp_path), mode="seed", dry_run=True)
+            summary = orchestrator.run(_bundle_file(tmp_path), mode="seed", dry_run=True, execution_backend="legacy-python")
         mock_spark.assert_not_called()
         mock_cred.assert_not_called()
         assert summary.steps == ()
@@ -331,8 +331,8 @@ class TestRunDryRun:
              patch("oracle_ai_data_platform_fusion_bundle.orchestrator._resolve_password"):
             summary = orchestrator.run(
                 _bundle_file(tmp_path), mode="seed", dry_run=True,
-                layers=["gold"],  # forces silver/bronze into prereqs
-            )
+                layers=["gold"],  # forces silver/bronze into prereqs,
+                execution_backend="legacy-python",            )
         assert summary.plan is not None
         assert isinstance(summary.plan, tuple)
         assert all(isinstance(n, PlanNode) for n in summary.plan), (
@@ -377,7 +377,7 @@ class TestRunCredentialPreflight:
             fake_module.secrets = fake_secrets
             with patch.dict(sys.modules, {"aidputils": fake_module, "aidputils.secrets": fake_secrets}):
                 with pytest.raises(CredentialResolutionError):
-                    orchestrator.run(fp, mode="seed")
+                    orchestrator.run(fp, mode="seed", execution_backend="legacy-python")
         # The load-bearing assertion: zero Spark + zero state calls
         mock_spark.assert_not_called()
         mock_state.assert_not_called()
@@ -401,7 +401,7 @@ gold:
   marts: []
 """
         with patch("oracle_ai_data_platform_fusion_bundle.orchestrator._bootstrap_spark") as mock_spark:
-            summary = orchestrator.run(_bundle_file(tmp_path, empty_bundle), mode="seed")
+            summary = orchestrator.run(_bundle_file(tmp_path, empty_bundle), mode="seed", execution_backend="legacy-python")
         assert summary.steps == ()
         assert summary.run_id.startswith("empty-")
         mock_spark.assert_not_called()
@@ -415,7 +415,7 @@ gold:
 class TestLayerFilterPreflight:
     """Run-loop integration of ``layers=`` filter + extra-plan preflight.
 
-    Exercises the full ``orchestrator.run(..., layers=['gold'])`` path:
+    Exercises the full ``orchestrator.run(..., layers=['gold'], execution_backend="legacy-python")`` path:
     ``resolve_plan`` classifies bronze/silver as extra-plan deps,
     ``_preflight_external_deps`` checks each via
     ``spark.catalog.tableExists``, and the dispatch loop runs only the
@@ -479,6 +479,7 @@ class TestLayerFilterPreflight:
         ):
             summary = orchestrator.run(
                 bundle_path, spark=fake_spark, mode="seed", layers=["gold"],
+                execution_backend="legacy-python",
             )
 
         # Only gold marts in the RunSummary
@@ -522,6 +523,7 @@ class TestLayerFilterPreflight:
             with pytest.raises(PrerequisiteError) as exc_info:
                 orchestrator.run(
                     bundle_path, spark=fake_spark, mode="seed", layers=["gold"],
+                    execution_backend="legacy-python",
                 )
         # Zero dispatch attempts
         mock_execute.assert_not_called()
@@ -620,7 +622,7 @@ gold:
                  registry.GOLD_MARTS,
                  {k: type(v)(v.dataset_id, fake_builder, v.depends_on_bronze, v.depends_on_silver) for k, v in registry.GOLD_MARTS.items()},
              ):
-            summary = orchestrator.run(_bundle_file(tmp_path, bundle_yaml), spark=fake_spark, mode="seed")
+            summary = orchestrator.run(_bundle_file(tmp_path, bundle_yaml), spark=fake_spark, mode="seed", execution_backend="legacy-python")
 
         # Every plan node has one row (audit-completeness)
         step_ids = {s.dataset_id for s in summary.steps}
@@ -749,6 +751,7 @@ gold:
         ):
             summary = orchestrator.run(
                 _bundle_file(tmp_path, bundle_yaml), spark=fake_spark, mode="seed",
+                execution_backend="legacy-python",
             )
 
         # The loop completed: both steps in the in-memory summary
@@ -805,6 +808,7 @@ gold:
             with pytest.raises(PermissionError, match="Delta DDL denied"):
                 orchestrator.run(
                     _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+                    execution_backend="legacy-python",
                 )
         # Load-bearing assertion: zero dispatch attempts
         mock_execute.assert_not_called()
@@ -868,6 +872,7 @@ class TestFix19PreflightThreading:
         ):
             summary = orchestrator.run(
                 _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+                execution_backend="legacy-python",
             )
 
         # Exact match — tuple type, order preserved
@@ -923,6 +928,7 @@ class TestFix19PreflightThreading:
         ):
             orchestrator.run(
                 _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+                execution_backend="legacy-python",
             )
 
         # Every bronze got the override value, NOT the catalog default
@@ -986,6 +992,7 @@ class TestFix19PreflightThreading:
         ):
             summary = orchestrator.run(
                 _bundle_file(tmp_path), spark=fake_spark, mode="seed",
+                execution_backend="legacy-python",
             )
 
         # Discovered schemas reach real dispatch (NOT the catalog defaults)

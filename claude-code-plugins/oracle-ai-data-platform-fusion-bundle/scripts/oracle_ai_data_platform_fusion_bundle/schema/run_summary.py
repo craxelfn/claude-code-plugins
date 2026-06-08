@@ -309,6 +309,46 @@ class RunStep:
         )
 
     @classmethod
+    def gate_failed(
+        cls,
+        *,
+        run_id: str,
+        mode: str,
+        layer: str,
+        gate_dataset_id: str,
+        aidpf_code: str,
+        error_message: str,
+    ) -> "RunStep":
+        """Synthetic ``RunStep`` for a Phase 5 medallion gate failure.
+
+        Used by the top-level dispatcher when ``assert_bronze_readiness``
+        (AIDPF-2071) or ``assert_fusion_pvo_compatibility`` (AIDPF-2072)
+        raises. The dispatcher catches the gate error, appends one of
+        these steps to the merged :class:`RunSummary`, and returns
+        normally — the CLI translates ``summary.has_failures()`` to a
+        non-zero exit code.
+
+        Reserved ``__<name>__`` ``dataset_id`` convention identifies the
+        synthetic step (e.g. ``__bronze_readiness_gate__`` /
+        ``__fusion_pvo_drift_gate__``) so downstream filters can
+        distinguish gate-failure steps from real node failures.
+        """
+        return cls(
+            run_id=run_id,
+            dataset_id=gate_dataset_id,
+            layer=layer,  # type: ignore[arg-type]
+            mode=mode,  # type: ignore[arg-type]
+            status="failed",
+            row_count=None,
+            duration_seconds=0.0,
+            error_message=f"[{aidpf_code}] {error_message}",
+            watermark_used=None,
+            last_watermark=None,
+            plan_hash=None,
+            plan_snapshot=None,
+        )
+
+    @classmethod
     def resumed_skip(
         cls,
         spec: Any,
