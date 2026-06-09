@@ -67,6 +67,64 @@ class TestValidate:
         assert result.exit_code == 1
         assert "definitely_not_in_catalog" in result.output
 
+    def test_fails_when_declared_contentpack_path_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-9 review fix: a bundle that DECLARES contentPack
+        but whose path doesn't resolve must fail validate with
+        AIDPF-1037/AIDPF-1038, NOT silently fall back to the legacy
+        fusion_catalog membership check. Pre-fix the legacy fallback
+        gave a false-green here while the run command would later
+        reject the bundle with the same code.
+        """
+        monkeypatch.chdir(tmp_path)
+        # erp_suppliers IS in fusion_catalog.CATALOG, so the legacy
+        # fallback would silently pass. The point of this test is
+        # that declaring contentPack with a bad path must surface
+        # the AIDPF-1038 error instead of falling back.
+        (tmp_path / "bundle.yaml").write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: validate-bad-pack\n"
+            "fusion:\n"
+            "  serviceUrl: https://example.com\n"
+            "  username: u\n  password: p\n  externalStorage: x\n"
+            "aidp:\n"
+            "  catalog: fusion_catalog\n"
+            "  bronzeSchema: bronze\n  silverSchema: silver\n  goldSchema: gold\n"
+            "contentPack:\n"
+            "  name: fusion-finance-starter\n"
+            "  path: ./does-not-exist\n"
+            "  profile: demo\n"
+            "datasets:\n"
+            "  - id: erp_suppliers\n"
+        )
+        (tmp_path / "aidp.config.yaml").write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: validate-bad-pack\n"
+            "environments:\n"
+            "  dev:\n"
+            "    workspaceKey: ws\n"
+        )
+        result = CliRunner().invoke(cli.main, ["validate"])
+        assert result.exit_code == 1, (
+            f"validate must exit 1 on bad contentPack.path; got "
+            f"exit={result.exit_code} output={result.output!r}"
+        )
+        # The error must be the same AIDPF code the run command would
+        # raise (AIDPF-1037 for installed-pack miss, AIDPF-1038 for
+        # resolved-root-no-pack.yaml). Local relative path → 1038.
+        assert (
+            "AIDPF-1037" in result.output
+            or "AIDPF-1038" in result.output
+        ), (
+            f"validate output must surface AIDPF-1037/1038; got "
+            f"{result.output!r}"
+        )
+        # And it must NOT silently fall through to the legacy catalog —
+        # erp_suppliers is in the catalog, so the legacy fallback
+        # would have printed "validation passed".
+        assert "validation passed" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # catalog list / probe

@@ -92,15 +92,21 @@ def _validate_datasets_against_pack(
     :func:`load_full_chain` — mirrors what the runtime path does so
     customer overlay-pack-authored bronze ids are visible.
 
-    Pack load failure is non-fatal at this stage (the rest of validate
-    still surfaces schema issues); records a single message.
+    Round-9 review fix: a bundle that DECLARES ``contentPack`` but
+    whose pack root cannot be resolved (missing path / no pack.yaml /
+    overlay chain busted) MUST surface the error as a validation
+    issue, NOT silently fall through to the legacy
+    ``fusion_catalog.CATALOG`` membership check. Pre-fix the legacy
+    fallback gave false greens on bundles that the run command would
+    later reject with AIDPF-1037 / AIDPF-1038.
+
+    The legacy catalog fallback is reserved for bundles WITHOUT a
+    declared ``contentPack`` block (pre-Phase-9 shape).
     """
-    pack_root = _resolve_pack_root(bundle, bundle_path)
-    if pack_root is None:
-        # Bundle declares no content pack — fall back to the legacy
-        # fusion_catalog.py membership check so legacy bundles
-        # (pre-Phase-9 shape with bronze-only dataset ids) still get
-        # typo detection.
+    if bundle.content_pack is None:
+        # No content pack declared — legacy bundle shape. Fall back
+        # to the catalog membership check so pre-Phase-9 bundles
+        # (bronze-only datasets) still get typo detection.
         from ..schema.fusion_catalog import CATALOG
         unknown = [ds.id for ds in bundle.datasets if ds.id not in CATALOG]
         if unknown:
@@ -109,6 +115,33 @@ def _validate_datasets_against_pack(
                 f"add them to schema/fusion_catalog.py first OR add a content "
                 f"pack with bronze/silver/gold YAMLs declaring them."
             )
+        return
+
+    # Bundle DECLARES a content pack — round-9 contract: any failure
+    # to resolve the pack root must be a validation issue, not a
+    # silent fallback to the legacy catalog. The run command uses
+    # the same resolver and will fail with the same code; validate
+    # must catch it first.
+    from ..schema.bundle import (
+        ContentPackRootInvalidError,
+        ContentPackRootNotFoundError,
+        resolve_content_pack_root,
+    )
+    try:
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+    except (
+        ContentPackRootNotFoundError,
+        ContentPackRootInvalidError,
+    ) as exc:
+        issues.append(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001 — defense in depth for
+                              # unforeseen resolver failures (e.g.
+                              # permission denied, broken symlink).
+        issues.append(
+            f"content pack declared in bundle.yaml but failed to resolve: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return
 
     try:
@@ -136,30 +169,6 @@ def _validate_datasets_against_pack(
             f"all layers: bronze={sorted(pack.bronze)!r}, "
             f"silver={sorted(pack.silver)!r}, gold={sorted(pack.gold)!r}."
         )
-
-
-def _resolve_pack_root(bundle: Bundle, bundle_path: Path) -> Path | None:
-    """Locate the bundle's content pack root.
-
-    Phase 9: delegates to ``schema.bundle.resolve_content_pack_root``
-    (the same helper ``commands/run.py`` uses). That gives validate
-    parity with run on:
-      * ``bundle.contentPack.path`` (laptop-relative) resolution.
-      * Lookups under ``INSTALLED_CONTENT_PACKS_DIR`` for
-        Oracle-shipped packs (the customer-extension story).
-      * Pydantic-typed ``ContentPackSpec`` rather than getattr fallbacks.
-
-    Returns ``None`` when the bundle declares no content pack.
-    """
-    if bundle.content_pack is None:
-        return None
-    try:
-        from ..schema.bundle import resolve_content_pack_root
-        return resolve_content_pack_root(bundle_path, bundle.content_pack)
-    except Exception:  # noqa: BLE001 — surface as no-pack so the caller
-                       # falls through to the legacy catalog membership
-                       # check.
-        return None
 
 
 def _load_bundle(path: Path, console: Console, issues: list[str]) -> Bundle | None:
