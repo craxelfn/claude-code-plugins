@@ -374,6 +374,57 @@ gold:
         with pytest.raises(MissingDependencyError, match="mart_does_not_exist"):
             resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
 
+    def test_layer_filter_empties_plan_raises_aidpf_1045(
+        self, pack, bundle, paths,
+    ):
+        """Round-8 review fix: ``--datasets supplier_spend --layers
+        silver`` filters the single gold root out before D-1
+        expansion, leaving effective_roots empty. Runtime raises
+        ``AIDPF-1045_LAYER_FILTER_EMPTIED_PLAN``; pre-fix the schema
+        resolver silently returned an empty plan, so REST dispatch
+        --dry-run reported success on a run the cluster would
+        reject."""
+        with pytest.raises(MissingDependencyError, match="AIDPF-1045"):
+            resolve_dry_run_plan(
+                pack, bundle, paths,
+                datasets=["supplier_spend"], layers=["silver"],
+            )
+
+    def test_layer_filter_empties_plan_bronze_only_bundle_raises(
+        self, pack, paths,
+    ):
+        """Round-8: bronze-only bundle (no silver/gold declared) with
+        ``--layers gold`` removes every root → AIDPF-1045. Runtime
+        raises the same; pre-fix dry-run silently returned an empty
+        plan."""
+        b = _bundle(
+            """\
+datasets:
+  - id: erp_suppliers
+  - id: ap_invoices
+"""
+        )
+        with pytest.raises(MissingDependencyError, match="AIDPF-1045"):
+            resolve_dry_run_plan(
+                pack, b, paths, datasets=None, layers=["gold"],
+            )
+
+    def test_layers_gold_on_gold_root_still_pulls_d1_deps(
+        self, pack, bundle, paths,
+    ):
+        """Round-8 positive test: ``--layers gold`` against a bundle
+        with a gold root keeps the gold mart in effective_roots and
+        D-1 still pulls bronze + silver deps into the plan. The
+        AIDPF-1045 guard must NOT fire here."""
+        plan, prereqs = resolve_dry_run_plan(
+            pack, bundle, paths, datasets=None, layers=["gold"],
+        )
+        plan_ids = {n.dataset_id for n in plan}
+        assert plan_ids == {
+            "supplier_spend", "ap_invoices", "dim_supplier", "erp_suppliers",
+        }
+        assert prereqs == ()
+
     def test_omitted_legacy_blocks_dont_fold_pydantic_defaults(
         self, pack, paths,
     ):

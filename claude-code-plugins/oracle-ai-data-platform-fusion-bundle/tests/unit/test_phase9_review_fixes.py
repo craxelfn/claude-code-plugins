@@ -1080,3 +1080,100 @@ environments:
             "REST dry-run default must D-1 auto-include erp_suppliers "
             f"into the plan; plan={sorted(plan_ids)}"
         )
+
+    def test_rest_dry_run_layer_filter_empties_plan_raises_aidpf_1045(
+        self, tmp_path,
+    ):
+        """Round-8 review fix: REST dispatch dry-run must raise
+        AIDPF-1045 when ``--layers`` removes every declared root —
+        same contract as runtime ``resolve_content_pack_plan``.
+        Pre-fix the schema resolver silently returned an empty plan,
+        so REST dispatch --dry-run reported success on a run the
+        cluster would reject.
+
+        Scenario: bundle declares supplier_spend (gold); CLI passes
+        ``--datasets supplier_spend --layers silver`` → effective_roots
+        is filtered to layer=silver, leaving the empty set.
+        """
+        from unittest.mock import patch, MagicMock
+        from oracle_ai_data_platform_fusion_bundle.dispatch import dispatch_via_rest
+        from oracle_ai_data_platform_fusion_bundle.dispatch.preflight import (
+            PreflightResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_pack,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig
+        from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+            MissingDependencyError,
+        )
+
+        pack_root = tmp_path / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.yaml").write_text(PACK_YAML)
+        (pack_root / "bronze").mkdir()
+        (pack_root / "bronze" / "erp_suppliers.yaml").write_text(
+            _bronze_yaml("erp_suppliers"),
+        )
+        (pack_root / "bronze" / "ap_invoices.yaml").write_text(
+            _bronze_yaml("ap_invoices"),
+        )
+        (pack_root / "silver").mkdir()
+        (pack_root / "silver" / "dim_supplier.yaml").write_text(SILVER_DIM)
+        (pack_root / "silver" / "dim_supplier.sql").write_text(
+            "SELECT 1 AS supplier_id",
+        )
+        (pack_root / "gold").mkdir()
+        (pack_root / "gold" / "supplier_spend.yaml").write_text(GOLD_MART)
+        (pack_root / "gold" / "supplier_spend.sql").write_text(
+            "SELECT 1 AS supplier_id",
+        )
+        pack = load_pack(pack_root)
+
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: layer-filter-empty\n"
+            "fusion:\n"
+            "  serviceUrl: https://x\n  username: u\n  password: p\n"
+            "  externalStorage: x\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: b\n"
+            "  silverSchema: s\n  goldSchema: g\n"
+            "datasets:\n  - id: erp_suppliers\n  - id: ap_invoices\n"
+            "dimensions:\n  build: [dim_supplier]\n"
+            "gold:\n  marts: [supplier_spend]\n"
+        )
+
+        config = AidpConfig.model_validate({
+            "project": "layer-filter-empty",
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "defaults": {"region": "us-phoenix-1", "workspaceRoot": "/Workspace"},
+            "environments": {
+                "dev": {
+                    "workspaceKey": "ws", "aiDataPlatformId": "aidp",
+                    "clusterKey": "ck", "clusterName": "cn",
+                    "ociProfile": "DEFAULT",
+                }
+            },
+        })
+        env = config.environments["dev"]
+        ok = [PreflightResult("x", "PASS", "ok", "")]
+        fake_client = MagicMock()
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_local_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_remote_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient",
+            return_value=fake_client,
+        ):
+            with pytest.raises(MissingDependencyError, match="AIDPF-1045"):
+                dispatch_via_rest(
+                    bundle_path=bundle_path, config=config, env=env,
+                    env_name="dev", mode="seed",
+                    datasets=["supplier_spend"], layers=["silver"],
+                    dry_run=True, resolved_pack=pack,
+                )

@@ -41,6 +41,10 @@ _VALID_LAYERS: Final[frozenset[str]] = frozenset({"bronze", "silver", "gold"})
 # code. Inlined here for the same boundary reason.
 AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY: Final[str] = "AIDPF-1042"
 
+# Mirrors orchestrator.content_pack_plan_resolver's empty-plan error
+# code. Inlined here for the §4.3 boundary.
+AIDPF_1045_LAYER_FILTER_EMPTIED_PLAN: Final[str] = "AIDPF-1045"
+
 # Bundle-section names per layer — operator-facing remediation strings.
 _BUNDLE_SECTION: Final[dict[str, str]] = {
     "bronze": "bundle.datasets",
@@ -291,6 +295,19 @@ def resolve_dry_run_plan(
             r for r in effective_roots
             if classes[r][0] in layer_set
         }
+        # Round-8 review fix: mirror runtime AIDPF-1045. When the
+        # layer filter removes every declared root, runtime
+        # immediately raises LayerFilterEmptiedPlanError; pre-fix
+        # the dry-run resolver silently returned an empty plan,
+        # letting REST dispatch report success on a run the cluster
+        # will reject. Now both surfaces agree.
+        if not effective_roots:
+            raise MissingDependencyError(
+                f"{AIDPF_1045_LAYER_FILTER_EMPTIED_PLAN}: --layers "
+                f"{sorted(layer_set)!r} removed every declared root; "
+                f"plan would be empty. Specify roots whose layer is "
+                f"in the filter, or drop --layers."
+            )
 
     # ------------------------------------------------------------------
     # 4. Helper: pack node existence check + dep walk.
