@@ -512,15 +512,11 @@ class TestBundleScopeRespectedByResolver:
     def test_inline_and_dispatch_dry_run_agree(self, pack, tmp_path):
         """Both the inline dry-run (orchestrator) and the REST
         dispatch dry-run (schema/plan_resolver) must report the same
-        set of touched nodes (plan ∪ prereqs) for the same bundle +
-        pack. Pre-fix the two disagreed: REST honored
-        bundle.datasets[]; inline treated every pack node as a root.
-
-        Uses a bundle that declares the full chain explicitly
-        (Phase 5 "explicit-everything" contract) — that's the
-        intersection where the two resolvers agree byte-for-byte. The
-        D-1 auto-include path (inline-only behavior for high-level
-        intent) is exercised in test_no_filter_with_gold_intent_pulls_transitive_deps.
+        plan (NOT plan ∪ prereqs) for the same bundle + pack. Round-6
+        review fix: parity is asserted on the PLAN itself, since the
+        schema resolver now mirrors runtime ``resolve_content_pack_plan``
+        and returns empty prereqs — every materializable dep is in
+        the plan.
         """
         from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
         from oracle_ai_data_platform_fusion_bundle.orchestrator import (
@@ -551,13 +547,15 @@ class TestBundleScopeRespectedByResolver:
         rest_plan, rest_prereqs = resolve_dry_run_plan(
             pack, bundle, paths, datasets=None, layers=None,
         )
-        rest_ids_total = (
-            {n.dataset_id for n in rest_plan}
-            | {n.dataset_id for n in rest_prereqs}
+        rest_plan_ids = {n.dataset_id for n in rest_plan}
+        assert rest_prereqs == (), (
+            "round-6 contract: schema resolver mirrors runtime and "
+            f"emits empty prereqs; got {rest_prereqs!r}"
         )
-        assert inline_ids == rest_ids_total, (
+        assert inline_ids == rest_plan_ids, (
             f"inline plan ({sorted(inline_ids)}) disagrees with REST "
-            f"plan+prereqs ({sorted(rest_ids_total)})"
+            f"plan ({sorted(rest_plan_ids)}) — the two resolvers must "
+            f"produce byte-identical plans"
         )
 
 
@@ -1070,11 +1068,15 @@ environments:
             )
         assert summary is not None
         plan_ids = {n.dataset_id for n in summary.plan}
-        # D-1 must auto-include erp_suppliers as a prereq when
-        # strict_scope=False — the plan/prereq union covers it.
-        prereq_ids = {n.dataset_id for n in summary.prereqs}
-        assert "dim_supplier" in (plan_ids | prereq_ids)
-        assert "erp_suppliers" in (plan_ids | prereq_ids), (
-            "REST dry-run default must D-1 auto-include erp_suppliers; "
-            f"plan={sorted(plan_ids)} prereqs={sorted(prereq_ids)}"
+        # Round-6: schema resolver mirrors runtime — D-1 closure lands
+        # in the PLAN, not as prereqs. Prereqs is empty under the new
+        # contract.
+        assert summary.prereqs == (), (
+            f"round-6: REST dry-run prereqs must be empty; got "
+            f"{summary.prereqs!r}"
+        )
+        assert "dim_supplier" in plan_ids
+        assert "erp_suppliers" in plan_ids, (
+            "REST dry-run default must D-1 auto-include erp_suppliers "
+            f"into the plan; plan={sorted(plan_ids)}"
         )

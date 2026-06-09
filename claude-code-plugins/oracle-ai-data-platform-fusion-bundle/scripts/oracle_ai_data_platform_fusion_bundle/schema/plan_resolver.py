@@ -130,53 +130,64 @@ def resolve_dry_run_plan(
 ) -> tuple[tuple[PlanNode, ...], tuple[PrereqNode, ...]]:
     """Classify, filter, and topo-sort the pack plan for dry-run rendering.
 
-    Phase 9: walks ``pack.bronze ∪ pack.silver ∪ pack.gold`` instead of
-    the registry-metadata maps. Honors ``bundle.datasets[]`` /
-    ``bundle.dimensions.build`` / ``bundle.gold.marts`` as the
-    operator's declared scope; unknown ids in the bundle raise
-    ``MissingDependencyError``. ``--datasets`` / ``--layers`` filter
-    the resulting plan; in-plan consumers whose upstream is filtered
-    out emit ``PrereqNode`` entries.
+    Phase 9 round-6 fix: this resolver MIRRORS the runtime
+    ``orchestrator.content_pack_plan_resolver.resolve_content_pack_plan``
+    contract byte-for-byte so dry-run is a faithful preview of what
+    runtime will do. Pre-fix the schema resolver had its own
+    declared/filtered/undeclared/prereq taxonomy that diverged from
+    runtime: with ``--datasets supplier_spend`` on a bundle that
+    declared the full chain, dry-run reported ``[supplier_spend]`` +
+    prereqs ``[ap_invoices, dim_supplier]`` while runtime D-1-closed
+    the plan to ``[erp_suppliers, ap_invoices, dim_supplier,
+    supplier_spend]`` — and with ``--strict-scope`` dry-run silently
+    accepted while runtime raised AIDPF-1042. That made dry-run
+    unsafe as an operator preview.
 
-    Phase 9 D-1 + strict-scope:
+    Phase 9 contract (mirrors runtime ``resolve_content_pack_plan``):
 
-    * ``strict_scope=False`` (default — matches the inline resolver's
-      D-1 implicit-transitive-include): a consumer whose upstream is
-      not in ``bundle.datasets[]`` / ``bundle.dimensions.build`` /
-      ``bundle.gold.marts`` auto-includes that upstream in the plan
-      (operator declared intent, resolver fills in deps).
-    * ``strict_scope=True``: a consumer whose upstream is not declared
-      in the bundle raises ``MissingDependencyError``. Matches the
-      inline resolver's ``AIDPF-1042`` contract — operators get the
-      same opt-out semantics whether they ``--inline`` or REST-
-      dispatch.
+    * Effective roots = ``set(datasets)`` when ``--datasets`` is
+      given; else the union of ``bundle.datasets[]``,
+      ``bundle.dimensions.build``, ``bundle.gold.marts`` (presence-
+      aware via ``model_fields_set``-style classification done here).
+    * ``--layers`` filters declared roots only; D-1 transitive deps
+      remain in the plan regardless of layer.
+    * ``strict_scope=False`` (D-1 default): walk
+      ``dependsOn.bronze`` ∪ ``dependsOn.silver`` transitively and
+      add every reachable dep to the plan, whether or not it was
+      declared in the bundle.
+    * ``strict_scope=True``: every transitive dep MUST be in
+      ``effective_roots``. If a declared root has a dep that isn't
+      also in effective_roots, raise ``AIDPF-1042`` — same as
+      runtime.
 
-    Args:
-        pack: the resolved content pack.
-        bundle: the parsed ``bundle.yaml``.
-        paths: tenant-aware ``TablePaths`` — drives 3-part table names
-            for extra-plan prereqs.
-        datasets: ``--datasets`` CSV filter (``None`` = include all).
-        layers: ``--layers`` filter (``None`` = include all).
-        strict_scope: when True, undeclared upstreams raise; when
-            False (default), D-1 auto-includes them.
-
-    Returns:
-        ``(plan, prereqs)``:
-        - ``plan`` — topo-sorted tuple of ``PlanNode``.
-        - ``prereqs`` — tuple of ``PrereqNode`` for in-plan consumers
-          whose upstream was filtered out by the filters.
+    Returns
+    -------
+    ``(plan, prereqs)``:
+      * ``plan`` — topo-sorted tuple of ``PlanNode``, containing the
+        full D-1 closure of effective_roots (when
+        ``strict_scope=False``) or effective_roots verbatim (when
+        ``strict_scope=True``, since transitive deps must already
+        be in the set).
+      * ``prereqs`` — always an empty tuple under this design (every
+        materializable dep lands in the plan). The slot is retained
+        for back-compat with callers + the renderer; future work
+        may re-purpose it for "expected-on-disk upstreams the
+        engine will read but not write" if a use case emerges.
 
     Raises:
-        MissingDependencyError: any bundle name unknown to the pack,
-            any filter typo, any disabled-but-required dataset, or any
-            in-plan consumer with an undeclared upstream.
+        MissingDependencyError: any bundle name unknown to the pack;
+            any ``--datasets`` typo; any ``--layers`` typo; any node
+            whose ``dependsOn`` references an id outside the pack;
+            any ``strict_scope=True`` violation (AIDPF-1042).
     """
     bronze_ids_in_pack = _bronze_ids_from_pack(pack)
 
-    # 1. Classify every bundle name against the pack. Honor
-    #    DatasetSpec.enabled=false (P1.5α-fix15).
-    all_classes: dict[
+    # ------------------------------------------------------------------
+    # 1. Classify every bundle root against the pack — same typo
+    #    validation surface the prior resolver had. Honors
+    #    DatasetSpec.enabled=false.
+    # ------------------------------------------------------------------
+    classes: dict[
         str,
         tuple[Literal["bronze", "silver", "gold"], Literal["eligible"], str | None],
     ] = {}
@@ -193,10 +204,10 @@ def resolve_dry_run_plan(
                 f"silver={sorted(pack.silver)!r}, "
                 f"gold={sorted(pack.gold)!r}."
             )
-        all_classes[ds.id] = (layer, "eligible", None)
+        classes[ds.id] = (layer, "eligible", None)
     for dim_name in bundle.dimensions.build:
         if dim_name in pack.silver:
-            all_classes[dim_name] = ("silver", "eligible", None)
+            classes[dim_name] = ("silver", "eligible", None)
         else:
             raise MissingDependencyError(
                 f"Unknown dim {dim_name!r} in bundle.dimensions.build. "
@@ -204,16 +215,18 @@ def resolve_dry_run_plan(
             )
     for mart_name in bundle.gold.marts:
         if mart_name in pack.gold:
-            all_classes[mart_name] = ("gold", "eligible", None)
+            classes[mart_name] = ("gold", "eligible", None)
         else:
             raise MissingDependencyError(
                 f"Unknown mart {mart_name!r} in bundle.gold.marts. "
                 f"Known gold ids: {sorted(pack.gold)!r}."
             )
 
-    # 1a. Validate filter inputs BEFORE applying them.
+    # ------------------------------------------------------------------
+    # 2. Validate filter inputs.
+    # ------------------------------------------------------------------
     if datasets is not None:
-        unknown_datasets = sorted(set(datasets) - set(all_classes))
+        unknown_datasets = sorted(set(datasets) - set(classes))
         if unknown_datasets:
             disabled_in_filter = [
                 d for d in unknown_datasets if d in disabled_datasets
@@ -225,18 +238,17 @@ def resolve_dry_run_plan(
             if disabled_in_filter:
                 msg_parts.append(
                     f"--datasets references disabled name(s): "
-                    f"{disabled_in_filter}. "
-                    f"Either set `enabled: true` in bundle.datasets for "
-                    f"those entries, or remove them from --datasets."
+                    f"{disabled_in_filter}. Either set `enabled: true` "
+                    f"in bundle.datasets for those entries, or remove "
+                    f"them from --datasets."
                 )
             if truly_unknown:
                 msg_parts.append(
                     f"--datasets contains name(s) not in the bundle plan: "
-                    f"{truly_unknown}. "
-                    f"Available names from bundle.yaml: {sorted(all_classes)}. "
-                    f"--datasets is a filter over the bundle's declared "
-                    f"datasets / dimensions / marts; to add a new name, "
-                    f"edit bundle.yaml first."
+                    f"{truly_unknown}. Available names from bundle.yaml: "
+                    f"{sorted(classes)}. --datasets is a filter over the "
+                    f"bundle's declared datasets / dimensions / marts; "
+                    f"to add a new name, edit bundle.yaml first."
                 )
             raise MissingDependencyError("\n".join(msg_parts))
     if layers is not None:
@@ -247,191 +259,159 @@ def resolve_dry_run_plan(
                 f"Valid layers: {sorted(_VALID_LAYERS)}."
             )
 
-    # 2. Determine which names are "in plan" given the filters.
-    def _matches_filter(name: str, layer: str) -> bool:
-        if datasets is not None and name not in datasets:
-            return False
-        if layers is not None and layer not in layers:
-            return False
-        return True
+    # ------------------------------------------------------------------
+    # 3. Compute effective_roots — the runtime contract: CLI datasets
+    #    win, else the bundle scope. Layers filter is applied to
+    #    declared roots only (transitive deps stay regardless of
+    #    layer — matches runtime).
+    # ------------------------------------------------------------------
+    if datasets is not None:
+        effective_roots: set[str] = set(datasets)
+    else:
+        effective_roots = set(classes.keys())
 
-    in_plan_names: set[str] = {
-        name for name, (layer, _status, _reason) in all_classes.items()
-        if _matches_filter(name, layer)
-    }
+    if layers is not None:
+        layer_set = {l.strip().lower() for l in layers}
+        effective_roots = {
+            r for r in effective_roots
+            if classes[r][0] in layer_set
+        }
 
-    # 3. Walk upstreams of in-plan consumers + classify each into
-    #    in-plan / extra-plan / undeclared.
-    prereqs_list: list[PrereqNode] = []
-    seen_prereqs: set[tuple[str, str]] = set()
-
-    def _add_prereq(
-        dep_name: str,
-        dep_layer: Literal["bronze", "silver", "gold"],
-        consumer: str,
-    ) -> None:
-        key = (dep_name, dep_layer)
-        if key in seen_prereqs:
-            return
-        if dep_layer == "bronze":
-            table_path = paths.bronze(_bronze_target(pack, dep_name))
-        elif dep_layer == "silver":
-            table_path = paths.silver(dep_name)
-        else:
-            table_path = paths.gold(dep_name)
-        prereqs_list.append(
-            PrereqNode(
-                dataset_id=dep_name,
-                layer=dep_layer,
-                consumer=consumer,
-                table_path=table_path,
-            )
-        )
-        seen_prereqs.add(key)
-
+    # ------------------------------------------------------------------
+    # 4. Helper: pack node existence check + dep walk.
+    # ------------------------------------------------------------------
     def _check_dep_exists_or_raise(
         dep_name: str, dep_layer: str, consumer: str,
     ) -> None:
-        """Dep must exist in the pack — never unknown."""
         if dep_layer == "bronze":
             if dep_name not in bronze_ids_in_pack:
                 raise MissingDependencyError(
-                    f"Gold/silver consumer {consumer!r} depends on bronze "
-                    f"{dep_name!r}, but that name is not in the pack's bronze "
-                    f"layer. Add a content_packs/<pack>/bronze/<id>.yaml or "
-                    f"a legacy bronze.yaml entry for it."
+                    f"Consumer {consumer!r} depends on bronze "
+                    f"{dep_name!r}, but that name is not in the pack's "
+                    f"bronze layer. Add a content_packs/<pack>/bronze/"
+                    f"<id>.yaml or a legacy bronze.yaml entry for it."
                 )
         elif dep_layer == "silver":
             if dep_name not in pack.silver:
                 raise MissingDependencyError(
                     f"Gold consumer {consumer!r} depends on silver "
-                    f"{dep_name!r}, but that name is not in the pack's silver "
-                    f"layer."
+                    f"{dep_name!r}, but that name is not in the pack's "
+                    f"silver layer."
                 )
 
-    undeclared_deps: list[tuple[str, str, str, str]] = []
-    # Phase 9 D-1 (strict_scope=False): undeclared upstreams auto-
-    # include into the plan rather than raising. Tracked so the
-    # topo-sort below sees them as in-plan members.
-    auto_included: set[str] = set()
+    def _layer_of(name: str) -> Literal["bronze", "silver", "gold"]:
+        if name in classes:
+            return classes[name][0]
+        # Auto-included node — derive from the pack.
+        if name in pack.silver:
+            return "silver"
+        if name in pack.gold:
+            return "gold"
+        return "bronze"
 
-    def _is_declared(dep_name: str) -> bool:
-        return dep_name in all_classes
-
-    def _record_undeclared(
-        consumer: str, consumer_layer: str, dep_layer: str, dep_name: str,
-    ) -> None:
-        if strict_scope:
-            undeclared_deps.append(
-                (consumer, consumer_layer, dep_layer, dep_name)
-            )
-        else:
-            # D-1 auto-include: add to all_classes + in_plan_names
-            # so the topo-sort + plan output picks it up.
-            all_classes[dep_name] = (
-                dep_layer,  # type: ignore[assignment]
-                "eligible",
-                None,
-            )
-            in_plan_names.add(dep_name)
-            auto_included.add(dep_name)
-
-    for name in list(in_plan_names):
-        consumer_layer, _status, _reason = all_classes[name]
-        if consumer_layer == "bronze":
-            continue
-        bronze_deps, silver_deps = _node_depends_on(
-            pack, consumer_layer, name,
-        )
-        for b in bronze_deps:
-            _check_dep_exists_or_raise(b, "bronze", name)
-            if not _is_declared(b):
-                _record_undeclared(name, consumer_layer, "bronze", b)
+    # ------------------------------------------------------------------
+    # 5. strict_scope=True: walk one level of deps from each root; any
+    #    dep not in effective_roots → AIDPF-1042 (mirrors runtime).
+    # ------------------------------------------------------------------
+    if strict_scope:
+        missing_deps: list[tuple[str, Literal["bronze", "silver"], str]] = []
+        for root in sorted(effective_roots):
+            root_layer = _layer_of(root)
+            if root_layer == "bronze":
                 continue
-            if b not in in_plan_names:
-                _add_prereq(b, "bronze", name)
-        if consumer_layer == "gold":
-            for s in silver_deps:
-                _check_dep_exists_or_raise(s, "silver", name)
-                if not _is_declared(s):
-                    _record_undeclared(name, consumer_layer, "silver", s)
-                    continue
-                if s not in in_plan_names:
-                    _add_prereq(s, "silver", name)
-
-    # D-1 transitive closure: auto-included silver nodes themselves
-    # have bronze deps that may also be undeclared. Walk them so a
-    # gold-only bundle pulls the full bronze→silver→gold chain.
-    if not strict_scope and auto_included:
-        pending = list(auto_included)
-        while pending:
-            current = pending.pop()
-            current_layer, _, _ = all_classes[current]
-            if current_layer not in ("silver", "gold"):
+            b_deps, s_deps = _node_depends_on(pack, root_layer, root)
+            for b in b_deps:
+                _check_dep_exists_or_raise(b, "bronze", root)
+                if b not in effective_roots:
+                    missing_deps.append((root, "bronze", b))
+            if root_layer == "gold":
+                for s in s_deps:
+                    _check_dep_exists_or_raise(s, "silver", root)
+                    if s not in effective_roots:
+                        missing_deps.append((root, "silver", s))
+        if missing_deps:
+            lines = [
+                f"{AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY}: "
+                f"--strict-scope requires every transitive dep be in the "
+                f"effective root set; {len(missing_deps)} missing:"
+            ]
+            for root, dep_layer, dep_name in missing_deps:
+                if dep_name in disabled_datasets:
+                    lines.append(
+                        f"  • {dep_layer} {dep_name!r} (required by "
+                        f"{root!r}) is disabled in bundle.datasets — set "
+                        f"`enabled: true` or drop {root!r} from "
+                        f"--datasets / {_BUNDLE_SECTION[_layer_of(root)]}"
+                    )
+                else:
+                    lines.append(
+                        f"  • {dep_layer} {dep_name!r} (required by "
+                        f"{root!r}) — add it to --datasets or "
+                        f"{_BUNDLE_SECTION[dep_layer]}"
+                    )
+            raise MissingDependencyError("\n".join(lines))
+        plan_ids: set[str] = set(effective_roots)
+    else:
+        # --------------------------------------------------------------
+        # 6. strict_scope=False: D-1 transitive closure. Walk
+        #    dependsOn.bronze ∪ dependsOn.silver from each root and
+        #    add every reachable pack node to plan_ids (regardless of
+        #    whether it was declared in the bundle, and regardless of
+        #    --layers).
+        # --------------------------------------------------------------
+        plan_ids = set(effective_roots)
+        frontier: list[str] = list(effective_roots)
+        while frontier:
+            current = frontier.pop()
+            cur_layer = _layer_of(current)
+            if cur_layer == "bronze":
                 continue
-            b_deps, s_deps = _node_depends_on(pack, current_layer, current)
+            b_deps, s_deps = _node_depends_on(pack, cur_layer, current)
             for b in b_deps:
                 _check_dep_exists_or_raise(b, "bronze", current)
-                if not _is_declared(b):
-                    all_classes[b] = ("bronze", "eligible", None)
-                    in_plan_names.add(b)
-                    auto_included.add(b)
-                    pending.append(b)
-            if current_layer == "gold":
+                if b not in plan_ids:
+                    plan_ids.add(b)
+                    frontier.append(b)
+            if cur_layer == "gold":
                 for s in s_deps:
                     _check_dep_exists_or_raise(s, "silver", current)
-                    if not _is_declared(s):
-                        all_classes[s] = ("silver", "eligible", None)
-                        in_plan_names.add(s)
-                        auto_included.add(s)
-                        pending.append(s)
+                    if s not in plan_ids:
+                        plan_ids.add(s)
+                        frontier.append(s)
 
-    if undeclared_deps:
-        lines = [
-            f"{AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY}: "
-            f"--strict-scope requires every transitive dep be declared; "
-            f"bundle.yaml is missing {len(undeclared_deps)} upstream "
-            f"declaration(s):"
-        ]
-        for consumer, consumer_layer, dep_layer, dep_name in undeclared_deps:
-            if dep_name in disabled_datasets:
-                lines.append(
-                    f"  • {dep_layer} {dep_name!r} is disabled in bundle.datasets "
-                    f"(required by {consumer!r}) — set `enabled: true` "
-                    f"or remove {consumer!r} from {_BUNDLE_SECTION[consumer_layer]}"
-                )
-            else:
-                lines.append(
-                    f"  • {dep_layer} {dep_name!r} (required by {consumer!r}) — "
-                    f"add it to {_BUNDLE_SECTION[dep_layer]}"
-                )
-        raise MissingDependencyError("\n".join(lines))
-
-    # 4. Topo-sort the in-plan names.
+    # ------------------------------------------------------------------
+    # 7. Topo-sort plan_ids: bronze first, then silver, then gold,
+    #    with intra-layer dependency edges from the pack.
+    # ------------------------------------------------------------------
     ts: TopologicalSorter[str] = TopologicalSorter()
-    for name in in_plan_names:
-        consumer_layer, _status, _reason = all_classes[name]
+    for name in plan_ids:
+        node_layer = _layer_of(name)
         deps_in_plan: set[str] = set()
-        if consumer_layer == "silver":
-            bronze_deps, _ = _node_depends_on(pack, "silver", name)
-            deps_in_plan.update(d for d in bronze_deps if d in in_plan_names)
-        elif consumer_layer == "gold":
-            bronze_deps, silver_deps = _node_depends_on(pack, "gold", name)
-            deps_in_plan.update(d for d in bronze_deps if d in in_plan_names)
-            deps_in_plan.update(d for d in silver_deps if d in in_plan_names)
+        if node_layer == "silver":
+            b_deps, _ = _node_depends_on(pack, "silver", name)
+            deps_in_plan.update(d for d in b_deps if d in plan_ids)
+        elif node_layer == "gold":
+            b_deps, s_deps = _node_depends_on(pack, "gold", name)
+            deps_in_plan.update(d for d in b_deps if d in plan_ids)
+            deps_in_plan.update(d for d in s_deps if d in plan_ids)
         ts.add(name, *deps_in_plan)
 
     ordered_names = list(ts.static_order())
     plan_nodes = tuple(
         PlanNode(
             dataset_id=name,
-            layer=all_classes[name][0],
+            layer=_layer_of(name),
             status="eligible",
             reason=None,
         )
         for name in ordered_names
     )
-    return plan_nodes, tuple(prereqs_list)
+    # Mark `paths` as referenced so static checkers / linters don't
+    # flag it — kept in the signature for back-compat with callers
+    # that wire TablePaths through even though the new plan-only
+    # contract no longer needs them for prereq rendering.
+    _ = paths
+    return plan_nodes, ()
 
 
 __all__ = ["resolve_dry_run_plan"]

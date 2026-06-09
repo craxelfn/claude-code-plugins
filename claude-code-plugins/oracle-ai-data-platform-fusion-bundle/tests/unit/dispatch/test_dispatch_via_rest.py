@@ -400,16 +400,18 @@ class TestDryRun:
         assert summary.plan[0].dataset_id == "erp_suppliers"
         assert summary.plan[0].layer == "bronze"
 
-    def test_dry_run_populates_prereqs_when_layer_filter_present(
+    def test_dry_run_layer_filter_pulls_d1_closure_into_plan(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """P1.5ε-fix9 — with ``--layers gold``, the bronze + silver
-        upstreams of in-plan gold marts must surface as PrereqNode
-        entries so the renderer can show the "Extra-plan prerequisites"
-        table the operator needs to verify before dispatching.
+        """Round-6 review fix: with ``--layers gold``, the layer filter
+        narrows declared ROOTS to gold marts, but D-1 transitive deps
+        (bronze + silver upstreams) land in the PLAN — matching runtime
+        ``resolve_content_pack_plan`` byte-for-byte. Pre-fix surfaced
+        them as PrereqNode entries which silently diverged from runtime.
+        Prereqs is empty under the new contract.
         """
         from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
-            PrereqNode,
+            PlanNode,
         )
 
         layer_filter_bundle = """
@@ -444,12 +446,16 @@ gold:
             dry_run=True,
             resolved_pack=pack,
         )
-        assert summary.prereqs is not None
-        assert len(summary.prereqs) > 0
-        assert all(isinstance(d, PrereqNode) for d in summary.prereqs)
-        prereq_keys = {(d.dataset_id, d.layer) for d in summary.prereqs}
-        assert ("ap_invoices", "bronze") in prereq_keys
-        assert ("dim_supplier", "silver") in prereq_keys
+        assert summary.prereqs == (), (
+            f"round-6 contract: prereqs must be empty; got {summary.prereqs!r}"
+        )
+        assert all(isinstance(n, PlanNode) for n in summary.plan)
+        plan_keys = {(n.dataset_id, n.layer) for n in summary.plan}
+        # gold mart (the declared root post-layer-filter)
+        assert ("ap_aging", "gold") in plan_keys
+        # D-1 transitive upstreams must be in the PLAN, not prereqs.
+        assert ("ap_invoices", "bronze") in plan_keys
+        assert ("dim_supplier", "silver") in plan_keys
 
 
 # ---------------------------------------------------------------------------

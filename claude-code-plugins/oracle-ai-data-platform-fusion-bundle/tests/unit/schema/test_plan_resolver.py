@@ -187,23 +187,71 @@ class TestResolveDryRunPlan:
         assert ids.index("dim_supplier") < ids.index("supplier_spend")
         assert prereqs == ()
 
-    def test_layers_silver_filter_creates_bronze_prereq(self, pack, bundle, paths):
+    def test_layers_silver_filter_pulls_bronze_via_d1_closure(
+        self, pack, bundle, paths,
+    ):
+        """Round-6 review fix: ``--layers silver`` filters declared
+        ROOTS to silver, but D-1 transitive deps remain in the plan
+        (matches runtime ``resolve_content_pack_plan``). Pre-fix this
+        emitted ``erp_suppliers`` as a prereq instead of including it
+        in the plan, which diverged from the real runtime plan."""
         plan, prereqs = resolve_dry_run_plan(
             pack, bundle, paths, datasets=None, layers=["silver"],
         )
-        plan_ids = [n.dataset_id for n in plan]
-        assert plan_ids == ["dim_supplier"]
-        prereq_ids = sorted(p.dataset_id for p in prereqs)
-        assert prereq_ids == ["erp_suppliers"]
+        plan_ids = sorted(n.dataset_id for n in plan)
+        # silver root: dim_supplier (the only silver in the bundle)
+        # D-1 transitive: erp_suppliers (dim_supplier depends on it)
+        assert plan_ids == ["dim_supplier", "erp_suppliers"]
+        # bronze before silver in topo-sort.
+        plan_order = [n.dataset_id for n in plan]
+        assert plan_order.index("erp_suppliers") < plan_order.index("dim_supplier")
+        # Prereqs is empty under the new mirror-runtime contract; every
+        # materializable dep lands in the plan instead.
+        assert prereqs == ()
 
-    def test_datasets_filter_silvers_become_prereqs(self, pack, bundle, paths):
+    def test_datasets_filter_pulls_full_d1_closure_into_plan(
+        self, pack, bundle, paths,
+    ):
+        """Round-6 review fix: ``--datasets supplier_spend`` on a
+        bundle that declares the full chain must surface the SAME
+        plan as runtime — the D-1 closure (bronze + silver + gold),
+        not just the CLI dataset. Pre-fix returned only
+        ``[supplier_spend]`` in the plan with the upstreams as
+        prereqs, which silently diverged from the real runtime
+        materialization plan."""
         plan, prereqs = resolve_dry_run_plan(
             pack, bundle, paths, datasets=["supplier_spend"], layers=None,
         )
-        plan_ids = [n.dataset_id for n in plan]
-        assert plan_ids == ["supplier_spend"]
-        prereq_ids = sorted(p.dataset_id for p in prereqs)
-        assert prereq_ids == ["ap_invoices", "dim_supplier"]
+        plan_ids = sorted(n.dataset_id for n in plan)
+        # CLI root: supplier_spend. D-1 closure:
+        #   supplier_spend → ap_invoices (bronze) + dim_supplier (silver)
+        #   dim_supplier → erp_suppliers (bronze, transitive)
+        assert plan_ids == [
+            "ap_invoices", "dim_supplier", "erp_suppliers", "supplier_spend",
+        ]
+        # Topological invariants: bronze before silver before gold.
+        plan_order = [n.dataset_id for n in plan]
+        assert plan_order.index("ap_invoices") < plan_order.index("supplier_spend")
+        assert plan_order.index("erp_suppliers") < plan_order.index("dim_supplier")
+        assert plan_order.index("dim_supplier") < plan_order.index("supplier_spend")
+        assert prereqs == ()
+
+    def test_strict_scope_cli_filter_raises_when_chain_declared_in_bundle(
+        self, pack, bundle, paths,
+    ):
+        """Round-6 review fix: ``--datasets supplier_spend
+        --strict-scope`` on a bundle that declares the full chain
+        MUST raise AIDPF-1042 — effective_roots is the CLI dataset
+        set (``{supplier_spend}``), and ap_invoices / dim_supplier
+        aren't in that set even though they're in the bundle. This
+        mirrors the runtime ``resolve_content_pack_plan`` contract;
+        pre-fix dry-run silently accepted while runtime raised."""
+        with pytest.raises(MissingDependencyError, match="AIDPF-1042"):
+            resolve_dry_run_plan(
+                pack, bundle, paths,
+                datasets=["supplier_spend"], layers=None,
+                strict_scope=True,
+            )
 
     def test_unknown_dataset_in_bundle_raises(self, pack, paths):
         b = _bundle(
@@ -326,16 +374,24 @@ gold:
         with pytest.raises(MissingDependencyError, match="mart_does_not_exist"):
             resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
 
-    def test_resolve_dry_run_plan_uses_custom_table_paths(self, pack, bundle):
+    def test_resolve_dry_run_plan_accepts_custom_table_paths(self, pack, bundle):
+        """``paths`` is retained in the signature for back-compat after
+        the round-6 mirror-runtime refactor (prereqs is empty so the
+        path argument is no longer load-bearing in the typical case).
+        Passing a custom TablePaths must not crash."""
         custom = TablePaths(
             catalog="custom_cat",
             bronze_schema="custom_bronze",
             silver_schema="custom_silver",
             gold_schema="custom_gold",
         )
-        _, prereqs = resolve_dry_run_plan(
+        plan, prereqs = resolve_dry_run_plan(
             pack, bundle, custom, datasets=["supplier_spend"], layers=None,
         )
-        prereq_paths = {p.table_path for p in prereqs}
-        assert any("custom_cat" in p for p in prereq_paths)
-        assert any("custom_bronze" in p for p in prereq_paths)
+        # Prereqs always empty under the mirror-runtime contract.
+        assert prereqs == ()
+        # Plan still contains the D-1 closure.
+        plan_ids = {n.dataset_id for n in plan}
+        assert plan_ids == {
+            "supplier_spend", "ap_invoices", "dim_supplier", "erp_suppliers",
+        }
