@@ -17,8 +17,10 @@ from __future__ import annotations
 import pytest
 
 from oracle_ai_data_platform_fusion_bundle.schema.bronze_fingerprint import (
+    BRONZE_AUDIT_COLUMNS,
     ColumnInfo,
     compute_bronze_fingerprint,
+    strip_audit_columns,
 )
 
 
@@ -185,3 +187,81 @@ class TestFingerprintShape:
         assert len(suffix) == 64
         # Each char is a lowercase hex digit.
         assert all(c in "0123456789abcdef" for c in suffix)
+
+
+class TestAuditColumnFiltering:
+    """Bronze audit columns (`_extract_ts` / `_source_pvo` / `_run_id` /
+    `_watermark_used`) are added by the bronze adapter post-extract and
+    are NOT part of the BICC PVO contract. `DESCRIBE TABLE` against
+    bronze Delta tables emits them; the fingerprint must strip them so
+    the Phase 5 drift gate's "snapshot vs live BICC" comparison stays
+    on a single axis.
+    """
+
+    _AUDIT_COLS = (
+        "_extract_ts",
+        "_source_pvo",
+        "_run_id",
+        "_watermark_used",
+    )
+
+    def test_known_audit_names_in_constant(self) -> None:
+        assert BRONZE_AUDIT_COLUMNS == frozenset(self._AUDIT_COLS)
+
+    def test_fingerprint_ignores_audit_columns(self) -> None:
+        pure_bicc = {
+            "erp_suppliers": [
+                ColumnInfo(name="VENDORID", type="bigint"),
+                ColumnInfo(name="SEGMENT1", type="string"),
+            ],
+        }
+        with_audit = {
+            "erp_suppliers": [
+                ColumnInfo(name="VENDORID", type="bigint"),
+                ColumnInfo(name="SEGMENT1", type="string"),
+                ColumnInfo(name="_extract_ts", type="timestamp"),
+                ColumnInfo(name="_source_pvo", type="string"),
+                ColumnInfo(name="_run_id", type="string"),
+                ColumnInfo(name="_watermark_used", type="timestamp"),
+            ],
+        }
+        assert compute_bronze_fingerprint(
+            observed=pure_bicc
+        ) == compute_bronze_fingerprint(observed=with_audit)
+
+    def test_strip_removes_audit_preserves_source(self) -> None:
+        observed = {
+            "ap_invoices": [
+                ColumnInfo(name="ApInvoicesInvoiceNum", type="string"),
+                ColumnInfo(name="_extract_ts", type="timestamp"),
+                ColumnInfo(name="ApInvoicesAmount", type="decimal(38,30)"),
+                ColumnInfo(name="_RUN_ID", type="string"),  # case-insensitive
+            ],
+        }
+        stripped = strip_audit_columns(observed)
+        names = [c.name for c in stripped["ap_invoices"]]
+        assert names == ["ApInvoicesInvoiceNum", "ApInvoicesAmount"]
+
+    def test_strip_is_pure_does_not_mutate_input(self) -> None:
+        observed = {
+            "erp_suppliers": [
+                ColumnInfo(name="VENDORID", type="bigint"),
+                ColumnInfo(name="_extract_ts", type="timestamp"),
+            ],
+        }
+        _ = strip_audit_columns(observed)
+        assert len(observed["erp_suppliers"]) == 2  # unchanged
+
+    def test_audit_only_dataset_yields_same_fingerprint_as_empty(self) -> None:
+        """A dataset whose only columns are audit cols fingerprints
+        identically to an empty-column dataset — both contribute zero
+        BICC schema content."""
+        only_audit = {
+            "erp_suppliers": [
+                ColumnInfo(name=n, type="string") for n in self._AUDIT_COLS
+            ],
+        }
+        empty = {"erp_suppliers": []}
+        assert compute_bronze_fingerprint(
+            observed=only_audit
+        ) == compute_bronze_fingerprint(observed=empty)

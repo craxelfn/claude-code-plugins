@@ -48,6 +48,43 @@ if TYPE_CHECKING:  # pragma: no cover — import guard for Spark
     from pyspark.sql import SparkSession
 
 
+# Audit columns the bronze adapter appends to every extracted DataFrame
+# AFTER the BICC pull. They exist in the materialized Delta tables but
+# NOT in the live BICC PVO `inferSchema` response. The Phase 3c/3d
+# fingerprint + Phase 3d snapshot represent the BICC PVO contract (so the
+# Phase 5 drift gate can compare them against live BICC), so the audit
+# names must NOT be folded into either. `DESCRIBE TABLE` on the bronze
+# Delta tables — the source of the `observed` dict — emits them; this
+# module strips them before fingerprinting / snapshotting.
+BRONZE_AUDIT_COLUMNS: frozenset[str] = frozenset({
+    "_extract_ts",
+    "_source_pvo",
+    "_run_id",
+    "_watermark_used",
+})
+
+
+def strip_audit_columns(
+    observed: dict[str, list["ColumnInfo"]],
+) -> dict[str, list["ColumnInfo"]]:
+    """Return a copy of ``observed`` with bronze audit columns removed
+    from every dataset.
+
+    Case-insensitive match against :data:`BRONZE_AUDIT_COLUMNS`. Other
+    columns are preserved in their original order so the canonical sort
+    in :func:`compute_bronze_fingerprint` stays deterministic.
+
+    Pure function — no Spark, no I/O.
+    """
+    return {
+        dataset_id: [
+            col for col in columns
+            if col.name.strip().lower() not in BRONZE_AUDIT_COLUMNS
+        ]
+        for dataset_id, columns in observed.items()
+    }
+
+
 @dataclass(frozen=True)
 class ColumnInfo:
     """One bronze column as observed via ``DESCRIBE TABLE``.
@@ -82,18 +119,19 @@ def compute_bronze_fingerprint(
         ``"sha256:<64-hex>"`` string ready to assign to
         :attr:`TenantProfile.bronze_schema_fingerprint`.
     """
+    stripped = strip_audit_columns(observed)
     payload = [
         {
             "dataset": dataset_id,
             "columns": [
                 {"name": col.name.strip().lower(), "type": col.type.strip().lower()}
                 for col in sorted(
-                    _dedupe_by_name(observed[dataset_id]),
+                    _dedupe_by_name(stripped[dataset_id]),
                     key=lambda c: c.name.strip().lower(),
                 )
             ],
         }
-        for dataset_id in sorted(observed)
+        for dataset_id in sorted(stripped)
     ]
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(serialised.encode("utf-8")).hexdigest()
@@ -119,4 +157,9 @@ def _dedupe_by_name(columns: Iterable[ColumnInfo]) -> list[ColumnInfo]:
     return result
 
 
-__all__ = ["ColumnInfo", "compute_bronze_fingerprint"]
+__all__ = [
+    "BRONZE_AUDIT_COLUMNS",
+    "ColumnInfo",
+    "compute_bronze_fingerprint",
+    "strip_audit_columns",
+]

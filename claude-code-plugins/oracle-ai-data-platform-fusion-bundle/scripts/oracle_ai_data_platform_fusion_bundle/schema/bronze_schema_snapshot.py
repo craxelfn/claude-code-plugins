@@ -198,15 +198,25 @@ def from_observed(
     Returns:
         A validated :class:`BronzeSchemaSnapshotV1`.
     """
+    # Strip bronze audit columns BEFORE building the snapshot — same
+    # axis as `compute_bronze_fingerprint`. The snapshot represents the
+    # BICC PVO contract (compared against live BICC at runtime by the
+    # Phase 5 drift gate); audit columns are appended post-extract by
+    # the bronze adapter and are NOT part of that contract. Without
+    # this strip, `DESCRIBE TABLE`-sourced `observed` dicts (the
+    # bootstrap path) leak audit names into the snapshot YAML and
+    # AIDPF-2072 fires false-positive on every subsequent run.
+    from .bronze_fingerprint import strip_audit_columns
+    stripped = strip_audit_columns(observed)
     datasets = [
         SnapshotDataset(
             datasetId=dataset_id,
             columns=[
                 SnapshotColumn(name=col.name, type=col.type)
-                for col in observed[dataset_id]
+                for col in stripped[dataset_id]
             ],
         )
-        for dataset_id in observed
+        for dataset_id in stripped
     ]
     return BronzeSchemaSnapshotV1(
         tenant=tenant,

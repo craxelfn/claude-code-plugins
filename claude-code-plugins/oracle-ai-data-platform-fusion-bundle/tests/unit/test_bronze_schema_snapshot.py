@@ -202,3 +202,80 @@ class TestEmptyBronze:
         loaded = load_bronze_schema_snapshot(path)
         assert loaded.datasets == []
         assert loaded.bronze_schema_fingerprint == snapshot.bronze_schema_fingerprint
+
+
+class TestAuditColumnStripping:
+    """`DESCRIBE TABLE` against bronze Delta tables emits the 4 audit
+    columns the bronze adapter appended post-extract. `from_observed`
+    must drop them before persisting so the snapshot represents the
+    BICC PVO contract (the axis the runtime drift gate compares against
+    live BICC `inferSchema`). Without this strip, AIDPF-2072 fires
+    false-positive on every run.
+    """
+
+    def test_audit_columns_stripped_from_snapshot(self, tmp_path: Path) -> None:
+        observed = {
+            "erp_suppliers": [
+                ColumnInfo(name="VENDORID", type="bigint"),
+                ColumnInfo(name="_extract_ts", type="timestamp"),
+                ColumnInfo(name="SEGMENT1", type="string"),
+                ColumnInfo(name="_source_pvo", type="string"),
+                ColumnInfo(name="_run_id", type="string"),
+                ColumnInfo(name="_watermark_used", type="timestamp"),
+            ],
+        }
+        snapshot = from_observed(
+            tenant="acme",
+            pinned_at=datetime(2026, 6, 6, 12, tzinfo=timezone.utc),
+            fingerprint=compute_bronze_fingerprint(observed=observed),
+            observed=observed,
+        )
+        names = [c.name for c in snapshot.datasets[0].columns]
+        assert names == ["VENDORID", "SEGMENT1"]
+        for forbidden in (
+            "_extract_ts", "_source_pvo", "_run_id", "_watermark_used",
+        ):
+            assert forbidden not in names
+
+    def test_snapshot_fingerprint_matches_stripped(self, tmp_path: Path) -> None:
+        """The fingerprint stored in the snapshot file must match the
+        fingerprint recomputed from the snapshot's own contents — i.e.
+        the strip must be applied symmetrically by `compute_bronze_fingerprint`
+        and `from_observed`. Catches a regression where one side strips
+        and the other doesn't.
+        """
+        observed_with_audit = {
+            "ap_invoices": [
+                ColumnInfo(name="ApInvoicesInvoiceNum", type="string"),
+                ColumnInfo(name="ApInvoicesAmount", type="decimal(38,30)"),
+                ColumnInfo(name="_extract_ts", type="timestamp"),
+                ColumnInfo(name="_run_id", type="string"),
+            ],
+        }
+        fp = compute_bronze_fingerprint(observed=observed_with_audit)
+        snapshot = from_observed(
+            tenant="acme",
+            pinned_at=datetime(2026, 6, 6, 12, tzinfo=timezone.utc),
+            fingerprint=fp,
+            observed=observed_with_audit,
+        )
+        recomputed = compute_bronze_fingerprint(
+            observed=snapshot_to_observed(snapshot)
+        )
+        assert recomputed == snapshot.bronze_schema_fingerprint == fp
+
+    def test_strip_is_case_insensitive(self) -> None:
+        observed = {
+            "erp_suppliers": [
+                ColumnInfo(name="VENDORID", type="bigint"),
+                ColumnInfo(name="_EXTRACT_TS", type="timestamp"),
+                ColumnInfo(name="_Source_PVO", type="string"),
+            ],
+        }
+        snapshot = from_observed(
+            tenant="acme",
+            pinned_at=datetime(2026, 6, 6, 12, tzinfo=timezone.utc),
+            fingerprint=compute_bronze_fingerprint(observed=observed),
+            observed=observed,
+        )
+        assert [c.name for c in snapshot.datasets[0].columns] == ["VENDORID"]
