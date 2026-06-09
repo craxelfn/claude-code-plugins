@@ -440,6 +440,11 @@ def _run_via_aidp_dispatch(
             # Phase 9 — pack threaded through so dispatch's dry-run path
             # can call schema.plan_resolver without crossing §4.3.
             resolved_pack=resolved_pack,
+            # Phase 9 — --strict-scope must reach the cluster-side
+            # orchestrator.run() AND the dispatch dry-run resolver
+            # (otherwise the default REST path silently ignores it and
+            # D-1 auto-includes the deps the operator opted out of).
+            strict_scope=strict_scope,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — drift surfaces from REST-dispatch via the marker

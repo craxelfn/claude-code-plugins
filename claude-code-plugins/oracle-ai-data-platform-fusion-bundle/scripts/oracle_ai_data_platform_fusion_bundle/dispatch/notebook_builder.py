@@ -112,6 +112,11 @@ def _build_run_cell(
     execution_backend: str = "legacy-python",
     force_fingerprint_skip: bool = False,
     resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Emitted as ``strict_scope=...`` in
+    # the generated orchestrator.run() call so the cluster honors the
+    # operator's opt-out; default False matches the CLI default.
+    strict_scope: bool = False,
 ) -> str:
     # Phase 2: when execution_backend == "content-pack", the bootstrap
     # cell that ran just before this one set up _resolved_pack and
@@ -142,6 +147,7 @@ def _build_run_cell(
         f"        dry_run=False,\n"
         f"        resume_run_id={resume_run_id!r},\n"
         f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
+        f"        strict_scope={strict_scope!r},\n"
         f"{backend_kwargs}"
         f"    )\n"
         f"except SchemaDriftDetectedError as _drift_exc:\n"
@@ -361,6 +367,10 @@ def build_notebook(
     # resume run_id. ``None`` preserves the original fresh-run
     # behaviour.
     resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Threaded into the generated
+    # orchestrator.run() call as a literal kwarg.
+    strict_scope: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -437,6 +447,7 @@ def build_notebook(
                 execution_backend=execution_backend,
                 force_fingerprint_skip=force_fingerprint_skip,
                 resume_run_id=resume_run_id,
+                strict_scope=strict_scope,
             )
         ),
         _code_cell(_build_verify_cell()),

@@ -37,6 +37,10 @@ if TYPE_CHECKING:  # pragma: no cover
 # (which would defeat the §4.3 import-boundary).
 _VALID_LAYERS: Final[frozenset[str]] = frozenset({"bronze", "silver", "gold"})
 
+# Mirrors orchestrator.content_pack_plan_resolver's strict-scope error
+# code. Inlined here for the same boundary reason.
+AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY: Final[str] = "AIDPF-1042"
+
 # Bundle-section names per layer — operator-facing remediation strings.
 _BUNDLE_SECTION: Final[dict[str, str]] = {
     "bronze": "bundle.datasets",
@@ -122,6 +126,7 @@ def resolve_dry_run_plan(
     *,
     datasets: list[str] | None,
     layers: list[str] | None,
+    strict_scope: bool = False,
 ) -> tuple[tuple[PlanNode, ...], tuple[PrereqNode, ...]]:
     """Classify, filter, and topo-sort the pack plan for dry-run rendering.
 
@@ -133,6 +138,19 @@ def resolve_dry_run_plan(
     the resulting plan; in-plan consumers whose upstream is filtered
     out emit ``PrereqNode`` entries.
 
+    Phase 9 D-1 + strict-scope:
+
+    * ``strict_scope=False`` (default — matches the inline resolver's
+      D-1 implicit-transitive-include): a consumer whose upstream is
+      not in ``bundle.datasets[]`` / ``bundle.dimensions.build`` /
+      ``bundle.gold.marts`` auto-includes that upstream in the plan
+      (operator declared intent, resolver fills in deps).
+    * ``strict_scope=True``: a consumer whose upstream is not declared
+      in the bundle raises ``MissingDependencyError``. Matches the
+      inline resolver's ``AIDPF-1042`` contract — operators get the
+      same opt-out semantics whether they ``--inline`` or REST-
+      dispatch.
+
     Args:
         pack: the resolved content pack.
         bundle: the parsed ``bundle.yaml``.
@@ -140,6 +158,8 @@ def resolve_dry_run_plan(
             for extra-plan prereqs.
         datasets: ``--datasets`` CSV filter (``None`` = include all).
         layers: ``--layers`` filter (``None`` = include all).
+        strict_scope: when True, undeclared upstreams raise; when
+            False (default), D-1 auto-includes them.
 
     Returns:
         ``(plan, prereqs)``:
@@ -290,11 +310,33 @@ def resolve_dry_run_plan(
                 )
 
     undeclared_deps: list[tuple[str, str, str, str]] = []
+    # Phase 9 D-1 (strict_scope=False): undeclared upstreams auto-
+    # include into the plan rather than raising. Tracked so the
+    # topo-sort below sees them as in-plan members.
+    auto_included: set[str] = set()
 
     def _is_declared(dep_name: str) -> bool:
         return dep_name in all_classes
 
-    for name in in_plan_names:
+    def _record_undeclared(
+        consumer: str, consumer_layer: str, dep_layer: str, dep_name: str,
+    ) -> None:
+        if strict_scope:
+            undeclared_deps.append(
+                (consumer, consumer_layer, dep_layer, dep_name)
+            )
+        else:
+            # D-1 auto-include: add to all_classes + in_plan_names
+            # so the topo-sort + plan output picks it up.
+            all_classes[dep_name] = (
+                dep_layer,  # type: ignore[assignment]
+                "eligible",
+                None,
+            )
+            in_plan_names.add(dep_name)
+            auto_included.add(dep_name)
+
+    for name in list(in_plan_names):
         consumer_layer, _status, _reason = all_classes[name]
         if consumer_layer == "bronze":
             continue
@@ -304,7 +346,7 @@ def resolve_dry_run_plan(
         for b in bronze_deps:
             _check_dep_exists_or_raise(b, "bronze", name)
             if not _is_declared(b):
-                undeclared_deps.append((name, consumer_layer, "bronze", b))
+                _record_undeclared(name, consumer_layer, "bronze", b)
                 continue
             if b not in in_plan_names:
                 _add_prereq(b, "bronze", name)
@@ -312,16 +354,44 @@ def resolve_dry_run_plan(
             for s in silver_deps:
                 _check_dep_exists_or_raise(s, "silver", name)
                 if not _is_declared(s):
-                    undeclared_deps.append((name, consumer_layer, "silver", s))
+                    _record_undeclared(name, consumer_layer, "silver", s)
                     continue
                 if s not in in_plan_names:
                     _add_prereq(s, "silver", name)
 
+    # D-1 transitive closure: auto-included silver nodes themselves
+    # have bronze deps that may also be undeclared. Walk them so a
+    # gold-only bundle pulls the full bronze→silver→gold chain.
+    if not strict_scope and auto_included:
+        pending = list(auto_included)
+        while pending:
+            current = pending.pop()
+            current_layer, _, _ = all_classes[current]
+            if current_layer not in ("silver", "gold"):
+                continue
+            b_deps, s_deps = _node_depends_on(pack, current_layer, current)
+            for b in b_deps:
+                _check_dep_exists_or_raise(b, "bronze", current)
+                if not _is_declared(b):
+                    all_classes[b] = ("bronze", "eligible", None)
+                    in_plan_names.add(b)
+                    auto_included.add(b)
+                    pending.append(b)
+            if current_layer == "gold":
+                for s in s_deps:
+                    _check_dep_exists_or_raise(s, "silver", current)
+                    if not _is_declared(s):
+                        all_classes[s] = ("silver", "eligible", None)
+                        in_plan_names.add(s)
+                        auto_included.add(s)
+                        pending.append(s)
+
     if undeclared_deps:
         lines = [
+            f"{AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY}: "
+            f"--strict-scope requires every transitive dep be declared; "
             f"bundle.yaml is missing {len(undeclared_deps)} upstream "
-            f"declaration(s) — refusing to run with undeclared "
-            f"dependencies:"
+            f"declaration(s):"
         ]
         for consumer, consumer_layer, dep_layer, dep_name in undeclared_deps:
             if dep_name in disabled_datasets:

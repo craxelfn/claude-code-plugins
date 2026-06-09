@@ -253,7 +253,35 @@ gold:
         assert "ap_invoices" not in ids
         assert "erp_suppliers" in ids
 
-    def test_undeclared_bronze_upstream_raises(self, pack, paths):
+    def test_undeclared_bronze_upstream_auto_included_by_default(self, pack, paths):
+        """Phase 9 default (strict_scope=False): D-1 auto-includes
+        the bronze dep transitively — matches the inline resolver's
+        contract so REST dispatch dry-run agrees with --inline."""
+        b = _bundle(
+            """\
+datasets: []
+dimensions:
+  build:
+    - dim_supplier
+gold:
+  marts: []
+"""
+        )
+        plan, _ = resolve_dry_run_plan(
+            pack, b, paths, datasets=None, layers=None,
+        )
+        ids = {n.dataset_id for n in plan}
+        assert "dim_supplier" in ids
+        assert "erp_suppliers" in ids, (
+            "D-1 must auto-include the bronze dep of dim_supplier; got "
+            f"{sorted(ids)!r}"
+        )
+
+    def test_undeclared_bronze_upstream_raises_with_strict_scope(
+        self, pack, paths,
+    ):
+        """Phase 9 ``strict_scope=True`` opts out of D-1 — undeclared
+        upstreams raise AIDPF-1042."""
         b = _bundle(
             """\
 datasets: []
@@ -265,7 +293,10 @@ gold:
 """
         )
         with pytest.raises(MissingDependencyError, match="erp_suppliers"):
-            resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
+            resolve_dry_run_plan(
+                pack, b, paths, datasets=None, layers=None,
+                strict_scope=True,
+            )
 
     def test_unknown_silver_in_bundle_raises(self, pack, paths):
         b = _bundle(

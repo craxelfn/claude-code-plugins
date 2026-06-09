@@ -616,3 +616,465 @@ class TestBronzeTableForSourceUsesNodeTarget:
         # Sanity: identity nodes still resolve correctly.
         assert bronze_table_for_source["erp_suppliers"] == "cat.bronze.erp_suppliers"
         assert bronze_table_for_source["ap_invoices"] == "cat.bronze.ap_invoices"
+
+
+class TestStrictScopeWiredEndToEnd:
+    """Round-5 review fix: ``--strict-scope`` was silently dropped on the
+    REST dispatch path. The flag must reach (1) ``dispatch_via_rest``
+    from the CLI, (2) ``build_notebook`` from ``dispatch_via_rest``,
+    (3) the generated ``orchestrator.run(...)`` call inside the run
+    cell, and (4) the REST dry-run resolver so ``--strict-scope
+    --dry-run`` raises ``AIDPF-1042`` on undeclared deps consistently
+    with the inline path.
+    """
+
+    def test_cli_strict_scope_reaches_dispatch_via_rest(self, tmp_path):
+        """CLI --strict-scope must thread to dispatch_via_rest(...)."""
+        from unittest.mock import patch
+        from click.testing import CliRunner
+        from oracle_ai_data_platform_fusion_bundle import cli
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        # Minimal bundle without a content pack (legacy path) so we
+        # don't have to set up profile/pack/snapshot — Phase 9 still
+        # routes through dispatch_via_rest with strict_scope.
+        bundle_yaml = """\
+apiVersion: aidp-fusion-bundle/v1
+project: strict-scope-cli-test
+fusion:
+  serviceUrl: https://example.com
+  username: u
+  password: p
+  externalStorage: x
+aidp:
+  catalog: fusion_catalog
+  bronzeSchema: bronze
+  silverSchema: silver
+  goldSchema: gold
+datasets: []
+"""
+        config_yaml = """\
+apiVersion: aidp-fusion-bundle/v1
+project: strict-scope-cli-test
+defaults:
+  region: us-phoenix-1
+  workspaceRoot: /Workspace
+environments:
+  dev:
+    workspaceKey: ws-key
+    aiDataPlatformId: aidp-id
+    clusterKey: c-key
+    clusterName: c-name
+    ociProfile: DEFAULT
+"""
+        (tmp_path / "bundle.yaml").write_text(bundle_yaml)
+        (tmp_path / "aidp.config.yaml").write_text(config_yaml)
+
+        captured_kwargs: dict = {}
+
+        def _fake_dispatch(**kwargs):
+            captured_kwargs.update(kwargs)
+            return RunSummary.empty(
+                bundle_project="strict-scope-cli-test",
+                mode="seed", plan=(), prereqs=(),
+            )
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            side_effect=_fake_dispatch,
+        ):
+            result = CliRunner().invoke(
+                cli.main,
+                [
+                    "--bundle", str(tmp_path / "bundle.yaml"),
+                    "--config", str(tmp_path / "aidp.config.yaml"),
+                    "--env", "dev",
+                    "run", "--mode", "seed", "--dry-run", "--strict-scope",
+                ],
+            )
+
+        assert result.exit_code == 0, (
+            f"CLI invocation failed: exit={result.exit_code} "
+            f"output={result.output!r}"
+        )
+        assert captured_kwargs.get("strict_scope") is True, (
+            "CLI --strict-scope must reach dispatch_via_rest with "
+            f"strict_scope=True; got kwargs={sorted(captured_kwargs.keys())} "
+            f"strict_scope={captured_kwargs.get('strict_scope')!r}"
+        )
+
+    def test_cli_without_strict_scope_defaults_to_false(self, tmp_path):
+        """When --strict-scope is NOT passed, dispatch_via_rest must
+        receive strict_scope=False so D-1 default behaviour stands."""
+        from unittest.mock import patch
+        from click.testing import CliRunner
+        from oracle_ai_data_platform_fusion_bundle import cli
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        bundle_yaml = """\
+apiVersion: aidp-fusion-bundle/v1
+project: strict-scope-cli-default
+fusion:
+  serviceUrl: https://example.com
+  username: u
+  password: p
+  externalStorage: x
+aidp:
+  catalog: fusion_catalog
+  bronzeSchema: bronze
+  silverSchema: silver
+  goldSchema: gold
+datasets: []
+"""
+        config_yaml = """\
+apiVersion: aidp-fusion-bundle/v1
+project: strict-scope-cli-default
+defaults:
+  region: us-phoenix-1
+  workspaceRoot: /Workspace
+environments:
+  dev:
+    workspaceKey: ws-key
+    aiDataPlatformId: aidp-id
+    clusterKey: c-key
+    clusterName: c-name
+    ociProfile: DEFAULT
+"""
+        (tmp_path / "bundle.yaml").write_text(bundle_yaml)
+        (tmp_path / "aidp.config.yaml").write_text(config_yaml)
+
+        captured: dict = {}
+
+        def _fake(**kwargs):
+            captured.update(kwargs)
+            return RunSummary.empty(
+                bundle_project="strict-scope-cli-default",
+                mode="seed", plan=(), prereqs=(),
+            )
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            side_effect=_fake,
+        ):
+            result = CliRunner().invoke(
+                cli.main,
+                [
+                    "--bundle", str(tmp_path / "bundle.yaml"),
+                    "--config", str(tmp_path / "aidp.config.yaml"),
+                    "--env", "dev",
+                    "run", "--mode", "seed", "--dry-run",
+                ],
+            )
+
+        assert result.exit_code == 0, (
+            f"CLI invocation failed: exit={result.exit_code} "
+            f"output={result.output!r}"
+        )
+        assert captured.get("strict_scope") is False, (
+            f"default strict_scope must be False; got {captured.get('strict_scope')!r}"
+        )
+
+    def test_dispatch_via_rest_threads_strict_scope_to_build_notebook(
+        self, tmp_path,
+    ):
+        """dispatch_via_rest(strict_scope=True) must reach build_notebook
+        with strict_scope=True. We short-circuit via a sentinel exception
+        inside the fake build_notebook so the test doesn't have to mock
+        the rest of the post-notebook upload+poll+marker flow."""
+        from unittest.mock import patch
+        from oracle_ai_data_platform_fusion_bundle.dispatch import dispatch_via_rest
+        from oracle_ai_data_platform_fusion_bundle.dispatch.preflight import (
+            PreflightResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig
+
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: strict-scope-disp\n"
+            "fusion:\n"
+            "  serviceUrl: https://x\n  username: u\n  password: p\n"
+            "  externalStorage: x\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: b\n"
+            "  silverSchema: s\n  goldSchema: g\n"
+            "datasets: []\n"
+        )
+        wheel = tmp_path / "fake-0.1.0-py3-none-any.whl"
+        wheel.write_bytes(b"PK\x03\x04 fake")
+
+        config = AidpConfig.model_validate({
+            "project": "strict-scope-disp",
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "defaults": {"region": "us-phoenix-1", "workspaceRoot": "/Workspace"},
+            "environments": {
+                "dev": {
+                    "workspaceKey": "ws", "aiDataPlatformId": "aidp",
+                    "clusterKey": "ck", "clusterName": "cn",
+                    "ociProfile": "DEFAULT",
+                }
+            },
+        })
+        env = config.environments["dev"]
+
+        captured: dict = {}
+
+        class _StopAfterBuildNotebook(Exception):
+            pass
+
+        def _fake_build_notebook(**kwargs):
+            captured.update(kwargs)
+            raise _StopAfterBuildNotebook()
+
+        ok = [PreflightResult("x", "PASS", "ok", "")]
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_local_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_remote_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient",
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            return_value=wheel,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            side_effect=_fake_build_notebook,
+        ):
+            with pytest.raises(_StopAfterBuildNotebook):
+                dispatch_via_rest(
+                    bundle_path=bundle_path, config=config, env=env,
+                    env_name="dev",
+                    mode="seed", datasets=None, layers=None, dry_run=False,
+                    plugin_checkout=tmp_path, auto_start_cluster=False,
+                    strict_scope=True,
+                )
+
+        assert captured.get("strict_scope") is True, (
+            f"build_notebook must receive strict_scope=True from "
+            f"dispatch_via_rest; got {captured.get('strict_scope')!r}"
+        )
+
+    def test_build_notebook_emits_strict_scope_literal_in_run_cell(self):
+        """build_notebook(strict_scope=True) must emit the literal
+        ``strict_scope=True`` inside the generated orchestrator.run(...)
+        call so the cluster honours the operator's opt-out."""
+        import pathlib
+        from oracle_ai_data_platform_fusion_bundle.dispatch.notebook_builder import (
+            build_notebook,
+        )
+
+        wheel = pathlib.Path("/tmp/strict-scope-test.whl")
+        wheel.write_bytes(b"PK\x03\x04 fake")
+
+        nb_true = build_notebook(
+            wheel_path=wheel, bundle_yaml="x: 1\n",
+            mode="seed", datasets=None, layers=None,
+            strict_scope=True,
+        )
+        all_source_true = "".join(
+            "".join(c["source"]) for c in nb_true["cells"]
+            if c["cell_type"] == "code"
+        )
+        assert "strict_scope=True" in all_source_true, (
+            "build_notebook(strict_scope=True) must emit "
+            "``strict_scope=True`` in the run cell so "
+            "orchestrator.run(...) on the cluster receives the operator's "
+            f"--strict-scope intent. Generated source did not contain it: "
+            f"{all_source_true[:400]}"
+        )
+
+        nb_false = build_notebook(
+            wheel_path=wheel, bundle_yaml="x: 1\n",
+            mode="seed", datasets=None, layers=None,
+            strict_scope=False,
+        )
+        all_source_false = "".join(
+            "".join(c["source"]) for c in nb_false["cells"]
+            if c["cell_type"] == "code"
+        )
+        assert "strict_scope=False" in all_source_false, (
+            "build_notebook(strict_scope=False) must still emit a literal "
+            "``strict_scope=False`` (not omit it) so the cluster honours "
+            "the default."
+        )
+
+    def test_rest_dry_run_strict_scope_raises_aidpf_1042_on_undeclared_dep(
+        self, tmp_path,
+    ):
+        """REST dispatch dry-run with strict_scope=True must raise
+        AIDPF-1042 on an undeclared bronze upstream — same contract
+        as the inline path."""
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        from oracle_ai_data_platform_fusion_bundle.dispatch import dispatch_via_rest
+        from oracle_ai_data_platform_fusion_bundle.dispatch.preflight import (
+            PreflightResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_pack,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import (
+            AidpConfig,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+            MissingDependencyError,
+        )
+
+        # Build a minimal pack with a silver dim that depends on
+        # an undeclared bronze.
+        pack_root = tmp_path / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.yaml").write_text(PACK_YAML)
+        (pack_root / "bronze").mkdir()
+        (pack_root / "bronze" / "erp_suppliers.yaml").write_text(
+            _bronze_yaml("erp_suppliers"),
+        )
+        (pack_root / "silver").mkdir()
+        (pack_root / "silver" / "dim_supplier.yaml").write_text(SILVER_DIM)
+        (pack_root / "silver" / "dim_supplier.sql").write_text(
+            "SELECT 1 AS supplier_id",
+        )
+        pack = load_pack(pack_root)
+
+        # Bundle declares the silver root but NOT its bronze upstream —
+        # under strict_scope this is an AIDPF-1042 violation.
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: strict-scope-rest-dryrun\n"
+            "fusion:\n"
+            "  serviceUrl: https://x\n  username: u\n  password: p\n"
+            "  externalStorage: x\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: b\n"
+            "  silverSchema: s\n  goldSchema: g\n"
+            "datasets: []\n"
+            "dimensions:\n  build: [dim_supplier]\n"
+            "gold:\n  marts: []\n"
+        )
+
+        config = AidpConfig.model_validate({
+            "project": "strict-scope-rest-dryrun",
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "defaults": {"region": "us-phoenix-1", "workspaceRoot": "/Workspace"},
+            "environments": {
+                "dev": {
+                    "workspaceKey": "ws", "aiDataPlatformId": "aidp",
+                    "clusterKey": "ck", "clusterName": "cn",
+                    "ociProfile": "DEFAULT",
+                }
+            },
+        })
+        env = config.environments["dev"]
+
+        ok = [PreflightResult("x", "PASS", "ok", "")]
+        fake_client = MagicMock()
+
+        # strict_scope=True with the undeclared erp_suppliers upstream
+        # must raise AIDPF-1042 from the dispatch dry-run path.
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_local_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_remote_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient",
+            return_value=fake_client,
+        ):
+            with pytest.raises(MissingDependencyError, match="erp_suppliers"):
+                dispatch_via_rest(
+                    bundle_path=bundle_path, config=config, env=env,
+                    env_name="dev", mode="seed",
+                    datasets=None, layers=None, dry_run=True,
+                    resolved_pack=pack, strict_scope=True,
+                )
+
+    def test_rest_dry_run_default_strict_scope_false_auto_includes(
+        self, tmp_path,
+    ):
+        """Counterpart: dispatch dry-run with strict_scope=False (default)
+        must NOT raise — D-1 auto-includes the undeclared bronze dep
+        so the operator sees the same plan as inline."""
+        from unittest.mock import patch, MagicMock
+        from oracle_ai_data_platform_fusion_bundle.dispatch import dispatch_via_rest
+        from oracle_ai_data_platform_fusion_bundle.dispatch.preflight import (
+            PreflightResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_pack,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import AidpConfig
+
+        pack_root = tmp_path / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.yaml").write_text(PACK_YAML)
+        (pack_root / "bronze").mkdir()
+        (pack_root / "bronze" / "erp_suppliers.yaml").write_text(
+            _bronze_yaml("erp_suppliers"),
+        )
+        (pack_root / "silver").mkdir()
+        (pack_root / "silver" / "dim_supplier.yaml").write_text(SILVER_DIM)
+        (pack_root / "silver" / "dim_supplier.sql").write_text(
+            "SELECT 1 AS supplier_id",
+        )
+        pack = load_pack(pack_root)
+
+        bundle_path = tmp_path / "bundle.yaml"
+        bundle_path.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: strict-scope-rest-default\n"
+            "fusion:\n"
+            "  serviceUrl: https://x\n  username: u\n  password: p\n"
+            "  externalStorage: x\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: b\n"
+            "  silverSchema: s\n  goldSchema: g\n"
+            "datasets: []\n"
+            "dimensions:\n  build: [dim_supplier]\n"
+            "gold:\n  marts: []\n"
+        )
+
+        config = AidpConfig.model_validate({
+            "project": "strict-scope-rest-default",
+            "apiVersion": "aidp-fusion-bundle/v1",
+            "defaults": {"region": "us-phoenix-1", "workspaceRoot": "/Workspace"},
+            "environments": {
+                "dev": {
+                    "workspaceKey": "ws", "aiDataPlatformId": "aidp",
+                    "clusterKey": "ck", "clusterName": "cn",
+                    "ociProfile": "DEFAULT",
+                }
+            },
+        })
+        env = config.environments["dev"]
+        ok = [PreflightResult("x", "PASS", "ok", "")]
+        fake_client = MagicMock()
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_local_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.run_remote_preflight",
+            return_value=ok,
+        ), patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.AidpRestClient",
+            return_value=fake_client,
+        ):
+            # strict_scope omitted (default False) must succeed.
+            summary = dispatch_via_rest(
+                bundle_path=bundle_path, config=config, env=env,
+                env_name="dev", mode="seed",
+                datasets=None, layers=None, dry_run=True,
+                resolved_pack=pack,
+            )
+        assert summary is not None
+        plan_ids = {n.dataset_id for n in summary.plan}
+        # D-1 must auto-include erp_suppliers as a prereq when
+        # strict_scope=False — the plan/prereq union covers it.
+        prereq_ids = {n.dataset_id for n in summary.prereqs}
+        assert "dim_supplier" in (plan_ids | prereq_ids)
+        assert "erp_suppliers" in (plan_ids | prereq_ids), (
+            "REST dry-run default must D-1 auto-include erp_suppliers; "
+            f"plan={sorted(plan_ids)} prereqs={sorted(prereq_ids)}"
+        )
