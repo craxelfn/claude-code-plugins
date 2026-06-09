@@ -50,6 +50,7 @@ def run(
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
     force_fingerprint_skip: bool = False,
+    strict_scope: bool = False,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -119,6 +120,7 @@ def run(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
             force_fingerprint_skip=force_fingerprint_skip,
+            strict_scope=strict_scope,
         )
     # Phase 5 P1.5ε-fix5 — REST-dispatch resume is now supported. The
     # generated notebook cell threads `resume_run_id` into the
@@ -130,6 +132,7 @@ def run(
         dry_run, poll_timeout_s, console,
         force_fingerprint_skip=force_fingerprint_skip,
         resume_run_id=resume_run_id,
+        strict_scope=strict_scope,
     )
 
 
@@ -143,6 +146,7 @@ def _run_inline(
     console: Console,
     *,
     force_fingerprint_skip: bool = False,
+    strict_scope: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -259,6 +263,7 @@ def _run_inline(
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
             force_fingerprint_skip=force_fingerprint_skip,
+            strict_scope=strict_scope,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — runtime preflight detected bronze-schema drift.
@@ -295,6 +300,7 @@ def _run_via_aidp_dispatch(
     *,
     force_fingerprint_skip: bool = False,
     resume_run_id: str | None = None,
+    strict_scope: bool = False,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 

@@ -315,11 +315,22 @@ def catalog_probe_pvo(
          "with mode='fingerprint_skip'. Production runs MUST NOT use "
          "this; SOX-audit environments should policy-disable.",
 )
+@click.option(
+    "--strict-scope", "strict_scope", is_flag=True, default=False,
+    help="Phase 9 — disable D-1 implicit-transitive-include. When set, "
+         "every declared root's `dependsOn` must ALSO appear in "
+         "`--datasets` / `bundle.datasets[]` explicitly; missing deps "
+         "raise AIDPF-1042 STRICT_SCOPE_MISSING_DEPENDENCY. Use for "
+         "debug-style runs where exact control over the plan is "
+         "required (e.g. re-run only `dim_supplier` against pre-staged "
+         "bronze).",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
         poll_timeout_s: int,
-        force_fingerprint_skip: bool) -> None:
+        force_fingerprint_skip: bool,
+        strict_scope: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -334,6 +345,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
         force_fingerprint_skip=force_fingerprint_skip,
+        strict_scope=strict_scope,
         console=console,
     ))
 
