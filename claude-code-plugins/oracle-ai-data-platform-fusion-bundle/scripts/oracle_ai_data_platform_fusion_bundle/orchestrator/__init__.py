@@ -1386,74 +1386,6 @@ def _emit_dispatcher_resumed_skip_for_bronze(
     return step
 
 
-# ---------------------------------------------------------------------------
-# Phase 5 — content-pack dry-run plan builder
-# ---------------------------------------------------------------------------
-
-
-def _build_phase5_merged_dry_run_plan(
-    *,
-    bundle: "Any",
-    paths: "TablePaths",
-    scope: "Any",  # RunScope
-    resolved_pack: "Any | None",
-) -> tuple[Any, ...]:
-    """Build the merged ``PlanNode`` tuple for the Phase 5 dry-run path.
-
-    Bronze rows come from the v1 spec list via :func:`resolve_plan` —
-    same source the legacy bronze recursive call would use during a
-    real run — and are coerced to ``PlanNode`` with the same shape the
-    v1 dry-run path emits (``status='eligible'`` for runnable specs,
-    ``status='deferred'`` carrying the reason for deferred ones).
-
-    Silver / gold rows come from the resolved pack via
-    :func:`_build_content_pack_dry_run_plan`.
-
-    Either side may be empty: ``--layers bronze`` produces bronze rows
-    only; ``--layers silver`` produces silver rows only; no filters
-    produces both.
-
-    The merge order is bronze-first then silver/gold, matching the
-    real run order and keeping the renderer's "what would run, in
-    what order" presentation honest.
-    """
-    plan_nodes: list[Any] = []
-
-    if scope.bronze_filter is not None:
-        bronze_datasets, bronze_layers = scope.bronze_filter
-        bronze_specs, _ = resolve_plan(
-            bundle, bronze_datasets, bronze_layers, paths=paths,
-        )
-        for spec in bronze_specs:
-            plan_nodes.append(
-                PlanNode(
-                    dataset_id=spec.dataset_id,
-                    layer=(
-                        spec.layer if isinstance(spec, DeferredSpec)
-                        else _layer_for_spec(spec)
-                    ),
-                    status=(
-                        "deferred" if isinstance(spec, DeferredSpec)
-                        else "eligible"
-                    ),
-                    reason=(
-                        spec.reason if isinstance(spec, DeferredSpec) else None
-                    ),
-                )
-            )
-
-    if scope.cp_filter is not None and resolved_pack is not None:
-        cp_datasets, cp_layers = scope.cp_filter
-        plan_nodes.extend(
-            _build_content_pack_dry_run_plan(
-                resolved_pack=resolved_pack,
-                datasets=cp_datasets,
-                layers=cp_layers,
-            )
-        )
-
-    return tuple(plan_nodes)
-
 
 def _build_content_pack_dry_run_plan(
     *,
@@ -1767,6 +1699,11 @@ def _run_content_pack_backend(
     # field (no default); the content-pack backend has already validated
     # that bundle.content_pack and bundle.content_pack.profile exist.
     active_profile_name = bundle.content_pack.profile  # type: ignore[union-attr]
+    # Map each declared dataset to its fully-qualified bronze table.
+    bronze_table_for_source = {
+        ds.id: f"{bundle.aidp.catalog}.{bundle.aidp.bronze_schema}.{ds.id}"
+        for ds in bundle.datasets
+    }
     ctx = CpRunContext(
         catalog=bundle.aidp.catalog,
         bronze_schema=bundle.aidp.bronze_schema,
@@ -1774,28 +1711,13 @@ def _run_content_pack_backend(
         gold_schema=bundle.aidp.gold_schema,
         run_id=run_id,
         active_profile_name=active_profile_name,
-        prior_watermark={},  # Phase 2 v0.3: caller-side prior watermark
-                              # lookups land in Phase 3 alongside the
-                              # bronze-merge generalisation.
+        prior_watermark={},
         mode=mode,
-        bronze_table_for_source={},  # Populated below from bundle datasets.
-    )
-    # Map each declared dataset to its fully-qualified bronze table.
-    bronze_table_for_source = {
-        ds.id: f"{bundle.aidp.catalog}.{bundle.aidp.bronze_schema}.{ds.id}"
-        for ds in bundle.datasets
-    }
-    # Re-build ctx with the populated bronze map.
-    ctx = CpRunContext(
-        catalog=ctx.catalog,
-        bronze_schema=ctx.bronze_schema,
-        silver_schema=ctx.silver_schema,
-        gold_schema=ctx.gold_schema,
-        run_id=ctx.run_id,
-        active_profile_name=ctx.active_profile_name,
-        prior_watermark=ctx.prior_watermark,
-        mode=ctx.mode,
         bronze_table_for_source=bronze_table_for_source,
+        # Phase 9 — bundle threaded so bronze_extract_adapter can read
+        # bundle.fusion.{service_url, username, password,
+        # external_storage} + bundle.fusion.schemaOverrides.<id>.
+        bundle=bundle,
     )
 
     profile_hash = compute_profile_hash(tenant_profile)
@@ -1976,6 +1898,7 @@ def _run_content_pack_backend(
             prior_watermark=prior_watermark_for_node,
             mode=ctx.mode,
             bronze_table_for_source=ctx.bronze_table_for_source,
+            bundle=ctx.bundle,
         )
 
         node_started = _dt.now(_tz.utc)

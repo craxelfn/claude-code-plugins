@@ -410,6 +410,15 @@ def _run_via_aidp_dispatch(
     try:
         config = load_aidp_config(config_path)
         env = env_or_error(config, env_name)
+        # Phase 9 — explicit backend selection from the bundle: if a
+        # contentPack block is present we staged the pack files above
+        # and want the cluster-side notebook to invoke the content-pack
+        # runner. Pre-Phase-9 default of "legacy-python" silently routed
+        # content-pack bundles through the deleted v1 dispatcher and
+        # raised OrchestratorConfigError on the cluster.
+        dispatch_execution_backend = (
+            "content-pack" if _has_content_pack else "legacy-python"
+        )
         summary = dispatch_via_rest(
             bundle_path=bundle_path,
             config=config,
@@ -421,6 +430,7 @@ def _run_via_aidp_dispatch(
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
+            execution_backend=dispatch_execution_backend,
             profile_yaml=profile_yaml,
             pack_files=pack_files,
             pack_manifest=pack_manifest,

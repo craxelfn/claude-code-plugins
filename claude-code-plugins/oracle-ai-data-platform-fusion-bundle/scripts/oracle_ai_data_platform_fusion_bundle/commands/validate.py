@@ -141,26 +141,25 @@ def _validate_datasets_against_pack(
 def _resolve_pack_root(bundle: Bundle, bundle_path: Path) -> Path | None:
     """Locate the bundle's content pack root.
 
-    Mirrors ``commands/run.py``'s pack-root resolution — handles both
-    the modern ``bundle.contentPack.path`` field and the per-tenant
-    layout where the pack sits alongside the bundle in
-    ``content_packs/<id>/``.
+    Phase 9: delegates to ``schema.bundle.resolve_content_pack_root``
+    (the same helper ``commands/run.py`` uses). That gives validate
+    parity with run on:
+      * ``bundle.contentPack.path`` (laptop-relative) resolution.
+      * Lookups under ``INSTALLED_CONTENT_PACKS_DIR`` for
+        Oracle-shipped packs (the customer-extension story).
+      * Pydantic-typed ``ContentPackSpec`` rather than getattr fallbacks.
+
+    Returns ``None`` when the bundle declares no content pack.
     """
-    cp = getattr(bundle, "content_pack", None) or getattr(bundle, "contentPack", None)
-    if cp is not None:
-        # Pydantic model with .path or .pack — accept either shape.
-        path = getattr(cp, "path", None) or getattr(cp, "pack", None)
-        if path:
-            candidate = (bundle_path.parent / path).resolve()
-            if candidate.exists():
-                return candidate
-    # Best-effort default — sibling content_packs/ dir.
-    sibling = bundle_path.parent / "content_packs"
-    if sibling.exists():
-        first = next(iter(sorted(sibling.iterdir())), None)
-        if first is not None:
-            return first.resolve()
-    return None
+    if bundle.content_pack is None:
+        return None
+    try:
+        from ..schema.bundle import resolve_content_pack_root
+        return resolve_content_pack_root(bundle_path, bundle.content_pack)
+    except Exception:  # noqa: BLE001 — surface as no-pack so the caller
+                       # falls through to the legacy catalog membership
+                       # check.
+        return None
 
 
 def _load_bundle(path: Path, console: Console, issues: list[str]) -> Bundle | None:

@@ -258,8 +258,12 @@ def catalog_probe_pvo(
 @main.command()
 @click.option(
     "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
-    help="seed = rebuild from bronze every run; incremental = delta-merge "
-         "(P1.5β, not implemented today). The retired alias 'full' is now 'seed'."
+    help="seed = full BICC pull + replace strategy per layer; incremental "
+         "= delta-merge using prior watermarks from fusion_bundle_state "
+         "(P1.17 — bronze MERGE on natural key + payload-diff for "
+         "incremental_capable=False PVOs; silver/gold MERGE on the "
+         "primary source's row-max watermark). The retired alias 'full' "
+         "is now 'seed'."
 )
 @click.option("--datasets", default=None, help="Comma-separated dataset/dim/mart names to filter (default: all in bundle.yaml).")
 @click.option(

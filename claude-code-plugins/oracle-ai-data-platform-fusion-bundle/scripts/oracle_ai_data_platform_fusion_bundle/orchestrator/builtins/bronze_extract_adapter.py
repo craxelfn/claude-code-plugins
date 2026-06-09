@@ -295,6 +295,13 @@ def run(
 
     impl = node.implementation
     bundle = ctx.bundle  # threaded onto RunContext by the dispatcher
+    if bundle is None:
+        raise ValueError(
+            "bronze_extract_adapter.run: ctx.bundle is None. The "
+            "dispatcher MUST set ctx.bundle when constructing the "
+            "RunContext for bronze nodes — bundle.fusion fields drive "
+            "BICC connection + schemaOverrides resolution."
+        )
 
     # Step 1: build PvoEntry-equivalent descriptor.
     from ...schema.fusion_catalog import PvoEntry, PvoKind

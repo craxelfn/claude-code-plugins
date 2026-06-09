@@ -214,6 +214,12 @@ class RunContext:
     prior_watermark: Mapping[str, Any] = field(default_factory=dict)
     mode: str = "seed"
     bronze_table_for_source: Mapping[str, str] = field(default_factory=dict)
+    # Phase 9 — bronze_extract_adapter needs the bundle for
+    # bundle.fusion.{service_url, username, password, external_storage}
+    # + bundle.fusion.schemaOverrides.<id> at extract time. Defaults to
+    # None so silver/gold adapters that don't need it stay unaffected
+    # (they should not depend on the bundle at the renderer layer).
+    bundle: Any = None
 
 
 # ---------------------------------------------------------------------------
