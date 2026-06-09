@@ -118,6 +118,11 @@ def dispatch_via_rest(
     # failed run. ``None`` preserves the original "fresh run only"
     # behaviour.
     resume_run_id: str | None = None,
+    # Phase 9 — caller-loads-and-passes the resolved pack for the
+    # dispatch dry-run path so schema.plan_resolver can walk it
+    # without crossing the §4.3 import boundary into orchestrator/*.
+    # Required when ``dry_run=True``; ignored otherwise.
+    resolved_pack: "Any | None" = None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -215,9 +220,16 @@ def dispatch_via_rest(
         from ..schema.bundle import load_bundle
         from ..schema.plan_resolver import resolve_dry_run_plan
 
+        if resolved_pack is None:
+            raise ValueError(
+                "dispatch_via_rest(dry_run=True) requires resolved_pack; "
+                "the caller (commands/run.py) must load the pack via "
+                "load_full_chain(...) and pass it in. This preserves "
+                "the §4.3 dispatch import boundary."
+            )
         bundle, paths = load_bundle(bundle_path)
         plan_nodes, prereq_nodes = resolve_dry_run_plan(
-            bundle, paths,
+            resolved_pack, bundle, paths,
             datasets=datasets, layers=layers,
         )
         log("dry-run requested — skipping wheel build + upload + dispatch")

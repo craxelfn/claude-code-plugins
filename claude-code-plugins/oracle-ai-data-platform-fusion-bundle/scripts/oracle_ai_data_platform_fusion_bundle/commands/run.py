@@ -336,6 +336,7 @@ def _run_via_aidp_dispatch(
     pack_files: dict[str, str] | None = None
     pack_manifest: dict | None = None
     schema_snapshot_yaml: str | None = None
+    resolved_pack = None
     _has_content_pack = False
     try:
         from ..schema.bundle import load_bundle as _peek_load_bundle
@@ -426,6 +427,9 @@ def _run_via_aidp_dispatch(
             force_fingerprint_skip=force_fingerprint_skip,
             schema_snapshot_yaml=schema_snapshot_yaml,
             resume_run_id=resume_run_id,
+            # Phase 9 — pack threaded through so dispatch's dry-run path
+            # can call schema.plan_resolver without crossing §4.3.
+            resolved_pack=resolved_pack,
         )
     except SchemaDriftDetectedError as exc:
         # Phase 3c — drift surfaces from REST-dispatch via the marker

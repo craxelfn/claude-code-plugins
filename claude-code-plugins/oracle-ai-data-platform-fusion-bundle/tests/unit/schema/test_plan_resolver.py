@@ -1,562 +1,310 @@
-"""P1.5ε-fix9 — relocated TestResolvePlan cases now exercising
-``schema.plan_resolver.resolve_dry_run_plan`` directly.
+"""Phase 9 (ADR-0022): schema.plan_resolver walks ResolvedPack.
 
-These cases were moved from ``tests/unit/test_orchestrator_run.py::TestResolvePlan``.
-The schema-level resolver is the new source of truth for the
-classification + filter + topo-sort behavior; the engine-side
-``orchestrator.resolve_plan`` wrapper just reconstructs ``Spec``
-instances + ``ExternalDep`` from the DTOs the resolver returns.
-
-Mechanical adaptations vs. the original cases:
-- ``orchestrator.resolve_plan(bundle, datasets, layers, paths=paths)`` →
-  ``resolve_dry_run_plan(bundle, paths, datasets=datasets, layers=layers)``.
-- ``BronzeExtractSpec`` / ``SilverDimSpec`` / ``GoldMartSpec`` /
-  ``DeferredSpec`` assertions → ``PlanNode`` assertions
-  (read ``.dataset_id`` / ``.layer`` / ``.status`` / ``.reason``).
-- ``ExternalDep`` assertions → ``PrereqNode`` (same 4-field shape).
-
-One new case lives here that isn't a relocation:
-``test_resolve_dry_run_plan_uses_custom_table_paths`` — reviewer round 1
-blocking lock for the ``paths: TablePaths`` signature requirement.
+Replaces the v1 tests that exercised the resolver against
+``BRONZE_EXTRACT_METADATA`` / ``SILVER_DIM_METADATA`` /
+``GOLD_MART_METADATA``. The resolver now consumes a ``ResolvedPack``
+(loaded by the caller — ``commands/run.py`` for both inline and REST
+dispatch paths) and walks ``pack.bronze ∪ pack.silver ∪ pack.gold``
+plus each node's ``dependsOn`` edges.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import patch
+import pathlib
 
 import pytest
 
-from oracle_ai_data_platform_fusion_bundle.schema import registry_metadata
-from oracle_ai_data_platform_fusion_bundle.schema.bundle import load_bundle
+from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
 from oracle_ai_data_platform_fusion_bundle.schema.errors import (
     MissingDependencyError,
 )
 from oracle_ai_data_platform_fusion_bundle.schema.plan_resolver import (
     resolve_dry_run_plan,
 )
-from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
-    PlanNode,
-    PrereqNode,
-)
 
 
-_MIN_BUNDLE = """
+PACK_YAML = """\
+id: plan-resolver-test-pack
+version: 0.1.0
+compatibility:
+  pluginMinVersion: 0.1.0
+"""
+
+
+def _bronze_yaml(node_id: str) -> str:
+    return f"""\
+id: {node_id}
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: {node_id.upper()}_PVO
+  biccSchema: Financial
+target: {node_id}
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+outputSchema:
+  columns:
+    - {{ name: ID, type: long, nullable: false, pii: none }}
+    - {{ name: _extract_ts, type: timestamp, nullable: false, pii: none }}
+    - {{ name: _source_pvo, type: string, nullable: false, pii: none }}
+    - {{ name: _run_id, type: string, nullable: false, pii: none }}
+    - {{ name: _watermark_used, type: timestamp, nullable: true, pii: none }}
+"""
+
+
+DIM_SUPPLIER = """\
+id: dim_supplier
+layer: silver
+implementation:
+  type: sql
+  sql: silver/dim_supplier.sql
+target: dim_supplier
+dependsOn:
+  bronze:
+    - id: erp_suppliers
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+outputSchema:
+  columns:
+    - name: supplier_id
+      type: long
+      nullable: false
+      pii: none
+"""
+
+
+SUPPLIER_SPEND = """\
+id: supplier_spend
+layer: gold
+implementation:
+  type: sql
+  sql: gold/supplier_spend.sql
+target: supplier_spend
+dependsOn:
+  bronze:
+    - id: ap_invoices
+  silver:
+    - id: dim_supplier
+refresh:
+  seed:
+    strategy: replace
+outputSchema:
+  columns:
+    - name: supplier_id
+      type: long
+      nullable: false
+      pii: none
+"""
+
+
+_BUNDLE_BASE = """\
 apiVersion: aidp-fusion-bundle/v1
-project: test-plan-resolver
+project: plan-resolver-test
 fusion:
   serviceUrl: https://example.com
   username: u
-  password: literal-password
-  externalStorage: oci://bucket@ns/path
-datasets:
-  - id: erp_suppliers
-    mode: full
-  - id: ap_invoices
-    mode: full
-  - id: gl_coa
-    mode: full
-  - id: gl_period_balances
-    mode: full
-dimensions:
-  build:
-    - dim_supplier
-    - dim_account
-    - dim_calendar
-gold:
-  marts:
-    - supplier_spend
-    - gl_balance
-    - ap_aging
+  password: p
+  externalStorage: x
+aidp:
+  catalog: fusion_catalog
+  bronzeSchema: bronze
+  silverSchema: silver
+  goldSchema: gold
 """
 
 
-def _bundle_file(tmp_path: Path, content: str = _MIN_BUNDLE) -> Path:
-    p = tmp_path / "bundle.yaml"
-    p.write_text(content, encoding="utf-8")
-    return p
+def _bundle(extra: str):
+    from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+    import yaml as _yaml
+    return Bundle.model_validate(_yaml.safe_load(_BUNDLE_BASE + extra))
+
+
+@pytest.fixture
+def pack(tmp_path: pathlib.Path):
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+        load_pack,
+    )
+
+    root = tmp_path / "pack"
+    root.mkdir()
+    (root / "pack.yaml").write_text(PACK_YAML)
+    (root / "bronze").mkdir()
+    (root / "bronze" / "erp_suppliers.yaml").write_text(_bronze_yaml("erp_suppliers"))
+    (root / "bronze" / "ap_invoices.yaml").write_text(_bronze_yaml("ap_invoices"))
+    (root / "silver").mkdir()
+    (root / "silver" / "dim_supplier.yaml").write_text(DIM_SUPPLIER)
+    (root / "silver" / "dim_supplier.sql").write_text("SELECT 1 AS supplier_id")
+    (root / "gold").mkdir()
+    (root / "gold" / "supplier_spend.yaml").write_text(SUPPLIER_SPEND)
+    (root / "gold" / "supplier_spend.sql").write_text("SELECT 1 AS supplier_id")
+    return load_pack(root)
+
+
+@pytest.fixture
+def bundle():
+    return _bundle(
+        """\
+datasets:
+  - id: erp_suppliers
+  - id: ap_invoices
+dimensions:
+  build:
+    - dim_supplier
+gold:
+  marts:
+    - supplier_spend
+"""
+    )
+
+
+@pytest.fixture
+def paths():
+    return TablePaths(
+        catalog="fusion_catalog",
+        bronze_schema="bronze",
+        silver_schema="silver",
+        gold_schema="gold",
+    )
 
 
 class TestResolveDryRunPlan:
-    # ----------------------- happy-path topo sort -----------------------
-
-    def test_basic_topo_sort(self, tmp_path: Path) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
+    def test_basic_topo_sort(self, pack, bundle, paths):
         plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=None,
+            pack, bundle, paths, datasets=None, layers=None,
         )
-        plan_names = [n.dataset_id for n in plan]
-        assert plan_names.index("erp_suppliers") < plan_names.index("dim_supplier")
-        assert plan_names.index("dim_supplier") < plan_names.index("supplier_spend")
-        assert plan_names.index("ap_invoices") < plan_names.index("supplier_spend")
-        assert plan_names.index("ap_invoices") < plan_names.index("ap_aging")
+        ids = [n.dataset_id for n in plan]
+        assert set(ids) == {
+            "erp_suppliers", "ap_invoices", "dim_supplier", "supplier_spend",
+        }
+        # bronze deps before silver consumers; silver before gold.
+        assert ids.index("erp_suppliers") < ids.index("dim_supplier")
+        assert ids.index("dim_supplier") < ids.index("supplier_spend")
         assert prereqs == ()
-        # Type check: every entry is a PlanNode
-        assert all(isinstance(n, PlanNode) for n in plan)
 
-    def test_layer_filter_creates_extra_deps(self, tmp_path: Path) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
+    def test_layers_silver_filter_creates_bronze_prereq(self, pack, bundle, paths):
         plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=["gold"],
+            pack, bundle, paths, datasets=None, layers=["silver"],
         )
-        plan_names = {n.dataset_id for n in plan}
-        assert plan_names == {"supplier_spend", "gl_balance", "ap_aging"}
-        dep_ids = {(d.dataset_id, d.layer) for d in prereqs}
-        assert ("ap_invoices", "bronze") in dep_ids
-        assert ("dim_supplier", "silver") in dep_ids
-        assert ("gl_period_balances", "bronze") in dep_ids
-        assert ("dim_account", "silver") in dep_ids
-        assert all(isinstance(d, PrereqNode) for d in prereqs)
+        plan_ids = [n.dataset_id for n in plan]
+        assert plan_ids == ["dim_supplier"]
+        prereq_ids = sorted(p.dataset_id for p in prereqs)
+        assert prereq_ids == ["erp_suppliers"]
 
-    def test_datasets_filter_targets_specific_names(self, tmp_path: Path) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
+    def test_datasets_filter_silvers_become_prereqs(self, pack, bundle, paths):
         plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=["dim_supplier"], layers=None,
+            pack, bundle, paths, datasets=["supplier_spend"], layers=None,
         )
-        plan_names = [n.dataset_id for n in plan]
-        assert plan_names == ["dim_supplier"]
-        assert any(
-            d.dataset_id == "erp_suppliers" and d.layer == "bronze"
-            for d in prereqs
+        plan_ids = [n.dataset_id for n in plan]
+        assert plan_ids == ["supplier_spend"]
+        prereq_ids = sorted(p.dataset_id for p in prereqs)
+        assert prereq_ids == ["ap_invoices", "dim_supplier"]
+
+    def test_unknown_dataset_in_bundle_raises(self, pack, paths):
+        b = _bundle(
+            """\
+datasets:
+  - id: totally_unknown
+dimensions:
+  build: []
+gold:
+  marts: []
+"""
         )
+        with pytest.raises(MissingDependencyError, match="totally_unknown"):
+            resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
 
-    # ----------------------- typo / missing-name paths -----------------------
-
-    def test_typo_in_dim_raises_missing_dependency(self, tmp_path: Path) -> None:
-        bad = _MIN_BUNDLE.replace("dim_supplier", "dim_typo")
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bad))
+    def test_typoed_datasets_filter_raises(self, pack, bundle, paths):
         with pytest.raises(MissingDependencyError, match="dim_typo"):
             resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
+                pack, bundle, paths, datasets=["dim_typo"], layers=None,
             )
 
-    def test_inplan_consumer_with_unknown_dependency_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        """Reviewer round 4 correction: patch
-        ``schema.registry_metadata.GOLD_MART_METADATA`` (the resolver's
-        upstream-walk reads here), NOT the engine-side runtime registry.
-        """
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: registry-inconsistency-test
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
+    def test_typoed_layers_filter_raises(self, pack, bundle, paths):
+        with pytest.raises(MissingDependencyError, match="unknown_layer"):
+            resolve_dry_run_plan(
+                pack, bundle, paths, datasets=None, layers=["unknown_layer"],
+            )
+
+    def test_disabled_dataset_excluded(self, pack, paths):
+        # Override Pydantic defaults — empty dimensions/gold to keep
+        # the test scoped to bronze enable/disable behavior.
+        b = _bundle(
+            """\
 datasets:
   - id: erp_suppliers
-    mode: full
+  - id: ap_invoices
+    enabled: false
+dimensions:
+  build: []
+gold:
+  marts: []
+"""
+        )
+        plan, _ = resolve_dry_run_plan(
+            pack, b, paths, datasets=None, layers=None,
+        )
+        ids = {n.dataset_id for n in plan}
+        assert "ap_invoices" not in ids
+        assert "erp_suppliers" in ids
+
+    def test_undeclared_bronze_upstream_raises(self, pack, paths):
+        b = _bundle(
+            """\
+datasets: []
 dimensions:
   build:
     - dim_supplier
 gold:
+  marts: []
+"""
+        )
+        with pytest.raises(MissingDependencyError, match="erp_suppliers"):
+            resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
+
+    def test_unknown_silver_in_bundle_raises(self, pack, paths):
+        b = _bundle(
+            """\
+datasets: []
+dimensions:
+  build:
+    - dim_does_not_exist
+gold:
+  marts: []
+"""
+        )
+        with pytest.raises(MissingDependencyError, match="dim_does_not_exist"):
+            resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
+
+    def test_unknown_gold_in_bundle_raises(self, pack, paths):
+        b = _bundle(
+            """\
+datasets: []
+dimensions:
+  build: []
+gold:
   marts:
-    - supplier_spend
+    - mart_does_not_exist
 """
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-
-        real_md = registry_metadata.GOLD_MART_METADATA["supplier_spend"]
-        bogus_md = registry_metadata.GoldMartMetadata(
-            dataset_id=real_md.dataset_id,
-            depends_on_bronze=("nonexistent_pvo",),
-            depends_on_silver=real_md.depends_on_silver,
-            natural_key=real_md.natural_key,
-            incremental_capable=real_md.incremental_capable,
         )
+        with pytest.raises(MissingDependencyError, match="mart_does_not_exist"):
+            resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
 
-        with patch.dict(
-            registry_metadata.GOLD_MART_METADATA,
-            {"supplier_spend": bogus_md},
-        ):
-            with pytest.raises(MissingDependencyError) as exc_info:
-                resolve_dry_run_plan(
-                    bundle, paths, datasets=None, layers=None,
-                )
-
-        msg = str(exc_info.value)
-        assert "nonexistent_pvo" in msg, (
-            f"MissingDependencyError must name the absent dependency; got: {msg!r}"
+    def test_resolve_dry_run_plan_uses_custom_table_paths(self, pack, bundle):
+        custom = TablePaths(
+            catalog="custom_cat",
+            bronze_schema="custom_bronze",
+            silver_schema="custom_silver",
+            gold_schema="custom_gold",
         )
-        # Locks that the registry-consistency check fires BEFORE any
-        # PrereqNode is fabricated for the bad name. If the check
-        # disappeared, the upstream-walk would silently create a
-        # PrereqNode for ``nonexistent_pvo`` and the run would proceed.
-        for line in msg.splitlines():
-            assert "PrereqNode" not in line
-
-    def test_deferred_dim_resolves_to_plan_node(self, tmp_path: Path) -> None:
-        bundle_with_deferred = _MIN_BUNDLE.replace(
-            "    - dim_supplier", "    - dim_supplier\n    - dim_org",
+        _, prereqs = resolve_dry_run_plan(
+            pack, bundle, custom, datasets=["supplier_spend"], layers=None,
         )
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_with_deferred))
-        plan, _ = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=None,
-        )
-        dim_org_node = next(n for n in plan if n.dataset_id == "dim_org")
-        assert dim_org_node.layer == "silver"
-        assert dim_org_node.status == "deferred"
-        assert dim_org_node.reason is not None
-        assert "P1.7" in dim_org_node.reason
-
-    # ----------------------- filter-typo guardrails -----------------------
-
-    def test_typoed_datasets_filter_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=["ap_invoies"], layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "ap_invoies" in msg
-        assert "ap_invoices" in msg
-
-    def test_typoed_datasets_filter_with_mixed_valid_and_invalid(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths,
-                datasets=["dim_supplier", "bogus_name_1", "bogus_name_2"],
-                layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "bogus_name_1" in msg and "bogus_name_2" in msg
-
-    def test_typoed_layers_filter_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle, paths = load_bundle(_bundle_file(tmp_path))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=["gols"],
-            )
-        msg = str(exc_info.value)
-        assert "gols" in msg
-        for valid in ("bronze", "silver", "gold"):
-            assert valid in msg
-
-    # ----------------------- undeclared-upstream paths -----------------------
-
-    def test_undeclared_bronze_upstream_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: []
-gold:
-  marts: [ap_aging]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "ap_aging" in msg
-        assert "ap_invoices" in msg
-        assert "bundle.datasets" in msg
-
-    def test_declared_bronze_filtered_out_becomes_prereq_node(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-declared-but-filtered
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    mode: full
-dimensions:
-  build: [dim_supplier, dim_calendar]
-gold:
-  marts: [ap_aging]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=["gold"],
-        )
-        plan_names = {n.dataset_id for n in plan}
-        assert plan_names == {"ap_aging"}
-        dep_keys = {(d.dataset_id, d.layer) for d in prereqs}
-        assert ("ap_invoices", "bronze") in dep_keys
-
-    def test_multiple_undeclared_upstreams_accumulated_in_one_error(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-multi-undeclared
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: []
-gold:
-  marts: [supplier_spend]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "ap_invoices" in msg
-        assert "dim_supplier" in msg
-        assert "bundle.datasets" in msg
-        assert "bundle.dimensions.build" in msg
-
-    def test_undeclared_bronze_upstream_for_silver_dim_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-bronze-for-silver-dim
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets: []
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: []
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "dim_supplier" in msg
-        assert "erp_suppliers" in msg
-        assert "bundle.datasets" in msg
-
-    def test_undeclared_silver_upstream_raises_missing_dependency(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix14-undeclared-silver
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    mode: full
-  - id: erp_suppliers
-    mode: full
-dimensions:
-  build: []
-gold:
-  marts: [supplier_spend]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "supplier_spend" in msg
-        assert "dim_supplier" in msg
-        assert "bundle.dimensions.build" in msg
-        assert "bundle.datasets" not in msg
-
-    # ----------------------- disabled-dataset paths -----------------------
-
-    def test_disabled_dataset_excluded_from_plan(self, tmp_path: Path) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-happy-path-disabled-excluded
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: []
-gold:
-  marts: []
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=None,
-        )
-        plan_names = {n.dataset_id for n in plan}
-        assert plan_names == {"erp_suppliers"}
-        assert prereqs == ()
-        assert not any(d.dataset_id == "ap_invoices" for d in prereqs)
-
-    def test_disabled_dataset_with_gold_consumer_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-gold-consumer-disabled-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: [supplier_spend]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "ap_invoices" in msg
-        assert "supplier_spend" in msg
-        assert "disabled" in msg
-        assert "enabled: true" in msg
-        assert "bundle.gold.marts" in msg
-        assert "add it to bundle.datasets" not in msg
-
-    def test_disabled_dataset_with_silver_consumer_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-silver-consumer-disabled-bronze
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: erp_suppliers
-    enabled: false
-dimensions:
-  build: [dim_supplier]
-gold:
-  marts: []
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=None, layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "erp_suppliers" in msg
-        assert "dim_supplier" in msg
-        assert "disabled" in msg
-        assert "enabled: true" in msg
-        assert "bundle.dimensions.build" in msg
-        assert "bundle.gold.marts" not in msg
-
-    def test_datasets_filter_with_disabled_id_raises_disabled_specific_error(
-        self, tmp_path: Path,
-    ) -> None:
-        bundle_yaml = """
-apiVersion: aidp-fusion-bundle/v1
-project: fix15-filter-input-disabled
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    enabled: false
-dimensions:
-  build: []
-gold:
-  marts: []
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, bundle_yaml))
-        with pytest.raises(MissingDependencyError) as exc_info:
-            resolve_dry_run_plan(
-                bundle, paths, datasets=["ap_invoices"], layers=None,
-            )
-        msg = str(exc_info.value)
-        assert "ap_invoices" in msg
-        assert "disabled" in msg
-        assert "enabled: true" in msg
-        assert "not in the bundle plan" not in msg
-
-    # ----------------------- reviewer round 1 blocking lock -----------------------
-
-    def test_resolve_dry_run_plan_uses_custom_table_paths(
-        self, tmp_path: Path,
-    ) -> None:
-        """Locks the ``paths: TablePaths`` positional requirement. With
-        non-default catalog + bronze/silver schemas, every PrereqNode's
-        ``table_path`` must reflect the custom values — otherwise a future
-        refactor that drops the ``paths`` arg and resolves table names from
-        a hardcoded default would silently break tenant-aware dispatch.
-        """
-        custom_bundle = """
-apiVersion: aidp-fusion-bundle/v1
-project: tenant-aware-paths-test
-aidp:
-  catalog: custom_cat
-  bronzeSchema: bz_custom
-  silverSchema: sv_custom
-  goldSchema: gd_custom
-fusion:
-  serviceUrl: https://x
-  username: u
-  password: literal-pw
-  externalStorage: oci://b@n/p
-datasets:
-  - id: ap_invoices
-    mode: full
-  - id: erp_suppliers
-    mode: full
-dimensions:
-  build: [dim_supplier, dim_calendar]
-gold:
-  marts: [ap_aging]
-"""
-        bundle, paths = load_bundle(_bundle_file(tmp_path, custom_bundle))
-        # --layers=gold filters bronze + silver out → both surface as
-        # PrereqNodes with custom-prefixed table paths.
-        _plan, prereqs = resolve_dry_run_plan(
-            bundle, paths, datasets=None, layers=["gold"],
-        )
-        bronze_prereqs = [d for d in prereqs if d.layer == "bronze"]
-        silver_prereqs = [d for d in prereqs if d.layer == "silver"]
-        assert bronze_prereqs, "expected at least one bronze PrereqNode"
-        assert silver_prereqs, "expected at least one silver PrereqNode"
-        for d in bronze_prereqs:
-            assert d.table_path.startswith("custom_cat.bz_custom."), (
-                f"bronze prereq must use custom catalog+schema; got {d.table_path!r}"
-            )
-        for d in silver_prereqs:
-            assert d.table_path.startswith("custom_cat.sv_custom."), (
-                f"silver prereq must use custom catalog+schema; got {d.table_path!r}"
-            )
+        prereq_paths = {p.table_path for p in prereqs}
+        assert any("custom_cat" in p for p in prereq_paths)
+        assert any("custom_bronze" in p for p in prereq_paths)
