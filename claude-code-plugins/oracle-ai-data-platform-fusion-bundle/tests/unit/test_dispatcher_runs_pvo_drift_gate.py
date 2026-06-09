@@ -87,7 +87,7 @@ class TestDispatcherRunsPvoDriftGate:
 
         def trap_run(*args, **kwargs):
             # Only the bronze branch's recursive call passes
-            # execution_backend="legacy-python". The outer call from
+            #. The outer call from
             # the test still routes through the patched dispatcher
             # via run() → _phase5_top_level_dispatch.
             if kwargs.get("execution_backend") == "legacy-python":

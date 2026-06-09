@@ -382,7 +382,10 @@ def build_notebook(
     :meth:`AidpRestClient.upload_notebook`.
     """
     # Phase 2 invariant check: content-pack backend requires all three
-    # primitives; legacy-python forbids them (programmer error guard).
+    # Phase 9 — content-pack is the only backend at the CLI level,
+    # but the dispatch boundary retains backend dispatch for the
+    # tests that lock the staging primitive contract. The kwargs
+    # are still asserted symmetrically.
     if execution_backend == "content-pack":
         assert profile_yaml is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires profile_yaml"
@@ -393,17 +396,11 @@ def build_notebook(
         assert pack_manifest is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires pack_manifest"
         )
-        # Phase 3d snapshot is OPTIONAL — pre-3d profiles legitimately ship
-        # without one; preflight degrades to empty `datasetDeltas` on the
-        # cluster the same way it does on the laptop.
     elif execution_backend == "legacy-python":
         assert profile_yaml is None and pack_files is None and pack_manifest is None, (
             "build_notebook(execution_backend='legacy-python', ...) must pass "
             "profile_yaml/pack_files/pack_manifest as None"
         )
-        # Phase 3d — legacy-python REST runs cannot drift via the gate,
-        # so staging a snapshot on the cluster would be dead weight + a
-        # silent contract violation. Programmer-error guard.
         assert schema_snapshot_yaml is None, (
             "build_notebook(execution_backend='legacy-python', ...) must "
             "pass schema_snapshot_yaml as None"

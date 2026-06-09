@@ -170,7 +170,6 @@ class TestDispatcherDryRunMergedPlan:
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             dry_run=True,
@@ -194,7 +193,6 @@ class TestDispatcherDryRunMergedPlan:
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["bronze"],
@@ -215,7 +213,6 @@ class TestDispatcherDryRunMergedPlan:
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["silver"],
@@ -241,7 +238,6 @@ class TestDispatcherDryRunMergedPlan:
         with pytest.raises(ScopeSplitError):
             orchestrator.run(
                 bundle_path=bundle_path,
-                execution_backend="content-pack",
                 resolved_pack=pack,
                 tenant_profile=profile,
                 datasets=["this_does_not_exist"],

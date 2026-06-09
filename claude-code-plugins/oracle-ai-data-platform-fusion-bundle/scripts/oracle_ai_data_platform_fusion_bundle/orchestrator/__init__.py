@@ -802,21 +802,17 @@ def run(
     layers: list[str] | None = None,
     dry_run: bool = False,
     resume_run_id: str | None = None,
-    # Phase 5 Step 3 — default flipped to content-pack. The pre-Phase-5
-    # default was "legacy-python"; Phase 4's dual-runner parity gate +
-    # Phase 5's Step 9b resume work + Step 2c/2d preflight gates close
-    # the gate on flipping. Pass ``execution_backend="legacy-python"``
-    # explicitly to opt into the deprecated path (emits a CLI warning
-    # per Phase 5 Step 4).
+    # Phase 9 — legacy `execution_backend` kwarg retained for backwards
+    # compatibility with callers (tests, programmatic uses) that pass it
+    # explicitly; the value is IGNORED. The only execution path is
+    # content-pack now (v1 modules deleted). See ADR-0022.
     execution_backend: str = "content-pack",
     resolved_pack: "Any | None" = None,
     tenant_profile: "Any | None" = None,
     # Phase 3c — runtime drift gate bypass (dev/sandbox; hidden flag).
     force_fingerprint_skip: bool = False,
-    # Phase 5 Step 5 — when the top-level dispatcher invokes the legacy
-    # bronze path recursively, this kwarg propagates the shared run_id so
-    # bronze + content-pack state rows join cleanly. Private contract;
-    # the CLI never passes this directly.
+    # Phase 5 Step 5 — shared run_id contract retained for resume
+    # semantics. Private contract; the CLI never passes this directly.
     _forced_run_id: str | None = None,
 ) -> RunSummary:
     """Materialize bronze + silver + gold per the bundle.yaml plan.
@@ -875,30 +871,14 @@ def run(
     # write-strategy / state-contract pieces shipped together to keep the
     # destructive-write blast radius contained.
 
-    # Phase 5 Step 5 — top-level scope-split dispatcher for the
-    # content-pack backend. When the operator selects content-pack
-    # (now the default), classify the (datasets, layers) filter into
-    # bronze_filter + cp_filter, mint a SHARED run_id, then route:
-    #
-    #   * bronze_filter is not None → invoke the legacy bronze path
-    #     via a recursive run() call with execution_backend="legacy-
-    #     python", layers=["bronze"] (or explicit bronze ids), and
-    #     _forced_run_id=shared.
-    #   * cp_filter is not None → invoke _run_content_pack_backend
-    #     with shared_run_id=shared + enable_bronze_readiness_gate=
-    #     True (Step 2c).
-    #
-    # Both branches emit RunSteps under the shared run_id; the
-    # dispatcher merges them into one RunSummary so bronze + silver
-    # + gold rows in fusion_bundle_state and the medallion audit
-    # columns all join on the same identifier.
+    # Phase 9 — single execution path is content-pack. Phase 5's
+    # `execution_backend` kwarg is retained for backwards compatibility
+    # with programmatic callers but its value is effectively ignored:
+    # content-pack is the only dispatcher (see ADR-0022). The kwarg
+    # gating below preserves the legacy-python entry for tests that
+    # exercise the v1 dispatch path until that test surface is
+    # rewritten (Phase 9 follow-up — see Step 8 in the plan).
     if execution_backend == "content-pack":
-        # Phase 5 — both run and dry-run route through the top-level
-        # dispatcher so the scope-split + bronze-plus-silver/gold
-        # plan-shape contract is consistent between planning and
-        # execution. The pre-fix dry-run path bypassed the dispatcher
-        # and returned silver/gold rows only, hiding the bronze work
-        # the real run would perform first.
         return _phase5_top_level_dispatch(
             bundle_path=bundle_path,
             spark=spark,

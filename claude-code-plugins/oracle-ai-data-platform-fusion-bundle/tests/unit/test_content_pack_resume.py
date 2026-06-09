@@ -405,7 +405,6 @@ class TestContentPackResume:
             orchestrator.run(
                 bundle_path=bundle_path,
                 spark=fake_spark,
-                execution_backend="content-pack",
                 resolved_pack=pack,
                 tenant_profile=profile,
                 resume_run_id="this-run-was-never-recorded",
@@ -437,7 +436,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -486,7 +484,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -534,7 +531,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -580,7 +576,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,

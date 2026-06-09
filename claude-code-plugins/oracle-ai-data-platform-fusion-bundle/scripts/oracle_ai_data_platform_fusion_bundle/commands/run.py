@@ -49,7 +49,6 @@ def run(
     resume_run_id: str | None = None,
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
-    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
     console: Console | None = None,
 ) -> int:
@@ -105,24 +104,6 @@ def run(
         if layers else None
     )
 
-    # Phase 5 Step 4 — deprecation warning on the explicit legacy-python
-    # opt-in. Emitted once at the top of every invocation that explicitly
-    # selects the legacy backend (default backend is content-pack per Phase
-    # 5 Step 3); structured log entry at INFO so programmatic callers can
-    # detect the deprecation without parsing console output.
-    if execution_backend == "legacy-python":
-        console.print(
-            "[yellow]DEPRECATED:[/yellow] --execution-backend=legacy-python "
-            "is on the deprecation path. v2 content-pack is the default; "
-            "the legacy-python path will be removed in a future release. "
-            "Drop the flag (or pass --execution-backend=content-pack "
-            "explicitly) to silence this warning."
-        )
-        logging.getLogger(__name__).info(
-            "phase5.legacy_python_backend.deprecated",
-            extra={"execution_backend": execution_backend},
-        )
-
     # Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack backend's
     # per-node atomic-commit model (preflight → render → drift → execute
     # → quality → state) is the resume unit; supplying --resume with the
@@ -137,7 +118,6 @@ def run(
         return _run_inline(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
-            execution_backend=execution_backend,
             force_fingerprint_skip=force_fingerprint_skip,
         )
     # Phase 5 P1.5ε-fix5 — REST-dispatch resume is now supported. The
@@ -148,7 +128,6 @@ def run(
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
-        execution_backend=execution_backend,
         force_fingerprint_skip=force_fingerprint_skip,
         resume_run_id=resume_run_id,
     )
@@ -163,7 +142,6 @@ def _run_inline(
     dry_run: bool,
     console: Console,
     *,
-    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
@@ -199,11 +177,21 @@ def _run_inline(
             f"reading fusion_bundle_state, computing reattempt plan…"
         )
 
-    # Phase 2 — when --execution-backend content-pack, resolve the pack
-    # + profile up front and pass them into orchestrator.run.
+    # Phase 9 — content-pack is the only backend. Resolve the pack
+    # + profile up front and pass them into orchestrator.run. Skip
+    # gracefully when the bundle has no contentPack block (legacy
+    # bundles still pass through the underlying orchestrator code
+    # path until they're migrated).
     resolved_pack = None
     tenant_profile = None
-    if execution_backend == "content-pack":
+    _has_content_pack = False
+    try:
+        from ..schema.bundle import load_bundle as _peek_load_bundle
+        _peek_bundle, _ = _peek_load_bundle(bundle_path)
+        _has_content_pack = _peek_bundle.content_pack is not None
+    except Exception:
+        _has_content_pack = False
+    if _has_content_pack:
         from ..schema.bundle import (
             AIDPF_1030_PROFILE_MISSING,
             AIDPF_1031_CONTENT_PACK_MISSING,
@@ -226,7 +214,7 @@ def _run_inline(
         if bundle.content_pack is None:
             console.print(
                 f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
-                f"`contentPack:` block; --execution-backend content-pack "
+                f"`contentPack:` block; "
                 f"requires it.[/red]"
             )
             return 2
@@ -234,7 +222,7 @@ def _run_inline(
             console.print(
                 f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
                 f"`contentPack.profile` field is required when running under "
-                f"--execution-backend content-pack.[/red]"
+                f"content-pack.[/red]"
             )
             return 2
         pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
@@ -268,7 +256,6 @@ def _run_inline(
             layers=layers,
             resume_run_id=resume_run_id,
             dry_run=dry_run,
-            execution_backend=execution_backend,
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
             force_fingerprint_skip=force_fingerprint_skip,
@@ -306,7 +293,6 @@ def _run_via_aidp_dispatch(
     poll_timeout_s: int,
     console: Console,
     *,
-    execution_backend: str = "content-pack",
     force_fingerprint_skip: bool = False,
     resume_run_id: str | None = None,
 ) -> int:
@@ -335,16 +321,23 @@ def _run_via_aidp_dispatch(
 
     error_console = Console(stderr=True)
 
-    # Phase 2: when --execution-backend content-pack, prepare the
-    # staging primitives at the CLI layer (orchestrator-side imports
-    # are allowed here; dispatch/ cannot import them).
+    # Phase 9 — content-pack is the only backend. Prepare staging
+    # primitives at the CLI layer (orchestrator-side imports are
+    # allowed here; dispatch/ cannot import them). Bundles without
+    # a contentPack block skip the staging — they execute purely
+    # through the legacy orchestrator paths.
     profile_yaml: str | None = None
     pack_files: dict[str, str] | None = None
     pack_manifest: dict | None = None
-    # Phase 3d — snapshot YAML staged alongside the profile so the
-    # cluster-side preflight can populate `datasetDeltas` on drift.
     schema_snapshot_yaml: str | None = None
-    if execution_backend == "content-pack":
+    _has_content_pack = False
+    try:
+        from ..schema.bundle import load_bundle as _peek_load_bundle
+        _peek_bundle, _ = _peek_load_bundle(bundle_path)
+        _has_content_pack = _peek_bundle.content_pack is not None
+    except Exception:
+        _has_content_pack = False
+    if _has_content_pack:
         from ..schema.bronze_schema_snapshot import resolve_snapshot_path
         from ..schema.bundle import (
             AIDPF_1030_PROFILE_MISSING,
@@ -366,15 +359,15 @@ def _run_via_aidp_dispatch(
         if bundle.content_pack is None:
             console.print(
                 f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
-                f"`contentPack:` block; --execution-backend content-pack requires "
-                f"the block. Either add it or run with the legacy-python backend.[/red]"
+                f"`contentPack:` block; requires "
+                f"the block. Either add it or run with the legacy v1 backend (removed in Phase 9).[/red]"
             )
             return 2
         if bundle.content_pack.profile is None:
             console.print(
                 f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
                 f"`contentPack.profile` field is required when running under "
-                f"--execution-backend content-pack.[/red]"
+                f"content-pack.[/red]"
             )
             return 2
         pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
@@ -421,7 +414,6 @@ def _run_via_aidp_dispatch(
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
-            execution_backend=execution_backend,
             profile_yaml=profile_yaml,
             pack_files=pack_files,
             pack_manifest=pack_manifest,

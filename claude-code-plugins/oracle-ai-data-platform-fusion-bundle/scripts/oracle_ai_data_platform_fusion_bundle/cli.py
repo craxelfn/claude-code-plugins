@@ -306,20 +306,6 @@ def catalog_probe_pvo(
          "operator error. Only meaningful for REST dispatch (no --inline).",
 )
 @click.option(
-    "--execution-backend", "execution_backend",
-    type=click.Choice(["legacy-python", "content-pack"]),
-    default="content-pack",
-    show_default=True,
-    help="Execution backend (Phase 5 default flip): `content-pack` "
-         "(default) runs the content-pack SQL runner against the pack "
-         "declared in bundle.yaml's `contentPack:` block. `legacy-python` "
-         "runs the v1 hardcoded dim_*.py / gold_*.py modules and emits a "
-         "deprecation warning — kept for backward compatibility through "
-         "Phase 9. Phase 4's dual-runner parity gate (live evidence on "
-         "saasfademo1, 2026-06-07) plus Phase 5's bronze-readiness + "
-         "Fusion-PVO-drift preflight gates close the gate on flipping.",
-)
-@click.option(
     "--force-fingerprint-skip", "force_fingerprint_skip",
     is_flag=True,
     default=False,
@@ -332,7 +318,7 @@ def catalog_probe_pvo(
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
-        poll_timeout_s: int, execution_backend: str,
+        poll_timeout_s: int,
         force_fingerprint_skip: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
@@ -347,7 +333,6 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         resume_run_id=resume_run_id,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
-        execution_backend=execution_backend,
         force_fingerprint_skip=force_fingerprint_skip,
         console=console,
     ))
