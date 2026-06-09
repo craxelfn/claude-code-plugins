@@ -192,6 +192,19 @@ def resolve_dry_run_plan(
         tuple[Literal["bronze", "silver", "gold"], Literal["eligible"], str | None],
     ] = {}
     disabled_datasets: set[str] = set()
+    # Presence-aware bundle scope (round-7 review fix): the legacy
+    # blocks `dimensions:` and `gold:` have non-empty Pydantic defaults
+    # (DimensionsSpec.build = [dim_supplier, dim_account, dim_calendar,
+    # dim_org]; GoldSpec.marts = [ar_aging, ap_aging, gl_balance,
+    # po_backlog]) that fire even when the YAML omits the blocks. A
+    # Phase-9 bundle declaring only `datasets:` would otherwise raise
+    # MissingDependencyError trying to classify dim_org / po_backlog
+    # against a starter pack that ships neither, or — worse — surface
+    # silver/gold roots in the dry-run plan that runtime will never
+    # dispatch (orchestrator's `_effective_bundle_scope` filters by
+    # `model_fields_set`). Mirror that filter here so dry-run preview
+    # matches runtime.
+    bundle_fields_set = getattr(bundle, "model_fields_set", set()) or set()
     for ds in bundle.datasets:
         if not ds.enabled:
             disabled_datasets.add(ds.id)
@@ -205,22 +218,24 @@ def resolve_dry_run_plan(
                 f"gold={sorted(pack.gold)!r}."
             )
         classes[ds.id] = (layer, "eligible", None)
-    for dim_name in bundle.dimensions.build:
-        if dim_name in pack.silver:
-            classes[dim_name] = ("silver", "eligible", None)
-        else:
-            raise MissingDependencyError(
-                f"Unknown dim {dim_name!r} in bundle.dimensions.build. "
-                f"Known silver ids: {sorted(pack.silver)!r}."
-            )
-    for mart_name in bundle.gold.marts:
-        if mart_name in pack.gold:
-            classes[mart_name] = ("gold", "eligible", None)
-        else:
-            raise MissingDependencyError(
-                f"Unknown mart {mart_name!r} in bundle.gold.marts. "
-                f"Known gold ids: {sorted(pack.gold)!r}."
-            )
+    if "dimensions" in bundle_fields_set:
+        for dim_name in bundle.dimensions.build:
+            if dim_name in pack.silver:
+                classes[dim_name] = ("silver", "eligible", None)
+            else:
+                raise MissingDependencyError(
+                    f"Unknown dim {dim_name!r} in bundle.dimensions.build. "
+                    f"Known silver ids: {sorted(pack.silver)!r}."
+                )
+    if "gold" in bundle_fields_set:
+        for mart_name in bundle.gold.marts:
+            if mart_name in pack.gold:
+                classes[mart_name] = ("gold", "eligible", None)
+            else:
+                raise MissingDependencyError(
+                    f"Unknown mart {mart_name!r} in bundle.gold.marts. "
+                    f"Known gold ids: {sorted(pack.gold)!r}."
+                )
 
     # ------------------------------------------------------------------
     # 2. Validate filter inputs.

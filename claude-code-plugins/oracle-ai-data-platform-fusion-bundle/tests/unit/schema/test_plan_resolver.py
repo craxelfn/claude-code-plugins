@@ -374,6 +374,75 @@ gold:
         with pytest.raises(MissingDependencyError, match="mart_does_not_exist"):
             resolve_dry_run_plan(pack, b, paths, datasets=None, layers=None)
 
+    def test_omitted_legacy_blocks_dont_fold_pydantic_defaults(
+        self, pack, paths,
+    ):
+        """Round-7 review fix: a Phase-9 bundle that omits the legacy
+        ``dimensions:`` and ``gold:`` blocks entirely must NOT have
+        ``DimensionsSpec.build`` / ``GoldSpec.marts`` Pydantic defaults
+        (``dim_supplier``, ``dim_account``, ``dim_calendar``,
+        ``dim_org``; ``ar_aging``, ``ap_aging``, ``gl_balance``,
+        ``po_backlog``) folded into the resolver's classification —
+        those would either raise MissingDependencyError against a
+        starter pack that doesn't ship them all, or surface unintended
+        silver/gold roots in the dry-run plan that runtime will never
+        dispatch.
+
+        Pre-fix dry-run iterated bundle.dimensions.build /
+        bundle.gold.marts unconditionally; runtime's
+        ``_effective_bundle_scope`` filtered by
+        ``bundle.model_fields_set`` so the two diverged. Now both
+        honor the same rule.
+        """
+        b = _bundle(
+            """\
+datasets:
+  - id: erp_suppliers
+"""
+        )
+        plan, prereqs = resolve_dry_run_plan(
+            pack, b, paths, datasets=None, layers=None,
+        )
+        plan_ids = {n.dataset_id for n in plan}
+        assert plan_ids == {"erp_suppliers"}, (
+            f"omitted-blocks bundle must yield single-root plan; got "
+            f"{sorted(plan_ids)} — Pydantic defaults leaking through?"
+        )
+        assert prereqs == ()
+
+    def test_omitted_legacy_blocks_match_inline_dry_run_plan(
+        self, pack, paths,
+    ):
+        """Round-7 review fix: REST/inline dry-run parity for the
+        omitted-blocks case. Bundle with only ``datasets:`` must
+        produce the same plan ids in both resolvers."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _build_content_pack_dry_run_plan,
+            _effective_bundle_scope,
+        )
+        b = _bundle(
+            """\
+datasets:
+  - id: erp_suppliers
+"""
+        )
+        scope = _effective_bundle_scope(b)
+        inline_plan = _build_content_pack_dry_run_plan(
+            resolved_pack=pack, datasets=None, layers=None,
+            bundle_scope=scope,
+        )
+        inline_ids = {n.dataset_id for n in inline_plan}
+
+        rest_plan, rest_prereqs = resolve_dry_run_plan(
+            pack, b, paths, datasets=None, layers=None,
+        )
+        rest_ids = {n.dataset_id for n in rest_plan}
+        assert rest_prereqs == ()
+        assert inline_ids == rest_ids, (
+            f"REST/inline divergence on omitted-blocks bundle: "
+            f"inline={sorted(inline_ids)} rest={sorted(rest_ids)}"
+        )
+
     def test_resolve_dry_run_plan_accepts_custom_table_paths(self, pack, bundle):
         """``paths`` is retained in the signature for back-compat after
         the round-6 mirror-runtime refactor (prereqs is empty so the
