@@ -320,6 +320,118 @@ class TestBundleScopeRespectedByResolver:
         )
         return bundle, bp
 
+    def test_legacy_blocks_omitted_do_not_pollute_scope(self, pack, tmp_path):
+        """Reviewer round-4 finding: ``DimensionsSpec.build`` defaults
+        to ``[dim_supplier, dim_account, dim_calendar, dim_org]`` and
+        ``GoldSpec.marts`` defaults to
+        ``[ar_aging, ap_aging, gl_balance, po_backlog]``. A Phase 9
+        bundle that OMITS both blocks must NOT see those defaults
+        folded into ``bundle_scope`` — the operator never authored
+        them.
+
+        Pre-fix ``_effective_bundle_scope`` did
+        ``for name in (dims.build or []): scope.add(name)`` which
+        always pulled the defaults.
+        """
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        import yaml as _yaml
+
+        # IMPORTANT — no ``dimensions:`` or ``gold:`` blocks.
+        bundle = Bundle.model_validate(_yaml.safe_load(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: omit-legacy-test\n"
+            "fusion:\n  serviceUrl: https://example.com\n  username: u\n"
+            "  password: p\n  externalStorage: s\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: bronze\n"
+            "  silverSchema: silver\n  goldSchema: gold\n"
+            "datasets:\n  - id: erp_suppliers\n"
+            "contentPack:\n  name: x\n  path: ./pack\n  profile: p\n"
+        ))
+
+        scope = _effective_bundle_scope(bundle)
+        assert scope == {"erp_suppliers"}, (
+            f"omitted dimensions:/gold: blocks must NOT contribute to "
+            f"scope (Pydantic defaults are non-empty for back-compat). "
+            f"Got {sorted(scope)!r}."
+        )
+
+        # No-filter run with this bundle must execute ONLY
+        # erp_suppliers — no dim_supplier, no dim_account, no
+        # supplier_spend, no other pack node.
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+            resolve_content_pack_plan,
+        )
+        plan = resolve_content_pack_plan(
+            pack, datasets=None, layers=None, bundle_scope=scope,
+        )
+        plan_ids = {n.id for n in plan}
+        assert plan_ids == {"erp_suppliers"}, (
+            f"no-filter run with omitted legacy blocks must execute "
+            f"ONLY the bundle-declared bronze root + true D-1 deps "
+            f"(bronze has none). Got plan {sorted(plan_ids)!r}."
+        )
+
+    def test_explicit_dimensions_block_folds_into_scope(self, pack, tmp_path):
+        """An author who explicitly writes ``dimensions: { build:
+        [dim_supplier] }`` opts INTO the legacy contract; that id
+        folds into scope."""
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        import yaml as _yaml
+
+        bundle = Bundle.model_validate(_yaml.safe_load(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: explicit-legacy-test\n"
+            "fusion:\n  serviceUrl: https://example.com\n  username: u\n"
+            "  password: p\n  externalStorage: s\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: bronze\n"
+            "  silverSchema: silver\n  goldSchema: gold\n"
+            "datasets:\n  - id: erp_suppliers\n"
+            "dimensions:\n  build: [dim_supplier]\n"
+            "contentPack:\n  name: x\n  path: ./pack\n  profile: p\n"
+        ))
+
+        scope = _effective_bundle_scope(bundle)
+        assert scope == {"erp_suppliers", "dim_supplier"}, (
+            f"explicit dimensions.build entry must fold into scope; "
+            f"got {sorted(scope)!r}."
+        )
+
+    def test_explicit_empty_dimensions_block_folds_nothing(self, pack, tmp_path):
+        """An author who writes ``dimensions: { build: [] }`` (explicit
+        empty list) opts INTO the legacy contract but contributes no
+        scope ids. ``model_fields_set`` includes ``dimensions`` so the
+        helper sees the authored block; the empty list folds nothing."""
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        import yaml as _yaml
+
+        bundle = Bundle.model_validate(_yaml.safe_load(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: explicit-empty-legacy-test\n"
+            "fusion:\n  serviceUrl: https://example.com\n  username: u\n"
+            "  password: p\n  externalStorage: s\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: bronze\n"
+            "  silverSchema: silver\n  goldSchema: gold\n"
+            "datasets:\n  - id: erp_suppliers\n"
+            "dimensions:\n  build: []\n"
+            "gold:\n  marts: []\n"
+            "contentPack:\n  name: x\n  path: ./pack\n  profile: p\n"
+        ))
+
+        scope = _effective_bundle_scope(bundle)
+        assert scope == {"erp_suppliers"}, (
+            f"explicit empty dimensions.build + gold.marts contribute "
+            f"nothing; scope = bundle.datasets[]. Got {sorted(scope)!r}."
+        )
+
     def test_no_filter_executes_only_bundle_declared_roots(self, pack, tmp_path):
         """A bundle declaring only erp_suppliers must NOT pull in
         supplier_spend (gold), dim_supplier (silver), or ap_invoices

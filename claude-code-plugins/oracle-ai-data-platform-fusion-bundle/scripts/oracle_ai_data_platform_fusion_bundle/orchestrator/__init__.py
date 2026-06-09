@@ -795,9 +795,20 @@ def _effective_bundle_scope(bundle: "Any") -> set[str]:
     intent list. It can reference bronze / silver / gold ids (D-1
     auto-pulls transitive deps). Two legacy bundle fields —
     ``bundle.dimensions.build`` and ``bundle.gold.marts`` — pre-date the
-    cross-layer ``datasets[]`` contract and still ship pack-id values;
-    when they're populated, fold their entries into the scope so old
-    bundles continue to work byte-for-byte.
+    cross-layer ``datasets[]`` contract; when the YAML actually carries
+    those blocks they fold into the scope so old bundles keep working.
+
+    **Presence-aware**: the Pydantic schema ships non-empty defaults for
+    ``dimensions.build`` (``dim_supplier``, ``dim_account``,
+    ``dim_calendar``, ``dim_org``) and ``gold.marts`` (``ar_aging``,
+    ``ap_aging``, ``gl_balance``, ``po_backlog``). A Phase 9 bundle that
+    omits the blocks entirely would otherwise have those default ids
+    smuggled into the scope. The check uses ``bundle.model_fields_set``
+    — Pydantic's "fields the constructor was given" record — to fold
+    only when the YAML actually authored the block. An author who
+    explicitly writes ``dimensions: { build: [] }`` (or a non-empty
+    list) marks ``dimensions`` as set and the inner ``build`` list is
+    honored regardless of contents.
 
     Disabled datasets (``DatasetSpec.enabled = False``) are excluded —
     same contract the legacy resolver honored.
@@ -814,20 +825,24 @@ def _effective_bundle_scope(bundle: "Any") -> set[str]:
     for ds in getattr(bundle, "datasets", []) or []:
         if getattr(ds, "enabled", True):
             scope.add(ds.id)
-    # Legacy fields — only fold when populated. The Pydantic defaults
-    # for these lists are non-empty in the current schema (back-compat
-    # with pre-Phase-9 bundles), so a no-touch bundle still surfaces
-    # them. Bundle authors who want pure-datasets[] semantics drop the
-    # legacy blocks; loaders that set them to ``[]`` explicitly are
-    # honored.
-    dims = getattr(bundle, "dimensions", None)
-    if dims is not None:
-        for name in getattr(dims, "build", None) or []:
-            scope.add(str(name))
-    gold = getattr(bundle, "gold", None)
-    if gold is not None:
-        for name in getattr(gold, "marts", None) or []:
-            scope.add(str(name))
+    bundle_fields_set = getattr(bundle, "model_fields_set", set()) or set()
+    # ``dimensions.build`` only folds when the YAML carries a
+    # ``dimensions:`` block. Without this guard, Pydantic's non-empty
+    # ``DimensionsSpec.build`` default would smuggle dim_supplier /
+    # dim_account / dim_calendar / dim_org into the scope of every
+    # Phase 9 bundle that omits the block.
+    if "dimensions" in bundle_fields_set:
+        dims = getattr(bundle, "dimensions", None)
+        if dims is not None:
+            for name in getattr(dims, "build", None) or []:
+                scope.add(str(name))
+    # Same guard for ``gold.marts`` (defaults to
+    # ar_aging / ap_aging / gl_balance / po_backlog).
+    if "gold" in bundle_fields_set:
+        gold = getattr(bundle, "gold", None)
+        if gold is not None:
+            for name in getattr(gold, "marts", None) or []:
+                scope.add(str(name))
     return scope
 
 

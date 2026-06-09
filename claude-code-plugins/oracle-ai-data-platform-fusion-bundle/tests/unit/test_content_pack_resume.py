@@ -132,6 +132,10 @@ aidp:
 datasets:
   - id: erp_suppliers
     mode: full
+  # Phase 9 cross-layer datasets[]: declare silver + gold roots so
+  # the resolver's bundle_scope picks them up.
+  - id: dim_supplier
+  - id: supplier_spend
 contentPack:
   name: content-pack-resume-test
   path: ./pack
