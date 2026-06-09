@@ -321,7 +321,6 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
     AIDPF_2057_AGGREGATE_MERGE_DEFERRED,
     AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST,
     AIDPF_2059_SCD2_NO_TRACKED_COLUMNS,
-    AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED,
     NodeYaml,
 )
 
@@ -551,62 +550,9 @@ def test_R12_output_schema_missing_pii_rejected() -> None:
     )
 
 
-# ----- R13: python_legacy without explicit deprecated (or invariant) -------
-
-
-def test_R13_python_legacy_without_deprecated_rejected() -> None:
-    data = _minimal_silver_node_dict()
-    data["implementation"] = {
-        "type": "python_legacy",
-        "callable": "oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier:build",
-        # `deprecated:` intentionally omitted
-    }
-    with pytest.raises(ValidationError) as exc:
-        NodeYaml.model_validate(data)
-    # Pydantic surfaces missing required-bool as "missing"; the architectural
-    # rule (AIDPF-2060) is the documented remediation.
-    errors = exc.value.errors()
-    assert any("deprecated" in str(e.get("loc", ())) for e in errors)
-
-
-def test_R13_python_legacy_deprecated_false_requires_migration_target() -> None:
-    """`deprecated: false` without `migrationTarget` → AIDPF-2060."""
-    data = _minimal_silver_node_dict()
-    data["implementation"] = {
-        "type": "python_legacy",
-        "callable": "oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier:build",
-        "deprecated": False,
-        # migrationTarget intentionally omitted
-    }
-    with pytest.raises(ValidationError) as exc:
-        NodeYaml.model_validate(data)
-    assert _errors_contain(exc.value, AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED)
-
-
-def test_R13_python_legacy_deprecated_false_with_migration_target_ok() -> None:
-    """`deprecated: false` + `migrationTarget` is the valid in-migration shape."""
-    data = _minimal_silver_node_dict()
-    data["implementation"] = {
-        "type": "python_legacy",
-        "callable": "oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier:build",
-        "deprecated": False,
-        "migrationTarget": "silver/dim_supplier.sql",
-    }
-    node = NodeYaml.model_validate(data)
-    assert node.implementation.deprecated is False
-    assert node.implementation.migration_target == "silver/dim_supplier.sql"
-
-
-def test_R13_python_legacy_deprecated_true_ok() -> None:
-    """`deprecated: true` is the post-migration shape; no migrationTarget needed."""
-    data = _minimal_silver_node_dict()
-    data["implementation"] = {
-        "type": "python_legacy",
-        "callable": "oracle_ai_data_platform_fusion_bundle.dimensions.dim_supplier:build",
-        "deprecated": True,
-    }
-    node = NodeYaml.model_validate(data)
-    assert node.implementation.deprecated is True
+# Phase 9: R13 (python_legacy invariants) deleted with the
+# python_legacy implementation type itself. ADR-0022 documents the
+# customer-migration paths.
 
 
 # ---------------------------------------------------------------------------

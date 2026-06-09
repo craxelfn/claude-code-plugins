@@ -56,17 +56,15 @@ def _make_base_pack(root: Path) -> Path:
             },
         },
     )
-    # One python_legacy silver node so override tests have a target.
+    # One silver node so override tests have a target.
     _write_yaml(
         pack_root / "silver" / "dim_supplier.yaml",
         {
             "id": "dim_supplier",
             "layer": "silver",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.dim_supplier:build",
-                "deprecated": False,
-                "migrationTarget": "silver/dim_supplier.sql",
             },
             "target": "dim_supplier",
             "dependsOn": {

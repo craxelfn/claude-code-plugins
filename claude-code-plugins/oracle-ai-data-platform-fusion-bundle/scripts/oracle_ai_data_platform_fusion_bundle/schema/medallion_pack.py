@@ -63,7 +63,9 @@ AIDPF_2056_APPEND_UNIQUE_NO_KEY = "AIDPF-2056"      # R8
 AIDPF_2057_AGGREGATE_MERGE_DEFERRED = "AIDPF-2057"  # R9
 AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST = "AIDPF-2058"   # R10
 AIDPF_2059_SCD2_NO_TRACKED_COLUMNS = "AIDPF-2059"   # R11
-AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED = "AIDPF-2060"  # R13
+# AIDPF-2060 (python_legacy deprecated invariant) and AIDPF-2061
+# (python_legacy callable spec) were retired in Phase 9 when the
+# python_legacy implementation type was deleted.
 
 # Phase 9 — bronze content-pack node type
 AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
@@ -319,8 +321,7 @@ class OverrideEntry(BaseModel):
     * ``sql:`` -- full-file replace; the named SQL path lives in the overlay.
     * ``quality:`` -- nested ``tests:`` list extends base.
     * ``extendColumns: true`` -- the overlay extends the base node's
-      ``outputSchema.columns`` rather than replacing it (Phase-1 stubs use
-      this for ``python_legacy`` migration-period stubs).
+      ``outputSchema.columns`` rather than replacing it.
 
     Unknown keys default to scalar-replace per §8.7.
     """
@@ -527,7 +528,7 @@ IncrementalStrategy = Literal[
     "scd2",
 ]
 NodeLayer = Literal["bronze", "silver", "gold"]
-NodeImplType = Literal["sql", "builtin", "python_legacy", "bronze_extract"]
+NodeImplType = Literal["sql", "builtin", "bronze_extract"]
 
 
 class WatermarkSpec(BaseModel):
@@ -763,49 +764,6 @@ class BuiltinImpl(BaseModel):
     """Importable Python callable, `<module>:<func>` form."""
 
 
-class PythonLegacyImpl(BaseModel):
-    """`implementation.type: python_legacy` — v1 module bridged for the migration period.
-
-    Per the v2 plan, this type is permitted only during the migration window:
-
-    * ``deprecated: true`` — v1 module replaced by SQL, kept for parity testing.
-    * ``deprecated: false`` — v1 module still active runtime; ``migrationTarget``
-      points at the pack-relative SQL path that will replace it in Phase 3.
-
-    The discriminator validates the field is **present**. The model_validator
-    below enforces the ``deprecated=false → migrationTarget`` invariant.
-    """
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    type: Literal["python_legacy"] = "python_legacy"
-    callable: str
-    """Importable Python callable, `<module>:<func>` form."""
-
-    deprecated: bool
-    """Required field. Missing → AIDPF-2060.
-
-    Pydantic treats `bool` fields without a default as required; if YAML omits
-    the key entirely, validation fails with a generic missing-field error. We
-    wrap that case in a model_validator below to surface AIDPF-2060 cleanly.
-    """
-
-    migration_target: str | None = Field(default=None, alias="migrationTarget")
-    """Pack-relative SQL path that will replace this module in Phase 3.
-    Required when ``deprecated=False``; ignored otherwise."""
-
-    @model_validator(mode="after")
-    def _check_deprecated_invariant(self) -> "PythonLegacyImpl":
-        if self.deprecated is False and not self.migration_target:
-            raise ValueError(
-                f"{AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED}: "
-                "python_legacy node with deprecated=false must declare "
-                "migrationTarget pointing at the pack-relative SQL path that "
-                "will replace it in Phase 3."
-            )
-        return self
-
-
 class BronzeExtractImpl(BaseModel):
     """``implementation.type: bronze_extract`` — BICC PVO extraction (Phase 9).
 
@@ -876,7 +834,7 @@ class BronzeExtractImpl(BaseModel):
 
 
 NodeImplementation = Annotated[
-    SqlImpl | BuiltinImpl | PythonLegacyImpl | BronzeExtractImpl,
+    SqlImpl | BuiltinImpl | BronzeExtractImpl,
     Field(discriminator="type"),
 ]
 

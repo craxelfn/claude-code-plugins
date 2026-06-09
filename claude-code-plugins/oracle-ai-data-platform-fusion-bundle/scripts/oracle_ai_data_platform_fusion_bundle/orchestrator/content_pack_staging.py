@@ -266,8 +266,8 @@ def _stage_sql_templates(
         impl = node.implementation
         sql_relpath_str = getattr(impl, "sql", None)
         if not sql_relpath_str:
-            # Non-SQL implementation (python_legacy, builtin) — no SQL
-            # file to stage.
+            # Non-SQL implementation (builtin, bronze_extract) — no
+            # SQL file to stage.
             continue
 
         source_root = resolved_pack.root_for(qid).resolve()

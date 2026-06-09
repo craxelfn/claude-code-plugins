@@ -141,7 +141,7 @@
     },
     "OverrideEntry": {
       "additionalProperties": true,
-      "description": "Per-node override declared by an overlay pack.\n\nPLAN \u00a78.7 merge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it (Phase-1 stubs use\n  this for ``python_legacy`` migration-period stubs).\n\nUnknown keys default to scalar-replace per \u00a78.7.",
+      "description": "Per-node override declared by an overlay pack.\n\nPLAN \u00a78.7 merge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it.\n\nUnknown keys default to scalar-replace per \u00a78.7.",
       "properties": {
         "profile": {
           "anyOf": [

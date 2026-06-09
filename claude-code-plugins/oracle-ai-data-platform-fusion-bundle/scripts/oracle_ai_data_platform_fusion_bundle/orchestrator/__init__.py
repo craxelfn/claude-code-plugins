@@ -1903,30 +1903,32 @@ def _resolve_node_from_pack(
     ``NodeYaml`` for silver/dim_supplier".
 
     Per-node ``implementation.type`` (``sql`` / ``builtin`` /
-    ``python_legacy``) discriminates the runtime path; the dispatch
+    ``bronze_extract``) discriminates the runtime path; the dispatch
     itself is inside ``sql_runner.execute_node``.
 
     Args:
         pack: the resolved content pack (``ResolvedPack``).
-        layer: ``"silver"`` or ``"gold"``.
+        layer: ``"bronze"`` / ``"silver"`` / ``"gold"``.
         node_id: pack-author node id (matches ``NodeYaml.id``).
 
     Returns:
         The :class:`NodeYaml` for that ``(layer, node_id)``.
 
     Raises:
-        ValueError: ``layer`` not in ``{"silver", "gold"}``.
+        ValueError: ``layer`` not in ``{"bronze", "silver", "gold"}``.
         PackNodeNotFoundError: ``node_id`` is absent from
-            ``pack.silver`` / ``pack.gold``.
+            ``pack.bronze`` / ``pack.silver`` / ``pack.gold``.
     """
-    if layer == "silver":
+    if layer == "bronze":
+        bucket = getattr(pack, "bronze", {})
+    elif layer == "silver":
         bucket = getattr(pack, "silver", {})
     elif layer == "gold":
         bucket = getattr(pack, "gold", {})
     else:
         raise ValueError(
             f"_resolve_node_from_pack: layer={layer!r} not in "
-            f"{{'silver', 'gold'}}. Bronze nodes are not pack-driven yet."
+            f"{{'bronze', 'silver', 'gold'}}."
         )
     if node_id not in bucket:
         available = sorted(bucket.keys())

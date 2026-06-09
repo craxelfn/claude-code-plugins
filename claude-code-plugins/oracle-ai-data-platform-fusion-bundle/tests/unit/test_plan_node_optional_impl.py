@@ -1,6 +1,6 @@
 """Phase 5 Step 6 — Content-pack dry-run plan nodes carry implementation
 metadata so the renderer can show operators which backend each node
-dispatches through (``sql`` / ``builtin`` / ``python_legacy``).
+dispatches through (``sql`` / ``builtin`` / ``bronze_extract``).
 
 The current ``PlanNode`` shape carries ``dataset_id``, ``layer``,
 ``status``, ``reason``. Phase 5's dry-run path produces PlanNodes
@@ -103,7 +103,7 @@ class TestPlanNodeOptionalImpl:
         assert set(ids) == {"dim_sql", "dim_calendar"}
         for pn in plan:
             node = _resolve_node_from_pack(pack, pn.layer, pn.dataset_id)
-            assert node.implementation.type in {"sql", "builtin", "python_legacy"}
+            assert node.implementation.type in {"sql", "builtin", "bronze_extract"}
             if pn.dataset_id == "dim_sql":
                 assert node.implementation.type == "sql"
             elif pn.dataset_id == "dim_calendar":

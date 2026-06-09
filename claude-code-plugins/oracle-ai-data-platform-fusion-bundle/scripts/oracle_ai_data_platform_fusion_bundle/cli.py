@@ -192,6 +192,69 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
     sys.exit(probe_catalog(pod=pod, username=username, password=password, console=console))
 
 
+@catalog.command("probe-pvo")
+@click.argument("dataset_id")
+@click.option(
+    "--datastore", required=True,
+    help="BICC datastore identifier (e.g. SupplierExtractPVO).",
+)
+@click.option(
+    "--bicc-schema", required=True,
+    help="BICC offering schema (Financial / HCM / SCM).",
+)
+@click.option(
+    "--pvo-id", default=None,
+    help="Optional full AM-hierarchy path "
+         "(e.g. FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO). "
+         "Used for WARN cross-reference against the curated catalog.",
+)
+@click.option(
+    "--incremental-capable/--no-incremental-capable", default=True,
+    help="Whether fusion.initial.extract-date is meaningful for this PVO "
+         "(default: True). Set --no-incremental-capable for snapshot-style "
+         "PVOs (gl_period_balances, gl_coa) where LastUpdateDate doesn't "
+         "track meaningful change events monotonically.",
+)
+@click.option(
+    "--emit-pack-yaml", required=True,
+    help="Path to write the draft YAML to "
+         "(typically content_packs/<overlay-pack>/bronze/<id>.yaml).",
+)
+@click.pass_context
+def catalog_probe_pvo(
+    ctx: click.Context,
+    dataset_id: str,
+    datastore: str,
+    bicc_schema: str,
+    pvo_id: str | None,
+    incremental_capable: bool,
+    emit_pack_yaml: str,
+) -> None:
+    """Probe a BICC PVO and emit a draft content-pack bronze YAML.
+
+    Runs a metadata-only ``extract_pvo().schema`` roundtrip (no row pull),
+    translates the discovered StructType to outputSchema.columns, and
+    writes a draft YAML with commented-out refresh.incremental TODOs.
+
+    Operator must review the generated YAML before production use:
+    fill in naturalKey, watermark.column, requiredColumns, and pii
+    classifications.
+    """
+    from .commands.catalog import probe_pvo_emit_pack_yaml
+    sys.exit(probe_pvo_emit_pack_yaml(
+        dataset_id=dataset_id,
+        datastore=datastore,
+        bicc_schema=bicc_schema,
+        pvo_id=pvo_id,
+        incremental_capable=incremental_capable,
+        emit_pack_yaml=emit_pack_yaml,
+        bundle_path=ctx.obj.get("bundle_path") if ctx.obj else None,
+        config_path=ctx.obj.get("config_path") if ctx.obj else None,
+        env_name=ctx.obj.get("env_name", "dev") if ctx.obj else "dev",
+        console=console,
+    ))
+
+
 @main.command()
 @click.option(
     "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
