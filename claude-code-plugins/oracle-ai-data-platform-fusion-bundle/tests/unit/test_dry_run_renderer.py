@@ -91,6 +91,11 @@ def test_dry_run_summary_carries_populated_plan(tmp_path, monkeypatch):
         "datasets:\n"
         "  - id: ap_invoices\n"
         "    mode: incremental\n"
+        # Phase 9 cross-layer datasets[]: declare dim_x so the
+        # bundle_scope picks it up as a silver root.
+        "  - id: dim_x\n"
+        "dimensions:\n  build: []\n"
+        "gold:\n  marts: []\n"
         f"contentPack:\n"
         f"  name: phase5-dry-run-renderer-test\n"
         f"  profile: finance-default\n"

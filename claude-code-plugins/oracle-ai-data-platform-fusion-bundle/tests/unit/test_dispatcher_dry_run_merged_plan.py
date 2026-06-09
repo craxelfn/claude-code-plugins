@@ -164,6 +164,15 @@ aidp:
 datasets:
   - id: erp_suppliers
     mode: incremental
+  # Phase 9 cross-layer datasets[]: declare silver + gold roots so
+  # the bundle_scope picks them up. D-1 auto-pulls erp_suppliers
+  # as a transitive bronze dep of dim_supplier.
+  - id: dim_supplier
+  - id: supplier_spend
+dimensions:
+  build: []
+gold:
+  marts: []
 contentPack:
   name: dispatch-dry-run-merge-pack
   path: ./pack

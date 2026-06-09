@@ -283,6 +283,172 @@ class TestPvoDriftGateScopeFromResolvedPlan:
 # ---------------------------------------------------------------------------
 
 
+class TestBundleScopeRespectedByResolver:
+    """Phase 9 round-3 review: production resolver call sites
+    (_phase5_top_level_dispatch PVO drift gate +
+    _build_content_pack_dry_run_plan + _run_content_pack_backend
+    execution loop) must pass ``bundle_scope=`` to the resolver so:
+
+      1. A no-filter run executes only bundle-declared roots + their
+         D-1 deps — NOT every node in the pack.
+      2. CLI ``--datasets <node-outside-bundle>`` raises
+         AIDPF-1043 CLI_DATASET_OUTSIDE_BUNDLE_SCOPE.
+      3. Inline and REST dispatch dry-runs render the same plan
+         (both honor bundle.datasets[] now).
+    """
+
+    def _bundle(self, tmp_path: pathlib.Path, dataset_ids: list[str]):
+        """Author a bundle whose contentPack points at ``pack`` fixture."""
+        from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle
+        import yaml as _yaml
+        bp = tmp_path / "bundle.yaml"
+        bp.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: scope-test\n"
+            "fusion:\n  serviceUrl: https://example.com\n  username: u\n"
+            "  password: p\n  externalStorage: s\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: bronze\n"
+            "  silverSchema: silver\n  goldSchema: gold\n"
+            "datasets:\n"
+            + "".join(f"  - id: {sid}\n" for sid in dataset_ids)
+            + "dimensions:\n  build: []\n"
+            "gold:\n  marts: []\n"
+            "contentPack:\n  name: x\n  path: ./pack\n  profile: p\n"
+        )
+        bundle = Bundle.model_validate(
+            _yaml.safe_load(bp.read_text(encoding="utf-8"))
+        )
+        return bundle, bp
+
+    def test_no_filter_executes_only_bundle_declared_roots(self, pack, tmp_path):
+        """A bundle declaring only erp_suppliers must NOT pull in
+        supplier_spend (gold), dim_supplier (silver), or ap_invoices
+        (a bronze sibling that's NOT in bundle.datasets[]).
+        Pre-fix behavior treated every pack node as a root and would
+        have returned the full pack."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+            resolve_content_pack_plan,
+        )
+        bundle, _ = self._bundle(tmp_path, ["erp_suppliers"])
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        scope = _effective_bundle_scope(bundle)
+        plan = resolve_content_pack_plan(
+            pack, datasets=None, layers=None, bundle_scope=scope,
+        )
+        ids = {n.id for n in plan}
+        assert ids == {"erp_suppliers"}, (
+            f"no-filter run with bundle.datasets=[erp_suppliers] must "
+            f"execute ONLY erp_suppliers (no D-1 deps since bronze has "
+            f"no upstream); got {ids!r}. Pre-fix the resolver treated "
+            f"every pack node as a root and would have returned silver "
+            f"+ gold too."
+        )
+
+    def test_no_filter_with_gold_intent_pulls_transitive_deps(self, pack, tmp_path):
+        """A bundle declaring supplier_spend (gold) must execute it
+        PLUS D-1 transitive deps — but NOT gl_journal_lines (a sibling
+        pack node that's not in scope)."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+            resolve_content_pack_plan,
+        )
+        bundle, _ = self._bundle(tmp_path, ["supplier_spend"])
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        scope = _effective_bundle_scope(bundle)
+        plan = resolve_content_pack_plan(
+            pack, datasets=None, layers=None, bundle_scope=scope,
+        )
+        ids = {n.id for n in plan}
+        # D-1 closure of supplier_spend: ap_invoices (bronze dep) +
+        # dim_supplier (silver dep) → erp_suppliers (transitive
+        # bronze dep of dim_supplier).
+        assert ids == {
+            "supplier_spend", "ap_invoices", "dim_supplier", "erp_suppliers",
+        }, (
+            f"supplier_spend with D-1 must pull transitive deps; got {ids!r}"
+        )
+        # gl_journal_lines is NOT in scope and NOT a transitive dep,
+        # so it must NOT appear.
+        assert "gl_journal_lines" not in ids
+
+    def test_cli_dataset_outside_bundle_scope_raises_aidpf_1043(self, pack, tmp_path):
+        """CLI ``--datasets gl_journal_lines`` against a bundle whose
+        datasets=[erp_suppliers] must raise AIDPF-1043 — the operator
+        cannot smuggle in undeclared roots via the CLI."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+            resolve_content_pack_plan,
+            CliDatasetOutsideBundleScopeError,
+            AIDPF_1043_CLI_DATASET_OUTSIDE_BUNDLE_SCOPE,
+        )
+        bundle, _ = self._bundle(tmp_path, ["erp_suppliers"])
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _effective_bundle_scope,
+        )
+        scope = _effective_bundle_scope(bundle)
+        with pytest.raises(CliDatasetOutsideBundleScopeError) as exc:
+            resolve_content_pack_plan(
+                pack,
+                datasets=["gl_journal_lines"],  # not in bundle.datasets[]
+                layers=None,
+                bundle_scope=scope,
+            )
+        assert AIDPF_1043_CLI_DATASET_OUTSIDE_BUNDLE_SCOPE in str(exc.value)
+
+    def test_inline_and_dispatch_dry_run_agree(self, pack, tmp_path):
+        """Both the inline dry-run (orchestrator) and the REST
+        dispatch dry-run (schema/plan_resolver) must report the same
+        set of touched nodes (plan ∪ prereqs) for the same bundle +
+        pack. Pre-fix the two disagreed: REST honored
+        bundle.datasets[]; inline treated every pack node as a root.
+
+        Uses a bundle that declares the full chain explicitly
+        (Phase 5 "explicit-everything" contract) — that's the
+        intersection where the two resolvers agree byte-for-byte. The
+        D-1 auto-include path (inline-only behavior for high-level
+        intent) is exercised in test_no_filter_with_gold_intent_pulls_transitive_deps.
+        """
+        from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            _build_content_pack_dry_run_plan,
+            _effective_bundle_scope,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.plan_resolver import (
+            resolve_dry_run_plan,
+        )
+
+        bundle, _ = self._bundle(
+            tmp_path,
+            ["erp_suppliers", "ap_invoices", "dim_supplier", "supplier_spend"],
+        )
+        scope = _effective_bundle_scope(bundle)
+        # Inline path.
+        inline_plan = _build_content_pack_dry_run_plan(
+            resolved_pack=pack, datasets=None, layers=None,
+            bundle_scope=scope,
+        )
+        inline_ids = {n.dataset_id for n in inline_plan}
+
+        # REST dispatch path (schema/plan_resolver).
+        paths = TablePaths(
+            catalog="c", bronze_schema="bronze",
+            silver_schema="silver", gold_schema="gold",
+        )
+        rest_plan, rest_prereqs = resolve_dry_run_plan(
+            pack, bundle, paths, datasets=None, layers=None,
+        )
+        rest_ids_total = (
+            {n.dataset_id for n in rest_plan}
+            | {n.dataset_id for n in rest_prereqs}
+        )
+        assert inline_ids == rest_ids_total, (
+            f"inline plan ({sorted(inline_ids)}) disagrees with REST "
+            f"plan+prereqs ({sorted(rest_ids_total)})"
+        )
+
+
 class TestBronzeTableForSourceUsesNodeTarget:
     """``gl_journal_lines`` has ``id=gl_journal_lines`` but
     ``target=gl_journal_headers``. The pre-fix map (built from

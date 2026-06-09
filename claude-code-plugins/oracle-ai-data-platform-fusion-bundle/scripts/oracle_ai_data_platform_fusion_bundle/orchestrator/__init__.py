@@ -788,6 +788,49 @@ def _bootstrap_spark() -> "SparkSession":
     return SparkSession.builder.appName("aidp-fusion-bundle-orchestrator").getOrCreate()
 
 
+def _effective_bundle_scope(bundle: "Any") -> set[str]:
+    """Compute the cross-layer scope the resolver should treat as roots.
+
+    Phase 9 contract: ``bundle.datasets[]`` is the operator's high-level
+    intent list. It can reference bronze / silver / gold ids (D-1
+    auto-pulls transitive deps). Two legacy bundle fields —
+    ``bundle.dimensions.build`` and ``bundle.gold.marts`` — pre-date the
+    cross-layer ``datasets[]`` contract and still ship pack-id values;
+    when they're populated, fold their entries into the scope so old
+    bundles continue to work byte-for-byte.
+
+    Disabled datasets (``DatasetSpec.enabled = False``) are excluded —
+    same contract the legacy resolver honored.
+
+    Returns the SET of declared root ids. The resolver consumes this
+    as ``bundle_scope=`` and:
+      * Uses it as the implicit root set when no CLI ``--datasets``
+        filter is given (so a no-filter run executes only declared
+        roots + D-1 deps, NOT every pack node).
+      * Validates CLI ``--datasets`` is a subset of it; ids outside
+        the scope raise ``AIDPF-1043 CLI_DATASET_OUTSIDE_BUNDLE_SCOPE``.
+    """
+    scope: set[str] = set()
+    for ds in getattr(bundle, "datasets", []) or []:
+        if getattr(ds, "enabled", True):
+            scope.add(ds.id)
+    # Legacy fields — only fold when populated. The Pydantic defaults
+    # for these lists are non-empty in the current schema (back-compat
+    # with pre-Phase-9 bundles), so a no-touch bundle still surfaces
+    # them. Bundle authors who want pure-datasets[] semantics drop the
+    # legacy blocks; loaders that set them to ``[]`` explicitly are
+    # honored.
+    dims = getattr(bundle, "dimensions", None)
+    if dims is not None:
+        for name in getattr(dims, "build", None) or []:
+            scope.add(str(name))
+    gold = getattr(bundle, "gold", None)
+    if gold is not None:
+        for name in getattr(gold, "marts", None) or []:
+            scope.add(str(name))
+    return scope
+
+
 # ---------------------------------------------------------------------------
 # Public API — run()
 # ---------------------------------------------------------------------------
@@ -1009,6 +1052,7 @@ def _phase5_top_level_dispatch(
             datasets=datasets,
             layers=layers,
             strict_scope=strict_scope,
+            bundle_scope=_effective_bundle_scope(bundle),
         )
         return RunSummary.empty(
             bundle_project=bundle.project, mode=mode, plan=plan_nodes,
@@ -1035,6 +1079,7 @@ def _phase5_top_level_dispatch(
     # gate scope from raw filters missed those transitive bronze
     # extracts, letting Fusion column drift slip past the AIDPF-2072
     # gate and surface as opaque downstream failures.
+    bundle_scope = _effective_bundle_scope(bundle)
     in_scope_bronze: set[str] = set()
     if resolved_pack is not None:
         try:
@@ -1043,6 +1088,7 @@ def _phase5_top_level_dispatch(
                 resolved_pack,
                 datasets=datasets, layers=layers,
                 strict_scope=strict_scope,
+                bundle_scope=bundle_scope,
             )
             in_scope_bronze = {n.id for n in gate_plan if n.layer == "bronze"}
         except Exception:  # noqa: BLE001 — resolver failures surface
@@ -1408,14 +1454,17 @@ def _build_content_pack_dry_run_plan(
     datasets: list[str] | None,
     layers: list[str] | None,
     strict_scope: bool = False,
+    bundle_scope: set[str] | None = None,
 ) -> tuple[Any, ...]:
     """Return a tuple of :class:`PlanNode` for the content-pack dry-run path.
 
-    The legacy backend's ``run(..., dry_run=True)`` returns a
-    ``RunSummary.empty(...)`` carrying a ``plan`` of
-    :class:`PlanNode`-shaped tuples. Phase 5's content-pack default-
-    flipped backend mirrors that contract so the CLI's summary renderer
-    (``_render_summary``) shows the same shape regardless of backend.
+    Phase 9 contract: when ``bundle_scope`` is supplied, the resolver
+    treats it as the declared-root ceiling. Without it (callers that
+    pre-date the bundle-scope wiring), the resolver falls back to
+    "every pack node is a root" — which lies to the operator when the
+    bundle declares only a subset. Production callers
+    (``_phase5_top_level_dispatch`` dry-run + REST dispatch) must pass
+    ``bundle_scope=_effective_bundle_scope(bundle)``.
 
     The implementation walks ``resolve_content_pack_plan`` (the same
     resolver the runtime uses) so the dry-run plan is byte-equivalent
@@ -1426,6 +1475,7 @@ def _build_content_pack_dry_run_plan(
     plan = resolve_content_pack_plan(
         resolved_pack, datasets=datasets, layers=layers,
         strict_scope=strict_scope,
+        bundle_scope=bundle_scope,
     )
     plan_nodes = tuple(
         PlanNode(
@@ -1625,6 +1675,12 @@ def _run_content_pack_backend(
     bundle, paths = _load_bundle_v2(bundle_path)
     bundle_project = bundle.project
 
+    # Phase 9 review fix: every resolver call from this point on uses
+    # the bundle's declared scope as the implicit root set. A no-CLI-
+    # filter run executes only bundle-declared roots + D-1 deps,
+    # NOT every pack node.
+    bundle_scope = _effective_bundle_scope(bundle)
+
     if dry_run:
         # Phase 5 Step 6 — populate the content-pack dry-run plan so the
         # renderer can show operators which silver/gold nodes would run +
@@ -1634,6 +1690,8 @@ def _run_content_pack_backend(
             resolved_pack=resolved_pack,
             datasets=datasets,
             layers=layers,
+            strict_scope=strict_scope,
+            bundle_scope=bundle_scope,
         )
         return RunSummary.empty(
             bundle_project=bundle_project, mode=mode, plan=plan_nodes,
@@ -1760,6 +1818,7 @@ def _run_content_pack_backend(
     plan = resolve_content_pack_plan(
         resolved_pack, datasets=datasets, layers=layers,
         strict_scope=strict_scope,
+        bundle_scope=bundle_scope,
     )
 
     # Phase 5 Step 2c — bronze readiness gate. Verify every in-scope
