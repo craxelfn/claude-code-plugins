@@ -127,8 +127,20 @@ def _assert_bundle_layout(bundle: Path) -> tuple[str, Path]:
 def _run_bootstrap(args: argparse.Namespace) -> int:
     """Invoke ``aidp-fusion-bundle bootstrap`` as a subprocess with the
     operator-supplied flags. Returns the CLI's exit code."""
+    # Resolve the `aidp-fusion-bundle` console script alongside the
+    # interpreter that started this dispatcher. The plugin package
+    # registers an entry point but no `__main__`, so `python -m
+    # oracle_ai_data_platform_fusion_bundle` fails — see
+    # pyproject.toml::[project.scripts].
+    cli_bin = Path(sys.executable).parent / "aidp-fusion-bundle"
+    if not cli_bin.exists():
+        raise SystemExit(
+            f"aidp-fusion-bundle console script not found at {cli_bin}. "
+            f"Install the plugin into {Path(sys.executable).parent.parent} "
+            f"(e.g. `pip install -e .`)."
+        )
     cmd = [
-        sys.executable, "-m", "oracle_ai_data_platform_fusion_bundle",
+        str(cli_bin),
         "--bundle", str(args.bundle),
         "--config", str(args.config),
         "--env", args.env,

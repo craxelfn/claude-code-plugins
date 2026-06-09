@@ -143,13 +143,27 @@ def _snapshot_columns_by_dataset(
     """``snapshot.datasets[*]`` → ``{dataset_id: {col_name_lower: type_lower}}``.
 
     Empty dict when ``snapshot is None`` (degraded mode).
+
+    Defensive: drops :data:`BRONZE_AUDIT_COLUMNS` even when present in
+    the snapshot. The fix at :mod:`schema.bronze_fingerprint` /
+    :func:`schema.bronze_schema_snapshot.from_observed` prevents future
+    writes from including audit columns, but pre-fix snapshots on disk
+    (pinned before this code shipped) still have them. This filter
+    lets the gate compare apples-to-apples against live BICC
+    `inferSchema` (which never has audit columns) without forcing every
+    tenant to re-bootstrap before the next run. No-op for clean
+    snapshots.
     """
+    from ..schema.bronze_fingerprint import BRONZE_AUDIT_COLUMNS
+
     if snapshot is None:
         return {}
     out: dict[str, dict[str, str]] = {}
     for ds in snapshot.datasets:
         out[ds.dataset_id] = {
-            col.name.lower(): col.type.lower() for col in ds.columns
+            col.name.lower(): col.type.lower()
+            for col in ds.columns
+            if col.name.strip().lower() not in BRONZE_AUDIT_COLUMNS
         }
     return out
 

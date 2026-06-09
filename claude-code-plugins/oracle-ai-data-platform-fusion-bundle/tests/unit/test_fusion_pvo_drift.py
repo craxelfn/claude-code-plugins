@@ -371,6 +371,112 @@ class TestRenameAndSnapshotOnly:
         assert "extra_pinned_col" in gap["snapshot_columns_missing_from_live"]
 
 
+class TestAuditColumnDefensiveGuard:
+    """The drift gate must tolerate snapshots that still contain bronze
+    audit columns (`_extract_ts` / `_source_pvo` / `_run_id` /
+    `_watermark_used`). New snapshots written post-fix exclude them,
+    but pre-fix snapshots on disk may still have them and forcing every
+    tenant to re-bootstrap before the next run is too sharp a tool.
+    `_snapshot_columns_by_dataset` strips audit columns defensively so
+    the gate compares apples-to-apples against live BICC `inferSchema`
+    (which never has audit columns).
+    """
+
+    def test_audit_columns_in_stale_snapshot_do_not_trigger_drift(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        pack = _build_pack(tmp_path)
+        # Pre-fix snapshot shape: BICC columns PLUS the 4 audit columns
+        # the bronze adapter appends after extraction. Live BICC will
+        # never report these (they don't exist in the PVO).
+        snapshot_with_audit = _make_snapshot({
+            "erp_suppliers": [
+                ("vendor_id", "long"), ("vendor_name", "string"),
+                ("_extract_ts", "timestamp"),
+                ("_source_pvo", "string"),
+                ("_run_id", "string"),
+                ("_watermark_used", "timestamp"),
+            ],
+            "ap_invoices": [
+                ("invoice_id", "long"), ("due_date", "date"),
+                ("amount", "double"),
+                ("_extract_ts", "timestamp"),
+                ("_source_pvo", "string"),
+                ("_run_id", "string"),
+                ("_watermark_used", "timestamp"),
+            ],
+        })
+        # Live BICC schema — clean, no audit columns (it never has them).
+        live = {
+            "erp_suppliers": {"vendor_id": "long", "vendor_name": "string"},
+            "ap_invoices": {
+                "invoice_id": "long", "due_date": "date", "amount": "double",
+            },
+        }
+        # Must NOT raise — defensive strip lets the gate ignore audit
+        # columns the writer should never have persisted in the first
+        # place.
+        assert assert_fusion_pvo_compatibility(
+            live_pvo_columns=live,
+            resolved_pack=pack,
+            cp_filter=(None, ["silver", "gold"]),
+            bronze_filter=(None, ["bronze"]),
+            schema_snapshot=snapshot_with_audit,
+            run_id="r-defensive",
+            diagnostics_root=tmp_path / "diag",
+        ) is None
+
+    def test_real_drift_still_caught_when_audit_present(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """The defensive strip must NOT mask actual drift. Snapshot has
+        audit cols + a non-audit column the live PVO lost (rename or
+        Oracle-side drop) — the gate must still fire on the real loss.
+        """
+        pack = _build_pack(tmp_path)
+        snapshot = _make_snapshot({
+            "erp_suppliers": [
+                ("vendor_id", "long"), ("vendor_name", "string"),
+                ("vendor_class", "string"),  # real column that live lost
+                ("_extract_ts", "timestamp"),
+                ("_run_id", "string"),
+            ],
+            "ap_invoices": [
+                ("invoice_id", "long"), ("due_date", "date"),
+                ("amount", "double"),
+            ],
+        })
+        live = {
+            "erp_suppliers": {"vendor_id": "long", "vendor_name": "string"},
+            "ap_invoices": {
+                "invoice_id": "long", "due_date": "date", "amount": "double",
+            },
+        }
+        with pytest.raises(FusionPvoDriftError) as exc:
+            assert_fusion_pvo_compatibility(
+                live_pvo_columns=live,
+                resolved_pack=pack,
+                cp_filter=(None, ["silver", "gold"]),
+                bronze_filter=(None, ["bronze"]),
+                schema_snapshot=snapshot,
+                run_id="r-real-drift",
+                diagnostics_root=tmp_path / "diag",
+            )
+        # The real lost column surfaces; audit columns do not appear.
+        gap = exc.value.gaps["erp_suppliers"]
+        # Either snapshot_columns_missing_from_live or candidate_renames
+        # (depending on pair-up logic) must mention vendor_class — but
+        # NEVER an audit column.
+        flat = json.dumps(gap)
+        assert "vendor_class" in flat
+        for forbidden in (
+            "_extract_ts", "_source_pvo", "_run_id", "_watermark_used",
+        ):
+            assert forbidden not in flat, (
+                f"audit column {forbidden!r} leaked into drift gap: {gap!r}"
+            )
+
+
 class TestDiagnostic:
     def test_diagnostic_json_written(self, tmp_path: pathlib.Path) -> None:
         pack = _build_pack(tmp_path)
