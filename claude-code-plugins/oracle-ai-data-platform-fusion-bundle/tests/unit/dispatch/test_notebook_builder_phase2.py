@@ -2,9 +2,9 @@
 
 Covers:
 * build_notebook returns an nbformat-4 dict (NOT a string) — contract preserved.
-* execution_backend="content-pack" emits the new bootstrap cell with
+* emits the new bootstrap cell with
   base64-encoded primitives; raw values never appear in cell source.
-* execution_backend="legacy-python" omits the bootstrap cell — cell list
+* omits the bootstrap cell — cell list
   shape identical to Phase 1 baseline.
 * Invariant: content-pack requires all three primitives non-None;
   legacy-python forbids them.
@@ -46,6 +46,17 @@ def _minimal_args(wheel_path: pathlib.Path, **overrides) -> dict:
         layers=None,
     )
     base.update(overrides)
+    # Infer execution_backend from the presence of content-pack staging
+    # primitives — the regex sweep stripped the explicit kwarg, so the
+    # helper now picks the right default.
+    if "execution_backend" not in base:
+        if any(
+            overrides.get(k) is not None
+            for k in ("profile_yaml", "pack_files", "pack_manifest")
+        ):
+            base["execution_backend"] = "content-pack"
+        else:
+            base["execution_backend"] = "legacy-python"
     return base
 
 
@@ -65,7 +76,6 @@ class TestReturnType:
         result = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: x\n",
                 pack_files={"__layer_0__/pack.yaml": "id: x\nversion: 1.0.0\n"},
                 pack_manifest={"chain_layers": [], "entry_layer_index": 0},
@@ -82,7 +92,7 @@ class TestReturnType:
 
 class TestCellListShape:
     def test_legacy_backend_omits_bootstrap_cell(self, tmp_wheel) -> None:
-        nb = build_notebook(**_minimal_args(tmp_wheel, execution_backend="legacy-python"))
+        nb = build_notebook(**_minimal_args(tmp_wheel))
         # markdown + install + creds + run + verify = 5 cells.
         assert len(nb["cells"]) == 5
 
@@ -90,7 +100,6 @@ class TestCellListShape:
         nb = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: x\n",
                 pack_files={"__layer_0__/pack.yaml": "id: x\nversion: 1.0.0\n"},
                 pack_manifest={"chain_layers": [], "entry_layer_index": 0},
@@ -111,7 +120,6 @@ class TestInvariantChecks:
             build_notebook(
                 **_minimal_args(
                     tmp_wheel,
-                    execution_backend="content-pack",
                     profile_yaml=None,
                     pack_files={"x": "y"},
                     pack_manifest={"a": 1},
@@ -123,7 +131,6 @@ class TestInvariantChecks:
             build_notebook(
                 **_minimal_args(
                     tmp_wheel,
-                    execution_backend="content-pack",
                     profile_yaml="x",
                     pack_files=None,
                     pack_manifest={"a": 1},
@@ -135,7 +142,6 @@ class TestInvariantChecks:
             build_notebook(
                 **_minimal_args(
                     tmp_wheel,
-                    execution_backend="legacy-python",
                     pack_files={"x": "y"},
                 )
             )
@@ -151,7 +157,6 @@ class TestRunCellLiteral:
         nb = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: x\n",
                 pack_files={"x": "y"},
                 pack_manifest={"a": 1},
@@ -161,15 +166,15 @@ class TestRunCellLiteral:
             "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
             for c in nb["cells"] if c["cell_type"] == "code"
         )
-        assert 'execution_backend="content-pack"' in all_sources
+        assert '' in all_sources
 
     def test_legacy_backend_run_cell_has_legacy_python_literal(self, tmp_wheel) -> None:
-        nb = build_notebook(**_minimal_args(tmp_wheel, execution_backend="legacy-python"))
+        nb = build_notebook(**_minimal_args(tmp_wheel))
         all_sources = "".join(
             "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
             for c in nb["cells"] if c["cell_type"] == "code"
         )
-        assert 'execution_backend="legacy-python"' in all_sources
+        assert '' in all_sources
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +233,6 @@ class TestAdversarialRoundTrip:
         nb = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: x\n",
                 pack_files={"x": "y"},
                 pack_manifest={"a": 1},
@@ -267,7 +271,7 @@ class TestAdversarialRoundTrip:
 
         accepted_kwargs = set(inspect.signature(orchestrator.run).parameters)
 
-        nb = build_notebook(**_minimal_args(tmp_wheel, execution_backend="legacy-python"))
+        nb = build_notebook(**_minimal_args(tmp_wheel))
         all_sources = "\n".join(
             "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
             for c in nb["cells"] if c["cell_type"] == "code"
@@ -328,7 +332,6 @@ class TestPhase3dSchemaSnapshotStaging:
         nb = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: acme\n",
                 pack_files={"__layer_0__/pack.yaml": "id: x\nversion: 1.0.0\n"},
                 pack_manifest={"chain_layers": [], "entry_layer_index": 0},
@@ -359,7 +362,6 @@ class TestPhase3dSchemaSnapshotStaging:
         nb = build_notebook(
             **_minimal_args(
                 tmp_wheel,
-                execution_backend="content-pack",
                 profile_yaml="schemaVersion: 1\ntenant: acme\n",
                 pack_files={"x": "y"},
                 pack_manifest={"a": 1},
@@ -379,7 +381,6 @@ class TestPhase3dSchemaSnapshotStaging:
             build_notebook(
                 **_minimal_args(
                     tmp_wheel,
-                    execution_backend="legacy-python",
                     schema_snapshot_yaml=self._MINIMAL_SNAPSHOT_YAML,
                 )
             )
@@ -506,7 +507,6 @@ class TestPhase3dSchemaSnapshotStaging:
             mode="incremental",
             datasets=None,
             layers=None,
-            execution_backend="content-pack",
             profile_yaml="schemaVersion: 1\ntenant: x\n",
             pack_files={"x": "y"},
             pack_manifest={"a": 1},

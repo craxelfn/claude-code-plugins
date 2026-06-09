@@ -118,6 +118,17 @@ def dispatch_via_rest(
     # failed run. ``None`` preserves the original "fresh run only"
     # behaviour.
     resume_run_id: str | None = None,
+    # Phase 9 — caller-loads-and-passes the resolved pack for the
+    # dispatch dry-run path so schema.plan_resolver can walk it
+    # without crossing the §4.3 import boundary into orchestrator/*.
+    # Required when ``dry_run=True``; ignored otherwise.
+    resolved_pack: "Any | None" = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1 implicit-transitive-
+    # include. Threaded into both the dispatch dry-run resolver (via
+    # ``resolve_dry_run_plan``) and the cluster-side orchestrator.run
+    # call (via the generated run cell). Default False matches the
+    # CLI default.
+    strict_scope: bool = False,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -215,10 +226,18 @@ def dispatch_via_rest(
         from ..schema.bundle import load_bundle
         from ..schema.plan_resolver import resolve_dry_run_plan
 
+        if resolved_pack is None:
+            raise ValueError(
+                "dispatch_via_rest(dry_run=True) requires resolved_pack; "
+                "the caller (commands/run.py) must load the pack via "
+                "load_full_chain(...) and pass it in. This preserves "
+                "the §4.3 dispatch import boundary."
+            )
         bundle, paths = load_bundle(bundle_path)
         plan_nodes, prereq_nodes = resolve_dry_run_plan(
-            bundle, paths,
+            resolved_pack, bundle, paths,
             datasets=datasets, layers=layers,
+            strict_scope=strict_scope,
         )
         log("dry-run requested — skipping wheel build + upload + dispatch")
         return RunSummary.empty(
@@ -249,6 +268,10 @@ def dispatch_via_rest(
         schema_snapshot_yaml=schema_snapshot_yaml,
         # Phase 5 P1.5ε-fix5 — pass through to the cluster-side cell.
         resume_run_id=resume_run_id,
+        # Phase 9 — emit ``strict_scope=...`` in the generated
+        # orchestrator.run() call so the cluster honors the operator's
+        # opt-out of D-1 implicit-transitive-include.
+        strict_scope=strict_scope,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")

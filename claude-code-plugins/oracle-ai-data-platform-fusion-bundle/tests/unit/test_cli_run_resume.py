@@ -38,7 +38,7 @@ def _init_minimal_bundle(monkeypatch) -> None:
 
 
 def test_resume_option_appears_in_help() -> None:
-    result = CliRunner().invoke(cli.main, ["run", "--help", "--execution-backend", "legacy-python"])
+    result = CliRunner().invoke(cli.main, ["run", "--help"])
     assert result.exit_code == 0
     assert "--resume" in result.output
     assert "run_id" in result.output.lower() or "run id" in result.output.lower()
@@ -52,7 +52,7 @@ def test_resume_help_describes_inline_and_rest_support() -> None:
     the generated notebook cell — see ``test_resume_without_inline_
     dispatches_via_rest`` below)."""
     result = CliRunner().invoke(
-        cli.main, ["run", "--help", "--execution-backend", "legacy-python"],
+        cli.main, ["run", "--help"],
     )
     assert result.exit_code == 0
     # Normalise whitespace — Click wraps help text across lines.
@@ -85,7 +85,6 @@ def test_resume_without_inline_dispatches_via_rest(
     ) as mock_dispatch:
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "seed", "--resume", "some-run-id",
-            "--execution-backend", "legacy-python",
         ])
     assert result.exit_code == 0
     # The resume id flowed into the dispatcher.
@@ -106,7 +105,7 @@ def test_resume_run_not_found_exits_2_no_traceback(
         side_effect=ResumeRunNotFoundError("--resume: no rows for run_id='ghost'"),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "ghost", "--execution-backend", "legacy-python"
+            "run", "--mode", "seed", "--inline", "--resume", "ghost"
         ])
     assert result.exit_code == 2
     assert "ghost" in result.output
@@ -128,7 +127,7 @@ def test_resume_run_not_resumable_exits_2_no_traceback(
         ),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "legacy", "--execution-backend", "legacy-python"
+            "run", "--mode", "seed", "--inline", "--resume", "legacy"
         ])
     assert result.exit_code == 2
     assert "not resumable" in result.output
@@ -153,7 +152,7 @@ def test_resume_bundle_mismatch_exits_2_no_traceback(
         side_effect=ResumeBundleMismatchError(msg),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "abc-123", "--execution-backend", "legacy-python"
+            "run", "--mode", "seed", "--inline", "--resume", "abc-123"
         ])
     assert result.exit_code == 2
     # The rendered diff sections surface to the operator.
@@ -177,7 +176,7 @@ def test_resume_banner_printed_before_orchestrator_call(
         return_value=RunSummary.empty("test-bundle", "seed"),
     ):
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--inline", "--resume", "abc-123", "--execution-backend", "legacy-python"
+            "run", "--mode", "seed", "--inline", "--resume", "abc-123"
         ])
     assert "Resuming run" in result.output
     assert "abc-123" in result.output

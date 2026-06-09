@@ -28,10 +28,17 @@ columns through the runtime.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from typing import Annotated, Any, Literal
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from .incremental_impact import IncrementalImpact
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .dashboard_pack import DashboardYaml
 
 from pydantic import (
     BaseModel,
@@ -63,7 +70,20 @@ AIDPF_2056_APPEND_UNIQUE_NO_KEY = "AIDPF-2056"      # R8
 AIDPF_2057_AGGREGATE_MERGE_DEFERRED = "AIDPF-2057"  # R9
 AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST = "AIDPF-2058"   # R10
 AIDPF_2059_SCD2_NO_TRACKED_COLUMNS = "AIDPF-2059"   # R11
-AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED = "AIDPF-2060"  # R13
+# AIDPF-2060 (python_legacy deprecated invariant) and AIDPF-2061
+# (python_legacy callable spec) were retired in Phase 9 when the
+# python_legacy implementation type was deleted.
+
+# Phase 9 — bronze content-pack node type
+AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
+# WARN-only: pack YAML's implementation.pvo_id is not in the curated
+# fusion_catalog.py. Pack loads cleanly; BICC drift gate (AIDPF-2072) catches
+# typos at extract-preflight time. Customers can author overlay-pack YAMLs
+# for new PVOs without a plugin release.
+
+AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK = "AIDPF-2081"
+# RAISE: bundle.yaml::datasets[].id does not resolve in any pack layer
+# (bronze ∪ silver ∪ gold). Replaces the old fusion_catalog.CATALOG check.
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +328,7 @@ class OverrideEntry(BaseModel):
     * ``sql:`` -- full-file replace; the named SQL path lives in the overlay.
     * ``quality:`` -- nested ``tests:`` list extends base.
     * ``extendColumns: true`` -- the overlay extends the base node's
-      ``outputSchema.columns`` rather than replacing it (Phase-1 stubs use
-      this for ``python_legacy`` migration-period stubs).
+      ``outputSchema.columns`` rather than replacing it.
 
     Unknown keys default to scalar-replace per §8.7.
     """
@@ -515,8 +534,8 @@ IncrementalStrategy = Literal[
     "snapshot",
     "scd2",
 ]
-NodeLayer = Literal["silver", "gold"]
-NodeImplType = Literal["sql", "builtin", "python_legacy"]
+NodeLayer = Literal["bronze", "silver", "gold"]
+NodeImplType = Literal["sql", "builtin", "bronze_extract"]
 
 
 class WatermarkSpec(BaseModel):
@@ -752,51 +771,77 @@ class BuiltinImpl(BaseModel):
     """Importable Python callable, `<module>:<func>` form."""
 
 
-class PythonLegacyImpl(BaseModel):
-    """`implementation.type: python_legacy` — v1 module bridged for the migration period.
+class BronzeExtractImpl(BaseModel):
+    """``implementation.type: bronze_extract`` — BICC PVO extraction (Phase 9).
 
-    Per the v2 plan, this type is permitted only during the migration window:
+    Declares a content-pack-driven bronze node. Carries everything the
+    runtime needs to construct a BICC ``PvoEntry``-equivalent descriptor
+    WITHOUT depending on the curated ``fusion_catalog.py`` — pack YAML is
+    self-contained so customer overlay packs can declare new PVOs without
+    a plugin release.
 
-    * ``deprecated: true`` — v1 module replaced by SQL, kept for parity testing.
-    * ``deprecated: false`` — v1 module still active runtime; ``migrationTarget``
-      points at the pack-relative SQL path that will replace it in Phase 3.
+    PVO resolution contract:
 
-    The discriminator validates the field is **present**. The model_validator
-    below enforces the ``deprecated=false → migrationTarget`` invariant.
+    1. The adapter constructs a ``PvoEntry``-equivalent descriptor directly
+       from the YAML fields (``datastore``, ``bicc_schema``, ``natural_key``
+       from ``refresh.incremental``, ``incremental_capable``).
+    2. The descriptor is passed to ``extract_pvo()`` unchanged.
+    3. At pack-load time, validators cross-reference
+       ``implementation.pvo_id`` against the curated catalog for a WARN
+       only — absent → ``AIDPF-2080``. Phase 5's BICC drift gate
+       (``AIDPF-2072``) catches typo'd PVOs at extract-preflight time.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    type: Literal["python_legacy"] = "python_legacy"
-    callable: str
-    """Importable Python callable, `<module>:<func>` form."""
+    type: Literal["bronze_extract"] = "bronze_extract"
 
-    deprecated: bool
-    """Required field. Missing → AIDPF-2060.
+    datastore: str
+    """BICC datastore identifier (e.g. ``SupplierExtractPVO``). What BICC
+    actually uses as the PVO handle. **Required.**"""
 
-    Pydantic treats `bool` fields without a default as required; if YAML omits
-    the key entirely, validation fails with a generic missing-field error. We
-    wrap that case in a model_validator below to surface AIDPF-2060 cleanly.
+    pvo_id: str | None = None
+    """Optional full AM-hierarchy path
+    (``FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO``).
+    Documentation field; used to cross-reference the curated catalog and
+    emit an ``AIDPF-2080`` WARN when not found. Missing entirely → no
+    WARN (nothing to cross-reference)."""
+
+    bicc_schema: str = Field(alias="biccSchema")
+    """BICC offering schema (``Financial`` / ``HCM`` / ``SCM``).
+    **Required.** Pack YAML always specifies; runtime never auto-discovers
+    behind the operator's back."""
+
+    schema_override: str | None = Field(default=None, alias="schemaOverride")
+    """Optional per-tenant BICC offering schema override. Overrides
+    ``bicc_schema`` at runtime — matches today's
+    ``bundle.fusion.schemaOverrides.<id>`` semantics."""
+
+    incremental_capable: bool = Field(default=True, alias="incrementalCapable")
+    """P1.17 contract: PVOs whose ``LastUpdateDate`` doesn't monotonically
+    track meaningful change events (e.g. ``gl_period_balances`` whose
+    period-end snapshot revises retroactively) MUST set this to False.
+
+    Effect on runtime (per Phase 9 decision matrix):
+
+    * ``mode=seed``: full BICC pull + ``replace`` strategy (independent of
+      this flag).
+    * ``mode=incremental`` + ``incremental_capable=False``: no BICC
+      ``fusion.initial.extract-date`` pushdown (full pull) +
+      payload-diff-gated MERGE (content-hash predicate on the source
+      side; unchanged rows keep their ``_extract_ts``/``_run_id``).
     """
 
-    migration_target: str | None = Field(default=None, alias="migrationTarget")
-    """Pack-relative SQL path that will replace this module in Phase 3.
-    Required when ``deprecated=False``; ignored otherwise."""
-
-    @model_validator(mode="after")
-    def _check_deprecated_invariant(self) -> "PythonLegacyImpl":
-        if self.deprecated is False and not self.migration_target:
-            raise ValueError(
-                f"{AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED}: "
-                "python_legacy node with deprecated=false must declare "
-                "migrationTarget pointing at the pack-relative SQL path that "
-                "will replace it in Phase 3."
-            )
-        return self
+    audit_columns_mode: Literal["bronze_v1"] = Field(
+        default="bronze_v1", alias="auditColumnsMode"
+    )
+    """Reserved for future audit-column-shape variants. v0.3 uses the
+    P1.17 ``bronze_v1`` shape (``_extract_ts``, ``_source_pvo``,
+    ``_run_id``, ``_watermark_used``)."""
 
 
 NodeImplementation = Annotated[
-    SqlImpl | BuiltinImpl | PythonLegacyImpl,
+    SqlImpl | BuiltinImpl | BronzeExtractImpl,
     Field(discriminator="type"),
 ]
 
@@ -839,6 +884,40 @@ class NodeYaml(BaseModel):
 
     @model_validator(mode="after")
     def _validate_strategy_matrix(self) -> "NodeYaml":
+        # Phase 9: bronze nodes are content-pack-driven. They permit
+        # seed=replace + incremental=merge (with watermark + naturalKey
+        # declared). The R1-R13 matrix below is silver/gold-specific —
+        # bronze has its own narrower contract checked here.
+        if self.layer == "bronze":
+            seed_strategy = self.refresh.seed.strategy
+            if seed_strategy != "replace":
+                raise ValueError(
+                    f"bronze node {self.id!r}: refresh.seed.strategy must be "
+                    f"'replace' (got {seed_strategy!r}). Bronze seed is always "
+                    f"a full BICC pull with overwriteSchema=true."
+                )
+            inc = self.refresh.incremental
+            if inc is not None:
+                if inc.strategy != "merge":
+                    raise ValueError(
+                        f"bronze node {self.id!r}: refresh.incremental.strategy "
+                        f"must be 'merge' (got {inc.strategy!r}). Bronze does "
+                        f"not support replace_partition / aggregate_merge / etc."
+                    )
+                if not inc.natural_key:
+                    raise ValueError(
+                        f"{AIDPF_2020_MERGE_NO_NATURAL_KEY}: bronze node "
+                        f"{self.id!r} with incremental=merge requires "
+                        f"naturalKey on refresh.incremental."
+                    )
+                if inc.watermark is None:
+                    raise ValueError(
+                        f"{AIDPF_2050_MERGE_NO_WATERMARK}: bronze node "
+                        f"{self.id!r} with incremental=merge requires "
+                        f"incremental.watermark.{{source,column}}."
+                    )
+            return self
+
         inc = self.refresh.incremental
         if inc is None:
             # No incremental block declared; nothing to validate against §11.3.
@@ -957,3 +1036,108 @@ class NodeYaml(BaseModel):
                 )
 
         return self
+
+
+# ---------------------------------------------------------------------------
+# ResolvedPack — Phase 9 (ADR-0022) moved from orchestrator/content_pack.py
+# ---------------------------------------------------------------------------
+#
+# The dispatch package's §4.3 import boundary forbids
+# ``schema.plan_resolver`` from importing ``orchestrator/*``. With
+# ``schema.plan_resolver::resolve_dry_run_plan`` rewritten (Phase 9) to
+# walk a ``ResolvedPack`` instead of the registry-metadata maps, the
+# dataclass must live under ``schema/`` so the boundary stays intact.
+# ``orchestrator/content_pack.py`` re-exports ``ResolvedPack`` for
+# backwards compatibility with existing consumers.
+
+
+def _canonicalise(value: Any) -> Any:
+    """Recursively sort dict keys for deterministic hashing."""
+    if isinstance(value, dict):
+        return {k: _canonicalise(value[k]) for k in sorted(value)}
+    if isinstance(value, list):
+        return [_canonicalise(v) for v in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ResolvedPack:
+    """A fully-loaded content pack (post-overlay-merge).
+
+    Attributes:
+        root: filesystem path to the pack root directory. For merged packs,
+            this is the overlay root (top of the chain). Use ``source_roots``
+            for per-node path resolution.
+        pack: parsed ``pack.yaml`` (top-level).
+        silver: per-node-id mapping of silver nodes (parsed from
+            ``silver/*.yaml``).
+        gold: per-node-id mapping of gold nodes (parsed from ``gold/*.yaml``).
+        dashboards: per-dashboard-id mapping (parsed from
+            ``dashboards/*.yaml``).
+        bronze: Phase 9 — per-node-id mapping of bronze nodes (parsed
+            from ``bronze/*.yaml``). Each carries
+            ``implementation.type: bronze_extract`` (or, for migration
+            bridges, a builtin/sql variant).
+        bronze_yaml: DEPRECATED (Phase 9 transitional): legacy single-file
+            ``bronze.yaml`` declaration. Retained for backwards compatibility
+            with packs that haven't migrated to per-file ``bronze/<id>.yaml``.
+        is_merged: True if this is the result of a merge_overlay call.
+        chain: list of pack ids in load order (base first, overlays after).
+        source_roots: per-artifact pack-root provenance.
+    """
+
+    root: Path
+    pack: "PackYaml"
+    silver: dict[str, "NodeYaml"] = field(default_factory=dict)
+    gold: dict[str, "NodeYaml"] = field(default_factory=dict)
+    dashboards: dict[str, "DashboardYaml"] = field(default_factory=dict)
+    bronze: dict[str, "NodeYaml"] = field(default_factory=dict)
+    bronze_yaml: dict[str, Any] = field(default_factory=dict)
+    is_merged: bool = False
+    chain: tuple[str, ...] = ()
+    source_roots: dict[str, Path] = field(default_factory=dict)
+
+    def all_nodes(self) -> dict[str, "NodeYaml"]:
+        """Convenience: bronze, silver, and gold nodes combined."""
+        return {**self.bronze, **self.silver, **self.gold}
+
+    def root_for(self, qualified_id: str) -> Path:
+        """Return the source-pack root for an artifact id, falling back to
+        ``root``.
+
+        ``qualified_id`` examples: ``"bronze/erp_suppliers"``,
+        ``"silver/dim_supplier"``, ``"gold/gl_balance"``,
+        ``"dashboards/executive_cfo"``, ``"bronze.yaml"``.
+        """
+        return self.source_roots.get(qualified_id, self.root)
+
+    def compute_hash(self) -> str:
+        """Stable sha256 of the pack's canonical serialised form.
+
+        Used by PLAN §11.9 plan-hash drift detection. Deterministic across
+        runs: keys sorted, no unstable ordering.
+        """
+        payload: dict[str, Any] = {
+            "pack": self.pack.model_dump(mode="json", by_alias=True),
+            "bronze": {
+                k: v.model_dump(mode="json", by_alias=True)
+                for k, v in sorted(self.bronze.items())
+            },
+            "silver": {
+                k: v.model_dump(mode="json", by_alias=True)
+                for k, v in sorted(self.silver.items())
+            },
+            "gold": {
+                k: v.model_dump(mode="json", by_alias=True)
+                for k, v in sorted(self.gold.items())
+            },
+            "dashboards": {
+                k: v.model_dump(mode="json", by_alias=True)
+                for k, v in sorted(self.dashboards.items())
+            },
+            "bronze_yaml": _canonicalise(self.bronze_yaml),
+        }
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(blob).hexdigest()

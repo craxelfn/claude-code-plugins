@@ -4,7 +4,7 @@ valid ``implementation.type`` (Phase 5 Step 7).
 This is the discovery-side regression guard. The dispatch-side
 regression guards live in the per-implementation-type tests
 (``test_sql_runner``, ``test_sql_runner_builtin_dispatch``,
-``test_python_legacy_adapter``).
+``test_bronze_extract_adapter`` once added).
 
 If a future YAML edit drops a required field or introduces an unknown
 ``implementation.type``, this test catches it before the dispatcher
@@ -32,7 +32,7 @@ STARTER_PACK_ROOT = (
 )
 
 
-VALID_IMPL_TYPES = {"sql", "builtin", "python_legacy"}
+VALID_IMPL_TYPES = {"sql", "builtin", "bronze_extract"}
 
 
 @pytest.fixture(scope="module")
@@ -84,21 +84,34 @@ class TestStarterPackDiscoveryViaHelper:
             assert node.id == node_id
             assert node.layer == "gold"
 
-    def test_starter_pack_uses_sql_or_builtin_only(self, starter_pack) -> None:
-        """Phase 5 deliverable — the SHIPPED starter pack uses sql / builtin
-        (no python_legacy). python_legacy is reserved for customer-shipped
-        migration overlays. If a future starter-pack edit introduces a
-        python_legacy node, this test fails so the architectural decision
-        gets explicit review.
+    def test_starter_pack_uses_sql_or_builtin_only_for_silver_gold(
+        self, starter_pack,
+    ) -> None:
+        """The SHIPPED starter pack uses sql / builtin for silver+gold.
+        Bronze uses bronze_extract (Phase 9). If a future starter-pack
+        edit introduces an unexpected impl type, this test fails so the
+        architectural decision gets explicit review.
         """
         for node_id, node in starter_pack.silver.items():
-            assert node.implementation.type != "python_legacy", (
-                f"silver/{node_id} declares python_legacy in the shipped "
-                f"starter pack. python_legacy is for customer migration "
-                f"overlays; SQL templates are the starter-pack contract."
+            assert node.implementation.type in {"sql", "builtin"}, (
+                f"silver/{node_id} declares unexpected "
+                f"implementation.type={node.implementation.type!r} "
+                f"in the shipped starter pack."
             )
         for node_id, node in starter_pack.gold.items():
-            assert node.implementation.type != "python_legacy", (
-                f"gold/{node_id} declares python_legacy in the shipped "
-                f"starter pack."
+            assert node.implementation.type in {"sql", "builtin"}, (
+                f"gold/{node_id} declares unexpected "
+                f"implementation.type={node.implementation.type!r} "
+                f"in the shipped starter pack."
+            )
+
+    def test_every_bronze_node_has_bronze_extract_impl(self, starter_pack) -> None:
+        """Phase 9: starter pack bronze nodes ship as bronze_extract."""
+        assert len(starter_pack.bronze) > 0, (
+            "starter pack must declare bronze nodes (Phase 9)"
+        )
+        for node_id, node in starter_pack.bronze.items():
+            assert node.implementation.type == "bronze_extract", (
+                f"bronze/{node_id} must be type=bronze_extract; got "
+                f"{node.implementation.type!r}"
             )

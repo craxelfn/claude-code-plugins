@@ -115,7 +115,6 @@ class TestContentPackBackendInvokesExecuteNode:
         summary = orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
             mode="seed",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile, layers=["silver", "gold"],
         )
@@ -154,7 +153,6 @@ class TestContentPackBackendInvokesExecuteNode:
         with pytest.raises(ValueError, match="resolved_pack is None"):
             orchestrator.run(
                 bundle_path=FIXTURE_BUNDLE,
-                execution_backend="content-pack",
                 resolved_pack=None,
                 tenant_profile=MagicMock(), layers=["silver", "gold"],
             )
@@ -163,7 +161,6 @@ class TestContentPackBackendInvokesExecuteNode:
         with pytest.raises(ValueError, match="tenant_profile is None"):
             orchestrator.run(
                 bundle_path=FIXTURE_BUNDLE,
-                execution_backend="content-pack",
                 resolved_pack=MagicMock(),
                 tenant_profile=None, layers=["silver", "gold"],
             )
@@ -180,7 +177,6 @@ class TestContentPackBackendInvokesExecuteNode:
         profile = load_tenant_profile(FIXTURE_PROFILE)
         summary = orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             dry_run=True, layers=["silver", "gold"],
@@ -248,7 +244,6 @@ class TestPriorStateHydration:
         orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
             mode="incremental",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile, layers=["silver", "gold"],
         )
@@ -302,7 +297,6 @@ class TestPriorStateHydration:
         orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
             mode="seed",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile, layers=["silver", "gold"],
         )
@@ -352,7 +346,6 @@ class TestPriorStateHydration:
         orchestrator.run(
             bundle_path=FIXTURE_BUNDLE,
             mode="seed",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile, layers=["silver", "gold"],
         )
@@ -411,7 +404,6 @@ class TestPriorStateHydration:
             orchestrator.run(
                 bundle_path=FIXTURE_BUNDLE,
                 mode="incremental",
-                execution_backend="content-pack",
                 resolved_pack=pack,
                 tenant_profile=profile, layers=["silver", "gold"],
             )
@@ -444,6 +436,29 @@ class TestCascadeAbort:
     Uses a two-node fixture pack where gold.mart_x depends on
     silver.dim_thing. First call returns failure → second node must
     never be passed to execute_node."""
+
+    def _ad_hoc_bundle(self, tmp_path: pathlib.Path, scope_ids: list[str]) -> pathlib.Path:
+        """Write a bundle whose ``datasets[]`` declares the scope-roots
+        the cascade test's pack expects (Phase 9: bundle_scope is now
+        load-bearing — pre-fix tests relied on the resolver treating
+        every pack node as a root).
+        """
+        bp = tmp_path / "bundle.yaml"
+        bp.write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: cascade-test\n"
+            "fusion:\n  serviceUrl: https://example.com\n  username: u\n"
+            "  password: p\n  externalStorage: s\n"
+            "aidp:\n  catalog: c\n  bronzeSchema: b\n"
+            "  silverSchema: silver\n  goldSchema: gold\n"
+            "datasets:\n"
+            + "".join(f"  - id: {sid}\n" for sid in scope_ids)
+            + "dimensions:\n  build: []\n"
+            "gold:\n  marts: []\n"
+            "contentPack:\n  name: cascade-test\n"
+            "  path: ./pack\n  profile: phase2-fixture\n"
+        )
+        return bp
 
     def _two_node_pack(self, tmp_path: pathlib.Path):
         """Build a 2-node fixture: silver.dim_a + gold.mart_x depending on dim_a."""
@@ -520,14 +535,13 @@ class TestCascadeAbort:
         monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
         monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
 
+        # Phase 9: bundle_scope is now load-bearing — declare the
+        # test pack's nodes in datasets[] so the resolver picks them
+        # up as roots.
+        bundle_path = self._ad_hoc_bundle(tmp_path, ["dim_a", "mart_x"])
         summary = orchestrator.run(
-            bundle_path=FIXTURE_BUNDLE,  # the fixture bundle's content_pack
-                                          # block is satisfied by the
-                                          # passed-in resolved_pack here
-                                          # — orchestrator.run trusts the
-                                          # caller-supplied pack.
+            bundle_path=bundle_path,
             mode="seed",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["silver", "gold"],
@@ -622,10 +636,10 @@ class TestCascadeAbort:
         monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
         monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
 
+        bundle_path = self._ad_hoc_bundle(tmp_path, ["dim_a", "dim_b"])
         summary = orchestrator.run(
-            bundle_path=FIXTURE_BUNDLE,
+            bundle_path=bundle_path,
             mode="seed",
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["silver", "gold"],
@@ -691,7 +705,6 @@ class TestInlineCliReachesExecuteNode:
             env_name="dev",
             mode="seed",
             inline=True,
-            execution_backend="content-pack",
             layers="silver,gold",
             console=Console(),
         )
@@ -813,7 +826,6 @@ class TestInvalidPackRejectedBeforeExecution:
             env_name="dev",
             mode="seed",
             inline=True,
-            execution_backend="content-pack",
             console=Console(),
         )
 
@@ -861,7 +873,6 @@ class TestInvalidPackRejectedBeforeExecution:
             env_name="dev",
             mode="seed",
             inline=False,
-            execution_backend="content-pack",
             console=Console(),
         )
 
@@ -902,7 +913,7 @@ class TestLegacyBackendUnchanged:
         # signature accepts the call shape and the dispatcher branch
         # decides correctly.
         from oracle_ai_data_platform_fusion_bundle.orchestrator import _run_content_pack_backend
-        # If we were to call orchestrator.run with execution_backend="legacy-python",
+        # If we were to call orchestrator.run with,
         # it would fall through to the v1 logic — not to _run_content_pack_backend.
         # The branch is `if execution_backend == "content-pack":` so any other
         # value (including the default) skips it.

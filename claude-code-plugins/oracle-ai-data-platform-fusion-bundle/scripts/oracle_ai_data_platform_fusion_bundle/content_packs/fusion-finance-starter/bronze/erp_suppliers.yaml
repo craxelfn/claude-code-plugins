@@ -1,0 +1,45 @@
+id: erp_suppliers
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO
+  pvo_id: FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO
+  biccSchema: Financial
+  schemaOverride: null
+  incrementalCapable: true
+  auditColumnsMode: bronze_v1
+target: erp_suppliers
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: erp_suppliers
+      column: LASTUPDATEDATE
+    naturalKey: [SEGMENT1]
+requiredColumns:
+  erp_suppliers:
+    - SEGMENT1
+    - VENDORID
+    - PARTYID
+    - PARENTVENDORID
+    - PARENTPARTYID
+    - LASTUPDATEDATE
+outputSchema:
+  columns:
+    - { name: SEGMENT1, type: string, nullable: true, pii: low }
+    - { name: VENDORID, type: long, nullable: true, pii: low }
+    - { name: PARTYID, type: long, nullable: true, pii: low }
+    - { name: PARENTVENDORID, type: long, nullable: true, pii: low }
+    - { name: PARENTPARTYID, type: long, nullable: true, pii: low }
+    - { name: LASTUPDATEDATE, type: timestamp, nullable: true, pii: none }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+    - { name: _source_pvo, type: string, nullable: false, pii: none }
+    - { name: _run_id, type: string, nullable: false, pii: none }
+    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }
+quality:
+  tests: []

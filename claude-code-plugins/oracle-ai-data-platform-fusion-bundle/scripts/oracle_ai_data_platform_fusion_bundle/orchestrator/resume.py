@@ -61,130 +61,11 @@ def reconstruct_resume_scope(
     return datasets, layers
 
 
-def compute_reattempt_extra_deps(
-    plan: "Sequence[Any]",
-    succeeded: "frozenset[str]",
-    original_extra_deps: "tuple[ExternalDep, ...]",
-    paths: "Any",  # TablePaths
-) -> "tuple[ExternalDep, ...]":
-    """Build the external-dep set the preflight should check on a
-    resumed run.
-
-    Returns a tuple combining (both filtered to reattempt-only
-    consumers):
-      * Out-of-scope upstreams from ``original_extra_deps`` whose
-        ``consumer`` is in the reattempt plan. A succeeded-only
-        consumer doesn't read its upstream on the resume (it's a
-        no-op carry-forward), so preflighting its upstream would
-        fail a no-op resume on an unrelated dropped table.
-      * Succeeded-node tables that any reattempt-plan node (i.e.
-        in ``plan`` and NOT in ``succeeded``) reads from. These are
-        "implicit external deps" on resume — they were dispatched on
-        the original run (so they exist on disk under normal
-        circumstances), but the resume isn't re-dispatching them, so
-        the preflight must check they still exist before any
-        downstream-only reattempt fires.
-
-    All-succeeded resume (``reattempt_ids`` empty) returns ``()`` —
-    nothing is going to dispatch, so nothing needs preflighting. A
-    missing upstream on a no-op resume is irrelevant to the resume's
-    correctness; the operator would learn about it on the next non-
-    resume run.
-
-    Catches the failure mode where an operator manually drops a
-    succeeded bronze table between runs and then resumes — without
-    this augmentation, the un-succeeded silver/gold would dispatch
-    and crash mid-flight as a ``failed`` row, instead of failing
-    cleanly pre-dispatch as ``PrerequisiteError``.
-
-    Implementation notes:
-      * Walks reattempt-plan nodes' ``depends_on_bronze`` /
-        ``depends_on_silver`` lists.
-      * Skips deps that are themselves in the reattempt plan (they'll
-        be re-dispatched; not external).
-      * Skips deps that aren't in ``succeeded`` (they're either out
-        of scope — already in ``original_extra_deps`` — or deferred
-        with no on-disk table).
-      * Deduplicates via ``(dataset_id, layer)``.
-    """
-    from oracle_ai_data_platform_fusion_bundle.schema import fusion_catalog
-
-    from .registry import (
-        BRONZE_EXTRACTS,
-        GoldMartSpec,
-        SilverDimSpec,
-    )
-    from .runtime import ExternalDep
-
-    reattempt_ids = {n.dataset_id for n in plan if n.dataset_id not in succeeded}
-
-    # All-succeeded resume → nothing to preflight. A no-op resume
-    # must not fail on a dropped upstream that no reattempt node
-    # reads from.
-    if not reattempt_ids:
-        return ()
-
-    # Filter the original extra-deps to those consumed by a reattempt
-    # node. A succeeded-only consumer is a no-op carry-forward and
-    # doesn't actually read its upstream on the resume.
-    filtered_original = tuple(
-        d for d in original_extra_deps if d.consumer in reattempt_ids
-    )
-    seen: set[tuple[str, str]] = {
-        (d.dataset_id, d.layer) for d in filtered_original
-    }
-    result: list[ExternalDep] = list(filtered_original)
-
-    def _resolve_table_path(dep_name: str, dep_layer: str) -> str:
-        if dep_layer == "bronze":
-            pvo_id = (
-                BRONZE_EXTRACTS[dep_name].pvo_id
-                if dep_name in BRONZE_EXTRACTS
-                else dep_name
-            )
-            pvo = fusion_catalog.get(pvo_id)
-            return paths.bronze(pvo.bronze_table_name)
-        if dep_layer == "silver":
-            return paths.silver(dep_name)
-        return paths.gold(dep_name)
-
-    def _add(dep_name: str, dep_layer: str, consumer: str) -> None:
-        key = (dep_name, dep_layer)
-        if key in seen:
-            return
-        if dep_name in reattempt_ids:
-            return
-        if dep_name not in succeeded:
-            # Dep is neither succeeded nor in reattempt plan — it's
-            # not a meaningful "implicit external dep" we need to
-            # preflight (it's either out of original scope entirely,
-            # in which case it's already in `original_extra_deps`,
-            # or it's a deferred node which has no table to check).
-            return
-        table_path = _resolve_table_path(dep_name, dep_layer)
-        result.append(
-            ExternalDep(
-                dataset_id=dep_name,
-                layer=dep_layer,  # type: ignore[arg-type]
-                consumer=consumer,
-                table_path=table_path,
-            )
-        )
-        seen.add(key)
-
-    for node in plan:
-        if node.dataset_id not in reattempt_ids:
-            continue
-        if isinstance(node, SilverDimSpec):
-            for b in node.depends_on_bronze:
-                _add(b, "bronze", node.dataset_id)
-        elif isinstance(node, GoldMartSpec):
-            for b in node.depends_on_bronze:
-                _add(b, "bronze", node.dataset_id)
-            for s in node.depends_on_silver:
-                _add(s, "silver", node.dataset_id)
-
-    return tuple(result)
+# Phase 9 (ADR-0022) — compute_reattempt_extra_deps deleted. It belonged
+# to the v1 dispatcher's resume path. The content-pack runner's
+# per-node atomic-commit model handles resume natively (each
+# execute_node is a full preflight → render → drift → execute →
+# quality → state commit cycle, and is the resume unit).
 
 
 def render_drift_error(
@@ -338,7 +219,6 @@ def check_identity_drift(
 
 __all__ = [
     "reconstruct_resume_scope",
-    "compute_reattempt_extra_deps",
     "render_drift_error",
     "check_identity_drift",
 ]

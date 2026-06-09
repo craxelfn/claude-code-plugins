@@ -1,5 +1,20 @@
 # Plugin Status — `oracle-ai-data-platform-fusion-bundle`
 
+> **Phase 9 status (2026-06-09)**: v1 silver/gold modules + the
+> python_legacy adapter + the parity harness + the
+> `--execution-backend` CLI flag + the v1 main-loop body have all been
+> deleted. Bronze migrated to content-pack
+> (`implementation.type: bronze_extract`) per-file YAMLs. Single
+> execution path through `sql_runner.execute_node`. D-1 implicit
+> transitive include + `--strict-scope` opt-out. ~10,000 LOC net
+> deletion across 7 commits. **1360 unit + 12 architectural + 5
+> integration tests pass.** The snapshot below is from 2026-05-10 and
+> documents the pre-Phase-9 state — sections referencing v1 modules
+> (`dimensions/dim_supplier.py`, `transforms/gold/*.py`,
+> `extractors/bicc.py`) describe code that no longer exists. See
+> ADR-0021 (pack-as-registry) and ADR-0022 (full v1 deletion + bronze
+> as content-pack) for the current architectural authority.
+
 > **Snapshot date**: 2026-05-10
 > **Version**: 0.1.0-alpha (Phase 2 in progress toward 0.2.0)
 > **Verdict**: **Phase 2 mid-flight.** Dim layer 3/4 shipped + 1 deferred (P1.6 blocked by L2). Gold layer 3/5 shipped (`supplier_spend`, `gl_balance`, `ap_aging`). Tests 268 → **306** all pass (38 P1.5b plumbing tests). Limit registry at [`LIMITS.md`](LIMITS.md).

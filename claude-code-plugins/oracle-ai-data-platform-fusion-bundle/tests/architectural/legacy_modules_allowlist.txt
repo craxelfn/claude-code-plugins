@@ -2,29 +2,16 @@
 #
 # Each entry is a module path (POSIX style, relative to plugin root) that the
 # architectural test `test_no_new_legacy_modules.py` should accept as a
-# preexisting v1 module. Add an entry ONLY with a documented reason on the
-# same PR; reviewer skill flags any addition without justification.
+# preexisting v1 module.
+#
+# Phase 9 (ADR-0022) deleted the v1 dim_supplier / dim_account modules and
+# every transforms/gold/*.py mart — they now ship as SQL templates under
+# content_packs/<pack-id>/silver/ and content_packs/<pack-id>/gold/.
+#
+# Only dim_calendar remains as a permanent exception per ADR-0011 — the
+# engine's `builtin` deterministic date-math generator. It cannot be
+# expressed as a pure SQL template (parameter-driven, not table-driven).
 #
 # Format: one path per line. Blank lines and `# comment` lines ignored.
-#
-# v2 plan reference: §15 Phase 0 step 9 ("architectural test prevents new
-#   dimensions/dim_*.py and transforms/gold/*.py modules unless allowlist
-#   is updated with a reason").
-#
-# ---------------------------------------------------------------------------
-# v1 reference modules inherited from fork/main at v2 base.
-# These are the v1 implementations that v2 will migrate to content-pack
-# SQL templates in Phase 3 (PLAN §15 Phase 3). They stay as reference /
-# parity-test fixtures during the migration; Phase 4 dual-runner gate
-# compares content-pack output against these. Phase 9 freezes them as
-# reference fixtures (PLAN §15 Phase 9).
-#
-# dim_calendar.py is a permanent exception per ADR-0011 — stays as the
-# engine's `builtin` deterministic generator forever. Not migrated to SQL.
-# ---------------------------------------------------------------------------
-scripts/oracle_ai_data_platform_fusion_bundle/dimensions/dim_supplier.py
-scripts/oracle_ai_data_platform_fusion_bundle/dimensions/dim_account.py
+
 scripts/oracle_ai_data_platform_fusion_bundle/dimensions/dim_calendar.py
-scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/gl_balance.py
-scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/supplier_spend.py
-scripts/oracle_ai_data_platform_fusion_bundle/transforms/gold/ap_aging.py

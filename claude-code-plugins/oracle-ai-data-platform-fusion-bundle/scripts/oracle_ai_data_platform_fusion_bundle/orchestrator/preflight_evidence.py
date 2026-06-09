@@ -297,21 +297,23 @@ def _reset_legacy_warn() -> None:
 
 
 def _bronze_dataset_ids(pack: "ResolvedPack") -> list[str]:
-    """Extract bronze dataset ids from ``pack.bronze_yaml``.
+    """Extract bronze dataset ids from the resolved pack.
 
-    Mirrors ``commands.variation_phase._bronze_dataset_ids`` — the
-    pin source bootstrap uses. NEVER reads ``bundle.datasets``
-    (round-1 finding — bundle.datasets is a legitimate subset of
-    pack bronze sources, and using it here would produce a
+    Phase 9: ``pack.bronze`` (per-file bronze nodes) is the source of
+    truth; legacy ``pack.bronze_yaml`` retained transitionally for
+    packs that haven't migrated to ``bronze/<id>.yaml`` per-file form.
+    NEVER reads ``bundle.datasets`` (bundle.datasets is a legitimate
+    subset of pack bronze sources; using it here would produce a
     different fingerprint than bootstrap pinned).
     """
+    ids: list[str] = list(pack.bronze.keys())
     bronze = pack.bronze_yaml or {}
-    datasets = bronze.get("datasets", [])
-    return [
-        str(entry["id"])
-        for entry in datasets
-        if isinstance(entry, dict) and "id" in entry
-    ]
+    for entry in bronze.get("datasets", []) or []:
+        if isinstance(entry, dict) and "id" in entry:
+            entry_id = str(entry["id"])
+            if entry_id not in ids:
+                ids.append(entry_id)
+    return ids
 
 
 def _compute_affected_variation_points(

@@ -174,4 +174,181 @@ def _extract_datastore_names(body: Any) -> set[str]:
     return names
 
 
-__all__ = ["list_catalog", "probe_catalog"]
+# ---------------------------------------------------------------------------
+# probe-pvo --emit-pack-yaml (Phase 9 Step 10)
+# ---------------------------------------------------------------------------
+
+
+def _spark_type_to_yaml(spark_type: str) -> str:
+    """Map a Spark DDL type string (e.g. ``StringType``, ``LongType``,
+    ``DecimalType(28,8)``) to the YAML form used in pack outputSchema."""
+    t = spark_type.strip()
+    # Strip the `()` from `Type()` if present, then lowercase the head.
+    if t.endswith("Type"):
+        head = t[:-4]
+        return head.lower()  # StringType → string, LongType → long, ...
+    if t.endswith("Type()"):
+        head = t[:-6]
+        return head.lower()
+    # Parameterised: `DecimalType(28,8)` → `decimal(28,8)`.
+    if t.startswith("DecimalType("):
+        # Pull out the parens content.
+        inside = t[len("DecimalType("):-1]
+        return f"decimal({inside})"
+    # Already a DDL-style literal like `string` / `long` / `timestamp` / etc.
+    return t.lower()
+
+
+def probe_pvo_emit_pack_yaml(
+    *,
+    dataset_id: str,
+    datastore: str,
+    bicc_schema: str,
+    pvo_id: str | None,
+    incremental_capable: bool,
+    emit_pack_yaml: "str",
+    bundle_path: "str | None" = None,
+    config_path: "str | None" = None,
+    env_name: str = "dev",
+    console: Console | None = None,
+) -> int:
+    """Probe a BICC PVO and emit a draft content-pack bronze YAML.
+
+    Runs a metadata-only ``extract_pvo().schema`` roundtrip (no row pull),
+    translates the discovered ``StructType`` to an ``outputSchema.columns``
+    list (plus the standard audit columns), and writes a draft YAML to
+    ``emit_pack_yaml``. ``refresh.incremental`` is BLOCK-COMMENTED with
+    explicit ``TODO`` markers so the operator MUST review before enabling
+    incremental.
+
+    Returns process exit code (0 on success).
+    """
+    from pathlib import Path
+
+    console = console or Console()
+
+    # Load bundle (if provided) so we can resolve BICC credentials +
+    # service URL the same way the orchestrator does.
+    if bundle_path is None:
+        console.print(
+            "[red]probe-pvo requires a bundle for BICC connectivity; "
+            "pass --bundle path/to/bundle.yaml[/red]"
+        )
+        return 2
+
+    try:
+        from pyspark.sql import SparkSession
+    except ImportError:
+        console.print(
+            "[red]probe-pvo requires PySpark + the aidataplatform connector; "
+            "run inside an AIDP notebook or a Spark-enabled environment.[/red]"
+        )
+        return 2
+
+    # Build the descriptor inline (mirrors the bronze adapter's path —
+    # NEVER calls fusion_catalog.get(); pack YAMLs are self-contained).
+    entry = PvoEntry(
+        id=dataset_id,
+        datastore=datastore,
+        schema=bicc_schema,
+        bronze_table_name=dataset_id,
+        description=f"probe-pvo draft for {dataset_id}",
+        kind=PvoKind.EXTRACT_PVO,
+        confirmed=False,
+        incremental_capable=incremental_capable,
+        natural_key="",
+    )
+
+    # Resolve bundle + credentials.
+    import yaml as _yaml
+    from ..schema.bundle import Bundle
+    bundle_obj = Bundle.model_validate(
+        _yaml.safe_load(Path(bundle_path).read_text(encoding="utf-8"))
+    )
+    from ..orchestrator.runtime import _resolve_password
+    resolved_password = _resolve_password(bundle_obj.fusion.password)
+
+    from ..extractors import bicc as bicc_extractor
+
+    spark = SparkSession.builder.getOrCreate()
+    df = bicc_extractor.extract_pvo(
+        spark, entry,
+        fusion_service_url=bundle_obj.fusion.service_url,
+        username=bundle_obj.fusion.username,
+        password=resolved_password.get_secret_value(),
+        fusion_external_storage=bundle_obj.fusion.external_storage,
+        schema=bicc_schema,
+    )
+    schema = df.schema  # Triggers BICC inferSchema roundtrip.
+
+    columns_yaml_lines: list[str] = []
+    for field in schema.fields:
+        ttype = _spark_type_to_yaml(str(field.dataType))
+        nullable = "true" if field.nullable else "false"
+        col_type = f'"{ttype}"' if "," in ttype else ttype
+        columns_yaml_lines.append(
+            f"    - {{ name: {field.name}, type: {col_type}, "
+            f"nullable: {nullable}, pii: none }}"
+        )
+
+    # Append standard audit columns.
+    columns_yaml_lines.extend([
+        "    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }",
+        "    - { name: _source_pvo, type: string, nullable: false, pii: none }",
+        "    - { name: _run_id, type: string, nullable: false, pii: none }",
+        "    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }",
+    ])
+
+    pvo_id_line = ""
+    if pvo_id is not None:
+        # Only emit the pvo_id key when a value was supplied — empty
+        # would trip a FALSE AIDPF-2080 ("not in catalog").
+        pvo_id_line = f"  pvo_id: {pvo_id}\n"
+
+    yaml_body = f"""id: {dataset_id}
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: {datastore}
+{pvo_id_line}  biccSchema: {bicc_schema}
+  schemaOverride: null
+  incrementalCapable: {str(incremental_capable).lower()}
+  auditColumnsMode: bronze_v1
+target: {dataset_id}
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  # incremental:                  # TODO: uncomment after filling in below
+  #   strategy: merge
+  #   watermark:
+  #     source: {dataset_id}
+  #     column: TODO_WATERMARK_COLUMN
+  #   naturalKey: [TODO_NATURAL_KEY]
+requiredColumns:
+  {dataset_id}: []                  # TODO: list cols downstream silver/gold reads
+outputSchema:
+  columns:
+{chr(10).join(columns_yaml_lines)}
+quality:
+  tests: []
+"""
+
+    out_path = Path(emit_pack_yaml).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(yaml_body, encoding="utf-8")
+
+    console.print(
+        f"[green]Draft pack YAML emitted at {out_path}.[/green]\n"
+        f"Review + fill TODOs ([cyan]incremental.naturalKey[/cyan], "
+        f"[cyan]watermark.column[/cyan], [cyan]requiredColumns[/cyan], "
+        f"[cyan]pii[/cyan] classifications). Commit. Then add "
+        f"[cyan]{dataset_id}[/cyan] to [cyan]bundle.yaml::datasets[][/cyan] "
+        f"to enable."
+    )
+    return 0
+
+
+__all__ = ["list_catalog", "probe_catalog", "probe_pvo_emit_pack_yaml"]

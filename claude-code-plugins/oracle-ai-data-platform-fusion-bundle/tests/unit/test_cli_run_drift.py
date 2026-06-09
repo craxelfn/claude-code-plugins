@@ -144,8 +144,7 @@ class TestRunInlineDriftCatch:
                 layers=None,
                 resume_run_id=None,
                 dry_run=False,
-                console=console,
-                execution_backend="legacy-python",  # avoid the content-pack pack-load
+                console=console,  # avoid the content-pack pack-load
                 force_fingerprint_skip=False,
             )
         assert exit_code == EXIT_CODE_SCHEMA_DRIFT
@@ -176,7 +175,6 @@ class TestRunInlineDriftCatch:
                 datasets=None, layers=None,
                 resume_run_id=None, dry_run=False,
                 console=console,
-                execution_backend="legacy-python",
             ) == 2
 
         # SchemaDriftDetectedError → exit 14 (NOT 2).
@@ -196,7 +194,6 @@ class TestRunInlineDriftCatch:
                 datasets=None, layers=None,
                 resume_run_id=None, dry_run=False,
                 console=console,
-                execution_backend="legacy-python",
             ) == 14
 
 
@@ -240,7 +237,6 @@ class TestForceFingerprintSkipFlag:
                 datasets=None, layers=None,
                 resume_run_id=None, dry_run=False,
                 console=console,
-                execution_backend="legacy-python",
                 force_fingerprint_skip=True,
             )
         assert captured.get("force_fingerprint_skip") is True

@@ -1,16 +1,15 @@
 """Unit tests for the pack-driven node-discovery surface (Phase 5 Step 2).
 
-Covers :func:`_resolve_node_from_pack` across the three
-``implementation.type`` branches (``sql`` / ``builtin`` /
-``python_legacy``) plus error paths (unknown layer, unknown node_id).
+Covers :func:`_resolve_node_from_pack` across the ``sql`` / ``builtin``
+``implementation.type`` branches plus error paths (unknown layer,
+unknown node_id). The Phase 9 ``bronze_extract`` arm has its own
+adapter tests.
 
 The dispatch itself is owned by ``sql_runner.execute_node``
 (:mod:`tests.unit.test_sql_runner_builtin_dispatch` covers the builtin
-arm; :mod:`tests.unit.test_python_legacy_adapter` covers the
-python_legacy arm; :mod:`tests.unit.test_sql_runner` covers the sql
-arm). This test only asserts that the discovery helper returns the
-correct ``NodeYaml`` so the dispatcher sees the right
-``implementation.type``.
+arm; :mod:`tests.unit.test_sql_runner` covers the sql arm). This test
+only asserts that the discovery helper returns the correct
+``NodeYaml`` so the dispatcher sees the right ``implementation.type``.
 """
 
 from __future__ import annotations
@@ -81,14 +80,13 @@ outputSchema:
       pii: none
 """
 
-NODE_YAML_PYTHON_LEGACY = """
-id: gold_legacy_mart
+NODE_YAML_GOLD_SQL = """
+id: gold_mart
 layer: gold
 implementation:
-  type: python_legacy
-  callable: tests.fixtures.python_legacy.fake_gold_mart:build
-  deprecated: true
-target: gold_legacy_mart
+  type: sql
+  sql: gold/gold_mart.sql
+target: gold_mart
 dependsOn:
   bronze:
     - id: ap_invoices
@@ -121,9 +119,10 @@ def _build_pack(tmp_path: pathlib.Path):
 
     gold = pack_root / "gold"
     gold.mkdir()
-    (gold / "gold_legacy_mart.yaml").write_text(
-        NODE_YAML_PYTHON_LEGACY, encoding="utf-8"
+    (gold / "gold_mart.yaml").write_text(
+        NODE_YAML_GOLD_SQL, encoding="utf-8"
     )
+    (gold / "gold_mart.sql").write_text("SELECT 1 AS amount\n", encoding="utf-8")
 
     return load_pack(pack_root)
 
@@ -143,21 +142,20 @@ class TestResolveNodeFromPack:
         assert node.implementation.type == "builtin"
         assert node.implementation.callable.endswith(":build")
 
-    def test_gold_python_legacy_node(self, tmp_path: pathlib.Path) -> None:
+    def test_gold_sql_node(self, tmp_path: pathlib.Path) -> None:
         pack = _build_pack(tmp_path)
-        node = _resolve_node_from_pack(pack, "gold", "gold_legacy_mart")
-        assert node.id == "gold_legacy_mart"
+        node = _resolve_node_from_pack(pack, "gold", "gold_mart")
+        assert node.id == "gold_mart"
         assert node.layer == "gold"
-        assert node.implementation.type == "python_legacy"
-        assert node.implementation.deprecated is True
+        assert node.implementation.type == "sql"
 
     def test_unknown_layer_raises_valueerror(self, tmp_path: pathlib.Path) -> None:
+        # Phase 9: bronze is a valid layer; only truly unknown layer
+        # values raise.
         pack = _build_pack(tmp_path)
         with pytest.raises(ValueError) as exc:
-            _resolve_node_from_pack(pack, "bronze", "anything")
+            _resolve_node_from_pack(pack, "not_a_real_layer", "anything")
         assert "not in" in str(exc.value)
-        assert "silver" in str(exc.value)
-        assert "gold" in str(exc.value)
 
     def test_unknown_node_id_raises_pack_not_found(
         self, tmp_path: pathlib.Path
@@ -175,6 +173,6 @@ class TestResolveNodeFromPack:
         with pytest.raises(PackNodeNotFoundError) as exc:
             _resolve_node_from_pack(pack, "gold", "missing_mart")
         # Should list gold nodes only, not silver.
-        assert "gold_legacy_mart" in str(exc.value)
+        assert "gold_mart" in str(exc.value)
         # Silver nodes MUST NOT appear in a gold lookup error message.
         assert "dim_supplier" not in str(exc.value)

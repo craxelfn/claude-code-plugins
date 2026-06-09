@@ -48,6 +48,50 @@ profiles:
       naturalAccountSegment: segment3
 """
 
+_BRONZE_NODE = """\
+id: erp_suppliers
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: SupplierExtractPVO
+  biccSchema: Financial
+target: erp_suppliers
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: erp_suppliers
+      column: LASTUPDATEDATE
+    naturalKey: [SEGMENT1]
+outputSchema:
+  columns:
+    - name: SEGMENT1
+      type: string
+      nullable: true
+      pii: low
+    - name: _extract_ts
+      type: timestamp
+      nullable: false
+      pii: none
+    - name: _source_pvo
+      type: string
+      nullable: false
+      pii: none
+    - name: _run_id
+      type: string
+      nullable: false
+      pii: none
+    - name: _watermark_used
+      type: timestamp
+      nullable: true
+      pii: none
+"""
+
 _SILVER_NODE = """\
 id: dim_supplier
 layer: silver
@@ -120,6 +164,15 @@ aidp:
 datasets:
   - id: erp_suppliers
     mode: incremental
+  # Phase 9 cross-layer datasets[]: declare silver + gold roots so
+  # the bundle_scope picks them up. D-1 auto-pulls erp_suppliers
+  # as a transitive bronze dep of dim_supplier.
+  - id: dim_supplier
+  - id: supplier_spend
+dimensions:
+  build: []
+gold:
+  marts: []
 contentPack:
   name: dispatch-dry-run-merge-pack
   path: ./pack
@@ -131,11 +184,14 @@ contentPack:
 def fixture(tmp_path: Path):
     """Build a self-contained content-pack bundle in tmp_path."""
     pack_root = tmp_path / "pack"
+    bronze = pack_root / "bronze"
     silver = pack_root / "silver"
     gold = pack_root / "gold"
+    bronze.mkdir(parents=True)
     silver.mkdir(parents=True)
     gold.mkdir(parents=True)
     (pack_root / "pack.yaml").write_text(_PACK_YAML, encoding="utf-8")
+    (bronze / "erp_suppliers.yaml").write_text(_BRONZE_NODE, encoding="utf-8")
     (silver / "dim_supplier.yaml").write_text(_SILVER_NODE, encoding="utf-8")
     (silver / "dim_supplier.sql").write_text("SELECT 1\n", encoding="utf-8")
     (gold / "supplier_spend.yaml").write_text(_GOLD_NODE, encoding="utf-8")
@@ -170,7 +226,6 @@ class TestDispatcherDryRunMergedPlan:
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             dry_run=True,
@@ -194,7 +249,6 @@ class TestDispatcherDryRunMergedPlan:
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["bronze"],
@@ -210,12 +264,13 @@ class TestDispatcherDryRunMergedPlan:
     def test_layers_silver_only_returns_silver_no_bronze(
         self, fixture,
     ) -> None:
-        """``--layers silver`` produces a silver-only plan (no bronze,
-        no gold)."""
+        """Phase 9 D-1: ``--layers silver`` filters declared roots but
+        auto-includes transitive bronze deps. The silver-only filter
+        keeps dim_supplier as the declared root; D-1 pulls in
+        erp_suppliers (its bronze dep). gold is filtered out."""
         bundle_path, pack, profile = fixture
         summary = orchestrator.run(
             bundle_path=bundle_path,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             layers=["silver"],
@@ -223,25 +278,26 @@ class TestDispatcherDryRunMergedPlan:
         )
         assert summary.steps == ()
         by_layer = _plan_ids_by_layer(summary)
-        assert "bronze" not in by_layer
+        # D-1 auto-includes transitive bronze dep.
+        assert by_layer.get("bronze") == ["erp_suppliers"]
         assert by_layer.get("silver") == ["dim_supplier"]
         assert "gold" not in by_layer
 
-    def test_unknown_dataset_raises_scope_split_error(
+    def test_unknown_dataset_raises_resolver_error(
         self, fixture,
     ) -> None:
-        """Dry-run routes through the SAME scope-split classifier as
-        the real run, so a typo in ``--datasets`` fails the same way
-        on planning as it would on execution."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.scope import (
-            ScopeSplitError,
+        """Dry-run routes through the SAME resolver as the real run,
+        so a typo in ``--datasets`` fails the same way on planning as
+        it would on execution (Phase 9: AIDPF-1034 from the content-
+        pack plan resolver)."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+            UnknownDatasetFilterError,
         )
 
         bundle_path, pack, profile = fixture
-        with pytest.raises(ScopeSplitError):
+        with pytest.raises(UnknownDatasetFilterError):
             orchestrator.run(
                 bundle_path=bundle_path,
-                execution_backend="content-pack",
                 resolved_pack=pack,
                 tenant_profile=profile,
                 datasets=["this_does_not_exist"],

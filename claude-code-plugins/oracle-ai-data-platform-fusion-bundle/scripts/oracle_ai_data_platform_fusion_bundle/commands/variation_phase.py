@@ -620,13 +620,18 @@ def _generate_run_id() -> str:
 
 
 def _bronze_dataset_ids(pack: ResolvedPack) -> list[str]:
-    """Extract bronze dataset ids from the pack's bronze.yaml."""
+    """Extract bronze dataset ids from the pack.
+
+    Phase 9: ``pack.bronze`` (per-file bronze YAMLs) is the source of
+    truth; legacy ``pack.bronze_yaml`` is retained transitionally.
+    """
+    out: list[str] = list(pack.bronze.keys())
     bronze = pack.bronze_yaml or {}
-    datasets = bronze.get("datasets", [])
-    out: list[str] = []
-    for entry in datasets:
+    for entry in bronze.get("datasets", []) or []:
         if isinstance(entry, dict) and "id" in entry:
-            out.append(str(entry["id"]))
+            entry_id = str(entry["id"])
+            if entry_id not in out:
+                out.append(entry_id)
     return out
 
 

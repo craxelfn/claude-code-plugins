@@ -112,6 +112,11 @@ def _build_run_cell(
     execution_backend: str = "legacy-python",
     force_fingerprint_skip: bool = False,
     resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Emitted as ``strict_scope=...`` in
+    # the generated orchestrator.run() call so the cluster honors the
+    # operator's opt-out; default False matches the CLI default.
+    strict_scope: bool = False,
 ) -> str:
     # Phase 2: when execution_backend == "content-pack", the bootstrap
     # cell that ran just before this one set up _resolved_pack and
@@ -142,6 +147,7 @@ def _build_run_cell(
         f"        dry_run=False,\n"
         f"        resume_run_id={resume_run_id!r},\n"
         f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
+        f"        strict_scope={strict_scope!r},\n"
         f"{backend_kwargs}"
         f"    )\n"
         f"except SchemaDriftDetectedError as _drift_exc:\n"
@@ -361,6 +367,10 @@ def build_notebook(
     # resume run_id. ``None`` preserves the original fresh-run
     # behaviour.
     resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Threaded into the generated
+    # orchestrator.run() call as a literal kwarg.
+    strict_scope: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -382,7 +392,10 @@ def build_notebook(
     :meth:`AidpRestClient.upload_notebook`.
     """
     # Phase 2 invariant check: content-pack backend requires all three
-    # primitives; legacy-python forbids them (programmer error guard).
+    # Phase 9 — content-pack is the only backend at the CLI level,
+    # but the dispatch boundary retains backend dispatch for the
+    # tests that lock the staging primitive contract. The kwargs
+    # are still asserted symmetrically.
     if execution_backend == "content-pack":
         assert profile_yaml is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires profile_yaml"
@@ -393,17 +406,11 @@ def build_notebook(
         assert pack_manifest is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires pack_manifest"
         )
-        # Phase 3d snapshot is OPTIONAL — pre-3d profiles legitimately ship
-        # without one; preflight degrades to empty `datasetDeltas` on the
-        # cluster the same way it does on the laptop.
     elif execution_backend == "legacy-python":
         assert profile_yaml is None and pack_files is None and pack_manifest is None, (
             "build_notebook(execution_backend='legacy-python', ...) must pass "
             "profile_yaml/pack_files/pack_manifest as None"
         )
-        # Phase 3d — legacy-python REST runs cannot drift via the gate,
-        # so staging a snapshot on the cluster would be dead weight + a
-        # silent contract violation. Programmer-error guard.
         assert schema_snapshot_yaml is None, (
             "build_notebook(execution_backend='legacy-python', ...) must "
             "pass schema_snapshot_yaml as None"
@@ -440,6 +447,7 @@ def build_notebook(
                 execution_backend=execution_backend,
                 force_fingerprint_skip=force_fingerprint_skip,
                 resume_run_id=resume_run_id,
+                strict_scope=strict_scope,
             )
         ),
         _code_cell(_build_verify_cell()),

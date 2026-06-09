@@ -126,7 +126,7 @@ def _node_references_token(
 ) -> bool:
     """Read the node's SQL file and search for the token.
 
-    Skips non-SQL implementations (``builtin``, ``python_legacy``) —
+    Skips non-SQL implementations (``builtin``, ``bronze_extract``) —
     they don't render via the SQL renderer and don't use VP tokens.
     """
     if not isinstance(node.implementation, SqlImpl):

@@ -132,6 +132,10 @@ aidp:
 datasets:
   - id: erp_suppliers
     mode: full
+  # Phase 9 cross-layer datasets[]: declare silver + gold roots so
+  # the resolver's bundle_scope picks them up.
+  - id: dim_supplier
+  - id: supplier_spend
 contentPack:
   name: content-pack-resume-test
   path: ./pack
@@ -405,7 +409,6 @@ class TestContentPackResume:
             orchestrator.run(
                 bundle_path=bundle_path,
                 spark=fake_spark,
-                execution_backend="content-pack",
                 resolved_pack=pack,
                 tenant_profile=profile,
                 resume_run_id="this-run-was-never-recorded",
@@ -437,7 +440,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -486,7 +488,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -534,7 +535,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,
@@ -580,7 +580,6 @@ class TestContentPackResume:
         summary = orchestrator.run(
             bundle_path=bundle_path,
             spark=fake_spark,
-            execution_backend="content-pack",
             resolved_pack=pack,
             tenant_profile=profile,
             resume_run_id=original_run_id,

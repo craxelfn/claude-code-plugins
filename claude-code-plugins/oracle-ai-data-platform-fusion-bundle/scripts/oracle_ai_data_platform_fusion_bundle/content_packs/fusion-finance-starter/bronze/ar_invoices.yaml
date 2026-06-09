@@ -1,0 +1,41 @@
+id: ar_invoices
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.FinExtractAM.ArBiccExtractAM.TransactionHeaderExtractPVO
+  pvo_id: FscmTopModelAM.FinExtractAM.ArBiccExtractAM.TransactionHeaderExtractPVO
+  biccSchema: Financial
+  schemaOverride: null
+  incrementalCapable: true
+  auditColumnsMode: bronze_v1
+target: ar_invoices
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: ar_invoices
+      column: RaCustTrxAllLastUpdateDate
+    naturalKey: [RaCustTrxAllCustomerTrxId]
+requiredColumns:
+  ar_invoices:
+    - RaCustTrxAllCustomerTrxId
+    - RaCustTrxAllBillToCustomerId
+    - RaCustTrxAllInvoiceCurrencyCode
+    - RaCustTrxAllLastUpdateDate
+outputSchema:
+  columns:
+    - { name: RaCustTrxAllCustomerTrxId, type: long, nullable: true, pii: low }
+    - { name: RaCustTrxAllBillToCustomerId, type: long, nullable: true, pii: low }
+    - { name: RaCustTrxAllInvoiceCurrencyCode, type: string, nullable: true, pii: none }
+    - { name: RaCustTrxAllLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+    - { name: _source_pvo, type: string, nullable: false, pii: none }
+    - { name: _run_id, type: string, nullable: false, pii: none }
+    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }
+quality:
+  tests: []

@@ -83,10 +83,8 @@ def _make_base_pack(root: Path, *, with_sql: bool = False) -> Path:
         )
     else:
         impl = {
-            "type": "python_legacy",
+            "type": "builtin",
             "callable": "pkg.dim_supplier:build",
-            "deprecated": False,
-            "migrationTarget": "silver/dim_supplier.sql",
         }
 
     _write_yaml(
@@ -131,11 +129,11 @@ def test_sql_file_missing_for_sql_node(tmp_path: Path) -> None:
     assert any(e.code == AIDPF_2003_SQL_FILE_MISSING for e in errors)
 
 
-def test_sql_path_validator_skips_python_legacy(tmp_path: Path) -> None:
+def test_sql_path_validator_skips_non_sql_impl(tmp_path: Path) -> None:
     pack_root = _make_base_pack(tmp_path, with_sql=False)
     pack = load_pack(pack_root)
     errors = validate_sql_paths(pack)
-    # python_legacy is exempt; no AIDPF-2003.
+    # Non-sql implementation (builtin) is exempt; no AIDPF-2003.
     assert errors == []
 
 
@@ -178,10 +176,8 @@ def test_dag_unresolved_dependency(tmp_path: Path) -> None:
             "id": "supplier_spend",
             "layer": "gold",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.supplier_spend:build",
-                "deprecated": False,
-                "migrationTarget": "gold/supplier_spend.sql",
             },
             "target": "supplier_spend",
             "dependsOn": {
@@ -209,10 +205,8 @@ def test_dag_cycle_detected(tmp_path: Path) -> None:
             "id": "node_a",
             "layer": "silver",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.node_a:build",
-                "deprecated": False,
-                "migrationTarget": "silver/node_a.sql",
             },
             "target": "node_a",
             "dependsOn": {"silver": [{"id": "node_b"}]},
@@ -228,10 +222,8 @@ def test_dag_cycle_detected(tmp_path: Path) -> None:
             "id": "node_b",
             "layer": "silver",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.node_b:build",
-                "deprecated": False,
-                "migrationTarget": "silver/node_b.sql",
             },
             "target": "node_b",
             "dependsOn": {"silver": [{"id": "node_a"}]},
@@ -291,10 +283,8 @@ def test_dashboard_requires_columns_typo_table_surfaces_AIDPF_7001(tmp_path: Pat
             "id": "gl_balance",
             "layer": "gold",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.gl_balance:build",
-                "deprecated": False,
-                "migrationTarget": "gold/gl_balance.sql",
             },
             "target": "gl_balance",
             "refresh": {"seed": {"strategy": "replace"}},
@@ -350,10 +340,8 @@ def test_dashboard_column_type_mismatch(tmp_path: Path) -> None:
             "id": "gl_balance",
             "layer": "gold",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": "pkg.gl_balance:build",
-                "deprecated": False,
-                "migrationTarget": "gold/gl_balance.sql",
             },
             "target": "gl_balance",
             "refresh": {"seed": {"strategy": "replace"}},
@@ -416,10 +404,8 @@ def _add_gold_node(
             "id": target,
             "layer": "gold",
             "implementation": {
-                "type": "python_legacy",
+                "type": "builtin",
                 "callable": f"pkg.{target}:build",
-                "deprecated": False,
-                "migrationTarget": f"gold/{target}.sql",
             },
             "target": target,
             "refresh": {"seed": {"strategy": "replace"}},

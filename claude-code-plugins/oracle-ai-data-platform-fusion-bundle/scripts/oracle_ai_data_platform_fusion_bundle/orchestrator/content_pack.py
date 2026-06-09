@@ -45,6 +45,11 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
     NodeYaml,
     PackOverlayRef,
     PackYaml,
+    # Phase 9 — ResolvedPack moved to schema/medallion_pack.py to honor
+    # the §4.3 dispatch import boundary. Re-exported here for backwards
+    # compatibility with existing consumers.
+    ResolvedPack,
+    _canonicalise,
 )
 
 # Error codes used by this module (registered in PLAN §25).
@@ -87,93 +92,10 @@ class MissingPackFileError(PackLoaderError):
 
 
 # ---------------------------------------------------------------------------
-# ResolvedPack dataclass
+# ResolvedPack — Phase 9 (ADR-0022) moved to schema/medallion_pack.py to
+# honor the §4.3 dispatch import boundary. Re-exported above for
+# backwards compatibility.
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ResolvedPack:
-    """A fully-loaded content pack (post-overlay-merge).
-
-    Attributes:
-        root: filesystem path to the pack root directory. For merged packs,
-            this is the overlay root (top of the chain). Use ``source_roots``
-            for per-node path resolution.
-        pack: parsed ``pack.yaml`` (top-level).
-        silver: per-node-id mapping of silver nodes (parsed from
-            ``silver/*.yaml``).
-        gold: per-node-id mapping of gold nodes (parsed from ``gold/*.yaml``).
-        dashboards: per-dashboard-id mapping (parsed from
-            ``dashboards/*.yaml``).
-        bronze_yaml: parsed contents of ``bronze.yaml`` (unstructured dict
-            for now; Phase 1 doesn't validate the schema — Phase 2 will).
-        is_merged: True if this is the result of a merge_overlay call.
-        chain: list of pack ids in load order (base first, overlays after).
-        source_roots: per-artifact pack-root provenance. Keys are qualified
-            ids (``"silver/<id>"``, ``"gold/<id>"``, ``"dashboards/<id>"``,
-            and the literal ``"bronze.yaml"``). Values are the pack-root
-            paths the artifact's files actually live under. For a non-merged
-            pack, every key maps to ``root``. For a merged pack, inherited
-            base artifacts keep their base root; overlay-added or
-            overlay-overridden artifacts use the overlay root.
-
-            Validators use this to resolve relative file paths (e.g. a
-            silver node's ``implementation.sql``) against the correct
-            filesystem location. The single ``root`` field is insufficient
-            for merged packs because inherited base SQL lives under
-            ``base.root``, not under ``overlay.root``.
-    """
-
-    root: Path
-    pack: PackYaml
-    silver: dict[str, NodeYaml] = field(default_factory=dict)
-    gold: dict[str, NodeYaml] = field(default_factory=dict)
-    dashboards: dict[str, DashboardYaml] = field(default_factory=dict)
-    bronze_yaml: dict[str, Any] = field(default_factory=dict)
-    is_merged: bool = False
-    chain: tuple[str, ...] = ()
-    source_roots: dict[str, Path] = field(default_factory=dict)
-
-    def all_nodes(self) -> dict[str, NodeYaml]:
-        """Convenience: silver and gold nodes combined."""
-        return {**self.silver, **self.gold}
-
-    def root_for(self, qualified_id: str) -> Path:
-        """Return the source-pack root for an artifact id, falling back to ``root``.
-
-        ``qualified_id`` examples: ``"silver/dim_supplier"``,
-        ``"gold/gl_balance"``, ``"dashboards/executive_cfo"``, ``"bronze.yaml"``.
-        """
-        return self.source_roots.get(qualified_id, self.root)
-
-    def compute_hash(self) -> str:
-        """Stable sha256 of the pack's canonical serialised form.
-
-        Used by PLAN §11.9 plan-hash drift detection. Deterministic across
-        runs: keys sorted, no unstable ordering.
-        """
-        # We hash the pack.yaml's model_dump plus the node/dashboard contents.
-        payload: dict[str, Any] = {
-            "pack": self.pack.model_dump(mode="json", by_alias=True),
-            "silver": {k: v.model_dump(mode="json", by_alias=True) for k, v in sorted(self.silver.items())},
-            "gold": {k: v.model_dump(mode="json", by_alias=True) for k, v in sorted(self.gold.items())},
-            "dashboards": {
-                k: v.model_dump(mode="json", by_alias=True)
-                for k, v in sorted(self.dashboards.items())
-            },
-            "bronze_yaml": _canonicalise(self.bronze_yaml),
-        }
-        blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(blob).hexdigest()
-
-
-def _canonicalise(value: Any) -> Any:
-    """Recursively sort dict keys for deterministic hashing."""
-    if isinstance(value, dict):
-        return {k: _canonicalise(value[k]) for k in sorted(value)}
-    if isinstance(value, list):
-        return [_canonicalise(v) for v in value]
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +228,7 @@ def load_pack(root: Path) -> ResolvedPack:
             nodes[node.id] = node
         return nodes
 
+    bronze_nodes = _scan_nodes("bronze")
     silver = _scan_nodes("silver")
     gold = _scan_nodes("gold")
 
@@ -320,6 +243,8 @@ def load_pack(root: Path) -> ResolvedPack:
     source_roots: dict[str, Path] = {}
     if bronze_yaml:
         source_roots["bronze.yaml"] = root
+    for nid in bronze_nodes:
+        source_roots[f"bronze/{nid}"] = root
     for nid in silver:
         source_roots[f"silver/{nid}"] = root
     for nid in gold:
@@ -330,6 +255,7 @@ def load_pack(root: Path) -> ResolvedPack:
     return ResolvedPack(
         root=root,
         pack=pack,
+        bronze=bronze_nodes,
         silver=silver,
         gold=gold,
         dashboards=dashboards,
@@ -451,12 +377,17 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
         )
 
     # ----- Validate orphan overrides ----------------------------------
-    base_node_ids = set(base.silver) | set(base.gold)
-    base_qualified_ids = base_node_ids | {f"silver/{nid}" for nid in base.silver} | {
-        f"gold/{nid}" for nid in base.gold
-    }
+    base_node_ids = set(base.bronze) | set(base.silver) | set(base.gold)
+    base_qualified_ids = (
+        base_node_ids
+        | {f"bronze/{nid}" for nid in base.bronze}
+        | {f"silver/{nid}" for nid in base.silver}
+        | {f"gold/{nid}" for nid in base.gold}
+    )
     for override_target in overlay.pack.overrides:
-        normalized = override_target.replace("silver/", "").replace("gold/", "")
+        normalized = override_target.replace("bronze/", "").replace(
+            "silver/", ""
+        ).replace("gold/", "")
         if normalized not in base_node_ids and override_target not in base_qualified_ids:
             raise OrphanOverrideError(
                 f"{AIDPF_2001}: overlay {overlay.pack.id!r} overrides node "
@@ -509,19 +440,28 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
     # overlay-only additions are then reassigned to overlay.root below.
     merged_source_roots: dict[str, Path] = dict(base.source_roots)
 
+    merged_bronze = _apply_node_overrides(base.bronze, overlay, "bronze/")
     merged_silver = _apply_node_overrides(base.silver, overlay, "silver/")
     merged_gold = _apply_node_overrides(base.gold, overlay, "gold/")
 
     # Mark every override target's source root as the overlay root,
     # since the override declared by the overlay points at overlay-side files.
     for override_key in overlay.pack.overrides:
-        normalized = override_key.replace("silver/", "").replace("gold/", "")
-        if normalized in base.silver:
+        normalized = override_key.replace("bronze/", "").replace(
+            "silver/", ""
+        ).replace("gold/", "")
+        if normalized in base.bronze:
+            merged_source_roots[f"bronze/{normalized}"] = overlay.root
+        elif normalized in base.silver:
             merged_source_roots[f"silver/{normalized}"] = overlay.root
         elif normalized in base.gold:
             merged_source_roots[f"gold/{normalized}"] = overlay.root
 
-    # Overlay's own silver/gold (not declared as overrides) are additions.
+    # Overlay's own bronze/silver/gold (not declared as overrides) are additions.
+    for nid, node in overlay.bronze.items():
+        if nid not in merged_bronze:
+            merged_bronze[nid] = node
+            merged_source_roots[f"bronze/{nid}"] = overlay.root
     for nid, node in overlay.silver.items():
         if nid not in merged_silver:
             merged_silver[nid] = node
@@ -546,6 +486,7 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
     return ResolvedPack(
         root=overlay.root,
         pack=merged_pack,
+        bronze=merged_bronze,
         silver=merged_silver,
         gold=merged_gold,
         dashboards=merged_dashboards,

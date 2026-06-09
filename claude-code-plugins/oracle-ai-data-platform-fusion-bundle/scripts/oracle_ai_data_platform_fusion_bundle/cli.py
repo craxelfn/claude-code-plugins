@@ -192,11 +192,78 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
     sys.exit(probe_catalog(pod=pod, username=username, password=password, console=console))
 
 
+@catalog.command("probe-pvo")
+@click.argument("dataset_id")
+@click.option(
+    "--datastore", required=True,
+    help="BICC datastore identifier (e.g. SupplierExtractPVO).",
+)
+@click.option(
+    "--bicc-schema", required=True,
+    help="BICC offering schema (Financial / HCM / SCM).",
+)
+@click.option(
+    "--pvo-id", default=None,
+    help="Optional full AM-hierarchy path "
+         "(e.g. FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO). "
+         "Used for WARN cross-reference against the curated catalog.",
+)
+@click.option(
+    "--incremental-capable/--no-incremental-capable", default=True,
+    help="Whether fusion.initial.extract-date is meaningful for this PVO "
+         "(default: True). Set --no-incremental-capable for snapshot-style "
+         "PVOs (gl_period_balances, gl_coa) where LastUpdateDate doesn't "
+         "track meaningful change events monotonically.",
+)
+@click.option(
+    "--emit-pack-yaml", required=True,
+    help="Path to write the draft YAML to "
+         "(typically content_packs/<overlay-pack>/bronze/<id>.yaml).",
+)
+@click.pass_context
+def catalog_probe_pvo(
+    ctx: click.Context,
+    dataset_id: str,
+    datastore: str,
+    bicc_schema: str,
+    pvo_id: str | None,
+    incremental_capable: bool,
+    emit_pack_yaml: str,
+) -> None:
+    """Probe a BICC PVO and emit a draft content-pack bronze YAML.
+
+    Runs a metadata-only ``extract_pvo().schema`` roundtrip (no row pull),
+    translates the discovered StructType to outputSchema.columns, and
+    writes a draft YAML with commented-out refresh.incremental TODOs.
+
+    Operator must review the generated YAML before production use:
+    fill in naturalKey, watermark.column, requiredColumns, and pii
+    classifications.
+    """
+    from .commands.catalog import probe_pvo_emit_pack_yaml
+    sys.exit(probe_pvo_emit_pack_yaml(
+        dataset_id=dataset_id,
+        datastore=datastore,
+        bicc_schema=bicc_schema,
+        pvo_id=pvo_id,
+        incremental_capable=incremental_capable,
+        emit_pack_yaml=emit_pack_yaml,
+        bundle_path=ctx.obj.get("bundle_path") if ctx.obj else None,
+        config_path=ctx.obj.get("config_path") if ctx.obj else None,
+        env_name=ctx.obj.get("env_name", "dev") if ctx.obj else "dev",
+        console=console,
+    ))
+
+
 @main.command()
 @click.option(
     "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
-    help="seed = rebuild from bronze every run; incremental = delta-merge "
-         "(P1.5β, not implemented today). The retired alias 'full' is now 'seed'."
+    help="seed = full BICC pull + replace strategy per layer; incremental "
+         "= delta-merge using prior watermarks from fusion_bundle_state "
+         "(P1.17 — bronze MERGE on natural key + payload-diff for "
+         "incremental_capable=False PVOs; silver/gold MERGE on the "
+         "primary source's row-max watermark). The retired alias 'full' "
+         "is now 'seed'."
 )
 @click.option("--datasets", default=None, help="Comma-separated dataset/dim/mart names to filter (default: all in bundle.yaml).")
 @click.option(
@@ -243,20 +310,6 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "operator error. Only meaningful for REST dispatch (no --inline).",
 )
 @click.option(
-    "--execution-backend", "execution_backend",
-    type=click.Choice(["legacy-python", "content-pack"]),
-    default="content-pack",
-    show_default=True,
-    help="Execution backend (Phase 5 default flip): `content-pack` "
-         "(default) runs the content-pack SQL runner against the pack "
-         "declared in bundle.yaml's `contentPack:` block. `legacy-python` "
-         "runs the v1 hardcoded dim_*.py / gold_*.py modules and emits a "
-         "deprecation warning — kept for backward compatibility through "
-         "Phase 9. Phase 4's dual-runner parity gate (live evidence on "
-         "saasfademo1, 2026-06-07) plus Phase 5's bronze-readiness + "
-         "Fusion-PVO-drift preflight gates close the gate on flipping.",
-)
-@click.option(
     "--force-fingerprint-skip", "force_fingerprint_skip",
     is_flag=True,
     default=False,
@@ -266,11 +319,22 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "with mode='fingerprint_skip'. Production runs MUST NOT use "
          "this; SOX-audit environments should policy-disable.",
 )
+@click.option(
+    "--strict-scope", "strict_scope", is_flag=True, default=False,
+    help="Phase 9 — disable D-1 implicit-transitive-include. When set, "
+         "every declared root's `dependsOn` must ALSO appear in "
+         "`--datasets` / `bundle.datasets[]` explicitly; missing deps "
+         "raise AIDPF-1042 STRICT_SCOPE_MISSING_DEPENDENCY. Use for "
+         "debug-style runs where exact control over the plan is "
+         "required (e.g. re-run only `dim_supplier` against pre-staged "
+         "bronze).",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
-        poll_timeout_s: int, execution_backend: str,
-        force_fingerprint_skip: bool) -> None:
+        poll_timeout_s: int,
+        force_fingerprint_skip: bool,
+        strict_scope: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -284,8 +348,8 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         resume_run_id=resume_run_id,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
-        execution_backend=execution_backend,
         force_fingerprint_skip=force_fingerprint_skip,
+        strict_scope=strict_scope,
         console=console,
     ))
 

@@ -72,6 +72,79 @@ def bundle_path(tmp_path: Path) -> Path:
     return p
 
 
+def _make_dispatch_test_pack(tmp_path: Path, extra_silver_gold: bool = False):
+    """Build a minimal ResolvedPack for the dispatch dry-run tests.
+
+    The Phase 9 dispatch dry-run path requires the caller to pass a
+    ResolvedPack so schema.plan_resolver can walk it without crossing
+    the §4.3 import boundary.
+    """
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+        load_pack,
+    )
+
+    root = tmp_path / "test_pack"
+    root.mkdir()
+    (root / "pack.yaml").write_text(
+        "id: dispatch-test\nversion: 0.1.0\n"
+        "compatibility:\n  pluginMinVersion: 0.1.0\n",
+    )
+
+    def _bronze(node_id: str) -> str:
+        return (
+            f"id: {node_id}\n"
+            f"layer: bronze\n"
+            f"implementation:\n"
+            f"  type: bronze_extract\n"
+            f"  datastore: X_PVO\n"
+            f"  biccSchema: Financial\n"
+            f"target: {node_id}\n"
+            f"dependsOn: {{ bronze: [], silver: [] }}\n"
+            f"refresh: {{ seed: {{ strategy: replace }} }}\n"
+            f"outputSchema:\n"
+            f"  columns:\n"
+            f"    - {{ name: ID, type: long, nullable: false, pii: none }}\n"
+            f"    - {{ name: _extract_ts, type: timestamp, nullable: false, pii: none }}\n"
+            f"    - {{ name: _source_pvo, type: string, nullable: false, pii: none }}\n"
+            f"    - {{ name: _run_id, type: string, nullable: false, pii: none }}\n"
+            f"    - {{ name: _watermark_used, type: timestamp, nullable: true, pii: none }}\n"
+        )
+
+    (root / "bronze").mkdir()
+    (root / "bronze" / "erp_suppliers.yaml").write_text(_bronze("erp_suppliers"))
+    if extra_silver_gold:
+        (root / "bronze" / "ap_invoices.yaml").write_text(_bronze("ap_invoices"))
+        (root / "silver").mkdir()
+        (root / "silver" / "dim_supplier.yaml").write_text(
+            "id: dim_supplier\nlayer: silver\n"
+            "implementation: { type: sql, sql: silver/dim_supplier.sql }\n"
+            "target: dim_supplier\n"
+            "dependsOn:\n  bronze:\n    - id: erp_suppliers\n  silver: []\n"
+            "refresh: { seed: { strategy: replace } }\n"
+            "outputSchema:\n  columns:\n    - { name: supplier_id, type: long, nullable: false, pii: none }\n",
+        )
+        (root / "silver" / "dim_supplier.sql").write_text("SELECT 1 AS supplier_id\n")
+        (root / "silver" / "dim_calendar.yaml").write_text(
+            "id: dim_calendar\nlayer: silver\n"
+            "implementation: { type: builtin, callable: x:y }\n"
+            "target: dim_calendar\n"
+            "dependsOn: { bronze: [], silver: [] }\n"
+            "refresh: { seed: { strategy: replace } }\n"
+            "outputSchema:\n  columns:\n    - { name: calendar_key, type: long, nullable: false, pii: none }\n",
+        )
+        (root / "gold").mkdir()
+        (root / "gold" / "ap_aging.yaml").write_text(
+            "id: ap_aging\nlayer: gold\n"
+            "implementation: { type: sql, sql: gold/ap_aging.sql }\n"
+            "target: ap_aging\n"
+            "dependsOn:\n  bronze:\n    - id: ap_invoices\n  silver:\n    - id: dim_supplier\n"
+            "refresh: { seed: { strategy: replace } }\n"
+            "outputSchema:\n  columns:\n    - { name: supplier_id, type: long, nullable: false, pii: none }\n",
+        )
+        (root / "gold" / "ap_aging.sql").write_text("SELECT 1 AS supplier_id\n")
+    return load_pack(root)
+
+
 def _env() -> EnvSpec:
     return EnvSpec.model_validate(
         {
@@ -266,7 +339,7 @@ class TestPhaseAGuards:
 
 class TestDryRun:
     def test_dry_run_skips_wheel_and_upload(
-        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, bundle_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = _stub_client(monkeypatch)
         wheel_mock = MagicMock(
@@ -276,6 +349,7 @@ class TestDryRun:
             "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
             wheel_mock,
         )
+        pack = _make_dispatch_test_pack(tmp_path)
         summary = dispatch_via_rest(
             bundle_path=bundle_path,
             config=_config(),
@@ -285,6 +359,7 @@ class TestDryRun:
             datasets=None,
             layers=None,
             dry_run=True,
+            resolved_pack=pack,
         )
         assert isinstance(summary, RunSummary)
         assert summary.steps == ()
@@ -293,7 +368,7 @@ class TestDryRun:
         client.submit_run.assert_not_called()
 
     def test_dry_run_populates_plan_nodes(
-        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, bundle_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """P1.5ε-fix9 — dispatch dry-run must resolve the bundle plan
         laptop-side and populate ``RunSummary.plan`` with PlanNode
@@ -306,6 +381,7 @@ class TestDryRun:
         )
 
         _stub_client(monkeypatch)
+        pack = _make_dispatch_test_pack(tmp_path)
         summary = dispatch_via_rest(
             bundle_path=bundle_path,
             config=_config(),
@@ -315,6 +391,7 @@ class TestDryRun:
             datasets=None,
             layers=None,
             dry_run=True,
+            resolved_pack=pack,
         )
         assert summary.plan is not None
         assert len(summary.plan) > 0
@@ -323,16 +400,18 @@ class TestDryRun:
         assert summary.plan[0].dataset_id == "erp_suppliers"
         assert summary.plan[0].layer == "bronze"
 
-    def test_dry_run_populates_prereqs_when_layer_filter_present(
+    def test_dry_run_layer_filter_pulls_d1_closure_into_plan(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """P1.5ε-fix9 — with ``--layers gold``, the bronze + silver
-        upstreams of in-plan gold marts must surface as PrereqNode
-        entries so the renderer can show the "Extra-plan prerequisites"
-        table the operator needs to verify before dispatching.
+        """Round-6 review fix: with ``--layers gold``, the layer filter
+        narrows declared ROOTS to gold marts, but D-1 transitive deps
+        (bronze + silver upstreams) land in the PLAN — matching runtime
+        ``resolve_content_pack_plan`` byte-for-byte. Pre-fix surfaced
+        them as PrereqNode entries which silently diverged from runtime.
+        Prereqs is empty under the new contract.
         """
         from oracle_ai_data_platform_fusion_bundle.schema.run_summary import (
-            PrereqNode,
+            PlanNode,
         )
 
         layer_filter_bundle = """
@@ -355,6 +434,7 @@ gold:
         bp.write_text(layer_filter_bundle)
 
         _stub_client(monkeypatch)
+        pack = _make_dispatch_test_pack(tmp_path, extra_silver_gold=True)
         summary = dispatch_via_rest(
             bundle_path=bp,
             config=_config(),
@@ -364,13 +444,18 @@ gold:
             datasets=None,
             layers=["gold"],
             dry_run=True,
+            resolved_pack=pack,
         )
-        assert summary.prereqs is not None
-        assert len(summary.prereqs) > 0
-        assert all(isinstance(d, PrereqNode) for d in summary.prereqs)
-        prereq_keys = {(d.dataset_id, d.layer) for d in summary.prereqs}
-        assert ("ap_invoices", "bronze") in prereq_keys
-        assert ("dim_supplier", "silver") in prereq_keys
+        assert summary.prereqs == (), (
+            f"round-6 contract: prereqs must be empty; got {summary.prereqs!r}"
+        )
+        assert all(isinstance(n, PlanNode) for n in summary.plan)
+        plan_keys = {(n.dataset_id, n.layer) for n in summary.plan}
+        # gold mart (the declared root post-layer-filter)
+        assert ("ap_aging", "gold") in plan_keys
+        # D-1 transitive upstreams must be in the PLAN, not prereqs.
+        assert ("ap_invoices", "bronze") in plan_keys
+        assert ("dim_supplier", "silver") in plan_keys
 
 
 # ---------------------------------------------------------------------------

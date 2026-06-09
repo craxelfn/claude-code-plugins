@@ -1,0 +1,47 @@
+id: gl_coa
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO
+  pvo_id: FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO
+  biccSchema: Financial
+  schemaOverride: null
+  # gl_coa is bucket-config style — full re-extract per cycle (P1.17 contract).
+  incrementalCapable: false
+  auditColumnsMode: bronze_v1
+target: gl_coa
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: gl_coa
+      column: CodeCombinationLastUpdateDate
+    naturalKey: [CodeCombinationCodeCombinationId]
+requiredColumns:
+  gl_coa:
+    - CodeCombinationCodeCombinationId
+    - CodeCombinationChartOfAccountsId
+    - CodeCombinationSegment1
+    - CodeCombinationEnabledFlag
+    - CodeCombinationLastUpdateDate
+outputSchema:
+  columns:
+    - { name: CodeCombinationCodeCombinationId, type: long, nullable: true, pii: none }
+    - { name: CodeCombinationChartOfAccountsId, type: long, nullable: true, pii: none }
+    - { name: CodeCombinationSegment1, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationSegment2, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationSegment3, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationAccountType, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationEnabledFlag, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+    - { name: _source_pvo, type: string, nullable: false, pii: none }
+    - { name: _run_id, type: string, nullable: false, pii: none }
+    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }
+quality:
+  tests: []

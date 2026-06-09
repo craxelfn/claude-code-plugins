@@ -1,0 +1,45 @@
+id: scm_items
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.ScmExtractAM.EgpBiccExtractAM.ItemExtractPVO
+  pvo_id: FscmTopModelAM.ScmExtractAM.EgpBiccExtractAM.ItemExtractPVO
+  # See po_receipts comment — tenant-dependent BICC offering schema.
+  biccSchema: Financial
+  schemaOverride: null
+  incrementalCapable: true
+  auditColumnsMode: bronze_v1
+target: scm_items
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: scm_items
+      column: EgpSystemItemsBLastUpdateDate
+    naturalKey:
+      - EgpSystemItemsBInventoryItemId
+      - EgpSystemItemsBOrganizationId
+requiredColumns:
+  scm_items:
+    - EgpSystemItemsBInventoryItemId
+    - EgpSystemItemsBOrganizationId
+    - EgpSystemItemsBSegment1
+    - EgpSystemItemsBLastUpdateDate
+outputSchema:
+  columns:
+    - { name: EgpSystemItemsBInventoryItemId, type: long, nullable: true, pii: none }
+    - { name: EgpSystemItemsBOrganizationId, type: long, nullable: true, pii: none }
+    - { name: EgpSystemItemsBSegment1, type: string, nullable: true, pii: none }
+    - { name: EgpSystemItemsBItemType, type: string, nullable: true, pii: none }
+    - { name: EgpSystemItemsBLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+    - { name: _source_pvo, type: string, nullable: false, pii: none }
+    - { name: _run_id, type: string, nullable: false, pii: none }
+    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }
+quality:
+  tests: []
