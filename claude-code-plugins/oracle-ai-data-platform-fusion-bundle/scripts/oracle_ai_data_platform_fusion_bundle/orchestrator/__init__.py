@@ -1026,17 +1026,47 @@ def _phase5_top_level_dispatch(
 
     # Fusion PVO drift gate (AIDPF-2072). Fires BEFORE state writes
     # when bronze nodes are in scope.
-    bronze_node_ids: set[str] = set()
+    #
+    # Phase 9 review fix: enumerate in-scope bronze ids from the
+    # RESOLVED PLAN, not from the raw (datasets, layers) filter. D-1
+    # implicit-transitive-include adds bronze deps for silver/gold
+    # roots — e.g. ``--datasets supplier_spend`` or ``--layers gold``
+    # still executes ``ap_invoices`` + ``erp_suppliers``. Computing the
+    # gate scope from raw filters missed those transitive bronze
+    # extracts, letting Fusion column drift slip past the AIDPF-2072
+    # gate and surface as opaque downstream failures.
+    in_scope_bronze: set[str] = set()
     if resolved_pack is not None:
-        bronze_node_ids = set(resolved_pack.bronze.keys())
-        # Legacy bronze.yaml fallback (pre-Phase-9 packs).
+        try:
+            from .content_pack_plan_resolver import resolve_content_pack_plan
+            gate_plan = resolve_content_pack_plan(
+                resolved_pack,
+                datasets=datasets, layers=layers,
+                strict_scope=strict_scope,
+            )
+            in_scope_bronze = {n.id for n in gate_plan if n.layer == "bronze"}
+        except Exception:  # noqa: BLE001 — resolver failures surface
+            # again from _run_content_pack_backend; the gate just
+            # degrades to "no bronze in scope" here.
+            in_scope_bronze = set()
+        # Legacy bronze.yaml fallback: a pack that hasn't migrated to
+        # per-file bronze/<id>.yaml carries its bronze ids only in
+        # pack.bronze_yaml. Resolver returns them as part of the plan
+        # already (resolve_content_pack_plan walks pack.bronze), so the
+        # set above is complete; this loop is belt-and-braces.
         bronze_yaml = getattr(resolved_pack, "bronze_yaml", None) or {}
-        for ds in bronze_yaml.get("datasets", []) or []:
-            if isinstance(ds, dict) and "id" in ds:
-                bronze_node_ids.add(str(ds["id"]))
-    in_scope_bronze = _bronze_ids_in_scope(
-        bronze_node_ids, datasets, layers,
-    )
+        legacy_ids = {
+            str(ds["id"]) for ds in bronze_yaml.get("datasets", []) or []
+            if isinstance(ds, dict) and "id" in ds
+        }
+        if legacy_ids:
+            # Apply the same filter shape as the resolver would have.
+            if datasets is not None:
+                legacy_ids &= set(datasets)
+            if layers is not None and "bronze" not in {l.lower() for l in layers}:
+                legacy_ids = set()
+            in_scope_bronze |= legacy_ids
+
     if in_scope_bronze:
         in_scope_bronze = _filter_resume_succeeded(in_scope_bronze, resume_context)
     if in_scope_bronze:
@@ -1077,21 +1107,6 @@ def _phase5_top_level_dispatch(
         shared_resume_context=resume_context,
         strict_scope=strict_scope,
     )
-
-
-def _bronze_ids_in_scope(
-    bronze_node_ids: set[str],
-    datasets: list[str] | None,
-    layers: list[str] | None,
-) -> set[str]:
-    """Return the bronze node ids matching the operator's filter."""
-    if not bronze_node_ids:
-        return set()
-    if layers is not None and "bronze" not in {l.lower() for l in layers}:
-        return set()
-    if datasets is None:
-        return bronze_node_ids
-    return {d for d in datasets if d in bronze_node_ids}
 
 
 def _filter_resume_succeeded(
@@ -1699,11 +1714,31 @@ def _run_content_pack_backend(
     # field (no default); the content-pack backend has already validated
     # that bundle.content_pack and bundle.content_pack.profile exist.
     active_profile_name = bundle.content_pack.profile  # type: ignore[union-attr]
-    # Map each declared dataset to its fully-qualified bronze table.
-    bronze_table_for_source = {
-        ds.id: f"{bundle.aidp.catalog}.{bundle.aidp.bronze_schema}.{ds.id}"
-        for ds in bundle.datasets
+    # Phase 9 review fix: build the source-id → bronze-table map from
+    # the resolved pack's bronze nodes, using each node's ``target``
+    # (not ``id``). The pack contract permits id != target — the
+    # starter pack has gl_journal_lines (id) → gl_journal_headers
+    # (target). The pre-fix bundle-based map assumed they're identical
+    # and would point silver/gold at catalog.bronze.gl_journal_lines
+    # when the bronze extractor actually writes
+    # catalog.bronze.gl_journal_headers.
+    bronze_table_for_source: dict[str, str] = {
+        node_id: paths.bronze(node.target)
+        for node_id, node in resolved_pack.bronze.items()
     }
+    # Legacy pack.bronze_yaml fallback (pre-Phase-9 packs that haven't
+    # migrated to per-file bronze/<id>.yaml).
+    legacy_bronze = getattr(resolved_pack, "bronze_yaml", None) or {}
+    for ds in legacy_bronze.get("datasets", []) or []:
+        if not isinstance(ds, dict):
+            continue
+        ds_id = ds.get("id")
+        if not ds_id or ds_id in bronze_table_for_source:
+            continue
+        # Legacy YAML carries the bronze table name as "target" or
+        # "pvo" depending on pack vintage; fall back to id.
+        table_name = ds.get("target") or ds.get("pvo") or ds_id
+        bronze_table_for_source[ds_id] = paths.bronze(table_name)
     ctx = CpRunContext(
         catalog=bundle.aidp.catalog,
         bronze_schema=bundle.aidp.bronze_schema,

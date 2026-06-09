@@ -470,7 +470,11 @@ def _build_target_identifier(
 
     ``paths`` is keyword-only for back-compat with call sites that
     pre-date the Step 2.5 refactor. When ``None``, falls back to
-    raw f-string composition (legacy shape — silver/gold only).
+    layer-aware f-string composition (silver / gold / bronze each
+    resolved against the matching ``ctx.<layer>_schema``). Pre-fix
+    the bronze branch fell through to the gold f-string, which made
+    bronze nodes resolve to ``catalog.gold.<target>`` — a real bug
+    surfaced in the Phase 9 review.
     """
     layer = node.layer
     if paths is not None:
@@ -484,8 +488,19 @@ def _build_target_identifier(
             f"_build_target_identifier: unsupported layer={layer!r} for "
             f"node {node.id!r}"
         )
-    # Legacy path — no validation. New code should pass ``paths``.
-    schema = ctx.silver_schema if layer == "silver" else ctx.gold_schema
+    # Legacy path — no identifier validation. Layer-aware so bronze
+    # nodes don't silently land in the gold schema.
+    if layer == "bronze":
+        schema = ctx.bronze_schema
+    elif layer == "silver":
+        schema = ctx.silver_schema
+    elif layer == "gold":
+        schema = ctx.gold_schema
+    else:
+        raise ValueError(
+            f"_build_target_identifier: unsupported layer={layer!r} for "
+            f"node {node.id!r}"
+        )
     return f"{ctx.catalog}.{schema}.{node.target}"
 
 
@@ -1054,7 +1069,12 @@ def _execute_bronze_extract_node(
         )
 
     # ----- Step 6: invoke the bronze adapter --------------------------
-    target = target_override or _build_target_identifier(node, ctx)
+    # Phase 9 review fix: pass `paths` so the bronze branch of
+    # _build_target_identifier routes through TablePaths.bronze and the
+    # post-write _assert_materialized_matches_declared describes the
+    # actual bronze table (catalog.bronze.<target>), not the gold-schema
+    # fallback the legacy f-string composed.
+    target = target_override or _build_target_identifier(node, ctx, paths)
     try:
         target_df, bronze_output_watermark = _bronze_adapter.run(
             spark,
