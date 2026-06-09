@@ -2,11 +2,13 @@
 
 Two layers of checking:
   1. **Schema** — ``bundle.yaml`` and ``aidp.config.yaml`` parse via Pydantic v2.
-  2. **Ref integrity** — every dataset id maps to an entry in
-     :mod:`oracle_ai_data_platform_fusion_bundle.schema.fusion_catalog`,
-     and every variable / vault reference resolves (env vars only —
-     vault refs are noted but NOT resolved here, since that requires
-     OCI session and the ``orchestrator`` does it lazily).
+  2. **Ref integrity** — every dataset id resolves cross-layer in the
+     configured content pack (``pack.bronze ∪ pack.silver ∪ pack.gold``).
+     Phase 9 replaced the old ``fusion_catalog.CATALOG``-membership
+     check; bundles may now declare silver/gold node ids as high-level
+     intent, and customer overlay packs may declare custom PVOs not in
+     the curated catalog (per Phase 9 WARN-only ``AIDPF-2080`` contract).
+     Variable / vault references are noted but NOT resolved here.
 
 No network calls.
 """
@@ -20,8 +22,10 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from ..schema.bundle import AidpConfig, Bundle
-from ..schema.fusion_catalog import CATALOG
 from ..schema.refs import find_vault_refs
+
+
+AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK = "AIDPF-2081"
 
 
 def validate(
@@ -45,13 +49,8 @@ def validate(
         )
 
     if bundle:
-        # Dataset id -> CATALOG entry
-        unknown = [ds.id for ds in bundle.datasets if ds.id not in CATALOG]
-        if unknown:
-            issues.append(
-                f"unknown dataset ids in bundle.yaml.datasets: {unknown} — "
-                f"add them to schema/fusion_catalog.py first"
-            )
+        # Cross-layer pack dataset resolution (Phase 9).
+        _validate_datasets_against_pack(bundle, bundle_path, issues, console)
 
         # Surface Vault refs (informational only)
         vault_refs = _collect_vault_refs(bundle)
@@ -78,6 +77,90 @@ def validate(
         console.print(f"  aidp.config.yaml -> environments: "
                       f"{sorted(config.environments.keys())}")
     return 0
+
+
+def _validate_datasets_against_pack(
+    bundle: Bundle,
+    bundle_path: Path,
+    issues: list[str],
+    console: Console,
+) -> None:
+    """Phase 9: every ``datasets[].id`` must resolve in
+    ``pack.bronze ∪ pack.silver ∪ pack.gold`` (cross-layer intent).
+
+    Loads the bundle's content pack (with overlay chain) via
+    :func:`load_full_chain` — mirrors what the runtime path does so
+    customer overlay-pack-authored bronze ids are visible.
+
+    Pack load failure is non-fatal at this stage (the rest of validate
+    still surfaces schema issues); records a single message.
+    """
+    pack_root = _resolve_pack_root(bundle, bundle_path)
+    if pack_root is None:
+        # Bundle declares no content pack — fall back to the legacy
+        # fusion_catalog.py membership check so legacy bundles
+        # (pre-Phase-9 shape with bronze-only dataset ids) still get
+        # typo detection.
+        from ..schema.fusion_catalog import CATALOG
+        unknown = [ds.id for ds in bundle.datasets if ds.id not in CATALOG]
+        if unknown:
+            issues.append(
+                f"unknown dataset ids in bundle.yaml.datasets: {unknown} — "
+                f"add them to schema/fusion_catalog.py first OR add a content "
+                f"pack with bronze/silver/gold YAMLs declaring them."
+            )
+        return
+
+    try:
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+    except ImportError as exc:
+        issues.append(f"pack loader unavailable: {exc}")
+        return
+
+    try:
+        resolver = make_filesystem_base_resolver(pack_root)
+        pack = load_full_chain(pack_root, base_resolver=resolver)
+    except Exception as exc:  # noqa: BLE001 — surface loader failures uniformly
+        issues.append(f"content pack at {pack_root} failed to load: {exc}")
+        return
+
+    layer_ids = set(pack.bronze) | set(pack.silver) | set(pack.gold)
+    unknown = [ds.id for ds in bundle.datasets if ds.id not in layer_ids]
+    if unknown:
+        issues.append(
+            f"{AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK}: bundle.yaml datasets "
+            f"do not resolve in any pack layer: {unknown}. Known across "
+            f"all layers: bronze={sorted(pack.bronze)!r}, "
+            f"silver={sorted(pack.silver)!r}, gold={sorted(pack.gold)!r}."
+        )
+
+
+def _resolve_pack_root(bundle: Bundle, bundle_path: Path) -> Path | None:
+    """Locate the bundle's content pack root.
+
+    Mirrors ``commands/run.py``'s pack-root resolution — handles both
+    the modern ``bundle.contentPack.path`` field and the per-tenant
+    layout where the pack sits alongside the bundle in
+    ``content_packs/<id>/``.
+    """
+    cp = getattr(bundle, "content_pack", None) or getattr(bundle, "contentPack", None)
+    if cp is not None:
+        # Pydantic model with .path or .pack — accept either shape.
+        path = getattr(cp, "path", None) or getattr(cp, "pack", None)
+        if path:
+            candidate = (bundle_path.parent / path).resolve()
+            if candidate.exists():
+                return candidate
+    # Best-effort default — sibling content_packs/ dir.
+    sibling = bundle_path.parent / "content_packs"
+    if sibling.exists():
+        first = next(iter(sorted(sibling.iterdir())), None)
+        if first is not None:
+            return first.resolve()
+    return None
 
 
 def _load_bundle(path: Path, console: Console, issues: list[str]) -> Bundle | None:

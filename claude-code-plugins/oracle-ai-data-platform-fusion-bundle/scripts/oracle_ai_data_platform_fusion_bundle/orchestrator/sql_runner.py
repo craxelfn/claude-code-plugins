@@ -225,14 +225,33 @@ def execute_node(
             prior_plan_hash=prior_plan_hash,
             target_override=target_override,
         )
+    if impl_type == "bronze_extract":
+        # Phase 9 — content-pack-driven bronze. Same lifecycle as the
+        # builtin dispatch but the adapter returns
+        # ``(target_df, bronze_output_watermark)`` because bronze cursor
+        # semantics are extraction-time, not source-row-max.
+        return _execute_bronze_extract_node(
+            spark,
+            node=node,
+            pack=pack,
+            profile=profile,
+            ctx=ctx,
+            paths=paths,
+            mode=mode,
+            profile_hash=profile_hash,
+            prior_plan_hash=prior_plan_hash,
+            target_override=target_override,
+        )
     if impl_type != "sql":
         # Defensive — the loader's discriminated union already rejects
-        # everything outside {sql, builtin, python_legacy}. Reaching here
-        # means a future implementation type slipped through the loader
-        # gate without being wired in. Hard-raise so the bug is visible.
+        # everything outside {sql, builtin, python_legacy, bronze_extract}.
+        # Reaching here means a future implementation type slipped
+        # through the loader gate without being wired in. Hard-raise so
+        # the bug is visible.
         raise ValueError(
             f"execute_node: unsupported implementation.type={impl_type!r} "
-            f"for node {node.id!r}. Expected 'sql', 'builtin', or 'python_legacy'."
+            f"for node {node.id!r}. Expected 'sql', 'builtin', "
+            f"'python_legacy', or 'bronze_extract'."
         )
 
     # ----- Step 1: static schema validation (Phase 1; loader did this).
@@ -458,9 +477,36 @@ def _normalise_spark_type(type_str: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_target_identifier(node: "NodeYaml", ctx: RunContext) -> str:  # noqa: F821
-    """Build ``<catalog>.<silver|gold_schema>.<node.target>``."""
+def _build_target_identifier(
+    node: "NodeYaml",  # noqa: F821
+    ctx: RunContext,
+    paths: "TablePaths | None" = None,  # noqa: F821
+) -> str:
+    """Build the fully-qualified target identifier for a node.
+
+    Phase 9 routes ALL three layers through ``TablePaths.bronze`` /
+    ``.silver`` / ``.gold`` so identifier validation
+    (``^[A-Za-z_][A-Za-z0-9_]*$``) fires centrally — malformed
+    ``node.target`` raises ``ValueError`` BEFORE any executor logic
+    runs (no BICC call, no Spark write, no state-row write attempt).
+
+    ``paths`` is keyword-only for back-compat with call sites that
+    pre-date the Step 2.5 refactor. When ``None``, falls back to
+    raw f-string composition (legacy shape — silver/gold only).
+    """
     layer = node.layer
+    if paths is not None:
+        if layer == "bronze":
+            return paths.bronze(node.target)
+        if layer == "silver":
+            return paths.silver(node.target)
+        if layer == "gold":
+            return paths.gold(node.target)
+        raise ValueError(
+            f"_build_target_identifier: unsupported layer={layer!r} for "
+            f"node {node.id!r}"
+        )
+    # Legacy path — no validation. New code should pass ``paths``.
     schema = ctx.silver_schema if layer == "silver" else ctx.gold_schema
     return f"{ctx.catalog}.{schema}.{node.target}"
 
@@ -1203,6 +1249,179 @@ def _execute_python_legacy_node(
         status="success",
         row_count=rows_scanned,
         output_watermark=output_watermark,
+        materialized_schema_hash=materialized_schema_hash,
+        plan_hash=expected_plan_hash,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 Step 2 — bronze_extract dispatch
+# ---------------------------------------------------------------------------
+
+
+def _execute_bronze_extract_node(
+    spark: "SparkSession",
+    *,
+    node: "NodeYaml",  # noqa: F821
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: RunContext,
+    paths: "TablePaths",  # noqa: F821
+    mode: Literal["seed", "incremental"],
+    profile_hash: str,
+    prior_plan_hash: str | None,
+    target_override: str | None,
+) -> NodeExecutionResult:
+    """Execute a ``type: bronze_extract`` node via the bronze adapter.
+
+    Lifecycle mirrors :func:`_execute_builtin_node` (preflight →
+    plan-hash → drift gate → invoke → quality → schema assertion →
+    state-row write); the adapter returns
+    ``(target_df, bronze_output_watermark)`` instead of a bare
+    DataFrame so the cursor (extraction-time, not source-row-max) can
+    be passed straight to ``_assemble_success_state_rows``.
+    """
+    from .builtins import bronze_extract_adapter as _bronze_adapter
+
+    # ----- Step 1: static validation done by the loader. -------------
+
+    # ----- Step 2: preflight (identity + bundle-side validation). ----
+    preflight = preflight_node(spark, node, pack, profile, ctx)
+    if not preflight.ok:
+        message = "; ".join(f"[{e.code}] {e.message}" for e in preflight.errors)
+        _safe_write_preflight_blocked_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        )
+        return NodeExecutionResult(status="preflight_blocked", error_message=message)
+
+    # ----- Step 4: compute plan-hash inputs --------------------------
+    callable_id = f"bronze_extract:{node.implementation.datastore}"
+    rendered_sql_hash = _builtin_rendered_sql_hash_substitute(
+        callable_id, _bronze_adapter.VERSION
+    )
+    output_schema_hash = plan_hash_module.compute_output_schema_hash(node)
+    expected_plan_hash = plan_hash_module.compute_content_pack_plan_hash(
+        pack=pack,
+        node=node,
+        profile=profile,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+    )
+
+    # ----- Step 5: plan-hash drift gate (incremental only) ----------
+    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
+        message = (
+            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
+            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
+            f"Re-run with --mode seed (or revert the YAML / adapter version change)."
+        )
+        _safe_write_resume_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="resume_drift_blocked",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 6: invoke the bronze adapter --------------------------
+    target = target_override or _build_target_identifier(node, ctx)
+    try:
+        target_df, bronze_output_watermark = _bronze_adapter.run(
+            spark,
+            node=node,
+            pack=pack,
+            profile=profile,
+            ctx=ctx,
+            paths=paths,
+            mode=mode,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface any adapter failure uniformly
+        message = f"bronze_extract_failed: {exc}"
+        _safe_write_strategy_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="strategy_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 7: quality tests -------------------------------------
+    quality_report = run_quality_tests(spark, node, target_df, ctx)
+    if not quality_report.ok:
+        message = "; ".join(f"[{f.test_type}] {f.message}" for f in quality_report.failures)
+        _safe_write_quality_failed_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="quality_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 8: materialised-schema assertion ---------------------
+    try:
+        materialized_schema_hash = _assert_materialized_matches_declared(
+            spark, target, node
+        )
+    except MaterializedSchemaDriftError as exc:
+        message = str(exc)
+        _safe_write_schema_drift_row(
+            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+            plan_hash=expected_plan_hash,
+        )
+        return NodeExecutionResult(
+            status="output_schema_drift",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+        )
+
+    # ----- Step 9: state rows -----------------------------------------
+    # Bronze cursor is extraction-time (not source-row-max), so we
+    # use the adapter's returned value directly — NOT
+    # _compute_output_watermark.
+    rows_scanned = target_df.count() if hasattr(target_df, "count") else 0
+
+    class _BronzeStrategyResult:
+        merge_skipped_empty_delta = False
+
+    _BronzeStrategyResult.rows_scanned = rows_scanned
+    strategy_result = _BronzeStrategyResult()
+
+    state_rows = _assemble_success_state_rows(
+        node=node,
+        ctx=ctx,
+        pack=pack,
+        profile=profile,
+        mode=mode,
+        rendered_sql_hash=rendered_sql_hash,
+        output_schema_hash=output_schema_hash,
+        profile_hash=profile_hash,
+        plan_hash=expected_plan_hash,
+        strategy_result=strategy_result,
+        output_watermark=bronze_output_watermark,
+    )
+
+    try:
+        state_phase2.write_state_rows_hard(spark, paths, state_rows)
+    except state_phase2.StateCommitError as exc:
+        message = f"state_commit_failed: {exc}"
+        return NodeExecutionResult(
+            status="state_commit_failed",
+            error_message=message,
+            plan_hash=expected_plan_hash,
+            row_count=rows_scanned,
+        )
+
+    return NodeExecutionResult(
+        status="success",
+        row_count=rows_scanned,
+        output_watermark=bronze_output_watermark,
         materialized_schema_hash=materialized_schema_hash,
         plan_hash=expected_plan_hash,
     )

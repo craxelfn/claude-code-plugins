@@ -90,7 +90,6 @@ oracle_ai_data_platform_fusion_bundle = [
 testpaths = ["tests"]
 markers = [
   "live: requires live Fusion pod / AIDP workspace / OAC instance (gated by AIDP_FUSION_BUNDLE_INTEGRATION=1)",
-  "parity: row-grain v1-vs-v2 parity tests (PySpark local-mode); run via `pytest -m parity`"
 ]
 
 [tool.ruff]

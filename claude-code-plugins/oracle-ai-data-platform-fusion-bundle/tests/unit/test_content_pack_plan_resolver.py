@@ -131,9 +131,23 @@ def test_layers_filter_restricts_to_silver(pack):
 
 
 def test_layers_filter_restricts_to_gold(pack):
+    # Phase 9: --layers filters declared roots only; D-1 still pulls
+    # in transitive deps so the plan stays correct. mart_x depends on
+    # dim_a, so dim_a appears via D-1.
     plan = resolve_content_pack_plan(pack, layers=["gold"])
     ids = {n.id for n in plan}
-    assert ids == {"mart_x"}
+    assert ids == {"mart_x", "dim_a"}
+
+
+def test_layers_filter_gold_strict_scope_excludes_silver(pack):
+    # Strict-scope opts out of D-1: only the gold root (plus would
+    # raise on missing deps). dim_a is a real dep of mart_x; expect
+    # strict-scope to raise.
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_plan_resolver import (
+        StrictScopeMissingDependencyError,
+    )
+    with pytest.raises(StrictScopeMissingDependencyError):
+        resolve_content_pack_plan(pack, layers=["gold"], strict_scope=True)
 
 
 def test_datasets_filter_restricts_to_named(pack):

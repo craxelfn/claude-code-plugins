@@ -65,6 +65,17 @@ AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST = "AIDPF-2058"   # R10
 AIDPF_2059_SCD2_NO_TRACKED_COLUMNS = "AIDPF-2059"   # R11
 AIDPF_2060_PYTHON_LEGACY_NO_DEPRECATED = "AIDPF-2060"  # R13
 
+# Phase 9 — bronze content-pack node type
+AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
+# WARN-only: pack YAML's implementation.pvo_id is not in the curated
+# fusion_catalog.py. Pack loads cleanly; BICC drift gate (AIDPF-2072) catches
+# typos at extract-preflight time. Customers can author overlay-pack YAMLs
+# for new PVOs without a plugin release.
+
+AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK = "AIDPF-2081"
+# RAISE: bundle.yaml::datasets[].id does not resolve in any pack layer
+# (bronze ∪ silver ∪ gold). Replaces the old fusion_catalog.CATALOG check.
+
 
 # ---------------------------------------------------------------------------
 # SemVer validation
@@ -515,8 +526,8 @@ IncrementalStrategy = Literal[
     "snapshot",
     "scd2",
 ]
-NodeLayer = Literal["silver", "gold"]
-NodeImplType = Literal["sql", "builtin", "python_legacy"]
+NodeLayer = Literal["bronze", "silver", "gold"]
+NodeImplType = Literal["sql", "builtin", "python_legacy", "bronze_extract"]
 
 
 class WatermarkSpec(BaseModel):
@@ -795,8 +806,77 @@ class PythonLegacyImpl(BaseModel):
         return self
 
 
+class BronzeExtractImpl(BaseModel):
+    """``implementation.type: bronze_extract`` — BICC PVO extraction (Phase 9).
+
+    Declares a content-pack-driven bronze node. Carries everything the
+    runtime needs to construct a BICC ``PvoEntry``-equivalent descriptor
+    WITHOUT depending on the curated ``fusion_catalog.py`` — pack YAML is
+    self-contained so customer overlay packs can declare new PVOs without
+    a plugin release.
+
+    PVO resolution contract:
+
+    1. The adapter constructs a ``PvoEntry``-equivalent descriptor directly
+       from the YAML fields (``datastore``, ``bicc_schema``, ``natural_key``
+       from ``refresh.incremental``, ``incremental_capable``).
+    2. The descriptor is passed to ``extract_pvo()`` unchanged.
+    3. At pack-load time, validators cross-reference
+       ``implementation.pvo_id`` against the curated catalog for a WARN
+       only — absent → ``AIDPF-2080``. Phase 5's BICC drift gate
+       (``AIDPF-2072``) catches typo'd PVOs at extract-preflight time.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: Literal["bronze_extract"] = "bronze_extract"
+
+    datastore: str
+    """BICC datastore identifier (e.g. ``SupplierExtractPVO``). What BICC
+    actually uses as the PVO handle. **Required.**"""
+
+    pvo_id: str | None = None
+    """Optional full AM-hierarchy path
+    (``FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO``).
+    Documentation field; used to cross-reference the curated catalog and
+    emit an ``AIDPF-2080`` WARN when not found. Missing entirely → no
+    WARN (nothing to cross-reference)."""
+
+    bicc_schema: str = Field(alias="biccSchema")
+    """BICC offering schema (``Financial`` / ``HCM`` / ``SCM``).
+    **Required.** Pack YAML always specifies; runtime never auto-discovers
+    behind the operator's back."""
+
+    schema_override: str | None = Field(default=None, alias="schemaOverride")
+    """Optional per-tenant BICC offering schema override. Overrides
+    ``bicc_schema`` at runtime — matches today's
+    ``bundle.fusion.schemaOverrides.<id>`` semantics."""
+
+    incremental_capable: bool = Field(default=True, alias="incrementalCapable")
+    """P1.17 contract: PVOs whose ``LastUpdateDate`` doesn't monotonically
+    track meaningful change events (e.g. ``gl_period_balances`` whose
+    period-end snapshot revises retroactively) MUST set this to False.
+
+    Effect on runtime (per Phase 9 decision matrix):
+
+    * ``mode=seed``: full BICC pull + ``replace`` strategy (independent of
+      this flag).
+    * ``mode=incremental`` + ``incremental_capable=False``: no BICC
+      ``fusion.initial.extract-date`` pushdown (full pull) +
+      payload-diff-gated MERGE (content-hash predicate on the source
+      side; unchanged rows keep their ``_extract_ts``/``_run_id``).
+    """
+
+    audit_columns_mode: Literal["bronze_v1"] = Field(
+        default="bronze_v1", alias="auditColumnsMode"
+    )
+    """Reserved for future audit-column-shape variants. v0.3 uses the
+    P1.17 ``bronze_v1`` shape (``_extract_ts``, ``_source_pvo``,
+    ``_run_id``, ``_watermark_used``)."""
+
+
 NodeImplementation = Annotated[
-    SqlImpl | BuiltinImpl | PythonLegacyImpl,
+    SqlImpl | BuiltinImpl | PythonLegacyImpl | BronzeExtractImpl,
     Field(discriminator="type"),
 ]
 
@@ -839,6 +919,40 @@ class NodeYaml(BaseModel):
 
     @model_validator(mode="after")
     def _validate_strategy_matrix(self) -> "NodeYaml":
+        # Phase 9: bronze nodes are content-pack-driven. They permit
+        # seed=replace + incremental=merge (with watermark + naturalKey
+        # declared). The R1-R13 matrix below is silver/gold-specific —
+        # bronze has its own narrower contract checked here.
+        if self.layer == "bronze":
+            seed_strategy = self.refresh.seed.strategy
+            if seed_strategy != "replace":
+                raise ValueError(
+                    f"bronze node {self.id!r}: refresh.seed.strategy must be "
+                    f"'replace' (got {seed_strategy!r}). Bronze seed is always "
+                    f"a full BICC pull with overwriteSchema=true."
+                )
+            inc = self.refresh.incremental
+            if inc is not None:
+                if inc.strategy != "merge":
+                    raise ValueError(
+                        f"bronze node {self.id!r}: refresh.incremental.strategy "
+                        f"must be 'merge' (got {inc.strategy!r}). Bronze does "
+                        f"not support replace_partition / aggregate_merge / etc."
+                    )
+                if not inc.natural_key:
+                    raise ValueError(
+                        f"{AIDPF_2020_MERGE_NO_NATURAL_KEY}: bronze node "
+                        f"{self.id!r} with incremental=merge requires "
+                        f"naturalKey on refresh.incremental."
+                    )
+                if inc.watermark is None:
+                    raise ValueError(
+                        f"{AIDPF_2050_MERGE_NO_WATERMARK}: bronze node "
+                        f"{self.id!r} with incremental=merge requires "
+                        f"incremental.watermark.{{source,column}}."
+                    )
+            return self
+
         inc = self.refresh.incremental
         if inc is None:
             # No incremental block declared; nothing to validate against §11.3.

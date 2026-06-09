@@ -113,8 +113,11 @@ class TestContentPackDryRunPlan:
         assert [pn.dataset_id for pn in plan] == ["dim_supplier"]
 
     def test_dataset_filter(self, tmp_path: pathlib.Path) -> None:
+        # Phase 9 D-1: declaring supplier_spend (gold) auto-includes
+        # its transitive silver dim_supplier dep. Topological order:
+        # silver first, then gold.
         pack = _build_pack(tmp_path)
         plan = _build_content_pack_dry_run_plan(
             resolved_pack=pack, datasets=["supplier_spend"], layers=None,
         )
-        assert [pn.dataset_id for pn in plan] == ["supplier_spend"]
+        assert [pn.dataset_id for pn in plan] == ["dim_supplier", "supplier_spend"]

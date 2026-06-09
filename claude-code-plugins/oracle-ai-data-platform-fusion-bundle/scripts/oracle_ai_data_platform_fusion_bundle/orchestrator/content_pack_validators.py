@@ -44,6 +44,9 @@ AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE = "AIDPF-7004"
 AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED = "AIDPF-7005"
 AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE = "AIDPF-8002"
 
+# Phase 9
+AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
+
 
 # ---------------------------------------------------------------------------
 # Validation report dataclasses
@@ -242,7 +245,10 @@ def validate_dag(pack: ResolvedPack) -> list[ValidationError]:
     # Build the set of declared source ids:
     #   - bronze datasets from bronze.yaml
     #   - silver nodes by id
-    declared_bronze = set()
+    declared_bronze: set[str] = set()
+    # Phase 9: per-file pack.bronze is the source of truth; legacy
+    # pack.bronze_yaml retained transitionally.
+    declared_bronze.update(pack.bronze.keys())
     for ds in pack.bronze_yaml.get("datasets", []) or []:
         if isinstance(ds, dict) and "id" in ds:
             declared_bronze.add(ds["id"])
@@ -578,12 +584,58 @@ def validate_dashboard_security_and_compat(
 # ---------------------------------------------------------------------------
 
 
+def validate_bronze_pvo_catalog(pack: ResolvedPack) -> list[ValidationError]:
+    """Phase 9: WARN when a bronze_extract node's ``pvo_id`` is not in the
+    curated ``fusion_catalog.py``.
+
+    WARN-only — pack loads cleanly; Phase 5's BICC drift gate
+    (``AIDPF-2072``) catches typo'd PVOs at extract-preflight time.
+    Preserves the customer-extension story: customers author overlay
+    pack YAMLs for new PVOs without a plugin release.
+
+    Missing ``pvo_id`` entirely produces NO WARN — there is nothing to
+    cross-reference.
+    """
+    from ..schema.fusion_catalog import CATALOG
+
+    warnings: list[ValidationError] = []
+    curated_pvo_ids = {entry.datastore for entry in CATALOG.values()}
+    for node_id, node in pack.bronze.items():
+        impl = node.implementation
+        if impl.type != "bronze_extract":
+            continue
+        pvo_id = getattr(impl, "pvo_id", None)
+        if pvo_id is None:
+            continue
+        # Cross-reference against either the curated PvoEntry.datastore
+        # (full AM-hierarchy) or the curated id keys themselves.
+        if pvo_id in curated_pvo_ids or pvo_id in CATALOG:
+            continue
+        warnings.append(
+            ValidationError(
+                code=AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG,
+                message=(
+                    f"{AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG}: bronze "
+                    f"node `bronze/{node_id}` references pvo_id "
+                    f"{pvo_id!r} which is not in the curated fusion_catalog. "
+                    f"Pack loads cleanly; Phase 5's BICC drift gate "
+                    f"(AIDPF-2072) catches typos at extract-preflight time. "
+                    f"Customer overlay packs commonly hit this WARN."
+                ),
+                location=f"bronze/{node_id}",
+            )
+        )
+    return warnings
+
+
 def validate_pack_full(pack: ResolvedPack) -> ValidationReport:
     """Run every validator over the assembled pack; aggregate into a report."""
     report = ValidationReport()
     report.merge_errors(validate_sql_paths(pack))
     report.merge_errors(validate_template_variables(pack))
     report.merge_errors(validate_dag(pack))
+    # AIDPF-2080 is WARN-only.
+    report.warnings.extend(validate_bronze_pvo_catalog(pack))
     for dashboard in pack.dashboards.values():
         report.merge_errors(validate_dashboard_requires(pack, dashboard))
         report.merge_errors(validate_dashboard_security_and_compat(pack, dashboard))

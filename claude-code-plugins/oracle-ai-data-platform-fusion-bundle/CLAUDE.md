@@ -6,7 +6,20 @@
 
 The fusion-bundle plugin must run on **any Fusion ERP/HCM/SCM tenant**, not just the `saasfademo1` demo pod. Hardcoded tenant-specific assumptions are bugs. The plugin's value proposition is that a customer can clone the repo, point it at *their* Fusion + AIDP + OAC, and have bronze + silver + gold materialize without editing Python.
 
-## v1 + v2 coexistence (migration state)
+## v2 content-pack architecture (Phase 9 partial landing — 2026-06-09)
+
+The plugin runs on the v2 content-pack architecture. Bronze, silver, and
+gold all dispatch through `sql_runner.execute_node` via per-file YAMLs
+under `content_packs/<pack-id>/{bronze,silver,gold}/<id>.yaml`. New
+work goes into the content pack; the v1 modules under `dimensions/`
+and `transforms/gold/` are slated for deletion in follow-up PRs (see
+ADR-0022 for the cascade plan and customer migration paths).
+
+**For the full architectural story** see [ADR-0021](docs/adr/0021-pack-as-registry.md)
+(pack-as-registry) and [ADR-0022](docs/adr/0022-full-v1-deletion-bronze-content-pack.md)
+(full v1 deletion + bronze as content-pack).
+
+## v1 + v2 coexistence (historical — being dismantled in Phase 9)
 
 This plugin is **mid-migration to v2 content-pack architecture**. Both layers live in the tree simultaneously:
 

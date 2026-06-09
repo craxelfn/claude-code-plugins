@@ -212,14 +212,17 @@ class TestRenderAllSmoke:
 
     def _ctx(self, pack) -> RunContext:
         # The bronze_table_for_source map is consumed by semantic-fragment
-        # `{table}` substitutions (e.g. ap_aging's cancelled_status). We
-        # build it from the pack's bronze.yaml dataset list so every node
-        # renders against a consistent virtual cluster.
-        bronze_yaml = pack.bronze_yaml or {}
-        btfs = {
-            ds["id"]: f"cat.bronze.{ds['id']}"
-            for ds in bronze_yaml.get("datasets", [])
+        # `{table}` substitutions (e.g. ap_aging's cancelled_status).
+        # Phase 9: source from per-file pack.bronze; fall back to the
+        # legacy single-file pack.bronze_yaml for pre-Phase-9 packs.
+        btfs: dict[str, str] = {
+            node_id: f"cat.bronze.{node.target}"
+            for node_id, node in pack.bronze.items()
         }
+        bronze_yaml = pack.bronze_yaml or {}
+        for ds in bronze_yaml.get("datasets", []) or []:
+            if isinstance(ds, dict) and "id" in ds and ds["id"] not in btfs:
+                btfs[ds["id"]] = f"cat.bronze.{ds['id']}"
         return RunContext(
             catalog="cat",
             bronze_schema="bronze",
