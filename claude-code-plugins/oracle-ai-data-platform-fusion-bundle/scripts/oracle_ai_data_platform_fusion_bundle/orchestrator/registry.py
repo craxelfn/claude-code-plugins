@@ -24,11 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from oracle_ai_data_platform_fusion_bundle.dimensions import (
-    dim_account,
-    dim_calendar,
-    dim_supplier,
-)
+from oracle_ai_data_platform_fusion_bundle.dimensions import dim_calendar
 from oracle_ai_data_platform_fusion_bundle.schema.fusion_catalog import (
     CATALOG,
     PvoKind,
@@ -41,11 +37,10 @@ from oracle_ai_data_platform_fusion_bundle.schema.registry_metadata import (
     KNOWN_DEFERRED_MARTS,
     SILVER_DIM_METADATA,
 )
-from oracle_ai_data_platform_fusion_bundle.transforms.gold import (
-    ap_aging,
-    gl_balance,
-    supplier_spend,
-)
+
+# Phase 9 — v1 silver/gold modules deleted. Their entries are
+# pruned from _SILVER_BUILDERS / _GOLD_BUILDERS below; only
+# dim_calendar (genuine Python builtin, ADR-0011) remains.
 
 from .errors import MissingDependencyError, MultipleUpstreamWatermarkError
 
@@ -187,11 +182,15 @@ BRONZE_EXTRACTS: dict[str, BronzeExtractSpec] = {
 
 
 _SILVER_BUILDERS: dict[str, Callable[..., "DataFrame"]] = {
-    "dim_supplier": dim_supplier.build,
-    "dim_account":  dim_account.build,
+    # Phase 9 — dim_supplier / dim_account migrated to SQL templates
+    # under content_packs/<pack-id>/silver/. Only dim_calendar (true
+    # Python builtin, ADR-0011) remains.
     "dim_calendar": dim_calendar.build,
 }
 
+# Phase 9 — SILVER_DIMS retains only nodes whose builder is still
+# present (dim_calendar). Other entries from SILVER_DIM_METADATA are
+# skipped so the dict isn't entries-without-builders.
 SILVER_DIMS: dict[str, SilverDimSpec] = {
     name: SilverDimSpec(
         dataset_id=md.dataset_id,
@@ -200,26 +199,16 @@ SILVER_DIMS: dict[str, SilverDimSpec] = {
         natural_key=md.natural_key,
     )
     for name, md in SILVER_DIM_METADATA.items()
+    if name in _SILVER_BUILDERS
 }
 
 
 _GOLD_BUILDERS: dict[str, Callable[..., "DataFrame"]] = {
-    "supplier_spend": supplier_spend.build,
-    "gl_balance":     gl_balance.build,
-    "ap_aging":       ap_aging.build,
+    # Phase 9 — every v1 gold mart deleted. All gold nodes ship as
+    # SQL templates under content_packs/<pack-id>/gold/.
 }
 
-GOLD_MARTS: dict[str, GoldMartSpec] = {
-    name: GoldMartSpec(
-        dataset_id=md.dataset_id,
-        builder=_GOLD_BUILDERS[name],
-        depends_on_bronze=md.depends_on_bronze,
-        depends_on_silver=md.depends_on_silver,
-        natural_key=md.natural_key,
-        incremental_capable=md.incremental_capable,
-    )
-    for name, md in GOLD_MART_METADATA.items()
-}
+GOLD_MARTS: dict[str, GoldMartSpec] = {}
 
 
 # ---------------------------------------------------------------------------

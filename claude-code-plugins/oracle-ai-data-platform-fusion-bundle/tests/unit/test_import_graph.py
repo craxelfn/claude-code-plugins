@@ -31,30 +31,12 @@ def test_orchestrator_run_imports_without_cycle() -> None:
     from oracle_ai_data_platform_fusion_bundle.orchestrator import run  # noqa: F401
 
 
-def test_silver_builders_import_standalone() -> None:
-    # If a builder tries to import a P1.17d helper from
-    # `orchestrator/__init__.py` (instead of `merge_sql.py`), THIS
-    # import would fail at builder-module-load time with an ImportError.
-    from oracle_ai_data_platform_fusion_bundle.dimensions import (  # noqa: F401
-        dim_supplier as _ds,
-    )
-    from oracle_ai_data_platform_fusion_bundle.dimensions import (  # noqa: F401
-        dim_account as _da,
-    )
+def test_dim_calendar_imports_standalone() -> None:
+    """Phase 9: only dim_calendar remains under dimensions/ (ADR-0011 —
+    the genuine Python builtin). The v1 dim_supplier / dim_account /
+    transforms.gold.* modules were deleted (ADR-0022)."""
     from oracle_ai_data_platform_fusion_bundle.dimensions import (  # noqa: F401
         dim_calendar as _dc,
-    )
-
-
-def test_gold_builders_import_standalone() -> None:
-    from oracle_ai_data_platform_fusion_bundle.transforms.gold import (  # noqa: F401
-        gl_balance as _gl,
-    )
-    from oracle_ai_data_platform_fusion_bundle.transforms.gold import (  # noqa: F401
-        supplier_spend as _ss,
-    )
-    from oracle_ai_data_platform_fusion_bundle.transforms.gold import (  # noqa: F401
-        ap_aging as _ap,
     )
 
 
