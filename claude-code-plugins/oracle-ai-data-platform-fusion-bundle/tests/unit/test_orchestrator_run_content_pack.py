@@ -1,11 +1,14 @@
-"""Verify orchestrator.run dispatches to the content-pack backend when selected.
+"""Verify orchestrator.run dispatches to the content-pack runner.
 
-These tests answer the round-12 blocking review findings: the
-``--execution-backend content-pack`` flag must actually reach
-``sql_runner.execute_node`` (NOT silently run the legacy registry),
-and the generated REST notebook's run cell must call orchestrator.run
-with kwargs the function actually accepts (no TypeError before any
-node executes).
+These tests pin the content-pack-only run loop: every silver / gold /
+bronze node must reach ``sql_runner.execute_node``, and the generated
+REST notebook's run cell must call orchestrator.run with kwargs the
+function actually accepts (no TypeError before any node executes).
+
+Phase 9 deleted the v1 legacy backend; the `--execution-backend` flag
+no longer exists. Tests still pin the legacy-rejection behaviour for
+back-compat callers that pass ``execution_backend="legacy-python"``
+programmatically (the run() function raises ``OrchestratorConfigError``).
 """
 
 from __future__ import annotations
@@ -656,7 +659,7 @@ class TestCascadeAbort:
 
 
 # ---------------------------------------------------------------------------
-# CLI integration: --inline --execution-backend content-pack reaches execute_node
+# CLI integration: --inline reaches execute_node via the content-pack runner
 # ---------------------------------------------------------------------------
 
 
@@ -792,8 +795,8 @@ class TestInvalidPackRejectedBeforeExecution:
     def test_inline_path_rejects_invalid_pack_before_orchestrator_run(
         self, monkeypatch, tmp_path
     ) -> None:
-        """CLI --inline --execution-backend content-pack with an invalid
-        pack: orchestrator.run is NEVER called; CLI returns non-zero."""
+        """CLI --inline with an invalid pack: orchestrator.run is NEVER
+        called; CLI returns non-zero."""
         from rich.console import Console
         from oracle_ai_data_platform_fusion_bundle import orchestrator as _o
         from oracle_ai_data_platform_fusion_bundle.commands.run import run as run_impl
@@ -840,9 +843,9 @@ class TestInvalidPackRejectedBeforeExecution:
     def test_rest_path_rejects_invalid_pack_before_dispatch(
         self, monkeypatch, tmp_path
     ) -> None:
-        """CLI without --inline + --execution-backend content-pack with an
-        invalid pack: dispatch_via_rest is NEVER called; CLI returns
-        non-zero. Staging primitives are not even produced."""
+        """CLI without --inline + an invalid pack: dispatch_via_rest is
+        NEVER called; CLI returns non-zero. Staging primitives are not
+        even produced."""
         from rich.console import Console
         from oracle_ai_data_platform_fusion_bundle.commands.run import run as run_impl
         from oracle_ai_data_platform_fusion_bundle import dispatch as _dispatch_pkg

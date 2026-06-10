@@ -32,9 +32,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from .medallion_pack import NodeYaml, ResolvedPack
 
 
-# Mirrors ``orchestrator.registry._VALID_LAYERS``. Inlined here so the
-# schema-layer resolver does not need to import from orchestrator
-# (which would defeat the §4.3 import-boundary).
+# Closed set of layer values. Inlined here so the schema-layer
+# resolver does not need to import from orchestrator (which would
+# defeat the §4.3 import-boundary).
 _VALID_LAYERS: Final[frozenset[str]] = frozenset({"bronze", "silver", "gold"})
 
 # Mirrors orchestrator.content_pack_plan_resolver's strict-scope error

@@ -1,8 +1,7 @@
 """Phase 3c runtime preflight — bronze schema fingerprint drift detection.
 
-Runs at the start of every ``aidp-fusion-bundle run --mode
-incremental`` under ``--execution-backend content-pack``, AFTER
-``_run_content_pack_backend`` mints Spark + ``run_id`` but BEFORE
+Runs at the start of every ``aidp-fusion-bundle run --mode incremental``,
+AFTER ``_run_content_pack_backend`` mints Spark + ``run_id`` but BEFORE
 ``state.ensure_state_table`` and any state-row write.
 
 Compares the live bronze schema fingerprint against

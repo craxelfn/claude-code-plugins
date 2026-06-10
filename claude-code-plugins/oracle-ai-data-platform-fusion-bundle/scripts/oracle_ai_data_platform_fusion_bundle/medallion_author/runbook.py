@@ -1,7 +1,5 @@
 """Remediation runbook drafter (Phase 3b).
 
-Per the round-4-confirmed plan:
-
 * **Option A — No action**: emit a `remediation.md` explaining the
   rename-only rationale.
 * **Option B — Surgical backfill MERGE**: emit `remediation.md` +
@@ -9,31 +7,24 @@ Per the round-4-confirmed plan:
 * **Option C — Watermark rewind**: **DEFERRED to v0.4**. Drafter
   raises :class:`OptionDeferredError` with an operator-facing message
   redirecting to Option D / Option B.
-* **Option D — Targeted re-seed (v0.3 default)**: backend-aware CLI
-  invocation.
-  * **Content-pack backend**:
-    ``aidp-fusion-bundle run --mode seed --execution-backend content-pack
-    --datasets <silver/gold-node-ids>``.
-  * **Legacy backend**: maps to ``SILVER_DIMS`` / ``GOLD_MARTS`` keys;
-    no ``--execution-backend`` flag (legacy is the CLI default).
-  * **Unmapped legacy node**: drafter refuses Option D and recommends
-    Option B / E with explanation in the runbook.
+* **Option D — Targeted re-seed (v0.3 default)**:
+  ``aidp-fusion-bundle run --mode seed --datasets <silver/gold-node-ids>``.
 * **Option E — Full re-seed**: bare
   ``aidp-fusion-bundle run --mode seed``.
 
 The drafter NEVER executes the remediation — emits files only.
+
+Phase 9 follow-up: the legacy-backend branch + the ``--execution-backend``
+flag (and ``Backend`` literal + ``UnmappedLegacyNodeError``) were deleted
+along with the v1 dispatcher. Only one execution path ships; the drafter
+emits the unflagged CLI invocation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
-from ..orchestrator.registry import GOLD_MARTS, SILVER_DIMS
 from ..schema.incremental_impact import RemediationOption
-
-
-Backend = Literal["legacy-python", "content-pack"]
 
 
 class OptionDeferredError(Exception):
@@ -42,17 +33,9 @@ class OptionDeferredError(Exception):
 
     Currently fires for Option C (watermark rewind), which requires
     an ``aidp-fusion-bundle rewind`` verb that doesn't exist yet.
-    See plan Step 8 for the round-2 evidence (legacy preflight raises
-    on NULL cursors; content-pack reads ``output_watermark`` filtered
-    by ``source_role='primary'`` — neither matches a sentinel-row INSERT).
+    Use Option D (targeted re-seed) or Option B (surgical MERGE)
+    instead.
     """
-
-
-class UnmappedLegacyNodeError(Exception):
-    """Raised when Option D is requested under the legacy backend but
-    an affected pack node has no ``SILVER_DIMS`` / ``GOLD_MARTS``
-    equivalent. The drafter falls back to Option B or E with an
-    explanation in the runbook."""
 
 
 @dataclass(frozen=True)
@@ -81,7 +64,6 @@ def draft_remediation(
     new_candidate: str,
     affected_silver_ids: set[str],
     affected_gold_ids: set[str],
-    backend: Backend,
     risk_label: str,
     rationale: str,
 ) -> RemediationArtifacts:
@@ -95,8 +77,6 @@ def draft_remediation(
         new_candidate: the operator-approved candidate.
         affected_silver_ids: bare silver node ids consuming the VP.
         affected_gold_ids: bare gold node ids consuming the VP.
-        backend: ``legacy-python`` | ``content-pack`` — read from the
-            bundle.
         risk_label: ``likely-rename`` / ``likely-different-semantics``
             / ``unknown`` (drives the runbook narrative).
         rationale: operator-facing one-paragraph explanation.
@@ -108,14 +88,9 @@ def draft_remediation(
     if option == "C":
         raise OptionDeferredError(
             "Option C (watermark rewind) is deferred to v0.4 — requires "
-            "the `aidp-fusion-bundle rewind` verb that knows the legacy + "
-            "content-pack state contracts. Round-2 review evidence: "
-            "legacy preflight raises IncrementalCursorMissingError on "
-            "NULL silver/gold cursors (orchestrator/preflight.py:400); "
-            "content-pack reads output_watermark filtered by "
-            "source_role='primary' (orchestrator/__init__.py:1591). "
-            "Use Option D (targeted re-seed) or Option B (advanced "
-            "surgical MERGE) instead."
+            "the `aidp-fusion-bundle rewind` verb that knows the "
+            "content-pack state contract. Use Option D (targeted "
+            "re-seed) or Option B (advanced surgical MERGE) instead."
         )
 
     if option == "A":
@@ -141,7 +116,6 @@ def draft_remediation(
             new_candidate=new_candidate,
             affected_silver_ids=affected_silver_ids,
             affected_gold_ids=affected_gold_ids,
-            backend=backend,
             rationale=rationale,
         )
     # Option E
@@ -288,55 +262,28 @@ def _draft_option_d(
     new_candidate,
     affected_silver_ids,
     affected_gold_ids,
-    backend,
     rationale,
 ) -> RemediationArtifacts:
     all_bare_ids = affected_silver_ids | affected_gold_ids
     if not all_bare_ids:
-        raise UnmappedLegacyNodeError(
+        raise ValueError(
             f"Option D requested for {vp_name!r} but no affected silver/gold "
             f"nodes were identified. Skill should fall back to Option B or E."
         )
 
-    if backend == "content-pack":
-        # Content-pack --datasets validates against pack node IDs.
-        # No mapping needed — pack IDs ARE the filter contract.
-        sorted_ids = ",".join(sorted(all_bare_ids))
-        command = (
-            "aidp-fusion-bundle run --mode seed \\\n"
-            "  --execution-backend content-pack \\\n"
-            f"  --datasets {sorted_ids}"
-        )
-    else:
-        # Legacy backend — map pack IDs to SILVER_DIMS / GOLD_MARTS keys.
-        # In v0.3 the mapping is identity (pack mirrors registry); the
-        # drafter still validates membership.
-        legacy_ids: list[str] = []
-        unmapped: list[str] = []
-        for node_id in sorted(all_bare_ids):
-            if node_id in SILVER_DIMS or node_id in GOLD_MARTS:
-                legacy_ids.append(node_id)
-            else:
-                unmapped.append(node_id)
-        if unmapped:
-            raise UnmappedLegacyNodeError(
-                f"Option D under legacy backend cannot map these pack nodes "
-                f"to SILVER_DIMS / GOLD_MARTS keys: {unmapped}. Skill should "
-                f"fall back to Option B (surgical MERGE) or Option E (full "
-                f"re-seed). The unmapped nodes likely exist only in the "
-                f"content-pack layer (no legacy equivalent ships)."
-            )
-        command = (
-            "aidp-fusion-bundle run --mode seed \\\n"
-            f"  --datasets {','.join(legacy_ids)}"
-        )
+    # Content-pack ``--datasets`` validates against pack node IDs — pack
+    # IDs ARE the filter contract.
+    sorted_ids = ",".join(sorted(all_bare_ids))
+    command = (
+        "aidp-fusion-bundle run --mode seed \\\n"
+        f"  --datasets {sorted_ids}"
+    )
 
     affected = sorted(affected_silver_ids) + sorted(affected_gold_ids)
     affected_list = "\n".join(f"- `{name}`" for name in affected)
     md = f"""# Remediation — Option D (targeted re-seed of affected nodes)
 
 **Variation point**: `{vp_name}` → `{new_candidate}`
-**Backend**: `{backend}`
 
 ## Affected nodes
 
@@ -407,9 +354,7 @@ after completion. Affected node values match the new candidate.
 
 
 __all__ = [
-    "Backend",
     "OptionDeferredError",
     "RemediationArtifacts",
-    "UnmappedLegacyNodeError",
     "draft_remediation",
 ]

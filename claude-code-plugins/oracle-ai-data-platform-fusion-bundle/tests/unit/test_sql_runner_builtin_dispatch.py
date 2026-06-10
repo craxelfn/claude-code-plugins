@@ -145,6 +145,21 @@ def _ctx(mode: str = "seed", run_id: str = "builtin-test-run") -> RunContext:
     )
 
 
+def _paths() -> MagicMock:
+    """MagicMock paths whose .bronze/.silver/.gold return string identifiers.
+
+    Required after the Phase 9 follow-up made ``paths`` a required
+    positional arg at every ``_build_target_identifier`` call site;
+    bare ``MagicMock()`` returns Mock objects which propagate as
+    ``f"... FROM {target}"`` strings containing ``<MagicMock ...>``.
+    """
+    paths = MagicMock()
+    paths.bronze.side_effect = lambda t: f"cat.bronze.{t}"
+    paths.silver.side_effect = lambda t: f"cat.silver.{t}"
+    paths.gold.side_effect = lambda t: f"cat.gold.{t}"
+    return paths
+
+
 def _fake_spark_for_builtin(materialized_cols: list[tuple[str, str]] | None = None) -> MagicMock:
     """Fake Spark for the builtin path.
 
@@ -203,7 +218,7 @@ class TestBuiltinDispatchHappyPath:
                 pack=pack,
                 profile=_profile(),
                 ctx=_ctx("seed"),
-                paths=MagicMock(),
+                paths=_paths(),
                 mode="seed",
                 profile_hash="profile-hash-test",
                 prior_plan_hash=None,
@@ -252,7 +267,7 @@ class TestUnknownBuiltinDispatch:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-hash-test",
             prior_plan_hash=None,
@@ -283,7 +298,7 @@ class TestBuiltinPlanHashDrift:
                 pack=pack,
                 profile=_profile(),
                 ctx=_ctx("incremental"),
-                paths=MagicMock(),
+                paths=_paths(),
                 mode="incremental",
                 profile_hash="profile-hash-test",
                 prior_plan_hash="0" * 64,  # known stale

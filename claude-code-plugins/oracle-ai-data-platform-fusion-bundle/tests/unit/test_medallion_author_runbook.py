@@ -1,16 +1,12 @@
-"""Unit tests for :mod:`medallion_author.runbook` — the round-3 + round-4
-backend-aware remediation drafter.
+"""Unit tests for :mod:`medallion_author.runbook` — content-pack remediation drafter.
 
 Covers:
 
 * Option C raises :class:`OptionDeferredError`.
-* Option D content-pack emits ``--execution-backend content-pack`` +
-  validates the affected IDs against the resolved pack via
-  ``content_pack_plan_resolver``.
-* Option D legacy validates ID membership in ``SILVER_DIMS`` /
-  ``GOLD_MARTS`` — NOT ``mart_*`` (round-4 finding).
-* Option D legacy with unmapped node raises
-  :class:`UnmappedLegacyNodeError`.
+* Option D emits a content-pack ``--datasets`` CLI invocation. The
+  Phase 9 follow-up removed the ``--execution-backend`` flag (only one
+  execution path ships) and the legacy ``SILVER_DIMS`` / ``GOLD_MARTS``
+  branch (the v1 dispatcher is gone).
 * Option B emits SQL + the 5-point operator-review checklist.
 * Option A / E emit markdown only.
 """
@@ -24,12 +20,7 @@ import pytest
 from oracle_ai_data_platform_fusion_bundle.medallion_author.runbook import (
     OptionDeferredError,
     RemediationArtifacts,
-    UnmappedLegacyNodeError,
     draft_remediation,
-)
-from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-    GOLD_MARTS,
-    SILVER_DIMS,
 )
 
 
@@ -48,7 +39,6 @@ class TestOptionCDeferred:
                 new_candidate="ApInvoicesXCurrCode",
                 affected_silver_ids={"supplier_spend"},
                 affected_gold_ids={"ap_aging"},
-                backend="content-pack",
                 risk_label="likely-different-semantics",
                 rationale="x",
             )
@@ -58,12 +48,12 @@ class TestOptionCDeferred:
 
 
 # ---------------------------------------------------------------------------
-# Option D — backend-aware
+# Option D — content-pack only
 # ---------------------------------------------------------------------------
 
 
 class TestOptionDContentPack:
-    def test_emits_execution_backend_flag(self) -> None:
+    def test_emits_datasets_filter_without_execution_backend_flag(self) -> None:
         artifacts = draft_remediation(
             option="D",
             vp_name="invoice_currency_code",
@@ -71,14 +61,14 @@ class TestOptionDContentPack:
             new_candidate="ApInvoicesXCurrCode",
             affected_silver_ids={"supplier_spend"},
             affected_gold_ids={"ap_aging"},
-            backend="content-pack",
             risk_label="likely-different-semantics",
             rationale="Fusion 25C rename.",
         )
         assert artifacts.option == "D"
-        # Must include the backend flag — round-4 finding.
-        assert "--execution-backend content-pack" in artifacts.runbook_markdown
-        # Datasets are bare pack node IDs (no layer prefix).
+        # Phase 9 follow-up: the --execution-backend flag was deleted
+        # with the v1 dispatcher; the runbook must NOT reference it.
+        assert "--execution-backend" not in artifacts.runbook_markdown
+        # Datasets are bare pack node IDs (no layer prefix), alphabetised.
         assert "--datasets ap_aging,supplier_spend" in artifacts.runbook_markdown
         # No SQL for Option D.
         assert artifacts.sql is None
@@ -91,7 +81,6 @@ class TestOptionDContentPack:
             new_candidate="y",
             affected_silver_ids={"dim_supplier"},
             affected_gold_ids={"supplier_spend", "ap_aging"},
-            backend="content-pack",
             risk_label="unknown",
             rationale="r",
         )
@@ -114,7 +103,6 @@ class TestOptionB:
             new_candidate="ApInvoicesInvoiceCurrencyCode",
             affected_silver_ids={"supplier_spend"},
             affected_gold_ids={"ap_aging"},
-            backend="content-pack",
             risk_label="likely-different-semantics",
             rationale="r",
         )
@@ -149,7 +137,6 @@ class TestOptionAAndE:
             new_candidate="ApInvoicesInvoiceCurrencyCode",
             affected_silver_ids=set(),
             affected_gold_ids=set(),
-            backend="content-pack",
             risk_label="likely-rename",
             rationale="Fusion rename.",
         )
@@ -165,7 +152,6 @@ class TestOptionAAndE:
             new_candidate="y",
             affected_silver_ids=set(),
             affected_gold_ids=set(),
-            backend="content-pack",
             risk_label="unknown",
             rationale="audit reset",
         )

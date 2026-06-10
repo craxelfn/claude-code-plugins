@@ -168,15 +168,6 @@ class TestBackCompatReExport:
         )
         assert FromRuntime is RunSummary
 
-    def test_skip_reason_templates_identity(self) -> None:
-        from oracle_ai_data_platform_fusion_bundle.orchestrator import runtime
-        from oracle_ai_data_platform_fusion_bundle.schema import run_summary
-
-        assert runtime._CASCADE_MSG_TMPL is run_summary._CASCADE_MSG_TMPL
-        assert runtime._ABORT_MSG_TMPL is run_summary._ABORT_MSG_TMPL
-        assert runtime._RESUME_SKIP_MSG_TMPL is run_summary._RESUME_SKIP_MSG_TMPL
-
-
 class TestPlanNode:
     def test_default_status_is_eligible(self) -> None:
         node = PlanNode(dataset_id="ap_invoices", layer="bronze")

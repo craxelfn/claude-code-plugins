@@ -896,13 +896,23 @@ class TestRenderRecommendations:
         from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import (
             RunStep, RunSummary,
         )
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            BronzeExtractSpec,
-        )
-        # Minimal one-step summary so _render_summary's main table branch runs
-        spec = BronzeExtractSpec("erp_suppliers", "erp_suppliers")
-        step = RunStep.success(spec, "rid", "seed", row_count=10, duration_seconds=1.0)
+        # Minimal one-step summary so _render_summary's main table branch runs.
+        # Phase 9 follow-up: the spec-typed ``RunStep.success(spec, ...)``
+        # factory was deleted; the live content-pack dispatcher constructs
+        # RunStep directly with ``node.id`` / ``node.layer`` literals, so the
+        # fixture mirrors that shape.
         now = datetime.now(UTC)
+        step = RunStep(
+            run_id="rid",
+            dataset_id="erp_suppliers",
+            layer="bronze",
+            mode="seed",
+            status="success",
+            row_count=10,
+            duration_seconds=1.0,
+            error_message=None,
+            watermark_used=None,
+        )
         return RunSummary(
             run_id="rid", started_at=now, finished_at=now,
             bundle_project="test", mode="seed", steps=(step,),
