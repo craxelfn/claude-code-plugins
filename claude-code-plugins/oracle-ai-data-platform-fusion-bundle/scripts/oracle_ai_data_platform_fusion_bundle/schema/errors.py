@@ -50,10 +50,10 @@ class BundleVersionMismatchError(BundleLoadError):
 
 class MissingDependencyError(OrchestratorConfigError):
     """Logical missing dependency — a bundle.yaml name that doesn't
-    resolve in any registry (BRONZE_EXTRACTS / SILVER_DIMS / GOLD_MARTS /
-    KNOWN_DEFERRED_*), or a ``--datasets`` / ``--layers`` filter naming a
-    value that doesn't exist. Raised by the schema-level plan resolver
-    and by engine-side ``_resolve_*`` functions.
+    resolve to any content-pack node (bronze / silver / gold) and is
+    also not on the deferred-name list, or a ``--datasets`` / ``--layers``
+    filter naming a value that doesn't exist. Raised by the schema-level
+    plan resolver.
     """
 
 

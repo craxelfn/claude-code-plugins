@@ -222,8 +222,9 @@ class DimensionsSpec(BaseModel):
     )
     """Default includes ``dim_supplier`` (§6 Q1 fix — was previously missing,
     silently dropping a shipped dim from clean-checkout runs). ``dim_org`` is
-    retained but resolves through ``KNOWN_DEFERRED_DIMS`` to
-    ``RunStep(status='deferred')`` instead of crashing."""
+    retained as a default opt-in but doesn't ship a content-pack node today;
+    the resolver emits ``RunStep(status='deferred')`` for it instead of
+    crashing."""
 
 
 class GoldSpec(BaseModel):

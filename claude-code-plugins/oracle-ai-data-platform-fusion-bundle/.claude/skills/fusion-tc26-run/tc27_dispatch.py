@@ -138,13 +138,10 @@ print("AIDP_LIVE_TEST_RESULT_BEGIN", json.dumps(_payload), "AIDP_LIVE_TEST_RESUL
 """
 
 
-# TC27 phase-2 induced-failure cell — PHASE-9 BROKEN, NEEDS REWRITE.
-#
-# The v1 implementation monkey-patched
-# ``dimensions.dim_supplier.build`` + ``registry.SILVER_DIMS["dim_supplier"]``
-# to raise mid-run. Phase 9 deleted both surfaces (dim_supplier.py and
-# the SILVER_DIMS / SilverDimSpec registry). A content-pack-equivalent
-# induced failure would patch the strategy executor (``orchestrator/
+# TC27 phase-2 induced-failure cell — NEEDS REWRITE on the content-pack
+# dispatch path. The v1 mechanism (monkey-patching a Python builder for
+# `dim_supplier`) is gone. A content-pack-equivalent induced failure
+# would patch the strategy executor (``orchestrator/
 # strategy_executors.py``) or stub ``sql_runner.execute_node`` for the
 # `dim_supplier` node id. Tracked under a follow-up; until that lands
 # TC27 phase 2 raises so the operator notices the gap rather than

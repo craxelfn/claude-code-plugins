@@ -26,13 +26,13 @@ from typing import Final
 
 class PvoKind(Enum):
     EXTRACT_PVO = "ExtractPVO"
-    """Dedicated bulk-extract PVO. Optimized; pdf1 Pro Tip recommends. Wired into BRONZE_EXTRACTS."""
+    """Dedicated bulk-extract PVO. Optimized; pdf1 Pro Tip recommends. Eligible for a bronze node in the content pack."""
 
     OTBI = "OTBI"
     """OTBI reporting PVO. NOT recommended for bulk extraction; orchestrator refuses by default."""
 
     SAAS_BATCH = "SaasBatch"
-    """saas-batch REST extractor (NOT BICC). v2 deliverable; orchestrator defers via KNOWN_DEFERRED_DATASETS until a concrete extractor ships (BACKLOG P2.11)."""
+    """saas-batch REST extractor (NOT BICC). v2 deliverable; no concrete extractor ships yet (BACKLOG P2.11) — packs cannot wire a bronze node against this kind today."""
 
 
 # Single-segment SQL-identifier regex — matches paths.py's _SQL_IDENTIFIER_RE.
@@ -301,9 +301,8 @@ _PO_RECEIPTS = PvoEntry(
 )
 
 # v2 deliverable — uses saas-batch REST path, NOT BICC. The kind=SAAS_BATCH
-# tag marks this entry as NOT wired into BRONZE_EXTRACTS today; the orchestrator
-# routes it through KNOWN_DEFERRED_DATASETS until a concrete saas-batch
-# extractor ships (BACKLOG P2.11).
+# tag marks this entry as NOT eligible for a content-pack bronze node today;
+# a concrete saas-batch extractor ships under BACKLOG P2.11.
 _HCM_WORKER_ASSIGNMENTS = PvoEntry(
     id="hcm_worker_assignments",
     datastore="workerAssignmentExtracts",  # confirmed in pdf2 p4 (saas-batch)

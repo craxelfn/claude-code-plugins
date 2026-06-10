@@ -164,7 +164,7 @@ def _payload_diff_predicate_sql(
     are by construction NULL-safe-equal between target and src. The
     ``target.k IS DISTINCT FROM src.k`` clause evaluates ``false`` for those
     columns; their inclusion is harmless and keeps this helper decoupled
-    from :class:`BronzeExtractSpec` (it doesn't need to know the natural key).
+    from the node YAML (it doesn't need to know the natural key).
 
     Args:
         data_columns: An iterable of bronze schema column names — typically

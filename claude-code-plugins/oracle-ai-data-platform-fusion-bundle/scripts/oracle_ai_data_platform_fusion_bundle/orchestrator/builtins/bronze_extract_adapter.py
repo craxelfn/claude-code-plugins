@@ -18,8 +18,8 @@ The adapter exposes two surfaces:
 * :func:`probe_bronze_schemas` — metadata-only BICC ``inferSchema``
   probe over the bronze nodes in a resolved plan (rehomed from
   ``orchestrator/preflight.py``, which is deleted in Step 5). Backs
-  Phase 5's ``AIDPF-2072`` PVO drift gate without crossing the legacy
-  ``BronzeExtractSpec`` registry.
+  Phase 5's ``AIDPF-2072`` PVO drift gate. Reads ``NodeYaml`` directly
+  off the resolved pack; no engine-spec lookup involved.
 
 Algorithm (see plan §Step 2):
 
