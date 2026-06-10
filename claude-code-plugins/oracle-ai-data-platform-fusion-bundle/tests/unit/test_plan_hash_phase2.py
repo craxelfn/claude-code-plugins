@@ -264,22 +264,9 @@ class TestComputeContentPackPlanHash:
         assert a != b
 
 
-# ---------------------------------------------------------------------------
-# Backwards compatibility — v1 plan-hash API unaffected
-# ---------------------------------------------------------------------------
-
-
-class TestV1PlanHashUnchanged:
-    def test_v1_plan_hash_function_still_imports(self) -> None:
-        """Phase 2 must not remove or modify the v1 ``hash_resolved_plan``
-        callable — in-flight resume runs depend on it."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.plan_hash import (
-            build_current_diagnostics,
-            hash_resolved_plan,
-            serialize_plan_snapshot,
-        )
-        # Just importing the names is the regression check — any signature
-        # change would surface in the v1 resume tests.
-        assert callable(hash_resolved_plan)
-        assert callable(serialize_plan_snapshot)
-        assert callable(build_current_diagnostics)
+# Phase 9 follow-up: the ``TestV1PlanHashUnchanged`` class was deleted
+# along with the v1 plan-hash entrypoints (``hash_resolved_plan``,
+# ``serialize_plan_snapshot``, ``build_current_diagnostics``). The
+# content-pack plan-hash (``compute_content_pack_plan_hash``) is the only
+# surviving plan-hash surface; its stability properties are covered by
+# the ``TestContentPackPlanHash*`` classes above.

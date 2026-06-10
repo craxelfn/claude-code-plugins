@@ -174,9 +174,11 @@ After approval, call:
 
 ### 7. Hand-off
 
-Print one of FOUR templates per the conditional + backend matrix:
+Print one of TWO templates per the conditional matrix. Phase 9 follow-up
+deleted the legacy backend (and the `--execution-backend` flag), so the
+prior 4-template matrix collapsed to 2.
 
-#### 7a. Initial-onboarding + content-pack backend
+#### 7a. Initial-onboarding
 
 ```
 Overlay drafted: overlays/<overlay-name>/pack.yaml
@@ -192,24 +194,11 @@ Next steps:
   4. Apply Option D remediation per remediation.md (targets
      affected pack silver/gold node IDs):
        aidp-fusion-bundle run --mode seed \
-         --execution-backend content-pack \
          --datasets <silver/gold-node-ids>
   5. Resume scheduled `aidp-fusion-bundle run --mode incremental`.
 ```
 
-#### 7b. Initial-onboarding + legacy backend
-
-Steps 1–3 identical to 7a; step 4 below:
-
-```
-  4. Apply Option D remediation per remediation.md:
-       aidp-fusion-bundle run --mode seed --datasets <legacy-ids>
-     (where <legacy-ids> are SILVER_DIMS / GOLD_MARTS keys for the
-     affected pack nodes — see remediation.md. NO --execution-backend
-     flag — legacy is the CLI default.)
-```
-
-#### 7c. MultiMatch / refresh-promotion + content-pack backend
+#### 7b. MultiMatch / refresh-promotion
 
 ```
 Overlay drafted: overlays/<overlay-name>/pack.yaml
@@ -224,21 +213,9 @@ Next steps:
          --resolutions overlays/<overlay-name>/resolutions.json
   3. Apply Option D remediation per remediation.md:
        aidp-fusion-bundle run --mode seed \
-         --execution-backend content-pack \
          --datasets <silver/gold-node-ids>
   4. Resume scheduled `aidp-fusion-bundle run --mode incremental`.
 ```
-
-#### 7d. MultiMatch / refresh-promotion + legacy backend
-
-As 7c but step 3 omits `--execution-backend` and uses mapped legacy
-IDs from `remediation.md`.
-
-**Legacy-backend fallback**: when an affected pack node has no
-`SILVER_DIMS` / `GOLD_MARTS` mapping, `runbook.draft_remediation`
-raises `UnmappedLegacyNodeError`; the skill emits a remediation.md
-recommending Option B (surgical MERGE) or Option E (full re-seed)
-instead.
 
 ### 8. Provenance trail
 

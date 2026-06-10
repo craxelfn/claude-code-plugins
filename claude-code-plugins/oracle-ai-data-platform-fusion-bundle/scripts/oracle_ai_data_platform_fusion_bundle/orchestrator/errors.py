@@ -227,8 +227,8 @@ class IncrementalCursorMissingError(OrchestratorConfigError):
 
     Bronze nodes are NOT checked: bronze tolerates a null prior cursor
     (full extract → MERGE inserts every row → fresh-tenant bronze
-    succeeds without prior cursor). ``dim_calendar`` and any
-    ``GoldMartSpec`` with ``incremental_capable=False`` (e.g.
+    succeeds without prior cursor). ``dim_calendar`` and any gold mart
+    whose YAML carries ``refresh.incremental.strategy: replace`` (e.g.
     ``supplier_spend``, ``ap_aging``) are also skipped — they route
     through seed-shape regardless of mode.
     """
@@ -277,11 +277,12 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
     permanently, without any "failed" status in state.
 
     The check covers bronze, silver, and gold; honors the same
-    skip-list as the cursor check (``DeferredSpec``, ``dim_calendar``,
-    ``GoldMartSpec`` with ``incremental_capable=False``). Bronze IS
-    in scope here even though it's skipped by the cursor check —
-    bronze has a safe NULL-cursor fallback (full extract) but NO
-    safe fallback when its target is dropped under a non-NULL cursor.
+    skip-list as the cursor check (deferred nodes, ``dim_calendar``,
+    gold marts whose YAML carries ``refresh.incremental.strategy:
+    replace``). Bronze IS in scope here even though it's skipped by
+    the cursor check — bronze has a safe NULL-cursor fallback (full
+    extract) but NO safe fallback when its target is dropped under a
+    non-NULL cursor.
 
     Inherits from :class:`OrchestratorConfigError` so the CLI's
     ``_run_inline`` exit-2 catch fires it cleanly — no traceback, no

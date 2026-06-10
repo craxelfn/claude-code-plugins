@@ -41,13 +41,6 @@ from .errors import (
 if TYPE_CHECKING:  # pragma: no cover
     from pyspark.sql import DataFrame, SparkSession
 
-    from .registry import (
-        BronzeExtractSpec,
-        DeferredSpec,
-        GoldMartSpec,
-        SilverDimSpec,
-    )
-
 logger = logging.getLogger(__name__)
 
 
@@ -117,9 +110,6 @@ from ..schema.run_summary import (  # noqa: E402, F401
     PlanNode,
     RunStep,
     RunSummary,
-    _ABORT_MSG_TMPL,
-    _CASCADE_MSG_TMPL,
-    _RESUME_SKIP_MSG_TMPL,
     _utc_now,
 )
 
@@ -376,9 +366,6 @@ def _safe_write_state_row(
 __all__ = [
     # Constants
     "_VALID_MODES",
-    "_CASCADE_MSG_TMPL",
-    "_ABORT_MSG_TMPL",
-    "_RESUME_SKIP_MSG_TMPL",
     "WATERMARK_SAFETY_WINDOW",
     "_resolve_safety_window",
     # Helpers

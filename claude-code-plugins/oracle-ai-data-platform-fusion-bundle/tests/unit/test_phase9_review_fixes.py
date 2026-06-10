@@ -128,16 +128,21 @@ def pack(tmp_path: pathlib.Path):
 
 
 # ---------------------------------------------------------------------------
-# Finding 1 — bronze _build_target_identifier legacy fallback
+# Finding 1 — bronze _build_target_identifier routes through TablePaths
 # ---------------------------------------------------------------------------
 
 
-class TestBronzeTargetIdentifierFallback:
-    """The pre-fix legacy fallback in ``_build_target_identifier`` did
-    ``schema = silver_schema if layer == 'silver' else gold_schema``,
-    so a bronze node fell through to the gold schema. The
-    post-write _assert_materialized_matches_declared then described
-    the gold target instead of the bronze table.
+class TestBronzeTargetIdentifierPathsAware:
+    """The Phase 9 review fixed a bronze-routing bug in
+    ``_build_target_identifier``: the legacy ctx-only fallback composed
+    ``f"{ctx.catalog}.{ctx.gold_schema}.{target}"`` for bronze nodes
+    because ``schema = silver_schema if layer == 'silver' else gold_schema``,
+    so a bronze node fell through to the gold schema. The post-write
+    ``_assert_materialized_matches_declared`` then described the gold
+    target instead of the bronze table.
+
+    Phase 9 follow-up: the legacy fallback branch was deleted; ``paths``
+    is now REQUIRED at every call site.
     """
 
     def _ctx(self):
@@ -184,18 +189,15 @@ class TestBronzeTargetIdentifierFallback:
             ]},
         })
 
-    def test_legacy_fallback_routes_bronze_to_bronze_schema(self):
-        """Without ``paths``, the helper must still route bronze to
-        ``ctx.bronze_schema`` — NOT fall through to gold."""
+    def test_missing_paths_raises_type_error(self):
+        """``paths`` is now a REQUIRED positional argument — calling the
+        helper without it must raise ``TypeError``. Locks the Phase 9
+        follow-up contract that deleted the ctx-only legacy fallback."""
         from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
             _build_target_identifier,
         )
-        target = _build_target_identifier(self._bronze_node(), self._ctx())
-        assert target == "cat.bronze.erp_suppliers", (
-            f"bronze target must resolve to ``cat.bronze.erp_suppliers``; "
-            f"got {target!r}. The legacy fallback incorrectly fell through "
-            f"to gold (pre-Phase-9-review behavior)."
-        )
+        with pytest.raises(TypeError, match="paths"):
+            _build_target_identifier(self._bronze_node(), self._ctx())
 
     def test_paths_routes_through_table_paths_bronze(self):
         """With ``paths``, the helper routes through

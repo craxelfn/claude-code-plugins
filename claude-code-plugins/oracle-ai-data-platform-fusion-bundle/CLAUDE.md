@@ -48,6 +48,19 @@ kwarg for backwards-compat with programmatic callers, but only
 `"content-pack"` is reachable; passing `"legacy-python"` raises
 `OrchestratorConfigError`.
 
+**Phase 9 follow-up (2026-06-10)** further deleted the transitional
+registry (`orchestrator/registry.py` — the four Spec dataclasses +
+`BRONZE_EXTRACTS` / `SILVER_DIMS` / `GOLD_MARTS` maps + the
+spec-typed resolvers) and `schema/registry_metadata.py`. The dead
+`_execute_node` body in `orchestrator/__init__.py`, the six
+spec-typed `RunStep.{success,failed,skipped_cascade,skipped_aborted,
+deferred,resumed_skip}` factory methods, and the v1 plan-hash
+entrypoints (`hash_resolved_plan`, `serialize_plan_snapshot`,
+`build_current_diagnostics`, `_node_tuple`, `_canonical_payload`)
+went with them. The four `sql_runner._build_target_identifier` call
+sites all pass `paths` now (the keyword is required, no fallback);
+identifier validation fires centrally on every call.
+
 The historical pre-Phase-9 dual-layer description follows for archive
 context only — none of the v1 modules it references exist in the tree
 anymore.

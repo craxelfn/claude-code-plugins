@@ -1,15 +1,12 @@
-"""Phase 5 Step 6 — the CLI dry-run renderer shows the content-pack
-plan with backend dispatch info.
+"""CLI dry-run renderer — shows the content-pack plan with dispatch info.
 
-This is the user-facing surface: ``aidp-fusion-bundle run --dry-run
---execution-backend content-pack`` should print a list of nodes that
-would dispatch + their implementation type so operators can confirm
-the plan before flipping ``--dry-run`` off.
+User-facing surface: ``aidp-fusion-bundle run --dry-run`` prints a list
+of nodes that would dispatch + their implementation type so operators
+can confirm the plan before flipping ``--dry-run`` off.
 
-The renderer (``commands/run.py::_render_summary`` and friends) sees
-the same ``RunSummary.plan`` PlanNode tuples regardless of backend.
-Phase 5 Step 6 populates that field for the content-pack path; this
-test asserts the populated plan reaches the renderer.
+The renderer (``commands/run.py::_render_summary`` and friends) reads
+``RunSummary.plan`` (a tuple of ``PlanNode`` instances) populated by
+the content-pack runner.
 """
 
 from __future__ import annotations

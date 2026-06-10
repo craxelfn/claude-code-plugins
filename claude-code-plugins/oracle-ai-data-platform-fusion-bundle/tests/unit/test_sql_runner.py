@@ -119,6 +119,25 @@ def _profile():
     return load_tenant_profile_from_string(PROFILE_YAML)
 
 
+def _paths() -> MagicMock:
+    """MagicMock paths whose .bronze/.silver/.gold return string identifiers.
+
+    The Phase 9 follow-up made ``paths`` REQUIRED at every
+    ``_build_target_identifier`` call site (``sql_runner.py:290`` /
+    ``:537`` / ``:910`` / ``:1078``), so test fixtures can no longer
+    pass a bare ``MagicMock()`` — the helper would return a Mock object
+    instead of a string, and downstream ``f"... FROM {target}"`` SQL
+    composition would produce ``"... FROM <MagicMock name='...'>``.
+    Use this helper to keep tests Spark-free while still emitting real
+    identifier strings.
+    """
+    paths = MagicMock()
+    paths.bronze.side_effect = lambda t: f"cat.bronze.{t}"
+    paths.silver.side_effect = lambda t: f"cat.silver.{t}"
+    paths.gold.side_effect = lambda t: f"cat.gold.{t}"
+    return paths
+
+
 def _fake_spark_seed_happy_path(target_row_count: int = 5) -> MagicMock:
     """Fake Spark that lets execute_node complete the full seed-mode
     happy path: preflight DESCRIBE returns required cols; CREATE OR
@@ -185,7 +204,7 @@ class TestSeedHappyPath:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )
@@ -205,7 +224,7 @@ class TestSeedHappyPath:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )
@@ -250,7 +269,7 @@ class TestRenderThenGateOrdering:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )
@@ -281,7 +300,7 @@ class TestRenderThenGateOrdering:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )
@@ -309,7 +328,7 @@ class TestPlanHashDriftGate:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )
@@ -324,7 +343,7 @@ class TestPlanHashDriftGate:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("incremental"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="incremental",
             profile_hash="profile-h",
             prior_plan_hash=first.plan_hash,
@@ -344,7 +363,7 @@ class TestPlanHashDriftGate:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("incremental"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="incremental",
             profile_hash="profile-h",
             prior_plan_hash="some-stale-hash-from-previous-yaml-version",
@@ -363,7 +382,7 @@ class TestPlanHashDriftGate:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
             prior_plan_hash="this-would-cause-drift-but-seed-skips",
@@ -444,7 +463,7 @@ class TestStateCommitFailure:
             pack=pack,
             profile=_profile(),
             ctx=_ctx("seed"),
-            paths=MagicMock(),
+            paths=_paths(),
             mode="seed",
             profile_hash="profile-h",
         )

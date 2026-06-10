@@ -61,8 +61,8 @@ def run(
 
     P1.5α-fix13: ``layers`` is now accepted as a CLI flag. Parses CSV the
     same shape as ``datasets`` and threads through to ``orchestrator.run``.
-    No new validation here — ``resolve_plan`` already handles unknown layer
-    names via ``MissingDependencyError`` (P1.5α-fix12).
+    No new validation here — the content-pack plan resolver already
+    rejects unknown layer names via ``MissingDependencyError``.
     """
     console = console or Console()
 
@@ -88,11 +88,10 @@ def run(
 
     # Parse CSV → list[str] or None. Do NOT pre-resolve against
     # bundle.datasets[] — that would limit the filter to bronze IDs
-    # and silently skip silver/gold. The orchestrator's resolve_plan
-    # classifies user-typed identifiers across all three registries
-    # (BRONZE_EXTRACTS / SILVER_DIMS / GOLD_MARTS) and raises
-    # MissingDependencyError (exit 2 via OrchestratorConfigError
-    # marker) if a name doesn't exist. P1.5α-fix7.
+    # and silently skip silver/gold. The content-pack plan resolver
+    # classifies user-typed identifiers across every pack node (bronze
+    # + silver + gold) and raises MissingDependencyError (exit 2 via
+    # OrchestratorConfigError marker) if a name doesn't exist.
     dataset_filter: list[str] | None = (
         [s.strip() for s in datasets.split(",") if s.strip()]
         if datasets else None

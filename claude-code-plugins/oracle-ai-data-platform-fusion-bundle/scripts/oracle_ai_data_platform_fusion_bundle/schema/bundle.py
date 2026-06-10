@@ -24,10 +24,9 @@ from .refs import render_vars
 # ---------------------------------------------------------------------------
 # Phase 2 — content-pack backend AIDPF error codes
 # ---------------------------------------------------------------------------
-# Registered in PLAN §25. Surfaced via the schema layer because content-pack
-# *runtime selection* (--execution-backend content-pack) lives at the CLI/run
-# layer, but the bundle-shape gates (missing contentPack block, unresolvable
-# pack path) are pure schema concerns.
+# Registered in PLAN §25. Surfaced via the schema layer because the
+# bundle-shape gates (missing contentPack block, unresolvable pack path)
+# are pure schema concerns.
 
 AIDPF_1030_PROFILE_MISSING = "AIDPF-1030"
 """`bundle.yaml`'s `contentPack.profile` field is missing when content-pack backend selected."""
@@ -174,9 +173,9 @@ class FusionConn(BaseModel):
     """Per-PVO BICC offering schema overrides (P1.5α-fix19).
 
     Wins over catalog default + auto-discovery. Key: bundle pvo id —
-    matches ``DatasetSpec.id`` / ``BronzeExtractSpec.dataset_id``
-    (the customer-facing bundle id). Value: BICC offering schema
-    name as it appears in ``/biacm/rest/meta/datastores``.
+    matches ``DatasetSpec.id`` / the bronze ``NodeYaml.id`` (the
+    customer-facing bundle id). Value: BICC offering schema name as
+    it appears in ``/biacm/rest/meta/datastores``.
 
     Tenant-dependent — use sparingly. The orchestrator's preflight
     auto-discovers the correct schema for ~80% of mismatch cases via
@@ -223,8 +222,9 @@ class DimensionsSpec(BaseModel):
     )
     """Default includes ``dim_supplier`` (§6 Q1 fix — was previously missing,
     silently dropping a shipped dim from clean-checkout runs). ``dim_org`` is
-    retained but resolves through ``KNOWN_DEFERRED_DIMS`` to
-    ``RunStep(status='deferred')`` instead of crashing."""
+    retained as a default opt-in but doesn't ship a content-pack node today;
+    the resolver emits ``RunStep(status='deferred')`` for it instead of
+    crashing."""
 
 
 class GoldSpec(BaseModel):

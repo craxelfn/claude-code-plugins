@@ -23,9 +23,8 @@ and adds:
   output_watermark without the lookup audit rows reaching the table).
 
 The v1 ``ensure_state_table`` and ``write_state_row`` continue to work
-unchanged — Phase 2 callers (Step 11 execute_node) explicitly invoke
-the Phase 2 helpers when ``--execution-backend content-pack`` is in
-effect.
+unchanged — Phase 2 callers (Step 11 ``execute_node``) explicitly invoke
+the Phase 2 helpers.
 
 References:
 

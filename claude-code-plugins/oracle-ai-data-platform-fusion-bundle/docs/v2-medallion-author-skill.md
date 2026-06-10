@@ -162,14 +162,13 @@ Next steps:
        aidp-fusion-bundle bootstrap --operator "$USER"
   4. Apply Option D remediation per remediation.md:
        aidp-fusion-bundle run --mode seed \
-         --execution-backend content-pack \
          --datasets supplier_spend,ap_aging
   5. Resume scheduled `aidp-fusion-bundle run --mode incremental`.
 ```
 
-The legacy-backend variant omits `--execution-backend` (legacy is
-the CLI default) and uses `SILVER_DIMS` / `GOLD_MARTS` keys
-(`dim_supplier`, `supplier_spend`, etc. — no `mart_` prefix).
+Phase 9 follow-up deleted the legacy backend (and the
+`--execution-backend` flag); only one execution path ships. The runbook
+emits the unflagged invocation with pack node IDs as the dataset filter.
 
 ### 8. Provenance
 

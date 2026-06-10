@@ -19,8 +19,8 @@ from ..schema.fusion_catalog import CATALOG, PvoEntry, PvoKind
 
 # Display markers for the three PvoKind values. Should-fix-4 (2026-05-17):
 # SAAS_BATCH distinct from ExtractPVO + OTBI so operators see at a glance
-# which entries the orchestrator will route through KNOWN_DEFERRED_DATASETS
-# vs BRONZE_EXTRACTS vs refuse outright.
+# which entries are eligible for a content-pack bronze node vs which are
+# deferred (no extractor yet) or refused outright (OTBI).
 _KIND_MARKERS: dict[PvoKind, str] = {
     PvoKind.EXTRACT_PVO: "ExtractPVO",
     PvoKind.OTBI:        "[red]OTBI[/red]",

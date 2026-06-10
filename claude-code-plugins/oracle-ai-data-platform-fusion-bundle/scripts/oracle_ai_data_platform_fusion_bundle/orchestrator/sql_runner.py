@@ -1,7 +1,7 @@
-"""Content-pack execution backend — ``execute_node`` entry point (Phase 2 Step 11).
+"""Content-pack execution backend — ``execute_node`` entry point.
 
-This is the main runner for ``--execution-backend content-pack``. The
-orchestrator's per-node loop calls ``execute_node`` once per node;
+This is the orchestrator's per-node runner. The content-pack runner
+calls ``execute_node`` once per node;
 ``execute_node`` performs the full lifecycle (preflight → render →
 plan-hash drift gate → strategy dispatch → quality tests → materialised
 schema assertion → atomic state commit) and returns a typed result.
@@ -287,7 +287,7 @@ def execute_node(
         )
 
     # ----- Step 6: dispatch by strategy, reusing RenderedSql ----------
-    target = target_override or _build_target_identifier(node, ctx)
+    target = target_override or _build_target_identifier(node, ctx, paths)
     try:
         strategy_result = execute_strategy(
             spark, node=node, rendered=rendered, target=target, ctx=ctx, mode=mode,
@@ -338,7 +338,7 @@ def execute_node(
 
     # ----- Step 9: compute output_watermark ---------------------------
     output_watermark = _compute_output_watermark(
-        spark, node, ctx, rendered, strategy_result,
+        spark, node, ctx, paths, rendered, strategy_result,
     )
 
     # ----- Step 10: assemble state rows (primary + lookups) ----------
@@ -458,7 +458,7 @@ def _normalise_spark_type(type_str: str) -> str:
 def _build_target_identifier(
     node: "NodeYaml",  # noqa: F821
     ctx: RunContext,
-    paths: "TablePaths | None" = None,  # noqa: F821
+    paths: "TablePaths",  # noqa: F821
 ) -> str:
     """Build the fully-qualified target identifier for a node.
 
@@ -468,46 +468,29 @@ def _build_target_identifier(
     ``node.target`` raises ``ValueError`` BEFORE any executor logic
     runs (no BICC call, no Spark write, no state-row write attempt).
 
-    ``paths`` is keyword-only for back-compat with call sites that
-    pre-date the Step 2.5 refactor. When ``None``, falls back to
-    layer-aware f-string composition (silver / gold / bronze each
-    resolved against the matching ``ctx.<layer>_schema``). Pre-fix
-    the bronze branch fell through to the gold f-string, which made
-    bronze nodes resolve to ``catalog.gold.<target>`` — a real bug
-    surfaced in the Phase 9 review.
+    Phase 9 follow-up: ``paths`` is now REQUIRED. The legacy ctx-only
+    fallback (which composed ``f"{ctx.catalog}.{schema}.{node.target}"``
+    without identifier validation) was deleted along with the v1
+    dispatcher.
     """
     layer = node.layer
-    if paths is not None:
-        if layer == "bronze":
-            return paths.bronze(node.target)
-        if layer == "silver":
-            return paths.silver(node.target)
-        if layer == "gold":
-            return paths.gold(node.target)
-        raise ValueError(
-            f"_build_target_identifier: unsupported layer={layer!r} for "
-            f"node {node.id!r}"
-        )
-    # Legacy path — no identifier validation. Layer-aware so bronze
-    # nodes don't silently land in the gold schema.
     if layer == "bronze":
-        schema = ctx.bronze_schema
-    elif layer == "silver":
-        schema = ctx.silver_schema
-    elif layer == "gold":
-        schema = ctx.gold_schema
-    else:
-        raise ValueError(
-            f"_build_target_identifier: unsupported layer={layer!r} for "
-            f"node {node.id!r}"
-        )
-    return f"{ctx.catalog}.{schema}.{node.target}"
+        return paths.bronze(node.target)
+    if layer == "silver":
+        return paths.silver(node.target)
+    if layer == "gold":
+        return paths.gold(node.target)
+    raise ValueError(
+        f"_build_target_identifier: unsupported layer={layer!r} for "
+        f"node {node.id!r}"
+    )
 
 
 def _compute_output_watermark(
     spark: "SparkSession",
     node: "NodeYaml",  # noqa: F821
     ctx: RunContext,
+    paths: "TablePaths",  # noqa: F821
     rendered: RenderedSql,
     strategy_result,
 ) -> datetime | None:
@@ -533,7 +516,7 @@ def _compute_output_watermark(
     if inc is None or inc.watermark is None:
         return None
     column = inc.watermark.column
-    target = _build_target_identifier(node, ctx)
+    target = _build_target_identifier(node, ctx, paths)
     try:
         df = spark.sql(f"SELECT MAX({column}) AS wm FROM {target}")
         rows = df.collect()
@@ -906,7 +889,7 @@ def _execute_builtin_node(
         )
 
     # ----- Step 6: invoke the adapter --------------------------------
-    target = target_override or _build_target_identifier(node, ctx)
+    target = target_override or _build_target_identifier(node, ctx, paths)
     try:
         adapter_func(spark, node=node, pack=pack, profile=profile, ctx=ctx)
     except Exception as exc:  # noqa: BLE001 — surface any adapter failure uniformly
