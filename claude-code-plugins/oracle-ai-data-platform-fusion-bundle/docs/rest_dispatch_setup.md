@@ -192,4 +192,4 @@ For now: the AIDP console's Job Runs tab carries the same executed-notebook view
 - REST contract: `.claude/skills/aidp-rest/SKILL.md` — the gotchas baked into `AidpRestClient`
 - Auth mode (`vault` deferred): tracked as `P1.5ε-fix6`
 - BICC credential preflight: **shipped** as `P1.5ε-fix1` (2026-06-03)
-- REST-dispatch `--resume` (deferred): tracked as `P1.5ε-fix5`
+- REST-dispatch `--resume`: **shipped** as `P1.5ε-fix5` (2026-06-03) — live evidence in `tests/live/TC29b_resume_via_rest.md`

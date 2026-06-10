@@ -50,6 +50,7 @@ from .errors import (
     DispatchError,
     DispatchFetchOutputError,
     DispatchJobSubmitError,
+    DispatchMarkerDegradedError,
     DispatchMarkerMissingError,
     DispatchPollTimeoutError,
     DispatchPreflightError,
@@ -161,12 +162,17 @@ def dispatch_via_rest(
             translates the marker back into a SchemaDriftDetectedError
             after writing the artifact locally so the CLI can return
             exit 14 (NOT exit 2 via DispatchRunFailedError).
+        :class:`DispatchMarkerDegradedError`: marker delimiters found
+            but body unparseable; run_id recovered via regex fallback
+            (P1.5ε-fix5, TC27 trap).
 
     Phase 5 P1.5ε-fix5: ``resume_run_id`` is supported on the REST
     dispatch path. The notebook cell threads it into
     ``orchestrator.run(..., resume_run_id=<id>)`` so the cluster-side
     run adopts the supplied id and writes state rows under the same
-    identifier as the prior failed run.
+    identifier as the prior failed run. Bad run_ids surface as cell-3
+    errors enriched into ``DispatchRunFailedError``'s message (see also
+    ``AidpRestClient.extract_cell_errors``).
     """
     # ---- Phase A — local preflight ---------------------------------------
     local_results = run_local_preflight(
@@ -257,6 +263,7 @@ def dispatch_via_rest(
         mode=mode,
         datasets=datasets,
         layers=layers,
+        resume_run_id=resume_run_id,
         bicc_secret_name=env.bicc_secret_name,
         bicc_secret_key=env.bicc_secret_key,
         # Phase 2 primitives — passthrough only; dispatch never inspects them.
@@ -266,8 +273,6 @@ def dispatch_via_rest(
         pack_manifest=pack_manifest,
         force_fingerprint_skip=force_fingerprint_skip,
         schema_snapshot_yaml=schema_snapshot_yaml,
-        # Phase 5 P1.5ε-fix5 — pass through to the cluster-side cell.
-        resume_run_id=resume_run_id,
         # Phase 9 — emit ``strict_scope=...`` in the generated
         # orchestrator.run() call so the cluster honors the operator's
         # opt-out of D-1 implicit-transitive-include.
@@ -497,15 +502,58 @@ def dispatch_via_rest(
         )
 
     if result.status != "SUCCESS":
+        # P1.5ε-fix5: best-effort cell-error enrichment. The generated
+        # run cell does not wrap orchestrator.run(...) in try/except, so
+        # a bad --resume <id> (ResumeRunNotFoundError /
+        # ResumeRunNotResumableError / ResumeBundleMismatchError) fails
+        # cell 3 before marker emit. Walk the executed notebook for
+        # cell-3 errors and append the typed ename/evalue so the operator
+        # sees the orchestrator exception class without opening the
+        # notebook. Diagnostic must not mask the original failure, so any
+        # exception in the enricher is swallowed.
+        detail = ""
+        try:
+            cell_errors = AidpRestClient.extract_cell_errors(executed_notebook)
+            # The canonical 4-cell layout is: markdown + install (1) +
+            # creds (2) + run (3) + verify (4). Run-cell errors live at
+            # cell_index == 3.
+            run_cell_err = next(
+                (e for e in cell_errors if e.get("cell_index") == 3),
+                None,
+            )
+            if run_cell_err is not None:
+                ename = run_cell_err.get("ename") or "UnknownError"
+                evalue = (run_cell_err.get("evalue") or "")[:200]
+                detail = f"; cell 3 error: {ename}: {evalue}"
+        except Exception:  # noqa: BLE001 - diagnostic is best-effort
+            detail = ""
         raise DispatchRunFailedError(
             f"job_run_key={job_run_key} reached terminal status "
-            f"{result.status!r}; see AIDP console / executed notebook for details"
+            f"{result.status!r}; see AIDP console / executed notebook "
+            f"for details{detail}"
         )
 
     if marker is None:
         raise DispatchMarkerMissingError(
             f"job reported SUCCESS but no marker found in executed notebook "
             f"(jobRunKey={job_run_key}); evidence-capture failure"
+        )
+
+    # P1.5ε-fix5: parse_marker's regex fallback fired — JSON body was
+    # unparseable (typically AIDP's display_data escape-stripping
+    # against failed-step repr(exc), the TC27 trap) but a run_id was
+    # recovered. Surface as a typed exception carrying the resume
+    # handle in the message so the operator can pass --resume <id>
+    # back to the same CLI without grepping the executed notebook.
+    if marker.get("_marker_parse_failed"):
+        recovered_run_id = marker["run_id"]
+        raise DispatchMarkerDegradedError(
+            f"marker JSON parse failed (jobRunKey={job_run_key}); "
+            f"cluster job reached terminal status SUCCESS but the "
+            f"summary marker is unparseable. Recovered "
+            f"run_id={recovered_run_id} from regex fallback — re-run "
+            f"with --resume {recovered_run_id} to continue.",
+            recovered_run_id=recovered_run_id,
         )
 
     try:
@@ -626,6 +674,7 @@ __all__ = [
     "DispatchError",
     "DispatchFetchOutputError",
     "DispatchJobSubmitError",
+    "DispatchMarkerDegradedError",
     "DispatchMarkerMissingError",
     "DispatchPollTimeoutError",
     "DispatchPreflightError",

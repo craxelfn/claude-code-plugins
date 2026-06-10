@@ -183,8 +183,10 @@ class TestRunCell:
         assert "layers=None" in run
         assert "datasets=null" not in run
 
-    def test_resume_run_id_hardcoded_none(self, wheel: Path) -> None:
-        # §3.1 — REST-dispatch resume is out of scope in P1.5ε.
+    def test_resume_run_id_default_none(self, wheel: Path) -> None:
+        # P1.5ε-fix5: default kwarg is None → run cell renders
+        # `resume_run_id=None,` (fresh run, the common case). Regression
+        # lock for the default behavior.
         nb = build_notebook(
             wheel_path=wheel,
             bundle_yaml="",
@@ -194,6 +196,39 @@ class TestRunCell:
         )
         run = "".join(nb["cells"][3]["source"])
         assert "resume_run_id=None" in run
+
+    def test_resume_run_id_literal_injected(self, wheel: Path) -> None:
+        # P1.5ε-fix5: operator-supplied run_id is repr()-injected as a
+        # quoted Python literal (same pattern as mode / datasets / layers).
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="abc-123",
+        )
+        run = "".join(nb["cells"][3]["source"])
+        assert "resume_run_id='abc-123'" in run
+
+    def test_resume_run_id_repr_escapes_special_chars(self, wheel: Path) -> None:
+        # Defensive — repr() must produce a well-formed Python literal
+        # even if the run_id contains characters that would otherwise
+        # break source parsing (quote, backslash). Asserts the generated
+        # run cell parses cleanly with ast.parse.
+        import ast
+
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="x'y\\z",
+        )
+        run = "".join(nb["cells"][3]["source"])
+        # If the repr() escape is broken, ast.parse raises SyntaxError.
+        ast.parse(run)
 
     def test_marker_emit_present(self, wheel: Path) -> None:
         nb = build_notebook(
@@ -231,9 +266,11 @@ class TestRunCell:
         """
         import inspect
 
-        # Locks the API: build_notebook accepts resume_run_id.
+        # Locks the API: build_notebook accepts resume_run_id as a
+        # keyword-only parameter with default None.
         sig = inspect.signature(build_notebook)
         assert "resume_run_id" in sig.parameters
+        assert sig.parameters["resume_run_id"].default is None
         # When None (default), the cell still emits a literal `None`.
         nb = build_notebook(
             wheel_path=wheel,

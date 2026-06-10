@@ -125,7 +125,14 @@ def run(
     # generated notebook cell threads `resume_run_id` into the
     # cluster-side `orchestrator.run(...)` call so the resumed run
     # adopts the supplied id and joins state rows with the prior
-    # failed run.
+    # failed run. Banner gated on `not dry_run`: dispatch short-circuits
+    # before any resume work happens under --dry-run, so a "Resuming
+    # run X" banner there would mislead the operator.
+    if resume_run_id is not None and not dry_run:
+        console.print(
+            f"[bold cyan]Resuming run[/bold cyan] [dim]{resume_run_id}[/dim] — "
+            f"reading fusion_bundle_state, computing reattempt plan…"
+        )
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
@@ -311,9 +318,13 @@ def _run_via_aidp_dispatch(
     Same exit-code contract as :func:`_run_inline`: 0 on success, 1 if any
     step failed, 2 on any dispatch-layer error (config, preflight, network).
 
-    ``resume_run_id`` is not accepted on the REST-dispatch path — the
-    caller guards in :func:`run` so this function never sees a resume
-    request. Tracked as ``P1.5ε-fix5`` follow-up.
+    ``resume_run_id`` (P1.5ε-fix5): threaded into ``dispatch_via_rest``
+    which injects it into the run-cell as a ``repr()``-quoted literal.
+    Bad run_ids surface as cell-3 ``ResumeRunNotFoundError`` /
+    ``ResumeRunNotResumableError`` / ``ResumeBundleMismatchError`` —
+    enriched into ``DispatchRunFailedError``'s message by
+    ``dispatch_via_rest`` so the operator sees the typed orchestrator
+    exception class without opening the executed notebook.
     """
     from ._config_helpers import env_or_error, load_aidp_config
     from ..dispatch import dispatch_via_rest
@@ -426,6 +437,7 @@ def _run_via_aidp_dispatch(
             mode=mode,  # type: ignore[arg-type]
             datasets=datasets,
             layers=layers,
+            resume_run_id=resume_run_id,
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
@@ -435,7 +447,6 @@ def _run_via_aidp_dispatch(
             pack_manifest=pack_manifest,
             force_fingerprint_skip=force_fingerprint_skip,
             schema_snapshot_yaml=schema_snapshot_yaml,
-            resume_run_id=resume_run_id,
             # Phase 9 — pack threaded through so dispatch's dry-run path
             # can call schema.plan_resolver without crossing §4.3.
             resolved_pack=resolved_pack,

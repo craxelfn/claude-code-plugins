@@ -71,7 +71,8 @@ def test_resume_without_inline_dispatches_via_rest(
     """Phase 5 P1.5ε-fix5 — non-inline ``--resume`` now dispatches via
     REST. The CLI no longer rejects it; the dispatcher's notebook
     cell threads the supplied id into the cluster-side
-    ``orchestrator.run(...)`` call.
+    ``orchestrator.run(...)`` call, and the cyan ``Resuming run`` banner
+    is printed before dispatching (not under --dry-run).
     """
     from unittest.mock import patch
 
@@ -86,10 +87,13 @@ def test_resume_without_inline_dispatches_via_rest(
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "seed", "--resume", "some-run-id",
         ])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
     # The resume id flowed into the dispatcher.
     assert mock_dispatch.call_args is not None
     assert mock_dispatch.call_args.kwargs.get("resume_run_id") == "some-run-id"
+    # P1.5ε-fix5 banner printed before dispatch (not under --dry-run).
+    assert "Resuming run" in result.output
+    assert "some-run-id" in result.output
 
 
 def test_resume_run_not_found_exits_2_no_traceback(

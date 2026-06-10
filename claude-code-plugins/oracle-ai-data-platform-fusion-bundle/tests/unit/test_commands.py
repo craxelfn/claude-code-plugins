@@ -233,7 +233,8 @@ class TestRun:
     ) -> None:
         """Phase 5 P1.5ε-fix5 — non-inline ``--resume`` is now
         supported through the REST-dispatch path. The CLI no longer
-        rejects it with a "requires --inline" hint."""
+        rejects it with a "requires --inline" hint, and prints the cyan
+        ``Resuming run`` banner before dispatching."""
         from unittest.mock import patch
 
         monkeypatch.chdir(tmp_path)
@@ -246,12 +247,42 @@ class TestRun:
             result = CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--resume", "some-run-id",
             ])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
         assert mock_dispatch.call_args is not None
         assert (
             mock_dispatch.call_args.kwargs.get("resume_run_id")
             == "some-run-id"
         )
+        # P1.5ε-fix5 banner printed before dispatch (not under --dry-run).
+        assert "Resuming run" in result.output
+        assert "some-run-id" in result.output
+
+    def test_dry_run_with_resume_omits_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P1.5ε-fix5: under ``--dry-run``, dispatch short-circuits
+        before any resume work; the cyan banner is gated on
+        ``resume_run_id is not None and not dry_run`` so the operator
+        doesn't see ``Resuming run X`` followed by a dry-run plan
+        table (would imply work was done)."""
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            return_value=RunSummary.empty("test", "seed"),
+        ) as mock_dispatch:
+            result = CliRunner().invoke(cli.main, [
+                "run", "--mode", "seed",
+                "--resume", "some-id", "--dry-run",
+            ])
+        assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
+        assert mock_dispatch.call_args.kwargs["resume_run_id"] == "some-id"
+        assert mock_dispatch.call_args.kwargs["dry_run"] is True
+        assert "Resuming run" not in result.output
 
     def test_run_dispatch_invokes_dispatch_via_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -278,6 +309,47 @@ class TestRun:
         assert kwargs["mode"] == "seed"
         assert kwargs["datasets"] == ["erp_suppliers"]
         assert kwargs["env_name"] == "dev"
+
+    def test_dispatch_marker_degraded_renders_recovered_run_id_exit_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P1.5ε-fix5: when dispatch_via_rest raises
+        DispatchMarkerDegradedError (the TC27 trap path), the CLI
+        renders the message in red and exits 2. The recovered run_id
+        is copy-pastable from the error block: contains
+        "recovered run_id=<id>" and "--resume <id>". Crucially, the
+        CLI does NOT fall into _render_summary's "Empty plan" branch.
+        """
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.dispatch.errors import (
+            DispatchMarkerDegradedError,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
+        msg = (
+            "marker JSON parse failed (jobRunKey=jr-xyz); "
+            "cluster job reached terminal status SUCCESS but the "
+            "summary marker is unparseable. Recovered "
+            "run_id=abc-123 from regex fallback — re-run "
+            "with --resume abc-123 to continue."
+        )
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
+            side_effect=DispatchMarkerDegradedError(
+                msg, recovered_run_id="abc-123",
+            ),
+        ):
+            result = CliRunner().invoke(cli.main, ["run", "--mode", "seed"])
+        assert result.exit_code == 2, f"got {result.exit_code}: {result.output}"
+        assert "DISPATCH_MARKER_DEGRADED" in result.output
+        assert "recovered" in result.output.lower()
+        assert "abc-123" in result.output
+        assert "--resume abc-123" in result.output
+        # The "Empty plan… nothing to do" miscapture must NOT happen —
+        # the degraded path is a typed exception, not a summary render.
+        assert "Empty plan" not in result.output
 
     # ------------------------------------------------------------------
     # P1.5ε-fix7 — --poll-timeout flag
