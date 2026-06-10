@@ -397,9 +397,18 @@ def run(
                 "overwriteSchema", "true"
             ).saveAsTable(target)
             materialized_df = spark.table(target)
+            # Advance the cursor ONLY on a non-empty extract — the adapter
+            # contract (steps 4 + 10) is "cursor = extract_started_at -
+            # safety_window on non-empty extract, carry forward prior on
+            # empty delta". This holds regardless of mode: an empty seed
+            # must NOT persist `extract_started_at - safety_window`, or the
+            # next incremental would skip late-arriving source records
+            # older than that bogus cursor. An empty first seed carries
+            # forward prior_watermark (None) → next run re-seeds (full
+            # pull), which is correct.
             output_watermark = (
                 next_persisted_cursor
-                if source_delta_count > 0 or mode == "seed"
+                if source_delta_count > 0
                 else prior_watermark
             )
             return materialized_df, output_watermark

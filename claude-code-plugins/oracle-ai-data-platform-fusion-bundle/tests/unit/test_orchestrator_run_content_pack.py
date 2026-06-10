@@ -657,6 +657,118 @@ class TestCascadeAbort:
         assert status_by_id["dim_a"] == "failed"
         assert status_by_id["dim_b"] == "success"
 
+    def _bronze_silver_pack(self, tmp_path: pathlib.Path):
+        """Build a 2-node fixture: bronze.erp_a + silver.dim_a depending
+        on bronze.erp_a. Phase 9 runs bronze in the same plan, so a failed
+        bronze extract must cascade-skip its silver consumer."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+
+        root = tmp_path / "pack"
+        root.mkdir()
+        (root / "pack.yaml").write_text(
+            "id: cascade-test\nversion: 1.0.0\ncompatibility:\n  pluginMinVersion: 0.3.0\n"
+        )
+        (root / "bronze").mkdir()
+        (root / "bronze" / "erp_a.yaml").write_text(
+            "id: erp_a\nlayer: bronze\nimplementation:\n  type: bronze_extract\n"
+            "  datastore: ErpAExtractPVO\n  biccSchema: Financial\n"
+            "  incrementalCapable: true\ntarget: erp_a\n"
+            "dependsOn:\n  bronze: []\n  silver: []\n"
+            "refresh:\n  seed:\n    strategy: replace\n  incremental:\n"
+            "    strategy: merge\n    watermark:\n      source: erp_a\n"
+            "      column: LastUpdateDate\n    naturalKey:\n      - Id\n"
+            "outputSchema:\n  columns:\n"
+            "    - { name: Id, type: long, nullable: true, pii: none }\n"
+            "    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }\n"
+            "    - { name: _source_pvo, type: string, nullable: false, pii: none }\n"
+            "    - { name: _run_id, type: string, nullable: false, pii: none }\n"
+            "    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }\n"
+            "quality:\n  tests: []\n"
+        )
+        (root / "silver").mkdir()
+        (root / "silver" / "dim_a.yaml").write_text(
+            "id: dim_a\nlayer: silver\nimplementation:\n  type: sql\n  sql: silver/dim_a.sql\n"
+            "target: dim_a\noutputSchema:\n  columns:\n    - name: a\n      type: string\n"
+            "      nullable: false\n      pii: none\ndependsOn:\n  bronze:\n    - id: erp_a\n"
+            "      role: primary\nrefresh:\n  seed:\n    strategy: replace\n"
+        )
+        (root / "silver" / "dim_a.sql").write_text("SELECT 1 AS a")
+        return load_full_chain(root, base_resolver=make_filesystem_base_resolver(root))
+
+    def test_silver_skipped_when_bronze_dep_fails(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """PR #23 blocking #1: a failed bronze node must cascade-skip a
+        silver consumer that declares ``dependsOn.bronze``. Pre-fix,
+        ``_find_cascade_blocker`` only walked ``dependsOn.silver``, so the
+        silver node would dispatch, read the stale pre-existing bronze
+        table, and commit a success row after its upstream failed."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import sql_runner
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state as v1_state
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import state_phase2
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            NodeExecutionResult,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import (
+            load_tenant_profile,
+        )
+        import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
+
+        pack = self._bronze_silver_pack(tmp_path)
+        profile = load_tenant_profile(FIXTURE_PROFILE)
+
+        # Bronze erp_a fails; silver dim_a (dependsOn.bronze erp_a) MUST
+        # NOT be dispatched.
+        execute_node_calls: list[dict] = []
+        def fake_execute_node(spark, **kwargs):
+            execute_node_calls.append(kwargs)
+            if kwargs["node"].id == "erp_a":
+                return NodeExecutionResult(
+                    status="quality_failed",
+                    error_message="[unique] simulated bronze failure",
+                )
+            return NodeExecutionResult(status="success", row_count=0)
+        monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
+
+        state_write_calls: list[list[dict]] = []
+        def spy_write_state_rows_hard(spark, paths, rows):
+            state_write_calls.append(list(rows))
+            return None
+        monkeypatch.setattr(state_phase2, "write_state_rows_hard", spy_write_state_rows_hard)
+
+        fake_spark = MagicMock()
+        empty_df = MagicMock()
+        empty_df.collect.return_value = []
+        fake_spark.sql.return_value = empty_df
+        monkeypatch.setattr(v1_state, "ensure_state_table", lambda spark, paths: None)
+        monkeypatch.setattr(state_phase2, "ensure_state_columns_v2", lambda spark, paths: None)
+        monkeypatch.setattr(_o, "_bootstrap_spark", lambda: fake_spark)
+
+        # Declare the silver root; D-1 transitive include pulls bronze erp_a.
+        bundle_path = self._ad_hoc_bundle(tmp_path, ["dim_a"])
+        summary = orchestrator.run(
+            bundle_path=bundle_path,
+            mode="seed",
+            resolved_pack=pack,
+            tenant_profile=profile,
+            layers=["bronze", "silver", "gold"],
+        )
+
+        called_node_ids = [c["node"].id for c in execute_node_calls]
+        # Bronze was dispatched and failed; silver must NOT have been.
+        assert "erp_a" in called_node_ids
+        assert "dim_a" not in called_node_ids
+
+        step_ids = {s.dataset_id: s for s in summary.steps}
+        assert step_ids["erp_a"].status == "failed"
+        assert step_ids["dim_a"].status == "skipped"
+        assert step_ids["dim_a"].skip_reason == "cascade"
+        # The cascade error must name the failed bronze upstream.
+        assert "erp_a" in (step_ids["dim_a"].error_message or "")
+
 
 # ---------------------------------------------------------------------------
 # CLI integration: --inline reaches execute_node via the content-pack runner

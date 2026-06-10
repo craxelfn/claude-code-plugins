@@ -1,22 +1,34 @@
 """Transcribe v1 registry metadata into a checked-in test fixture.
 
-Reads ``schema/registry_metadata.py`` from the v1 reference branch
-``P1.5ε-fix5`` via ``git show`` and emits ``tests/fixtures/v1_registry_snapshot.yaml``
-as deterministic, byte-stable YAML.
+Reads ``tests/fixtures/v1_registry_metadata_source.py`` — a byte-identical,
+committed copy of ``schema/registry_metadata.py`` as it existed on the v1
+reference branch ``P1.5ε-fix5`` — and emits
+``tests/fixtures/v1_registry_snapshot.yaml`` as deterministic, byte-stable
+YAML.
 
-Used as the parity baseline for v2's Phase 4 dual-runner gate. The fixture
-is **test data**, not runtime code — the engine never imports it.
+The v1 ``registry_metadata.py`` was deleted from the live tree in Phase 9,
+and ``P1.5ε-fix5`` is a local-only branch absent from clean clones / CI.
+Reading the committed fixture instead of shelling out to git keeps the
+snapshot test self-contained — it runs identically anywhere.
+
+Used as the parity baseline for v2's Phase 4 dual-runner gate. Both the
+source fixture and the snapshot are **test data**, not runtime code — the
+engine never imports them.
 
 Provenance (recorded on every run):
 
-    branch:        P1.5ε-fix5
+    branch:        P1.5ε-fix5  (historical; source now committed as a fixture)
     branch head:   650d6909655fd30618f56edbbded6e4b81d6cc3b
     file blob:     02ec45a7fae7c1fa5b94a3940144727da69dcc13
 
-If the branch head advances past 650d690 (v1 maintenance work continues),
-the script warns. If the blob hash diverges from 02ec45a7, the script hard
-fails — the v1 registry's content has changed and the snapshot must be
-re-reviewed before regenerating.
+The script verifies the committed fixture's git blob hash on every run.
+If the blob hash diverges from 02ec45a7, the script hard fails — the v1
+registry source has been modified and the snapshot must be re-reviewed
+before regenerating. Regenerate the source fixture (only with explicit
+re-review) via:
+
+    git show P1.5ε-fix5:./scripts/oracle_ai_data_platform_fusion_bundle/schema/registry_metadata.py \\
+        > tests/fixtures/v1_registry_metadata_source.py
 
 Usage:
     python scripts/dev/transcribe_v1_registry.py > tests/fixtures/v1_registry_snapshot.yaml
@@ -30,7 +42,7 @@ in ``tests/unit/test_v1_registry_snapshot.py``).
 from __future__ import annotations
 
 import ast
-import subprocess
+import hashlib
 import sys
 from pathlib import Path
 
@@ -41,55 +53,61 @@ V1_FILE_REL = "./scripts/oracle_ai_data_platform_fusion_bundle/schema/registry_m
 EXPECTED_HEAD = "650d6909655fd30618f56edbbded6e4b81d6cc3b"
 EXPECTED_BLOB = "02ec45a7fae7c1fa5b94a3940144727da69dcc13"
 
+# Committed, byte-identical copy of the v1 registry source. Self-contained
+# replacement for `git show P1.5ε-fix5:<path>` — that branch is local-only
+# and absent from clean clones / CI.
+FIXTURE_SOURCE = (
+    Path(__file__).resolve().parent.parent.parent
+    / "tests"
+    / "fixtures"
+    / "v1_registry_metadata_source.py"
+)
 
-def _git_rev_parse(target: str) -> str:
-    return subprocess.run(
-        ["git", "rev-parse", target],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
 
-
-def _git_show(target: str) -> str:
-    return subprocess.run(
-        ["git", "show", target],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+def _git_blob_hash(data: bytes) -> str:
+    """Compute the git blob SHA-1 for a byte string (matches ``git hash-object``)."""
+    header = f"blob {len(data)}\0".encode("utf-8")
+    return hashlib.sha1(header + data).hexdigest()  # noqa: S324 — git uses SHA-1
 
 
 def fetch_v1_registry_source() -> str:
-    """Fetch the v1 registry_metadata.py source via git show."""
-    return _git_show(f"{V1_BRANCH}:{V1_FILE_REL}")
+    """Read the v1 registry_metadata.py source from the committed fixture."""
+    if not FIXTURE_SOURCE.exists():
+        print(
+            f"ERROR: v1 source fixture missing: {FIXTURE_SOURCE}. Regenerate "
+            f"(with re-review) via: git show {V1_BRANCH}:{V1_FILE_REL} > "
+            f"{FIXTURE_SOURCE}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return FIXTURE_SOURCE.read_bytes().decode("utf-8")
 
 
 def assert_provenance() -> tuple[str, str]:
-    """Check that the v1 branch head + file blob match recorded provenance.
+    """Verify the committed fixture's blob hash matches recorded provenance.
 
-    Returns (current_head, current_blob).
+    No git access — the historical branch head is reported verbatim for the
+    snapshot's provenance block; integrity is enforced by the blob hash of
+    the committed source fixture. Returns ``(branch_head, file_blob)``.
     """
-    current_head = _git_rev_parse(V1_BRANCH)
-    current_blob = _git_rev_parse(f"{V1_BRANCH}:{V1_FILE_REL}")
-
-    if current_head != EXPECTED_HEAD:
+    if not FIXTURE_SOURCE.exists():
         print(
-            f"WARNING: {V1_BRANCH} head has advanced from {EXPECTED_HEAD} to "
-            f"{current_head}. v1 maintenance is allowed; re-review the snapshot.",
-            file=sys.stderr,
-        )
-
-    if current_blob != EXPECTED_BLOB:
-        print(
-            f"ERROR: {V1_BRANCH}:{V1_FILE_REL} blob has changed from "
-            f"{EXPECTED_BLOB} to {current_blob}. The v1 registry's content "
-            "has been modified. Re-review and update the snapshot manually.",
+            f"ERROR: v1 source fixture missing: {FIXTURE_SOURCE}.",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    return current_head, current_blob
+    current_blob = _git_blob_hash(FIXTURE_SOURCE.read_bytes())
+    if current_blob != EXPECTED_BLOB:
+        print(
+            f"ERROR: {FIXTURE_SOURCE} blob has changed from {EXPECTED_BLOB} "
+            f"to {current_blob}. The committed v1 registry source fixture has "
+            "been modified. Re-review and update the snapshot manually.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    return EXPECTED_HEAD, current_blob
 
 
 def parse_v1_registry(source: str) -> dict:

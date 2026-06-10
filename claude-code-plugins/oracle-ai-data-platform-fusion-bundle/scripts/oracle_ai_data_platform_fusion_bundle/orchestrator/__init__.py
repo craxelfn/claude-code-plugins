@@ -1600,13 +1600,21 @@ def _emit_content_pack_resumed_skip(
 def _find_cascade_blocker(node: Any, failed_node_ids: set[str]) -> str | None:
     """Return a failed upstream node id if this node depends on one, else None.
 
-    Walks the node's ``dependsOn.silver`` list (intra-pack dependencies).
-    Bronze dependencies are out of scope for cascade — bronze is the
-    legacy-python concern in Phase 2 v0.3.
+    Walks both ``dependsOn.bronze`` and ``dependsOn.silver`` (intra-pack
+    dependencies). Since Phase 9 runs bronze nodes in the same plan, a
+    failed bronze extract must cascade-skip its silver/gold consumers —
+    otherwise a downstream node would dispatch, read the stale
+    pre-existing bronze table, and commit a success row after its upstream
+    failed. Bronze deps are checked first so the reported blocker is the
+    earliest layer in the chain.
     """
     deps = getattr(node, "depends_on", None)
     if deps is None:
         return None
+    bronze_deps = getattr(deps, "bronze", None) or []
+    for dep in bronze_deps:
+        if dep.id in failed_node_ids:
+            return dep.id
     silver_deps = getattr(deps, "silver", None) or []
     for dep in silver_deps:
         if dep.id in failed_node_ids:
