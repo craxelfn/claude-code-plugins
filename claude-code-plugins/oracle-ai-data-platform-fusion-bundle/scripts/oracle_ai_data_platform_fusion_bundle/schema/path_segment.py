@@ -1,4 +1,4 @@
-"""Safe path-segment validator used by every Phase 3a writer.
+"""Safe path-segment validator used by artifact writers.
 
 Bootstrap writes filesystem artifacts whose names come from
 user-controlled inputs:

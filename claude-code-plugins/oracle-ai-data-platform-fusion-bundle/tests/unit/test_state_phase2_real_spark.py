@@ -1,4 +1,4 @@
-"""Round-16 fix: pyspark-backed test for write_state_rows_hard's schema path.
+"""PySpark-backed test for write_state_rows_hard's schema path.
 
 The mock-spark tests in tests/unit/test_state_phase2.py exercise the
 ImportError fallback (pyspark not installed in the default venv). This
@@ -8,7 +8,7 @@ builds an explicit StructType for ``spark.createDataFrame``.
 
 Without this coverage, real PySpark would raise:
     PySparkValueError: [CANNOT_DETERMINE_TYPE]
-on any Phase 2 cursor-advancing row (because single-source success rows
+on any content-pack cursor-advancing row (because single-source success rows
 legitimately have all-None values in ``node_version`` /
 ``fusion_version`` / ``input_watermark_start`` / etc.).
 """
@@ -29,7 +29,7 @@ def spark():
     s = (
         SparkSession.builder
         .master("local[1]")
-        .appName("phase2-state-write-test")
+        .appName("content_pack-state-write-test")
         .config("spark.sql.shuffle.partitions", "1")
         .getOrCreate()
     )
@@ -43,9 +43,9 @@ def spark():
 
 
 class TestStateRowSchema:
-    def test_schema_covers_v1_and_phase2_columns(self) -> None:
+    def test_schema_covers_v1_and_content_pack_columns(self) -> None:
         from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
-            PHASE2_NEW_COLUMNS,
+            CONTENT_PACK_STATE_COLUMNS,
             _build_state_row_schema,
         )
         schema = _build_state_row_schema()
@@ -57,12 +57,12 @@ class TestStateRowSchema:
             "skip_reason", "duration_seconds", "plan_hash", "plan_snapshot",
         ):
             assert required in names, f"missing v1 column {required!r}"
-        # Phase 2 columns.
-        for name, _ in PHASE2_NEW_COLUMNS:
-            assert name in names, f"missing Phase 2 column {name!r}"
+        # content-pack columns.
+        for name, _ in CONTENT_PACK_STATE_COLUMNS:
+            assert name in names, f"missing content-pack column {name!r}"
 
     def test_all_fields_nullable(self) -> None:
-        """The Phase 2 caller-side normaliser handles v1 NOT NULL coercion;
+        """The content-pack caller-side normaliser handles v1 NOT NULL coercion;
         the StructType itself declares every field nullable so a row with
         all-None nullable columns doesn't fail Spark's strict mode."""
         from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
@@ -79,15 +79,15 @@ class TestStateRowSchema:
 
 
 class TestCreateDataFrameWithAllNoneColumns:
-    """The reviewer's concrete case: a Phase 2 single-source success row
+    """The reviewer's concrete case: a content-pack single-source success row
     has node_version, fusion_version, input_watermark_start,
     input_watermark_end, consumed_version all None. Without an explicit
     schema, real PySpark raises CANNOT_DETERMINE_TYPE."""
 
-    def test_phase2_single_source_success_row_builds_via_explicit_schema(self, spark) -> None:
+    def test_content_pack_single_source_success_row_builds_via_explicit_schema(self, spark) -> None:
         """The same row dict that the dispatcher produces — every
         nullable column None — must build a DataFrame without raising."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )
@@ -142,7 +142,7 @@ class TestCreateDataFrameWithAllNoneColumns:
         """The cascade-skip diagnostic row has even more None columns —
         every cursor field, every hash, row_count, plan_hash, etc. Must
         still build a DataFrame without raising."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )
@@ -164,7 +164,7 @@ class TestCreateDataFrameWithAllNoneColumns:
             "plan_snapshot": None,
             "source_id": None,
             "source_role": "primary",
-            # Every other Phase 2 column omitted — normaliser fills with None.
+            # Every other content-pack column omitted — normaliser fills with None.
         }
         schema = _build_state_row_schema()
         normalised = _normalise_row_for_schema(row, [f.name for f in schema.fields])
@@ -180,7 +180,7 @@ class TestCreateDataFrameWithAllNoneColumns:
     def test_multi_source_batch_builds_atomically(self, spark) -> None:
         """The atomic-batch contract: primary + N lookup rows all build
         in a single DataFrame via createDataFrame."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )

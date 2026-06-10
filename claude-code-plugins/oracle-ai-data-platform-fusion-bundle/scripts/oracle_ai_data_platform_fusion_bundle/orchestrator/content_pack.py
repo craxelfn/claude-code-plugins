@@ -45,9 +45,9 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
     NodeYaml,
     PackOverlayRef,
     PackYaml,
-    # Phase 9 — ResolvedPack moved to schema/medallion_pack.py to honor
-    # the §4.3 dispatch import boundary. Re-exported here for backwards
-    # compatibility with existing consumers.
+    # ResolvedPack lives in schema/medallion_pack.py to honor the
+    # dispatch import boundary. Re-exported here for compatibility with
+    # existing consumers.
     ResolvedPack,
     _canonicalise,
 )
@@ -92,25 +92,22 @@ class MissingPackFileError(PackLoaderError):
 
 
 # ---------------------------------------------------------------------------
-# ResolvedPack — Phase 9 (ADR-0022) moved to schema/medallion_pack.py to
-# honor the §4.3 dispatch import boundary. Re-exported above for
-# backwards compatibility.
+# ResolvedPack lives in schema/medallion_pack.py to honor the dispatch
+# import boundary. Re-exported above for compatibility.
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — promoted public helpers (Step 12c.bis)
+# Public helper functions
 # ---------------------------------------------------------------------------
 #
-# The Phase 2 generated REST notebook imports load_full_chain from this
-# module. Phase 1 had this as a CLI-private helper in
-# commands/content_pack.py; promoting it here makes it orchestrator-owned
-# and available to both CLI code AND the cluster-side notebook body
-# without crossing the dispatch import boundary.
+# The generated REST notebook imports load_full_chain from this module.
+# Keeping it here makes it available to both CLI code and the cluster-side
+# notebook body without crossing the dispatch import boundary.
 
 
 def make_filesystem_base_resolver(pack_path: Path):
-    """Build a base resolver for :func:`resolve_overlay_chain` (Phase 2 promotion).
+    """Build a base resolver for :func:`resolve_overlay_chain`.
 
     Looks up referenced base packs in two places, in order:
 
@@ -122,10 +119,10 @@ def make_filesystem_base_resolver(pack_path: Path):
     ``FileNotFoundError`` so :func:`resolve_overlay_chain` surfaces
     a clean error.
 
-    Used by both the CLI's content-pack verbs and the new Phase 2
-    inline runner. The cluster-side staging path passes a different
-    closure (over the staged tempdir layers) so the cluster reconstructs
-    the overlay chain from the embedded layer subdirs.
+    Used by both the CLI's content-pack verbs and the inline runner.
+    The cluster-side staging path passes a different closure over the
+    staged tempdir layers so the cluster reconstructs the overlay chain
+    from the embedded layer subdirs.
     """
     # Lazy import to avoid commands -> orchestrator -> commands cycle.
     from ..commands.content_pack import INSTALLED_CONTENT_PACKS_DIR
@@ -147,7 +144,7 @@ def make_filesystem_base_resolver(pack_path: Path):
 
 
 def load_full_chain(pack_path: Path, *, base_resolver=None) -> ResolvedPack:
-    """Load a pack and resolve any ``extends:`` chain — Phase 2 public API.
+    """Load a pack and resolve any ``extends:`` chain.
 
     For a base pack (no ``extends:``), returns it unmerged. For an
     overlay, resolves the chain via :func:`resolve_overlay_chain` +
@@ -471,7 +468,7 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
             merged_gold[nid] = node
             merged_source_roots[f"gold/{nid}"] = overlay.root
 
-    # Dashboards: overlay can add or replace (Phase 1 scope — replace-only,
+    # Dashboards: overlay can add or replace (replace-only,
     # no field-level merge). Inherited dashboards keep base root; overlay
     # dashboards (whether new or replacing a base one) get overlay root.
     merged_dashboards = dict(base.dashboards)
@@ -479,7 +476,7 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
         merged_dashboards[did] = dash
         merged_source_roots[f"dashboards/{did}"] = overlay.root
 
-    # bronze.yaml: base wins unless overlay provides one (rare; Phase 2 feature).
+    # bronze.yaml: base wins unless overlay provides one.
     if overlay.bronze_yaml:
         merged_source_roots["bronze.yaml"] = overlay.root
 
@@ -571,9 +568,9 @@ def _apply_node_overrides(
         if node_id not in base_nodes:
             continue  # Belongs to a different layer; skip.
 
-        # Phase 1: only `profile` and `sql` and `quality.tests` extension are
-        # supported at the schema level. SQL override is a path-replace;
-        # validators (Step 6) confirm the new SQL file exists.
+        # Only `profile`, `sql`, and `quality.tests` extension are supported
+        # at the schema level. SQL override is a path-replace; validators
+        # confirm the new SQL file exists.
         base_node = base_nodes[node_id]
         node_data = base_node.model_dump(by_alias=True)
 

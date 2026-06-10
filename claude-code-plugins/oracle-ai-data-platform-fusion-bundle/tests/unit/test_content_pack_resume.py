@@ -356,9 +356,9 @@ def _stub_downstream(monkeypatch, fake_spark: _FakeSpark) -> list[dict]:
             prior_fingerprint=None, current_fingerprint=None,
         ),
     )
-    # Stub the dispatcher-level PVO drift gate — Step 2d helper. The
-    # full drift gate would require a real BICC probe.
-    monkeypatch.setattr(_o, "_phase5_run_fusion_pvo_drift_gate", lambda **kw: None)
+    # Stub the dispatcher-level PVO drift gate. The full drift gate
+    # would require a real BICC probe.
+    monkeypatch.setattr(_o, "_run_fusion_pvo_drift_gate", lambda **kw: None)
     # Stub the dispatcher's bronze branch (legacy recursive run) so we
     # don't need real BICC. The CP-only paths exercised here should
     # not even hit the bronze branch (resume narrows it out), but stub

@@ -44,7 +44,7 @@ AIDPF_7004_DASHBOARD_PACK_INCOMPATIBLE = "AIDPF-7004"
 AIDPF_7005_ALLOWED_COLUMNS_NOT_REQUIRED = "AIDPF-7005"
 AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE = "AIDPF-8002"
 
-# Phase 9
+# Bronze extract nodes are validated against the Fusion catalog when possible.
 AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
 
 
@@ -88,7 +88,7 @@ _BASE_TEMPLATE_VARS = {
     "gold_schema",
     "run_id_literal",
     "watermark_predicate",
-    "snapshot_date",  # Phase 3 Step 2 — dedicated ISO-date token (AIDPF-5013).
+    "snapshot_date",  # Dedicated ISO-date token (AIDPF-5013).
 }
 
 # `{{ profile.<key> }}` / `{{ column.<name> }}` / `{{ semantic.<name> }}`

@@ -14,20 +14,20 @@ The plan-hash drift gate compares the *expected* content-pack plan-hash
 state row. The expected hash can only be computed AFTER the SQL has
 been rendered with profile params. The flow is therefore:
 
-1. Static schema validation (Phase 1; trusted from the loader).
-2. Preflight (Step 7) — metadata + bronze DESCRIBE only, no render.
-3. **Render SQL** (Step 3) — happens exactly once per execute_node call.
-4. **Compute expected content-pack plan-hash** (Step 9) including the
+1. Static schema validation; trusted from the loader.
+2. Preflight — metadata + bronze DESCRIBE only, no render.
+3. **Render SQL** — happens exactly once per execute_node call.
+4. **Compute expected content-pack plan-hash** including the
    rendered_sql_hash.
 5. **Plan-hash drift gate** (incremental only) — block resume on
    AIDPF-4040 BEFORE any Spark write.
-6. Dispatch by strategy (Steps 5-6), reusing the same RenderedSql.
-7. Quality tests (Step 8) — failures block cursor advance.
+6. Dispatch by strategy, reusing the same RenderedSql.
+7. Quality tests — failures block cursor advance.
 8. Materialised-schema assertion — Spark target schema must match
    ``node.outputSchema`` (AIDPF-4070).
 9. Compute output_watermark.
 10. Assemble the full state-row list (primary + every lookup) in memory.
-11. ONE atomic batch state write via ``write_state_rows_hard`` (Step 10).
+11. ONE atomic batch state write via ``write_state_rows_hard``.
 12. Return.
 
 References:
@@ -86,9 +86,9 @@ and the SQL is never executed."""
 
 AIDPF_5014_UNKNOWN_BUILTIN_DISPATCH = "AIDPF-5014"
 """Content-pack execute_node dispatched a ``type: builtin`` node whose
-``implementation.callable`` is not in the builtin registry. Phase 3
-contract is strict: the registry is the allowlist, missing entries fail
-fast rather than auto-importing arbitrary callables."""
+``implementation.callable`` is not in the builtin registry. The
+registry is the allowlist; missing entries fail fast rather than
+auto-importing arbitrary callables."""
 
 class ExecuteNodeError(Exception):
     """Base error class for execute_node failures."""
@@ -185,10 +185,9 @@ def execute_node(
         written the state rows itself; for hard programmer errors it
         re-raises.
     """
-    # Phase 9 — dispatch on implementation type. The SQL path
-    # (existing body) handles ``type: sql``; the builtin path handles
-    # ``type: builtin`` (ADR-0011, e.g. dim_calendar); the bronze
-    # path handles ``type: bronze_extract`` (Phase 9, ADR-0022).
+    # Dispatch on implementation type. SQL nodes render templates,
+    # builtin nodes call registered adapters, and bronze_extract nodes
+    # execute the BICC extraction adapter.
     impl_type = node.implementation.type
     if impl_type == "builtin":
         return _execute_builtin_node(
@@ -204,8 +203,8 @@ def execute_node(
             target_override=target_override,
         )
     if impl_type == "bronze_extract":
-        # Phase 9 — content-pack-driven bronze. Same lifecycle as the
-        # builtin dispatch but the adapter returns
+        # Content-pack-driven bronze follows the builtin lifecycle, but
+        # the adapter returns
         # ``(target_df, bronze_output_watermark)`` because bronze cursor
         # semantics are extraction-time, not source-row-max.
         return _execute_bronze_extract_node(
@@ -232,7 +231,7 @@ def execute_node(
             f"'bronze_extract'."
         )
 
-    # ----- Step 1: static schema validation (Phase 1; loader did this).
+    # ----- Static schema validation is done by the loader. ----------
 
     # ----- Step 2: preflight ------------------------------------------
     preflight = preflight_node(spark, node, pack, profile, ctx)
@@ -749,7 +748,7 @@ def _safe_write_schema_drift_row(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 Step 3 — builtin dispatch
+# Builtin dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -980,7 +979,7 @@ def _execute_builtin_node(
 
 
 # ---------------------------------------------------------------------------
-# Phase 9 Step 2 — bronze_extract dispatch
+# Bronze extract dispatch
 # ---------------------------------------------------------------------------
 
 

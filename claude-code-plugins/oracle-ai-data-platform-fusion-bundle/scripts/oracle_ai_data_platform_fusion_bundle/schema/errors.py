@@ -1,4 +1,4 @@
-"""Cross-boundary error classes (P1.5ε §Step 1a).
+"""Cross-boundary error classes.
 
 Houses the subset of orchestrator error classes that schema-level modules
 (``schema.bundle.load_bundle``, ``schema.plan_resolver.resolve_dry_run_plan``)
@@ -58,7 +58,7 @@ class MissingDependencyError(OrchestratorConfigError):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3c — runtime schema-fingerprint drift detection
+# Runtime schema-fingerprint drift detection
 # ---------------------------------------------------------------------------
 
 
@@ -66,11 +66,11 @@ EXIT_CODE_SCHEMA_DRIFT = 14
 """Process exit code emitted by the CLI when bronze-schema fingerprint
 drift is detected at runtime (PLAN §9.5.5).
 
-Reserved exit codes Phase 3a/3b/3c:
+Reserved bootstrap/runtime exit codes:
 * 11 — AIDPF-1020 (operator identity unresolved)
 * 12 — AIDPF-2010 (columnAlias unresolved)
 * 13 — AIDPF-2011 (semanticVariant unresolved)
-* 14 — AIDPF-2012 (bronze-schema fingerprint drift) ← Phase 3c
+* 14 — AIDPF-2012 (bronze-schema fingerprint drift)
 """
 
 

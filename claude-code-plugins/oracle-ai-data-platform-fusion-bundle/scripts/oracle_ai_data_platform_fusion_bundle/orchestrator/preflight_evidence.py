@@ -1,12 +1,11 @@
-"""Phase 3c runtime preflight — bronze schema fingerprint drift detection.
+"""Runtime preflight for bronze schema fingerprint drift detection.
 
 Runs at the start of every ``aidp-fusion-bundle run --mode incremental``,
 AFTER ``_run_content_pack_backend`` mints Spark + ``run_id`` but BEFORE
 ``state.ensure_state_table`` and any state-row write.
 
 Compares the live bronze schema fingerprint against
-``profile.bronze_schema_fingerprint`` (pinned at bootstrap by
-Phase 3a). On mismatch:
+``profile.bronze_schema_fingerprint`` (pinned at bootstrap). On mismatch:
 
 * Writes ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json``
   with the structured drift context (``SchemaDriftFailure`` + per-
@@ -16,7 +15,7 @@ Phase 3a). On mismatch:
   :class:`schema.errors.SchemaDriftDetectedError` so the CLI's
   catch arm can map to exit 14.
 
-Skip cases (per PLAN §11.6 / round-1 + round-3 findings):
+Skip cases:
 
 * ``--mode seed`` → seed is the new baseline; skip.
 * ``--force-fingerprint-skip`` → probe + record both fingerprints
@@ -27,7 +26,7 @@ Skip cases (per PLAN §11.6 / round-1 + round-3 findings):
 The probe is the same ``commands.bronze_probe.describe_bronze``
 feature #2 ships; the fingerprint is the same
 ``schema.bronze_fingerprint.compute_bronze_fingerprint`` — single
-source of truth across bootstrap (Phase 3a) and this preflight.
+source of truth across bootstrap and this preflight.
 """
 
 from __future__ import annotations
@@ -133,8 +132,8 @@ def check_bronze_fingerprint_drift(
             threaded for forward-compat with future per-tenant
             checks).
         pack: resolved content pack — the bronze dataset list comes
-            from ``pack.bronze_yaml["datasets"]`` (the SAME source
-            bootstrap uses; round-1 finding pinned this).
+            from ``pack.bronze_yaml["datasets"]`` (the same source
+            bootstrap uses).
         profile: loaded ``TenantProfile`` — read
             ``bronze_schema_fingerprint`` + ``resolved.*`` for the
             affected-VP diff.
@@ -152,7 +151,7 @@ def check_bronze_fingerprint_drift(
     """
     # ─── Skip: --mode seed ─────────────────────────────────────────
     if mode == "seed":
-        logger.debug("Phase 3c drift gate skipped in seed mode")
+        logger.debug("Bronze fingerprint drift gate skipped in seed mode")
         return PreflightOutcome(kind="skip_seed")
 
     # ─── Skip: legacy / placeholder fingerprint ────────────────────
@@ -163,9 +162,7 @@ def check_bronze_fingerprint_drift(
 
     # ─── Probe + compute current fingerprint (UNCONDITIONAL) ───────
     # Even under --force-fingerprint-skip we run the probe so the
-    # outcome carries a real `current_fingerprint` for the audit row
-    # (round-1 finding — earlier draft returned skip_force_flag
-    # BEFORE probing, leaving the audit row's `current` undefined).
+    # outcome carries a real `current_fingerprint` for the audit row.
     dataset_ids = _bronze_dataset_ids(pack)
     observed = describe_bronze(
         spark,
@@ -196,12 +193,11 @@ def check_bronze_fingerprint_drift(
     affected_vps = _compute_affected_variation_points(
         pack=pack, profile=profile, observed=observed
     )
-    # Phase 3d — read the pinned snapshot (when present + healthy) and
-    # diff against the live observation to populate per-dataset
-    # column-level deltas. Absent / unparseable / desynced snapshot
-    # degrades to empty `datasetDeltas` + a one-time WARN log; preflight
-    # never crashes from this helper — drift signal must always reach
-    # the artifact even when the snapshot path is unhealthy.
+    # Read the pinned snapshot, when present and healthy, and diff it
+    # against the live observation to populate per-dataset column-level
+    # deltas. Absent / unparseable / desynced snapshot degrades to empty
+    # `datasetDeltas` + a one-time WARN log; drift signal must always
+    # reach the artifact even when the snapshot path is unhealthy.
     # Snapshot path is keyed by `bundle.contentPack.profile` (same key
     # bootstrap writes under), NOT `profile.tenant` — a hand-authored
     # pre-3d profile YAML may carry a different `tenant:` value than
@@ -264,7 +260,7 @@ def _is_legacy_fingerprint(value: str | None) -> bool:
 
     Three flavors all map to "no real pin" (legacy graceful degrade):
 
-    1. ``None`` — the ``TenantProfile`` field is Optional post-Phase-3c
+    1. ``None`` — the ``TenantProfile`` field is Optional, so
        schema change; legacy profiles parse without the field.
     2. ``sha256:placeholder-...`` — the existing
        ``examples/profiles/finance-default.yaml`` placeholder shape.
@@ -281,8 +277,8 @@ def _emit_legacy_warn_once() -> None:
     if _LEGACY_WARN_EMITTED:
         return
     logger.warning(
-        "Phase 3c drift gate skipped — tenant profile has no real "
-        "bronze fingerprint pinned (legacy / pre-Phase-3a profile). "
+        "Bronze fingerprint drift gate skipped — tenant profile has no real "
+        "bronze fingerprint pinned (legacy profile). "
         "Run `aidp-fusion-bundle bootstrap --refresh` to pin a real "
         "fingerprint and enable drift detection from the next run on."
     )
@@ -298,7 +294,7 @@ def _reset_legacy_warn() -> None:
 def _bronze_dataset_ids(pack: "ResolvedPack") -> list[str]:
     """Extract bronze dataset ids from the resolved pack.
 
-    Phase 9: ``pack.bronze`` (per-file bronze nodes) is the source of
+    ``pack.bronze`` (per-file bronze nodes) is the source of
     truth; legacy ``pack.bronze_yaml`` retained transitionally for
     packs that haven't migrated to ``bronze/<id>.yaml`` per-file form.
     NEVER reads ``bundle.datasets`` (bundle.datasets is a legitimate
@@ -336,7 +332,7 @@ def _compute_affected_variation_points(
       ``stillExistsOnBronze=False`` so the operator sees the real
       drift signal.
 
-    Returns a flat list — skill (Phase 3b) reads it for recovery
+    Returns a flat list — the medallion-author skill reads it for recovery
     context.
     """
     # Flatten observed columns across all datasets — the walker
@@ -431,7 +427,7 @@ def _load_snapshot_if_present(
     profile_name: str,
     profile: "TenantProfile",
 ) -> BronzeSchemaSnapshotV1 | None:
-    """Read the Phase 3d pinned snapshot for the active profile.
+    """Read the pinned bronze schema snapshot for the active profile.
 
     Returns ``None`` (with a WARN log) when ANY of:
 
@@ -450,7 +446,7 @@ def _load_snapshot_if_present(
       rewritten by hand.
 
     In all four cases the drift signal still reaches the artifact —
-    only ``datasetDeltas`` stays empty (the Phase 3c v0.3 behaviour).
+    only ``datasetDeltas`` stays empty.
     The function NEVER raises; it's a defensive helper.
 
     Args:
@@ -474,7 +470,7 @@ def _load_snapshot_if_present(
     snapshot_path = resolve_snapshot_path(bundle_path, profile_name)
     if not snapshot_path.exists():
         logger.warning(
-            "Phase 3d snapshot absent — datasetDeltas will be empty in "
+            "Pinned schema snapshot absent — datasetDeltas will be empty in "
             "the AIDPF-2012 artifact. Run `aidp-fusion-bundle bootstrap "
             "--refresh` to pin the snapshot. Expected at: %s",
             snapshot_path,
@@ -485,7 +481,7 @@ def _load_snapshot_if_present(
         snapshot = load_bronze_schema_snapshot(snapshot_path)
     except BronzeSchemaSnapshotSchemaError as exc:
         logger.warning(
-            "Phase 3d snapshot unparseable — datasetDeltas will be empty "
+            "Pinned schema snapshot unparseable — datasetDeltas will be empty "
             "in the AIDPF-2012 artifact. Run `aidp-fusion-bundle "
             "bootstrap --refresh` to repin. Reason: %s",
             exc,
@@ -501,7 +497,7 @@ def _load_snapshot_if_present(
     )
     if recomputed != snapshot.bronze_schema_fingerprint:
         logger.warning(
-            "Phase 3d snapshot content/metadata fingerprint desync at "
+            "Pinned schema snapshot content/metadata fingerprint desync at "
             "%s — datasetDeltas will be empty in the AIDPF-2012 artifact. "
             "Run `aidp-fusion-bundle bootstrap --refresh` to repin "
             "atomically.",
@@ -515,7 +511,7 @@ def _load_snapshot_if_present(
     # a schema the profile never saw.
     if snapshot.bronze_schema_fingerprint != profile.bronze_schema_fingerprint:
         logger.warning(
-            "Phase 3d snapshot fingerprint %s differs from profile "
+            "Pinned schema snapshot fingerprint %s differs from profile "
             "fingerprint %s at %s — datasetDeltas will be empty in the "
             "AIDPF-2012 artifact. Run `aidp-fusion-bundle bootstrap "
             "--refresh` to repin atomically.",

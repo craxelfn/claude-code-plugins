@@ -1,11 +1,9 @@
-"""Shared bronze-schema fingerprint helper (PLAN §9.5.4 / §11.6).
+"""Shared bronze-schema fingerprint helper.
 
-Single source of truth for the algorithm bootstrap (this feature) uses to
-PIN ``profile.bronzeSchemaFingerprint`` and feature #4
-(``v2-phase-3c-runtime-preflight-evidence``) will use to COMPARE the live
-bronze against the pinned value. If the two paths computed fingerprints
-differently the drift gate would silently misfire — keep this as the
-only producer of the value.
+Single source of truth for the algorithm bootstrap uses to pin
+``profile.bronzeSchemaFingerprint`` and runtime preflight uses to
+compare live bronze against the pinned value. If the two paths computed
+fingerprints differently, the drift gate would silently misfire.
 
 Algorithm:
 
@@ -21,7 +19,7 @@ Algorithm:
    triples for real columns.
 3. Canonicalise each triple: lowercase ``col_name`` + ``data_type``,
    strip whitespace, drop nullable/comment metadata that Spark may
-   reorder cosmetically. The Phase 2 contract is **type-shape stability**,
+   reorder cosmetically. The contract is **type-shape stability**,
    not nullability — nullability is allowed to drift without changing
    the fingerprint (Hive/Spark surfaces it inconsistently across
    versions, and silver/gold logic re-asserts nullability anyway).
@@ -50,10 +48,9 @@ if TYPE_CHECKING:  # pragma: no cover — import guard for Spark
 
 # Audit columns the bronze adapter appends to every extracted DataFrame
 # AFTER the BICC pull. They exist in the materialized Delta tables but
-# NOT in the live BICC PVO `inferSchema` response. The Phase 3c/3d
-# fingerprint + Phase 3d snapshot represent the BICC PVO contract (so the
-# Phase 5 drift gate can compare them against live BICC), so the audit
-# names must NOT be folded into either. `DESCRIBE TABLE` on the bronze
+# NOT in the live BICC PVO `inferSchema` response. The fingerprint and
+# pinned snapshot represent the BICC PVO contract, so audit names must
+# NOT be folded into either. `DESCRIBE TABLE` on the bronze
 # Delta tables — the source of the `observed` dict — emits them; this
 # module strips them before fingerprinting / snapshotting.
 BRONZE_AUDIT_COLUMNS: frozenset[str] = frozenset({
@@ -89,7 +86,7 @@ def strip_audit_columns(
 class ColumnInfo:
     """One bronze column as observed via ``DESCRIBE TABLE``.
 
-    The fields are exactly what bootstrap's walker (Step 6) needs to
+    The fields are exactly what bootstrap's walker needs to
     answer "does this column exist?" + what the fingerprint algorithm
     needs to detect type drift.
     """
@@ -107,7 +104,7 @@ def compute_bronze_fingerprint(
     already-probed observation.
 
     Pure function — does not call Spark. The variation-phase wiring
-    (Step 8) probes via :mod:`bronze_probe`, then passes the
+    probes via :mod:`bronze_probe`, then passes the
     ``observed`` dict here so the probe is run exactly once.
 
     Args:

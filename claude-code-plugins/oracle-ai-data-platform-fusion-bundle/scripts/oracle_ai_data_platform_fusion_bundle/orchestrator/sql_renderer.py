@@ -135,7 +135,7 @@ _DISALLOWED_AFTER_RENDER = (
 )
 """Substrings rejected by the post-render check (AIDPF-5010). Semicolons are
 checked separately (a trailing newline-only ``;`` is acceptable, mid-string ``;``
-is not — but Phase 2 enforces "no ``;`` at all" for simplicity and per §9.4)."""
+is not — but the renderer enforces "no ``;`` at all" for simplicity and per §9.4)."""
 
 
 # Allowed Python types for profile values flowing through parameter markers.
@@ -214,7 +214,7 @@ class RunContext:
     prior_watermark: Mapping[str, Any] = field(default_factory=dict)
     mode: str = "seed"
     bronze_table_for_source: Mapping[str, str] = field(default_factory=dict)
-    # Phase 9 — bronze_extract_adapter needs the bundle for
+    # bronze_extract_adapter needs the bundle for
     # bundle.fusion.{service_url, username, password, external_storage}
     # + bundle.fusion.schemaOverrides.<id> at extract time. Defaults to
     # None so silver/gold adapters that don't need it stay unaffected
@@ -773,7 +773,7 @@ def _resolve_primary_source(node: NodeYaml, ctx: RunContext) -> str | None:
 
     Used for the watermark predicate's source-suffixed parameter marker
     and the semantic-fragment ``{table}`` substitution. Multi-source nodes
-    in Phase 2 follow PLAN §11.10 — exactly one primary source per node.
+    follow PLAN §11.10 — exactly one primary source per node.
     """
     inc = node.refresh.incremental
     if inc is not None and inc.watermark is not None:

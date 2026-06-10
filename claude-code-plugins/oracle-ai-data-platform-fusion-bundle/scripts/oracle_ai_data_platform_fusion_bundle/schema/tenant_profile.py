@@ -1,4 +1,4 @@
-"""Tenant profile schema + loader (Phase 2, PLAN §9.5.7).
+"""Tenant profile schema + loader.
 
 A *tenant profile* is the customer-specific values frozen at bootstrap
 time for a given Fusion pod: calendar settings, COA semantic segment
@@ -11,14 +11,12 @@ The profile YAML lives **beside** ``bundle.yaml`` at
 directory (PLAN §9.5.7). One file per tenant; the active one is named
 in ``bundle.contentPack.profile``.
 
-Bootstrap-time profile *creation* (interactive variation-point
-resolution, evidence snapshotting) ships in a separate feature. Phase
-2 supports hand-authored profiles only — the orchestrator just loads
-the file and threads the resolved values into the SQL renderer.
+Bootstrap-time profile *creation* performs interactive variation-point
+resolution and evidence snapshotting. At runtime, the orchestrator
+loads the file and threads the resolved values into the SQL renderer.
 
-Phase 1's column-alias / semantic-variant runtime-detection contract
-(``KNOWN_*_ALIASES`` priority lists in v1 ``dim_*.py`` modules) is
-superseded by this layer at Phase 4 (parity gate) per ADR-0014.
+This layer supersedes runtime detection by pinning column-alias and
+semantic-variant choices at bootstrap time.
 
 References:
 * PLAN §9.5 (variation points)
@@ -41,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 # ---------------------------------------------------------------------------
-# AIDPF error codes registered in PLAN §25 (Phase 2 — tenant profile loader)
+# AIDPF error codes for tenant profile loading.
 # ---------------------------------------------------------------------------
 # Note: AIDPF-1033 (profile file not found) is registered with the bundle-
 # resolution codes in schema/bundle.py because it fires at the CLI/run
@@ -116,17 +114,15 @@ class TenantProfile(BaseModel):
     )
     """Fingerprint of the bronze schema this profile was resolved against.
 
-    PLAN §11.6 Gate 4 drift-detection (Phase 3c) compares this against
-    the live bronze schema each run; mismatch blocks the run until a
-    re-bootstrap.
+    Runtime drift detection compares this against the live bronze
+    schema each run; mismatch blocks the run until a re-bootstrap.
 
-    Optional with ``default=None`` so legacy profiles (pre-Phase-3a /
-    pre-Phase-3c) load without the field — Phase 3c's
-    ``check_bronze_fingerprint_drift`` treats ``None`` and the
+    Optional with ``default=None`` so legacy profiles load without the
+    field. ``check_bronze_fingerprint_drift`` treats ``None`` and the
     placeholder sentinel pattern (e.g. ``sha256:placeholder-...``) as
     "no real pin" and emits a single WARN log per run before
-    proceeding without the drift gate. The first ``bootstrap --refresh``
-    after Phase 3a pins a real value; from then on the gate fires.
+    proceeding without the drift gate. ``bootstrap --refresh`` pins a
+    real value; from then on the gate fires.
     """
 
     resolved: ResolvedVariationPoints = Field(default_factory=ResolvedVariationPoints)

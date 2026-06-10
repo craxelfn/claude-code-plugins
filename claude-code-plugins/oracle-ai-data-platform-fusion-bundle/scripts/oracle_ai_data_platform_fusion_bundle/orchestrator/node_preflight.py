@@ -1,4 +1,4 @@
-"""Per-node preflight for the content-pack runner (Phase 2 Step 7).
+"""Per-node preflight for the content-pack runner.
 
 Preflight runs in :func:`sql_runner.execute_node` *after* static schema
 validation and *before* SQL rendering. Its job is to fail fast on
@@ -10,7 +10,7 @@ runtime-only conditions that the static validator can't see:
   ``replace_partition`` strategy).
 
 **Crucial ordering invariant**: preflight does NOT render SQL. The
-renderer is invoked exactly once in ``execute_node`` step 3, *after*
+renderer is invoked exactly once in ``execute_node``, *after*
 this preflight passes. This separation is what makes the
 ``preflight-blocked`` unit test branch assert "renderer never called".
 

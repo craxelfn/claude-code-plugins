@@ -1,7 +1,7 @@
 """Quality test runner skeleton for the content-pack execution backend.
 
-Phase 2 Step 8 (PLAN §8.6). Runs the per-node ``quality.tests``
-declared in the node YAML against the materialised target DataFrame.
+Runs the per-node ``quality.tests`` declared in the node YAML against
+the materialised target DataFrame.
 
 **v0.3 implementation status:**
 
@@ -107,12 +107,12 @@ class QualityReport:
 # ---------------------------------------------------------------------------
 
 
-# Test types Phase 2 v0.3 actually executes.
+# Test types currently executed.
 _IMPLEMENTED_TEST_TYPES: frozenset[str] = frozenset(
     {"not_null", "unique", "accepted_values", "row_count_min"}
 )
 
-# Test types Phase 2 v0.3 recognises but defers (PLAN §8.6 deferral list).
+# Test types recognised by the schema but deferred by the runner.
 _DEFERRED_TEST_TYPES: frozenset[str] = frozenset(
     {
         "row_count_delta",
@@ -176,7 +176,7 @@ def run_quality_tests(
                     message=(
                         f"{AIDPF_8011_QUALITY_TEST_DEFERRED}: test type "
                         f"{test_type!r} is recognised by the v0.3 schema but "
-                        f"deferred to a later Phase. The runner reports this "
+                        f"deferred to a later release. The runner reports this "
                         f"test as 'deferred' and continues; this does NOT "
                         f"block cursor advancement per PLAN §11.9."
                     ),

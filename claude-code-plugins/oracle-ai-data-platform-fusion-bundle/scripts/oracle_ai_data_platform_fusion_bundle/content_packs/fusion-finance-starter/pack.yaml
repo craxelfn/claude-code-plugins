@@ -3,11 +3,9 @@ version: 0.1.0
 description: |
   Starter medallion model for Fusion Finance analytics.
   Ships silver dimensions (dim_supplier, dim_account, dim_calendar) and
-  gold marts (gl_balance, supplier_spend, ap_aging). v0.3 starter pack
-  Phase 1: nodes are declared as `python_legacy` with `migrationTarget`
-  pointing at the SQL file Phase 3 will land. Variation points and
-  profile defaults are authored against the v1 reference branch's
-  registry data (see tests/fixtures/v1_registry_snapshot.yaml).
+  gold marts (gl_balance, supplier_spend, ap_aging). Variation points
+  and profile defaults are authored from the Fusion Finance starter
+  registry snapshot (see tests/fixtures/v1_registry_snapshot.yaml).
 
 compatibility:
   pluginMinVersion: 0.3.0
@@ -34,9 +32,8 @@ profiles:
     # mapping. NOT consumed by any v0.3 SQL template — the three
     # `coa_*_segment` columnAliases below own the bootstrap-resolved
     # source-column substitution for the three roles. See
-    # `docs/v2-phase-3-variation-catalog.md` "Round-3 restore" + the
     # `LIMITS.md P3-L2` entry for the role-positioning architectural
-    # limit + the future `{{ coa.<role> }}` token follow-up.
+    # limit and the future `{{ coa.<role> }}` token.
     chartOfAccounts:
       balancingSegment: segment1
       costCenterSegment: segment2

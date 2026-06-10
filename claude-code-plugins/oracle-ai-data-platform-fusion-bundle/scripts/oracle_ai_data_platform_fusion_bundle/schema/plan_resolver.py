@@ -1,9 +1,8 @@
 """Neutral plan resolver for dispatch-side dry-run plan rendering.
 
-Phase 9 (ADR-0022): walks a ``ResolvedPack`` instead of the
-registry-metadata maps. Bronze + silver + gold are all sourced from
-the resolved content pack; node ``dependsOn`` edges drive prerequisite
-discovery and topological sort.
+Walks a ``ResolvedPack`` instead of registry-metadata maps. Bronze +
+silver + gold are all sourced from the resolved content pack; node
+``dependsOn`` edges drive prerequisite discovery and topological sort.
 
 The engine-side ``orchestrator.run`` calls
 :func:`resolve_content_pack_plan` for runtime dispatch. The
@@ -56,7 +55,7 @@ _BUNDLE_SECTION: Final[dict[str, str]] = {
 def _bronze_ids_from_pack(pack: "ResolvedPack") -> set[str]:
     """Collect bronze node ids from the resolved pack.
 
-    Honors both Phase 9 per-file ``pack.bronze`` and the legacy
+    Honors both per-file ``pack.bronze`` and the legacy
     single-file ``pack.bronze_yaml`` (back-compat fallback).
     """
     ids: set[str] = set(pack.bronze.keys())
@@ -134,20 +133,10 @@ def resolve_dry_run_plan(
 ) -> tuple[tuple[PlanNode, ...], tuple[PrereqNode, ...]]:
     """Classify, filter, and topo-sort the pack plan for dry-run rendering.
 
-    Phase 9 round-6 fix: this resolver MIRRORS the runtime
+    Mirrors the runtime
     ``orchestrator.content_pack_plan_resolver.resolve_content_pack_plan``
     contract byte-for-byte so dry-run is a faithful preview of what
-    runtime will do. Pre-fix the schema resolver had its own
-    declared/filtered/undeclared/prereq taxonomy that diverged from
-    runtime: with ``--datasets supplier_spend`` on a bundle that
-    declared the full chain, dry-run reported ``[supplier_spend]`` +
-    prereqs ``[ap_invoices, dim_supplier]`` while runtime D-1-closed
-    the plan to ``[erp_suppliers, ap_invoices, dim_supplier,
-    supplier_spend]`` — and with ``--strict-scope`` dry-run silently
-    accepted while runtime raised AIDPF-1042. That made dry-run
-    unsafe as an operator preview.
-
-    Phase 9 contract (mirrors runtime ``resolve_content_pack_plan``):
+    runtime will do.
 
     * Effective roots = ``set(datasets)`` when ``--datasets`` is
       given; else the union of ``bundle.datasets[]``,
@@ -196,18 +185,15 @@ def resolve_dry_run_plan(
         tuple[Literal["bronze", "silver", "gold"], Literal["eligible"], str | None],
     ] = {}
     disabled_datasets: set[str] = set()
-    # Presence-aware bundle scope (round-7 review fix): the legacy
-    # blocks `dimensions:` and `gold:` have non-empty Pydantic defaults
+    # Presence-aware bundle scope: the legacy blocks `dimensions:` and
+    # `gold:` have non-empty Pydantic defaults
     # (DimensionsSpec.build = [dim_supplier, dim_account, dim_calendar,
     # dim_org]; GoldSpec.marts = [ar_aging, ap_aging, gl_balance,
     # po_backlog]) that fire even when the YAML omits the blocks. A
-    # Phase-9 bundle declaring only `datasets:` would otherwise raise
-    # MissingDependencyError trying to classify dim_org / po_backlog
-    # against a starter pack that ships neither, or — worse — surface
-    # silver/gold roots in the dry-run plan that runtime will never
-    # dispatch (orchestrator's `_effective_bundle_scope` filters by
-    # `model_fields_set`). Mirror that filter here so dry-run preview
-    # matches runtime.
+    # Bundle YAML declaring only `datasets:` would otherwise raise
+    # MissingDependencyError for default dim/mart entries that are not
+    # actually in scope. Mirror runtime's `model_fields_set` filter so
+    # dry-run preview matches execution.
     bundle_fields_set = getattr(bundle, "model_fields_set", set()) or set()
     for ds in bundle.datasets:
         if not ds.enabled:

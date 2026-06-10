@@ -25,8 +25,8 @@ refresh:
       Hence `replace` (PLAN §10, ADR-0012). A future `snapshot`
       strategy (§10.7, deferred) is the right long-term fit.
 
-# INTENTIONAL SCOPE DECISION — Phase 3 ships AP aging in **proxy mode
-# only**. v1's auto/real-mode behaviour (transforms/gold/ap_aging.py
+# INTENTIONAL SCOPE DECISION — AP aging ships in **proxy mode only**.
+# v1's auto/real-mode behaviour (transforms/gold/ap_aging.py
 # defaults to `due_date_mode='auto'`, probes ApInvoicesTermsDate /
 # ApInvoicesDueDate coverage at runtime, switches to real mode when
 # coverage exceeds DEFAULT_REAL_MODE_GATE_THRESHOLD) is exactly the kind
@@ -40,16 +40,15 @@ refresh:
 # Tenants whose live AP data would auto-route to real mode under v1
 # will see proxy-shape output under v2. This is a documented divergence
 # (see docs/v2-phase-3-variation-catalog.md "AP aging — proxy mode only"
-# and LIMITS.md). The auto/real follow-up needs (a) a renderer extension
+# and LIMITS.md). Auto/real mode needs (a) a renderer extension
 # for two-schema variants, (b) declarative tenant-side threshold config,
 # and (c) live evidence of any tenant exceeding the v1 threshold.
 #
 # Output schema below matches v1 ap_aging.py:475-505 with
 # due_date_mode='proxy' — 19 columns at v1's cents precision
 # (decimal(28,2) widths per ap_aging.py:463-490). Dashboards rebind
-# to decimal(28,2) accordingly. Round-3 review caught a precision
-# drift where round-2 widened these to decimal(28,8); the parity
-# harness's schema-type check now guards against regression.
+# to decimal(28,2) accordingly. The parity harness's schema-type check
+# guards against precision drift.
 outputSchema:
   columns:
     - name: vendor_id

@@ -1,17 +1,16 @@
-"""Content-pack DAG plan resolver (Phase 2 Step 12d + Phase 9 extensions).
+"""Content-pack DAG plan resolver.
 
-Phase 9: walks ``pack.bronze`` ∪ ``pack.silver`` ∪ ``pack.gold`` —
-bronze becomes a first-class layer alongside silver/gold. Adds the D-1
-implicit-transitive-include semantics: when the operator declares a
+Walks ``pack.bronze`` ∪ ``pack.silver`` ∪ ``pack.gold``. Bronze is a
+first-class layer alongside silver/gold. When the operator declares a
 high-level node (e.g. ``supplier_spend`` gold), the resolver
-AUTO-INCLUDES the transitive bronze + silver dependencies needed to
+auto-includes the transitive bronze + silver dependencies needed to
 materialize it. ``--strict-scope`` opts out of that auto-include.
 
 References:
 
 * PLAN §11 (medallion correctness invariants)
 * PLAN §11.10 (multi-source primary/lookup)
-* Phase 9 plan §Step 4 (single-path dispatcher + D-1 transitive include)
+* ADR-0022 (single content-pack execution path)
 """
 
 from __future__ import annotations
@@ -73,15 +72,13 @@ def resolve_content_pack_plan(
 ) -> list["NodeYaml"]:
     """Build a topologically-ordered list of nodes to execute.
 
-    Phase 9 contract:
-
     * ``pack.bronze`` is a first-class layer (alongside silver/gold).
     * The resolver computes ``effective_roots`` from
       ``cli_datasets`` ∩ ``bundle_scope`` (when ``bundle_scope`` is
       given); otherwise from ``cli_datasets`` ∪ ``bundle_scope`` ∪
       ``all_nodes``.
-    * D-1 implicit transitive include: walks ``dependsOn.bronze`` /
-      ``dependsOn.silver`` to AUTO-INCLUDE deps unless
+    * Implicit transitive include: walks ``dependsOn.bronze`` /
+      ``dependsOn.silver`` to auto-include deps unless
       ``strict_scope`` is set.
     * ``layers`` filters declared roots; transitive deps remain.
     * Topological sort: bronze first, then silver, then gold.
@@ -165,8 +162,8 @@ def resolve_content_pack_plan(
                 f"the filter, or drop --layers."
             )
 
-    # D-1: transitively walk dependsOn.bronze + dependsOn.silver to
-    # build the closure. strict_scope disables auto-include.
+    # Transitively walk dependsOn.bronze + dependsOn.silver to build
+    # the executable closure. strict_scope disables auto-include.
     if strict_scope:
         missing_deps: list[tuple[str, str]] = []
         for root in effective_roots:
