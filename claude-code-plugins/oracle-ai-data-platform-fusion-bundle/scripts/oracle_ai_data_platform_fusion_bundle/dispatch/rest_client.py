@@ -536,13 +536,25 @@ class AidpRestClient:
         *,
         begin: str,
         end: str,
+        decode_base64: bool = False,
     ) -> dict[str, Any] | None:
         """Walk ``cells[*].outputs[*]`` of an executed notebook for a stdout
         marker block. Returns the parsed JSON or None if absent.
 
+        ``decode_base64=True`` (Phase 4.1 / D3): the payload between
+        ``begin`` and ``end`` is base64-encoded JSON — decode it before
+        ``json.loads``. Required for the bootstrap cluster cell because
+        AIDP's Jupyter wraps stdout as ``display_data text/plain`` and
+        strips JSON-escape backslashes, corrupting embedded quotes
+        (D5-class issue documented in
+        ``docs/v2-phase-4-live-defects.md`` appendix bug 6). The run
+        dispatcher continues to use the plain default — its markers
+        ship through a different code path that doesn't hit the
+        corruption.
+
         P1.5ε-fix5 hardening: on ``json.JSONDecodeError`` against the
-        ``BEGIN..END`` body, attempt a regex extraction of ``run_id`` and
-        return a sentinel payload
+        ``BEGIN..END`` body (the plain-decode run-dispatch path), attempt
+        a regex extraction of ``run_id`` and return a sentinel payload
         ``{"run_id": "<id>", "_marker_parse_failed": True, "_raw_marker": ...}``
         so the dispatcher can surface a typed
         ``DispatchMarkerDegradedError`` carrying the resume handle.
@@ -554,6 +566,8 @@ class AidpRestClient:
         ``json.JSONDecodeError`` propagates unchanged (caller still
         raises ``DispatchMarkerMissingError``).
         """
+        import base64
+
         for cell in executed_notebook.get("cells", []):
             for output in cell.get("outputs", []):
                 for src in ("text", "data"):
@@ -567,19 +581,26 @@ class AidpRestClient:
                     if begin in value:
                         b = value.index(begin) + len(begin)
                         e = value.index(end, b)
-                        body = value[b:e].strip()
+                        payload = value[b:e].strip()
+                        if decode_base64:
+                            payload = base64.b64decode(payload).decode("utf-8")
                         try:
-                            return json.loads(body)
+                            return json.loads(payload)
                         except json.JSONDecodeError:
+                            # P1.5ε-fix5 — TC27 trap: plain-decode run-
+                            # dispatch markers can arrive with JSON escapes
+                            # stripped. Recover the run_id via regex so the
+                            # operator gets a resume handle; if even that
+                            # fails, re-raise the original decode error.
                             m = re.search(
-                                r'"run_id"\s*:\s*"([^"]+)"', body,
+                                r'"run_id"\s*:\s*"([^"]+)"', payload,
                             )
                             if m is None:
                                 raise
                             return {
                                 "run_id": m.group(1),
                                 "_marker_parse_failed": True,
-                                "_raw_marker": body[:2000],
+                                "_raw_marker": payload[:2000],
                             }
         return None
 

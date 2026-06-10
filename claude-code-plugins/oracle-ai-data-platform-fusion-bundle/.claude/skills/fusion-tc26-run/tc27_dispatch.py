@@ -138,65 +138,21 @@ print("AIDP_LIVE_TEST_RESULT_BEGIN", json.dumps(_payload), "AIDP_LIVE_TEST_RESUL
 """
 
 
+# TC27 phase-2 induced-failure cell — NEEDS REWRITE on the content-pack
+# dispatch path. The v1 mechanism (monkey-patching a Python builder for
+# `dim_supplier`) is gone. A content-pack-equivalent induced failure
+# would patch the strategy executor (``orchestrator/
+# strategy_executors.py``) or stub ``sql_runner.execute_node`` for the
+# `dim_supplier` node id. Tracked under a follow-up; until that lands
+# TC27 phase 2 raises so the operator notices the gap rather than
+# silently running phase 1 + phase 3.
 _INDUCED_FAIL_RUN_CELL = """\
-# Phase 2: monkeypatch the dim_supplier silver builder to raise.
-# A silver-layer failure runs AFTER preflight + BOTH bronze extracts
-# succeed, so the orchestrator records:
-#   erp_suppliers  bronze  success
-#   ap_invoices    bronze  success
-#   dim_calendar   silver  success  (no upstream — runs in parallel)
-#   dim_supplier   silver  failed   (monkeypatch raises)
-#   supplier_spend gold    skipped  (cascade: depends on dim_supplier)
-# Then Phase 3 resumes: the 3 succeeded carry-forward as resumed_skipped;
-# dim_supplier re-dispatches (no patch) and succeeds; supplier_spend
-# dispatches and succeeds. Patching an extractor would also poison
-# preflight_bronze_schemas (it calls extract_pvo to probe), so we
-# patch at the silver builder boundary instead.
-import time, json
-from oracle_ai_data_platform_fusion_bundle.orchestrator import registry as _reg
-from oracle_ai_data_platform_fusion_bundle.dimensions import dim_supplier as _dim_supplier
-_orig_build = _dim_supplier.build
-def _patched_build(*args, **kw):
-    raise RuntimeError(
-        "TC27 induced failure: simulating mid-run failure on dim_supplier silver build"
-    )
-_dim_supplier.build = _patched_build
-# The registry holds a reference to the original build function — patch
-# that too so the orchestrator's dispatch loop sees the patched version.
-_reg.SILVER_DIMS["dim_supplier"] = _reg.SilverDimSpec(
-    "dim_supplier",
-    builder=_patched_build,
-    depends_on_bronze=_reg.SILVER_DIMS["dim_supplier"].depends_on_bronze,
-)
-
-tstart = time.time()
-summary = orchestrator.run(bundle_path=BUNDLE_PATH, spark=spark,
-                           mode="seed", datasets=None, layers=None, dry_run=False)
-twall = time.time() - tstart
-print(f"PHASE_2_INDUCED_FAIL run_id={summary.run_id} wall={twall:.1f}s")
-for step in summary.steps:
-    skip_tag = f" [{step.skip_reason}]" if step.skip_reason else ""
-    rc = step.row_count if step.row_count is not None else "-"
-    err = f" err={step.error_message[:60]}" if step.error_message and step.status=="failed" else ""
-    print(f"  {step.layer:6s}  {step.dataset_id:24s}  {step.status:16s}{skip_tag:14s}  rows={str(rc):>10s}  dur={step.duration_seconds:.2f}s{err}")
-_payload = {"tc":"TC27","phase":2,"run_id":summary.run_id,
-            "bundle_project":summary.bundle_project,
-            "succeeded":summary.succeeded,"failed":summary.failed,
-            "skipped":summary.skipped,"deferred":summary.deferred,
-            "resumed_skipped":summary.resumed_skipped,
-            "total_duration_seconds":summary.total_duration_seconds,
-            "wall_seconds":twall,
-            "steps":[{"dataset_id":s.dataset_id,"layer":s.layer,"status":s.status,
-                      "row_count":s.row_count,"duration_seconds":s.duration_seconds,
-                      "skip_reason":s.skip_reason,
-                      "error_message":(s.error_message or "")[:120]} for s in summary.steps]}
-print("AIDP_LIVE_TEST_RESULT_BEGIN", json.dumps(_payload), "AIDP_LIVE_TEST_RESULT_END")
-# Restore the unpatched silver builder so re-running the cell is clean.
-_dim_supplier.build = _orig_build
-_reg.SILVER_DIMS["dim_supplier"] = _reg.SilverDimSpec(
-    "dim_supplier",
-    builder=_orig_build,
-    depends_on_bronze=_reg.SILVER_DIMS["dim_supplier"].depends_on_bronze,
+raise NotImplementedError(
+    "TC27 phase-2 induced-failure cell is awaiting a content-pack rewrite. "
+    "Phase 9 deleted the v1 dim_supplier monkey-patch target; the "
+    "replacement should patch sql_runner.execute_node for the "
+    "'dim_supplier' node id. See docs/features/"
+    "v2-phase-9-followup-registry-deletion/idea.md."
 )
 """
 

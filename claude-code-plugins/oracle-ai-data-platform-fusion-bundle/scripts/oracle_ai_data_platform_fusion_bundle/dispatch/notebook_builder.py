@@ -11,10 +11,8 @@ Differences from the TC26 template:
   ``summary.to_marker_dict()`` (NOT a hand-rolled subset dict —
   hand-rolled dicts drift from the schema and break
   ``RunSummary.from_marker_dict`` laptop-side).
-- ``resume_run_id`` is a ``str | None`` parameter on ``build_notebook``,
-  injected into the run cell as a ``repr()``-quoted literal (same shape
-  as ``mode`` / ``datasets`` / ``layers``). ``None`` means a fresh run;
-  a string is the run_id to resume against ``fusion_bundle_state``.
+- ``resume_run_id`` is NOT a parameter — it's hardcoded to ``None`` in
+  the run cell. Resume-over-REST is tracked as ``P1.5ε-fix5`` follow-up.
 
 The notebook contract is the **only** boundary between the laptop-side
 dispatcher and the cluster-side orchestrator. Adding a new orchestrator
@@ -26,8 +24,9 @@ package.
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # Marker delimiters — must match ``schema.run_summary.RunSummary``'s
 # serialization contract. The dispatch package's ``parse_marker`` looks
@@ -110,20 +109,65 @@ def _build_run_cell(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
-    resume_run_id: str | None,
+    execution_backend: str = "legacy-python",
+    force_fingerprint_skip: bool = False,
+    resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Emitted as ``strict_scope=...`` in
+    # the generated orchestrator.run() call so the cluster honors the
+    # operator's opt-out; default False matches the CLI default.
+    strict_scope: bool = False,
 ) -> str:
+    # Phase 2: when execution_backend == "content-pack", the bootstrap
+    # cell that ran just before this one set up _resolved_pack and
+    # _tenant_profile; we thread them into orchestrator.run as kwargs.
+    if execution_backend == "content-pack":
+        # 8-space indent — sits inside `try:` block + inside `orchestrator.run(` call.
+        backend_kwargs = (
+            f'        execution_backend="content-pack",\n'
+            f"        resolved_pack=_resolved_pack,  # noqa: F821 — bootstrap cell\n"
+            f"        tenant_profile=_tenant_profile,  # noqa: F821 — bootstrap cell\n"
+        )
+    else:
+        backend_kwargs = f'        execution_backend="legacy-python",\n'
+
     return (
         f"import json, time\n"
-        f"_tstart = time.time()\n"
-        f"summary = orchestrator.run(  # noqa: F821\n"
-        f"    bundle_path=BUNDLE_PATH,  # noqa: F821\n"
-        f"    spark=spark,  # noqa: F821\n"
-        f"    mode={mode!r},\n"
-        f"    datasets={datasets!r},\n"
-        f"    layers={layers!r},\n"
-        f"    dry_run=False,\n"
-        f"    resume_run_id={resume_run_id!r},\n"
+        f"from oracle_ai_data_platform_fusion_bundle.schema.errors import (\n"
+        f"    SchemaDriftDetectedError,\n"
         f")\n"
+        f"_tstart = time.time()\n"
+        f"try:\n"
+        f"    summary = orchestrator.run(  # noqa: F821\n"
+        f"        bundle_path=BUNDLE_PATH,  # noqa: F821\n"
+        f"        spark=spark,  # noqa: F821\n"
+        f"        mode={mode!r},\n"
+        f"        datasets={datasets!r},\n"
+        f"        layers={layers!r},\n"
+        f"        dry_run=False,\n"
+        f"        resume_run_id={resume_run_id!r},\n"
+        f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
+        f"        strict_scope={strict_scope!r},\n"
+        f"{backend_kwargs}"
+        f"    )\n"
+        f"except SchemaDriftDetectedError as _drift_exc:\n"
+        f"    # Phase 3c — emit drift marker (artifact_json carries the\n"
+        f"    # full AIDPF-2012 payload so the laptop dispatcher can\n"
+        f"    # reconstruct the diagnostic locally + raise\n"
+        f"    # SchemaDriftDetectedError on the operator's machine).\n"
+        f"    _drift_artifact_json = _drift_exc.diagnostic_path.read_text(\n"
+        f"        encoding='utf-8'\n"
+        f"    )\n"
+        f"    _drift_payload = {{\n"
+        f"        '_kind': 'schema_drift',\n"
+        f"        'run_id': _drift_exc.run_id,\n"
+        f"        'summary': _drift_exc.summary,\n"
+        f"        'prior_fingerprint': _drift_exc.prior_fingerprint,\n"
+        f"        'current_fingerprint': _drift_exc.current_fingerprint,\n"
+        f"        'artifact_json': _drift_artifact_json,\n"
+        f"    }}\n"
+        f"    print({MARKER_BEGIN!r}, json.dumps(_drift_payload), {MARKER_END!r})\n"
+        f"    raise\n"
         f"_twall = time.time() - _tstart\n"
         f'print(f"run_id={{summary.run_id}}")\n'
         f'print(f"steps: {{summary.succeeded}} ok, {{summary.failed}} failed, "\n'
@@ -146,6 +190,110 @@ def _build_run_cell(
         f"# can round-trip via RunSummary.from_marker_dict (P1.5ε §4.3a).\n"
         f"_payload = summary.to_marker_dict()\n"
         f'print({MARKER_BEGIN!r}, json.dumps(_payload), {MARKER_END!r})\n'
+    )
+
+
+def _encode_payload_b64(obj: Any) -> str:
+    """base64(json) encoding for arbitrary dict/list payloads.
+
+    Pure-ASCII opaque token — safe to splice into the generated
+    notebook source as a Python string literal. ``sort_keys=True``
+    makes the encoded form deterministic for snapshot tests;
+    ``ensure_ascii=True`` guarantees no non-ASCII chars in the token.
+    """
+    import base64
+    import json as _json
+    raw = _json.dumps(obj, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _encode_text_b64(text: str) -> str:
+    """base64 encoding for arbitrary text payloads (e.g. profile YAML).
+
+    Same safety guarantees as ``_encode_payload_b64`` but for plain
+    string content. No JSON wrapping — the cluster-side decoder calls
+    ``base64.b64decode(...).decode('utf-8')`` and gets the original
+    text back byte-for-byte.
+    """
+    import base64
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _build_content_pack_bootstrap_cell(
+    *,
+    profile_yaml: str,
+    pack_files: Mapping[str, str],
+    pack_manifest: dict[str, Any],
+    schema_snapshot_yaml: str | None = None,
+) -> str:
+    """Cell that materialises the staged pack + reconstructs ResolvedPack on the cluster.
+
+    Emits Python source that:
+
+    1. Imports the orchestrator helpers (load_full_chain,
+       materialize_staged_pack, load_tenant_profile_from_string).
+    2. Decodes the embedded base64+json payloads to get the staged
+       files dict + manifest + profile YAML text.
+    3. Materialises the files to a tempdir + builds the staging-aware
+       base resolver.
+    4. Reconstructs ResolvedPack via load_full_chain(top_root,
+       base_resolver=...).
+    5. Reconstructs TenantProfile via load_tenant_profile_from_string.
+    6. **Phase 3d**: when ``schema_snapshot_yaml`` is provided,
+       materialises the snapshot to
+       ``<BUNDLE_PATH.parent>/profiles/<profile>.schema-snapshot.yaml``
+       — the same path the laptop-side bootstrap writes, resolved on
+       the cluster via the shared ``resolve_snapshot_path`` helper.
+       Without this step, preflight on the cluster would never find
+       the snapshot and would silently degrade to empty
+       ``datasetDeltas``.
+
+    The orchestrator.run call in the run cell consumes
+    ``_resolved_pack`` + ``_tenant_profile`` from this cell's namespace.
+    """
+    pack_files_b64 = _encode_payload_b64(dict(pack_files))
+    pack_manifest_b64 = _encode_payload_b64(pack_manifest)
+    profile_yaml_b64 = _encode_text_b64(profile_yaml)
+
+    if schema_snapshot_yaml is None:
+        snapshot_stage = ""
+    else:
+        snapshot_yaml_b64 = _encode_text_b64(schema_snapshot_yaml)
+        # Key the cluster-side snapshot path by `bundle.contentPack.profile`
+        # — the SAME key bootstrap writes under on the laptop. NOT
+        # `_tenant_profile.tenant`: a pre-3d profile YAML may carry a
+        # hand-authored `tenant:` field that differs from the active
+        # profile name; using the YAML field as the path key would
+        # write to (and later read from) the wrong file.
+        snapshot_stage = (
+            f"from oracle_ai_data_platform_fusion_bundle.schema.bronze_schema_snapshot import resolve_snapshot_path\n"
+            f"from oracle_ai_data_platform_fusion_bundle.schema.bundle import load_bundle as _load_bundle_for_snapshot\n"
+            f"_SCHEMA_SNAPSHOT_YAML = _b64.b64decode({snapshot_yaml_b64!r}).decode('utf-8')\n"
+            f"_bundle_for_snapshot, _ = _load_bundle_for_snapshot(BUNDLE_PATH)  # noqa: F821\n"
+            f"_snapshot_profile_name = (\n"
+            f"    _bundle_for_snapshot.content_pack.profile\n"
+            f"    or _bundle_for_snapshot.content_pack.name\n"
+            f")\n"
+            f"_snapshot_path = resolve_snapshot_path(BUNDLE_PATH, _snapshot_profile_name)  # noqa: F821\n"
+            f"_snapshot_path.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"_snapshot_path.write_text(_SCHEMA_SNAPSHOT_YAML, encoding='utf-8')\n"
+            f'print(f"phase 3d snapshot staged at {{_snapshot_path}}")\n'
+        )
+
+    return (
+        f"import base64 as _b64\n"
+        f"import json as _json\n"
+        f"from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_staging import materialize_staged_pack\n"
+        f"from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import load_full_chain\n"
+        f"from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import load_tenant_profile_from_string\n"
+        f"_PACK_FILES = _json.loads(_b64.b64decode({pack_files_b64!r}).decode('utf-8'))\n"
+        f"_PACK_MANIFEST = _json.loads(_b64.b64decode({pack_manifest_b64!r}).decode('utf-8'))\n"
+        f"_PROFILE_YAML = _b64.b64decode({profile_yaml_b64!r}).decode('utf-8')\n"
+        f"_top_overlay_root, _base_resolver = materialize_staged_pack(_PACK_FILES, _PACK_MANIFEST)\n"
+        f"_resolved_pack = load_full_chain(_top_overlay_root, base_resolver=_base_resolver)\n"
+        f"_tenant_profile = load_tenant_profile_from_string(_PROFILE_YAML)\n"
+        f"{snapshot_stage}"
+        f'print(f"content-pack bootstrap: pack={{_resolved_pack.pack.id}}@{{_resolved_pack.pack.version}} tenant={{_tenant_profile.tenant}}")\n'
     )
 
 
@@ -197,10 +345,32 @@ def build_notebook(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
-    resume_run_id: str | None = None,
     bicc_secret_name: str = "fusion_bicc_password",
     bicc_secret_key: str = "password",
     title: str = "P1.5ε dispatch",
+    # Phase 2 additions — primitives only (no orchestrator imports).
+    execution_backend: str = "legacy-python",
+    profile_yaml: str | None = None,
+    pack_files: Mapping[str, str] | None = None,
+    pack_manifest: dict[str, Any] | None = None,
+    # Phase 3c — splices into the orchestrator.run kwargs in the run
+    # cell so the cluster-side gate honours the break-glass intent.
+    force_fingerprint_skip: bool = False,
+    # Phase 3d — when provided, the bootstrap cell materialises the
+    # pinned bronze-schema snapshot at the cluster-side resolved path
+    # so preflight can populate `datasetDeltas` on drift. ``None``
+    # preserves pre-3d behaviour (snapshot absent → empty
+    # `datasetDeltas` + WARN).
+    schema_snapshot_yaml: str | None = None,
+    # Phase 5 P1.5ε-fix5 — splices into the orchestrator.run kwargs
+    # in the run cell so the cluster-side run adopts the supplied
+    # resume run_id. ``None`` preserves the original fresh-run
+    # behaviour.
+    resume_run_id: str | None = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1
+    # implicit-transitive-include. Threaded into the generated
+    # orchestrator.run() call as a literal kwarg.
+    strict_scope: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 
@@ -214,14 +384,38 @@ def build_notebook(
       4. **verify** — query ``fusion_bundle_state`` + count silver/gold
          audit-col matches for the run_id.
 
-    The run cell injects ``mode`` / ``datasets`` / ``layers`` /
-    ``resume_run_id`` as literals (via ``repr()``). ``resume_run_id``
-    defaults to ``None`` (fresh run); pass the operator-supplied run_id
-    to resume against the cluster-side ``fusion_bundle_state``.
+    The run cell injects ``mode`` / ``datasets`` / ``layers`` as literals
+    (via ``repr()``). ``resume_run_id`` is hardcoded to ``None`` — REST-
+    dispatch resume is out of scope in this PR.
 
     Returns an nbformat-4 dict ready to pass to
     :meth:`AidpRestClient.upload_notebook`.
     """
+    # Phase 2 invariant check: content-pack backend requires all three
+    # Phase 9 — content-pack is the only backend at the CLI level,
+    # but the dispatch boundary retains backend dispatch for the
+    # tests that lock the staging primitive contract. The kwargs
+    # are still asserted symmetrically.
+    if execution_backend == "content-pack":
+        assert profile_yaml is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires profile_yaml"
+        )
+        assert pack_files is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires pack_files"
+        )
+        assert pack_manifest is not None, (
+            "build_notebook(execution_backend='content-pack', ...) requires pack_manifest"
+        )
+    elif execution_backend == "legacy-python":
+        assert profile_yaml is None and pack_files is None and pack_manifest is None, (
+            "build_notebook(execution_backend='legacy-python', ...) must pass "
+            "profile_yaml/pack_files/pack_manifest as None"
+        )
+        assert schema_snapshot_yaml is None, (
+            "build_notebook(execution_backend='legacy-python', ...) must "
+            "pass schema_snapshot_yaml as None"
+        )
+
     cells = [
         _markdown_cell(f"# {title}\nSelf-contained dispatch from `aidp-fusion-bundle run`."),
         _code_cell(_build_install_cell(wheel_path)),
@@ -232,14 +426,32 @@ def build_notebook(
                 bicc_secret_key=bicc_secret_key,
             )
         ),
+    ]
+
+    if execution_backend == "content-pack":
+        cells.append(
+            _code_cell(
+                _build_content_pack_bootstrap_cell(
+                    profile_yaml=profile_yaml,
+                    pack_files=pack_files,
+                    pack_manifest=pack_manifest,
+                    schema_snapshot_yaml=schema_snapshot_yaml,
+                )
+            )
+        )
+
+    cells.extend([
         _code_cell(
             _build_run_cell(
                 mode=mode, datasets=datasets, layers=layers,
+                execution_backend=execution_backend,
+                force_fingerprint_skip=force_fingerprint_skip,
                 resume_run_id=resume_run_id,
+                strict_scope=strict_scope,
             )
         ),
         _code_cell(_build_verify_cell()),
-    ]
+    ])
     return {
         "cells": cells,
         "metadata": {

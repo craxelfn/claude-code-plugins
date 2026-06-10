@@ -636,6 +636,89 @@ def write_state_row(
     )
 
 
+def write_fingerprint_skip_row(
+    spark: "SparkSession",
+    paths: TablePaths,
+    *,
+    run_id: str,
+    prior_fingerprint: str,
+    current_fingerprint: str,
+) -> None:
+    """Append a Phase 3c ``--force-fingerprint-skip`` audit row to
+    ``fusion_bundle_state``.
+
+    Dedicated single-purpose helper because
+    :func:`write_state_row` takes a :class:`RunStep` whose
+    ``mode``/``status`` Literal types reject ``"fingerprint_skip"``
+    / ``"warn"``. The v1 DDL at ``state.py:135-152`` accepts any
+    string for those columns; this helper writes a raw INSERT
+    bypassing the Python-side Literal narrowing.
+
+    Row carries:
+
+    * ``dataset_id = "_fingerprint_skip"`` — sentinel; the prior
+      bootstrap/run queries never look it up by this id.
+    * ``layer = "bronze"`` (the fingerprint is whole-bronze-schema).
+    * ``mode = "fingerprint_skip"`` — distinguishes from
+      ``seed``/``incremental`` rows in audit queries.
+    * ``last_watermark = NULL`` — there's no watermark for this row.
+    * ``last_run_at = current_timestamp()`` — when the bypass fired.
+    * ``status = "success"`` — the existing schema accepts any
+      string at the DB level; "success" keeps the row from being
+      mistaken for a failure. The audit signal lives in
+      ``skip_reason``.
+    * ``skip_reason`` — encodes the bypass + prior/current
+      fingerprints (truncated to 24 chars each + ``...``).
+    * ``duration_seconds = 0.0``.
+
+    Args:
+        spark: active Spark session.
+        paths: bundle's ``TablePaths``.
+        run_id: SAME run_id the rest of the run would use — Phase 3c
+            audit-correlation invariant (drift artifact + this row +
+            RunSummary all share one id).
+        prior_fingerprint: pinned profile fingerprint.
+        current_fingerprint: live bronze fingerprint computed at
+            preflight.
+    """
+    table_path = _state_table_path(paths)
+
+    def _q(s: str) -> str:
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+
+    # Truncated fingerprints — 24 chars is enough to disambiguate
+    # in audit queries without bloating the column.
+    skip_reason = (
+        f"--force-fingerprint-skip; "
+        f"prior={prior_fingerprint[:24]}... "
+        f"current={current_fingerprint[:24]}..."
+    )
+
+    spark.sql(
+        f"""
+        INSERT INTO {table_path}
+          (run_id, dataset_id, layer, mode, last_watermark, last_run_at,
+           status, row_count, error_message, skip_reason, duration_seconds,
+           plan_hash, plan_snapshot)
+        VALUES
+          ({_q(run_id)},
+           '_fingerprint_skip',
+           'bronze',
+           'fingerprint_skip',
+           CAST(NULL AS TIMESTAMP),
+           current_timestamp(),
+           'success',
+           CAST(0 AS BIGINT),
+           CAST(NULL AS STRING),
+           {_q(skip_reason)},
+           CAST(0.0 AS DOUBLE),
+           CAST(NULL AS STRING),
+           CAST(NULL AS STRING))
+        """
+    )
+
+
 def _build_last_watermark_query(
     paths: TablePaths,
     dataset_id: str,
@@ -1095,12 +1178,221 @@ def read_resumable_state(
     )
 
 
+# ---------------------------------------------------------------------------
+# Content-pack resume reader (Phase 5 Step 9b)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CPResumeContext:
+    """Resume snapshot for a default-flipped (content-pack) run.
+
+    Differs from :class:`ResumeContext` in two structural ways
+    reflecting the content-pack write path (``sql_runner._write_success_rows``):
+
+    * **Per-node ``plan_hash``** — sql_runner writes a hash computed
+      over the rendered SQL + output schema for each silver/gold node.
+      Each node gets its OWN hash, so the v1 invariant "single
+      plan_hash across the whole run" doesn't hold. The mixed shape
+      (bronze rows from the legacy backend carry a run-level v1 hash;
+      silver/gold rows carry per-node hashes) is the WAI design.
+
+    * **``plan_snapshot`` may be ``None``** — sql_runner writes
+      ``plan_snapshot=None`` on every CP row. A default-flipped run
+      that also ran bronze through the legacy backend carries the v1
+      bronze snapshot under those rows; pure CP runs have no snapshot
+      at all.
+
+    The dispatcher uses :func:`read_content_pack_resumable_state` to
+    build this and threads it through bronze + cp branches the same
+    way the v1 reader's :class:`ResumeContext` is threaded.
+
+    Attributes:
+        run_id: the run identifier (echoes the input).
+        succeeded: dataset_ids whose latest terminal status is
+            ``'success'`` or ``'resumed_skipped'``. Same semantics as
+            :class:`ResumeContext.succeeded`.
+        bronze_plan_snapshot: a v1-shape plan snapshot lifted from any
+            bronze row that carries one. ``None`` for pure silver/gold-
+            only runs. The dispatcher uses this for identity-drift
+            checks (skipped when ``None``) and bare-resume scope
+            reconstruction (falls back to ``scope_*`` fields).
+        scope_datasets: dataset_ids observed across the run's rows —
+            the actual scope the original run dispatched. Used to
+            reconstruct ``--datasets`` for bare-resume when the
+            snapshot is absent.
+        scope_layers: layers observed across the run's rows.
+        succeeded_row_counts: ``(dataset_id, layer)`` →
+            most-recent non-NULL ``row_count`` (same as :class:`ResumeContext`).
+        succeeded_last_watermarks: same shape as :class:`ResumeContext`.
+        original_started_at: earliest ``last_run_at`` for this run_id.
+    """
+
+    run_id: str
+    succeeded: frozenset[str]
+    bronze_plan_snapshot: "str | None"
+    scope_datasets: tuple[str, ...]
+    scope_layers: tuple[str, ...]
+    succeeded_row_counts: "dict[tuple[str, str], int]"
+    succeeded_last_watermarks: "dict[tuple[str, str], datetime | None]"
+    original_started_at: "datetime"
+
+
+def read_content_pack_resumable_state(
+    spark: "SparkSession",
+    paths: TablePaths,
+    run_id: str,
+) -> "CPResumeContext":
+    """Resume reader tolerant of the content-pack write path.
+
+    Same SQL-query shape as :func:`read_resumable_state` but with the
+    v1 invariants relaxed for the realities of how
+    ``sql_runner._write_success_rows`` persists state:
+
+    * **Allows per-node ``plan_hash`` variance** — no "single hash
+      across all rows" check; each row carries its own hash.
+    * **Allows ``plan_snapshot IS NULL``** — content-pack rows
+      legitimately write None. The v1 reader's ``ResumeRunNotResumableError``
+      branch would falsely reject these.
+    * **Reconstructs scope from rows** — exposes the dataset/layer
+      tuples observed under this run_id so the dispatcher can rebuild
+      ``(datasets, layers)`` for bare-resume without depending on a
+      snapshot.
+
+    Still raises:
+        ResumeRunNotFoundError: zero terminal rows for ``run_id``.
+
+    Does NOT raise on null snapshot or hash mismatch — the v1 reader's
+    invariants don't apply to the CP write path. Returns a
+    :class:`CPResumeContext`.
+    """
+    # Local import — avoid an import cycle into errors.py at module load.
+    from .errors import ResumeRunNotFoundError
+
+    table_path = _state_table_path(paths)
+    status_list = ", ".join(f"'{s}'" for s in _RESUMABLE_TERMINAL_STATUSES)
+    escaped_run_id = run_id.replace("'", "''")
+    query = f"""
+        WITH ranked AS (
+          SELECT
+            dataset_id, status, plan_hash, plan_snapshot,
+            last_run_at, layer, mode,
+            ROW_NUMBER() OVER (
+              PARTITION BY dataset_id, layer
+              ORDER BY last_run_at DESC
+            ) AS rn
+          FROM {table_path}
+          WHERE run_id = '{escaped_run_id}'
+            AND status IN ({status_list})
+        )
+        SELECT dataset_id, status, plan_hash, plan_snapshot,
+               last_run_at, layer
+        FROM ranked
+        WHERE rn = 1
+    """
+    rows = spark.sql(query).collect()
+
+    if not rows:
+        raise ResumeRunNotFoundError(
+            f"--resume: no rows in fusion_bundle_state for run_id={run_id!r}. "
+            f"Check the value (operator typo?) or use `aidp-fusion-bundle "
+            f"status` to list recent run_ids."
+        )
+
+    # Succeeded set — includes BOTH 'success' AND 'resumed_skipped' so a
+    # re-resume of an already-resumed run treats carry-forwards as done.
+    succeeded: set[str] = {
+        r["dataset_id"]
+        for r in rows
+        if r["status"] in ("success", "resumed_skipped")
+    }
+
+    # Lift a plan_snapshot from any row that carries one (bronze rows
+    # from the legacy backend write one; CP rows do not). Take the
+    # newest first by ``last_run_at`` so a refreshed identity reflects
+    # the most recent successful seed cycle.
+    bronze_plan_snapshot: str | None = None
+    snap_candidates = sorted(
+        (r for r in rows if r["plan_snapshot"]),
+        key=lambda r: r["last_run_at"],
+        reverse=True,
+    )
+    if snap_candidates:
+        bronze_plan_snapshot = snap_candidates[0]["plan_snapshot"]
+
+    # Scope reconstruction from the rows themselves.
+    scope_datasets = tuple(sorted({r["dataset_id"] for r in rows}))
+    scope_layers = tuple(sorted({r["layer"] for r in rows}))
+    original_started_at = min(r["last_run_at"] for r in rows)
+
+    # row_counts + last_watermarks queries — same SQL shape as
+    # read_resumable_state; tuple-keyed by (dataset_id, layer).
+    row_count_query = f"""
+        WITH ranked AS (
+          SELECT dataset_id, layer, row_count, last_run_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY dataset_id, layer
+                   ORDER BY last_run_at DESC
+                 ) AS rn
+          FROM {table_path}
+          WHERE run_id = '{escaped_run_id}'
+            AND status IN ({status_list})
+            AND row_count IS NOT NULL
+        )
+        SELECT dataset_id, layer, row_count FROM ranked WHERE rn = 1
+    """
+    rc_rows = spark.sql(row_count_query).collect()
+    succeeded_row_counts: dict[tuple[str, str], int] = {}
+    for r in rc_rows:
+        ds_id = r["dataset_id"]
+        layer = r["layer"]
+        if ds_id in succeeded:
+            succeeded_row_counts[(ds_id, layer)] = int(r["row_count"])
+
+    last_watermark_query = f"""
+        WITH ranked AS (
+          SELECT dataset_id, layer, last_watermark, last_run_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY dataset_id, layer
+                   ORDER BY last_run_at DESC
+                 ) AS rn
+          FROM {table_path}
+          WHERE run_id = '{escaped_run_id}'
+            AND status IN ({status_list})
+        )
+        SELECT dataset_id, layer, last_watermark FROM ranked WHERE rn = 1
+    """
+    lw_rows = spark.sql(last_watermark_query).collect()
+    succeeded_last_watermarks: dict[tuple[str, str], datetime | None] = {}
+    for r in lw_rows:
+        ds_id = r["dataset_id"]
+        layer = r["layer"]
+        if ds_id in succeeded:
+            succeeded_last_watermarks[(ds_id, layer)] = _normalize_to_utc(
+                r["last_watermark"]
+            )
+
+    return CPResumeContext(
+        run_id=run_id,
+        succeeded=frozenset(succeeded),
+        bronze_plan_snapshot=bronze_plan_snapshot,
+        scope_datasets=scope_datasets,
+        scope_layers=scope_layers,
+        succeeded_row_counts=succeeded_row_counts,
+        succeeded_last_watermarks=succeeded_last_watermarks,
+        original_started_at=original_started_at,
+    )
+
+
 __all__ = [
     "ensure_state_table",
     "write_state_row",
+    "write_fingerprint_skip_row",
     "read_last_watermark",
     "read_resumable_state",
+    "read_content_pack_resumable_state",
     "ResumeContext",
+    "CPResumeContext",
     "WATERMARK_READ_SOFT_FAILED_MARKER",
     "_ensure_target_table_exists",
 ]

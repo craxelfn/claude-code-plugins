@@ -73,9 +73,84 @@ def validate(ctx: click.Context) -> None:
 
 @main.command()
 @click.option("--check-iam", is_flag=True, help="Also probe OCI IAM policies (requires AIDP RP credentials).")
+@click.option(
+    "--refresh", is_flag=True,
+    help="Re-walk every variation point against the live bronze; resolves drift per §9.5.5 Tier-1.",
+)
+@click.option(
+    "--operator", "operator", type=str, default=None,
+    help="Explicit operator identity for the SOX-floor audit trail (overrides $AIDP_OPERATOR / $USER).",
+)
+@click.option(
+    "--non-interactive", is_flag=True,
+    help="Sandbox/CI mode: multi-match auto-picks the first candidate; refuses --refresh changes to pinned values.",
+)
+@click.option(
+    "--resolutions", "resolutions_path", type=click.Path(path_type=Path, exists=True),
+    default=None,
+    help="JSON file scripting multi-match resolutions (feature #3 / CI use).",
+)
+@click.option(
+    "--skip-preonboarding-probes", is_flag=True,
+    help=(
+        "Skip phase-1 BICC / AIDP probes; useful for --refresh after initial "
+        "onboarding succeeded. INCOMPATIBLE with --dispatch-mode=cluster "
+        "(the aidp-rest probe is load-bearing in cluster mode — see "
+        "Phase 4.1 / AIDPF-2047 reason=conflicting_flags)."
+    ),
+)
+@click.option(
+    "--dispatch-mode",
+    "dispatch_mode",
+    type=click.Choice(["cluster", "local"]),
+    default="cluster",
+    show_default=True,
+    help=(
+        "Where the variation-phase bronze probe runs. 'cluster' "
+        "(default, Phase 4.1) dispatches a notebook to the AIDP cluster "
+        "where 3-part-namespace DESCRIBE works natively. 'local' uses "
+        "the laptop's in-process Spark session — backward-compat for "
+        "unit tests and laptop-POC bundles."
+    ),
+)
+@click.option(
+    "--cluster-key", "cluster_key", type=str, default=None,
+    help=(
+        "Cluster UUID for cluster-mode dispatch; overrides "
+        "EnvSpec.clusterKey. Env var: AIDP_FUSION_CLUSTER_KEY."
+    ),
+)
+@click.option(
+    "--cluster-name", "cluster_name", type=str, default=None,
+    help=(
+        "Cluster display name for cluster-mode dispatch; overrides "
+        "EnvSpec.clusterName. Env var: AIDP_FUSION_CLUSTER_NAME."
+    ),
+)
+@click.option(
+    "--workspace-dir", "workspace_dir", type=str, default=None,
+    help=(
+        "Server-side notebook upload root for cluster-mode dispatch; "
+        "overrides Defaults.workspaceDir. Env var: "
+        "AIDP_FUSION_WORKSPACE_DIR. When unset (and not in EnvSpec / "
+        "Defaults), derives '/Workspace/{workspace_root}/fusion-bundle-bootstrap'."
+    ),
+)
 @click.pass_context
-def bootstrap(ctx: click.Context, check_iam: bool) -> None:
-    """Probe all prerequisites against the live Fusion pod + AIDP workspace."""
+def bootstrap(
+    ctx: click.Context,
+    check_iam: bool,
+    refresh: bool,
+    operator: str | None,
+    non_interactive: bool,
+    resolutions_path: Path | None,
+    skip_preonboarding_probes: bool,
+    dispatch_mode: str,
+    cluster_key: str | None,
+    cluster_name: str | None,
+    workspace_dir: str | None,
+) -> None:
+    """Probe all prerequisites + run the variation-resolution phase when content-pack-enabled."""
     from .commands.bootstrap import bootstrap as bootstrap_impl
     sys.exit(bootstrap_impl(
         bundle_path=ctx.obj["bundle_path"],
@@ -83,6 +158,15 @@ def bootstrap(ctx: click.Context, check_iam: bool) -> None:
         env_name=ctx.obj["env_name"],
         check_iam=check_iam,
         console=console,
+        refresh=refresh,
+        operator=operator,
+        non_interactive=non_interactive,
+        resolutions_path=resolutions_path,
+        skip_preonboarding_probes=skip_preonboarding_probes,
+        dispatch_mode=dispatch_mode,
+        cluster_key_override=cluster_key,
+        cluster_name_override=cluster_name,
+        workspace_dir_override=workspace_dir,
     ))
 
 
@@ -108,11 +192,78 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
     sys.exit(probe_catalog(pod=pod, username=username, password=password, console=console))
 
 
+@catalog.command("probe-pvo")
+@click.argument("dataset_id")
+@click.option(
+    "--datastore", required=True,
+    help="BICC datastore identifier (e.g. SupplierExtractPVO).",
+)
+@click.option(
+    "--bicc-schema", required=True,
+    help="BICC offering schema (Financial / HCM / SCM).",
+)
+@click.option(
+    "--pvo-id", default=None,
+    help="Optional full AM-hierarchy path "
+         "(e.g. FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO). "
+         "Used for WARN cross-reference against the curated catalog.",
+)
+@click.option(
+    "--incremental-capable/--no-incremental-capable", default=True,
+    help="Whether fusion.initial.extract-date is meaningful for this PVO "
+         "(default: True). Set --no-incremental-capable for snapshot-style "
+         "PVOs (gl_period_balances, gl_coa) where LastUpdateDate doesn't "
+         "track meaningful change events monotonically.",
+)
+@click.option(
+    "--emit-pack-yaml", required=True,
+    help="Path to write the draft YAML to "
+         "(typically content_packs/<overlay-pack>/bronze/<id>.yaml).",
+)
+@click.pass_context
+def catalog_probe_pvo(
+    ctx: click.Context,
+    dataset_id: str,
+    datastore: str,
+    bicc_schema: str,
+    pvo_id: str | None,
+    incremental_capable: bool,
+    emit_pack_yaml: str,
+) -> None:
+    """Probe a BICC PVO and emit a draft content-pack bronze YAML.
+
+    Runs a metadata-only ``extract_pvo().schema`` roundtrip (no row pull),
+    translates the discovered StructType to outputSchema.columns, and
+    writes a draft YAML with commented-out refresh.incremental TODOs.
+
+    Operator must review the generated YAML before production use:
+    fill in naturalKey, watermark.column, requiredColumns, and pii
+    classifications.
+    """
+    from .commands.catalog import probe_pvo_emit_pack_yaml
+    sys.exit(probe_pvo_emit_pack_yaml(
+        dataset_id=dataset_id,
+        datastore=datastore,
+        bicc_schema=bicc_schema,
+        pvo_id=pvo_id,
+        incremental_capable=incremental_capable,
+        emit_pack_yaml=emit_pack_yaml,
+        bundle_path=ctx.obj.get("bundle_path") if ctx.obj else None,
+        config_path=ctx.obj.get("config_path") if ctx.obj else None,
+        env_name=ctx.obj.get("env_name", "dev") if ctx.obj else "dev",
+        console=console,
+    ))
+
+
 @main.command()
 @click.option(
     "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
-    help="seed = rebuild from bronze every run; incremental = delta-merge "
-         "(P1.5β, not implemented today). The retired alias 'full' is now 'seed'."
+    help="seed = full BICC pull + replace strategy per layer; incremental "
+         "= delta-merge using prior watermarks from fusion_bundle_state "
+         "(P1.17 — bronze MERGE on natural key + payload-diff for "
+         "incremental_capable=False PVOs; silver/gold MERGE on the "
+         "primary source's row-max watermark). The retired alias 'full' "
+         "is now 'seed'."
 )
 @click.option("--datasets", default=None, help="Comma-separated dataset/dim/mart names to filter (default: all in bundle.yaml).")
 @click.option(
@@ -133,7 +284,9 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "stored plan_snapshot when --datasets/--layers are omitted. Drift "
          "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
          "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch. "
-         "Works on both --inline and REST-dispatch paths.",
+         "Supported on both --inline and REST dispatch (P1.5ε-fix5): the "
+         "generated cluster notebook threads the run_id into the orchestrator "
+         "call so the resumed run adopts the original id end-to-end.",
 )
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False,
@@ -156,10 +309,32 @@ def catalog_probe(pod: str, username: str | None, password: str | None) -> None:
          "Fusion pods. Below 60s rejected at parse — anything that short is "
          "operator error. Only meaningful for REST dispatch (no --inline).",
 )
+@click.option(
+    "--force-fingerprint-skip", "force_fingerprint_skip",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Phase 3c — dev/sandbox: bypass the bronze-schema fingerprint "
+         "drift gate. Records an audit warn row in fusion_bundle_state "
+         "with mode='fingerprint_skip'. Production runs MUST NOT use "
+         "this; SOX-audit environments should policy-disable.",
+)
+@click.option(
+    "--strict-scope", "strict_scope", is_flag=True, default=False,
+    help="Phase 9 — disable D-1 implicit-transitive-include. When set, "
+         "every declared root's `dependsOn` must ALSO appear in "
+         "`--datasets` / `bundle.datasets[]` explicitly; missing deps "
+         "raise AIDPF-1042 STRICT_SCOPE_MISSING_DEPENDENCY. Use for "
+         "debug-style runs where exact control over the plan is "
+         "required (e.g. re-run only `dim_supplier` against pre-staged "
+         "bronze).",
+)
 @click.pass_context
 def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
-        poll_timeout_s: int) -> None:
+        poll_timeout_s: int,
+        force_fingerprint_skip: bool,
+        strict_scope: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
     sys.exit(run_impl(
@@ -173,6 +348,8 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         resume_run_id=resume_run_id,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
+        force_fingerprint_skip=force_fingerprint_skip,
+        strict_scope=strict_scope,
         console=console,
     ))
 
@@ -209,6 +386,45 @@ def status(ctx: click.Context) -> None:
         env_name=ctx.obj["env_name"],
         console=console,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Content pack commands (v2 — schema validation + introspection)
+# ---------------------------------------------------------------------------
+
+
+@main.group("content-pack")
+def content_pack() -> None:
+    """Inspect and validate content packs (v2 schema layer)."""
+
+
+@content_pack.command("list")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_list(json_output: bool) -> None:
+    """List installed content packs."""
+    from .commands.content_pack import list_packs
+
+    sys.exit(list_packs(json_output=json_output, console=console))
+
+
+@content_pack.command("info")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_info(name: str, json_output: bool) -> None:
+    """Show detailed info about an installed pack (or a pack by path)."""
+    from .commands.content_pack import info_pack
+
+    sys.exit(info_pack(name, json_output=json_output, console=console))
+
+
+@content_pack.command("validate")
+@click.argument("name")
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_validate(name: str, json_output: bool) -> None:
+    """Validate a content pack against the schema + content validators."""
+    from .commands.content_pack import validate_pack_cli
+
+    sys.exit(validate_pack_cli(name, json_output=json_output, console=console))
 
 
 # ---------------------------------------------------------------------------

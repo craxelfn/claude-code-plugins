@@ -72,12 +72,24 @@ where = ["scripts"]
 include = ["oracle_ai_data_platform_fusion_bundle*"]
 
 [tool.setuptools.package-data]
-oracle_ai_data_platform_fusion_bundle = ["py.typed"]
+oracle_ai_data_platform_fusion_bundle = [
+  "py.typed",
+  # Content packs ship as package data. The directory uses an underscore
+  # (Python identifier convention) even though pack `id:` values use dashes.
+  # See v2 plan §6.3 / ADR-0022 and docs/features/v2-phase-1-content-pack-schema/plan.md ("Resolved discrepancies").
+  "content_packs/**/*.yaml",
+  "content_packs/**/*.yml",
+  "content_packs/**/*.sql",
+  "content_packs/**/*.bar",
+  "content_packs/**/README.md",
+  # JSON Schema artifacts exported from Pydantic models (see schema/medallion_pack.py, schema/dashboard_pack.py).
+  "*.schema.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-  "live: requires live Fusion pod / AIDP workspace / OAC instance (gated by AIDP_FUSION_BUNDLE_INTEGRATION=1)"
+  "live: requires live Fusion pod / AIDP workspace / OAC instance (gated by AIDP_FUSION_BUNDLE_INTEGRATION=1)",
 ]
 
 [tool.ruff]

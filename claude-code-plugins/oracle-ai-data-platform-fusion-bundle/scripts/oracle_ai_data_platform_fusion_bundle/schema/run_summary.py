@@ -16,37 +16,28 @@ Identity is preserved:
 ``orchestrator.runtime.RunStep is schema.run_summary.RunStep``
 ``orchestrator.runtime.RunSummary is schema.run_summary.RunSummary``
 
-Factory classmethods (``RunStep.success`` etc.) still take engine ``spec``
-objects and resolve the layer through ``orchestrator.registry._layer_for_spec``
-via a **lazy import inside the method body**. The lazy import only fires when
-a factory is called — which only happens engine-side. The dispatch path
-reaches ``RunStep`` exclusively via ``RunSummary.from_marker_dict`` (pure
-JSON → dataclass; no factory, no spec, no engine import).
+Phase 9 follow-up: the spec-typed factory classmethods (``RunStep.success`` /
+``.failed`` / ``.skipped_cascade`` / ``.skipped_aborted`` / ``.deferred`` /
+``.resumed_skip``) were deleted along with the v1 execution path. The live
+content-pack dispatcher constructs ``RunStep`` directly with positional args
+(see ``orchestrator/__init__.py:_run_content_pack_backend``); the dispatch
+package deserializes via ``RunSummary.from_marker_dict`` (pure JSON →
+dataclass; no factory, no spec, no engine import). ``RunStep.gate_failed``
+survives because it takes no spec object and is still used by
+``_phase5_top_level_dispatch`` for AIDPF-207x medallion gate failures.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
-from typing import Any, Final, Literal
+from typing import Final, Literal
 from uuid import uuid4
 
 
 # Marker payload schema version. Bump when ``from_marker_dict`` /
 # ``to_marker_dict`` gain or rename fields in a non-back-compat way.
 MARKER_SCHEMA_VERSION: Final[int] = 1
-
-
-# ---------------------------------------------------------------------------
-# Skip-reason message templates (mirror of orchestrator/runtime.py)
-# ---------------------------------------------------------------------------
-# Kept in lockstep with the originals in runtime.py; the runtime module
-# imports these names from here via the re-export shim so there is exactly
-# one source of truth.
-
-_CASCADE_MSG_TMPL: Final[str] = "cascade: upstream {upstream!r} failed"
-_ABORT_MSG_TMPL: Final[str] = "aborted: run halted on prior failure of {failed!r}"
-_RESUME_SKIP_MSG_TMPL: Final[str] = "resume-skip: succeeded under run {run_id!r}"
 
 
 def _utc_now() -> datetime:
@@ -80,10 +71,8 @@ def _parse_iso(value: str | None) -> datetime | None:
 # PlanNode — neutral DTO for dry-run plan rendering (P1.5ε §4.3a)
 # ---------------------------------------------------------------------------
 # Used by the dispatch package's dry-run path to package up plan rows without
-# importing engine spec types (BronzeExtractSpec / SilverDimSpec / GoldMartSpec).
-# The orchestrator-side dry-run path can convert its spec list → PlanNode list
-# before stuffing into RunSummary.empty(plan=...); the renderer reads .layer
-# directly and skips the legacy ``_layer_for_spec`` fallback.
+# importing the engine. Carries ``dataset_id`` + ``layer`` directly; the
+# renderer reads ``.layer`` without any spec/registry round-trip.
 
 
 @dataclass(frozen=True)
@@ -149,205 +138,44 @@ class RunStep:
     plan_hash: str | None = None
     plan_snapshot: str | None = None
 
-    # ----------------------------- Factories ------------------------------
-    # Each factory takes an engine spec object and resolves the layer via a
-    # lazy import of ``orchestrator.registry._layer_for_spec``. The lazy
-    # import only fires when a factory is called (engine-side); the dispatch
-    # path reaches RunStep through ``RunSummary.from_marker_dict`` instead
-    # and never triggers the engine import.
-
     @classmethod
-    def success(
+    def gate_failed(
         cls,
-        spec: Any,
+        *,
         run_id: str,
         mode: str,
-        *,
-        row_count: int,
-        duration_seconds: float,
-        watermark_used: datetime | None = None,
-        last_watermark: datetime | None = None,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
+        layer: str,
+        gate_dataset_id: str,
+        aidpf_code: str,
+        error_message: str,
     ) -> "RunStep":
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            _layer_for_spec,
-        )
+        """Synthetic ``RunStep`` for a Phase 5 medallion gate failure.
 
+        Used by the top-level dispatcher when ``assert_bronze_readiness``
+        (AIDPF-2071) or ``assert_fusion_pvo_compatibility`` (AIDPF-2072)
+        raises. The dispatcher catches the gate error, appends one of
+        these steps to the merged :class:`RunSummary`, and returns
+        normally — the CLI translates ``summary.has_failures()`` to a
+        non-zero exit code.
+
+        Reserved ``__<name>__`` ``dataset_id`` convention identifies the
+        synthetic step (e.g. ``__bronze_readiness_gate__`` /
+        ``__fusion_pvo_drift_gate__``) so downstream filters can
+        distinguish gate-failure steps from real node failures.
+        """
         return cls(
             run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=_layer_for_spec(spec),
-            mode=mode,  # type: ignore[arg-type]
-            status="success",
-            row_count=row_count,
-            duration_seconds=duration_seconds,
-            error_message=None,
-            watermark_used=watermark_used,
-            last_watermark=last_watermark,
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
-        )
-
-    @classmethod
-    def failed(
-        cls,
-        spec: Any,
-        run_id: str,
-        mode: str,
-        *,
-        exc: BaseException,
-        duration_seconds: float,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
-    ) -> "RunStep":
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            _layer_for_spec,
-        )
-
-        return cls(
-            run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=_layer_for_spec(spec),
+            dataset_id=gate_dataset_id,
+            layer=layer,  # type: ignore[arg-type]
             mode=mode,  # type: ignore[arg-type]
             status="failed",
             row_count=None,
-            duration_seconds=duration_seconds,
-            error_message=repr(exc),
+            duration_seconds=0.0,
+            error_message=f"[{aidpf_code}] {error_message}",
             watermark_used=None,
             last_watermark=None,
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
-        )
-
-    @classmethod
-    def skipped_cascade(
-        cls,
-        spec: Any,
-        run_id: str,
-        mode: str,
-        *,
-        upstream_dataset_id: str,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
-    ) -> "RunStep":
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            _layer_for_spec,
-        )
-
-        return cls(
-            run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=_layer_for_spec(spec),
-            mode=mode,  # type: ignore[arg-type]
-            status="skipped",
-            row_count=None,
-            duration_seconds=0.0,
-            error_message=_CASCADE_MSG_TMPL.format(upstream=upstream_dataset_id),
-            watermark_used=None,
-            last_watermark=None,
-            skip_reason="cascade",
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
-        )
-
-    @classmethod
-    def skipped_aborted(
-        cls,
-        spec: Any,
-        run_id: str,
-        mode: str,
-        *,
-        failed_dataset_id: str,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
-    ) -> "RunStep":
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            _layer_for_spec,
-        )
-
-        return cls(
-            run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=_layer_for_spec(spec),
-            mode=mode,  # type: ignore[arg-type]
-            status="skipped",
-            row_count=None,
-            duration_seconds=0.0,
-            error_message=_ABORT_MSG_TMPL.format(failed=failed_dataset_id),
-            watermark_used=None,
-            last_watermark=None,
-            skip_reason="aborted",
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
-        )
-
-    @classmethod
-    def deferred(
-        cls,
-        spec: Any,  # DeferredSpec — carries .layer directly
-        run_id: str,
-        mode: str,
-        *,
-        error_message: str,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
-    ) -> "RunStep":
-        return cls(
-            run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=spec.layer,
-            mode=mode,  # type: ignore[arg-type]
-            status="deferred",
-            row_count=None,
-            duration_seconds=0.0,
-            error_message=error_message,
-            watermark_used=None,
-            last_watermark=None,
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
-        )
-
-    @classmethod
-    def resumed_skip(
-        cls,
-        spec: Any,
-        run_id: str,
-        mode: str,
-        *,
-        row_count: int | None = None,
-        last_watermark: datetime | None = None,
-        plan_hash: str | None = None,
-        plan_snapshot: str | None = None,
-    ) -> "RunStep":
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            BronzeExtractSpec,
-            DeferredSpec,
-            GoldMartSpec,
-            SilverDimSpec,
-            _layer_for_spec,
-        )
-
-        if isinstance(spec, DeferredSpec):
-            layer = spec.layer
-        elif isinstance(spec, (BronzeExtractSpec, SilverDimSpec, GoldMartSpec)):
-            layer = _layer_for_spec(spec)
-        else:  # pragma: no cover — defensive
-            raise TypeError(f"resumed_skip: unsupported spec type {type(spec)!r}")
-        return cls(
-            run_id=run_id,
-            dataset_id=spec.dataset_id,
-            layer=layer,
-            mode=mode,  # type: ignore[arg-type]
-            status="resumed_skipped",
-            row_count=row_count,
-            duration_seconds=0.0,
-            error_message=_RESUME_SKIP_MSG_TMPL.format(run_id=run_id),
-            watermark_used=None,
-            last_watermark=last_watermark,
-            skip_reason="resume-skip",
-            plan_hash=plan_hash,
-            plan_snapshot=plan_snapshot,
+            plan_hash=None,
+            plan_snapshot=None,
         )
 
     # ---------------------- Marker (de)serialization ----------------------
@@ -524,8 +352,5 @@ __all__ = [
     "PrereqNode",
     "RunStep",
     "RunSummary",
-    "_ABORT_MSG_TMPL",
-    "_CASCADE_MSG_TMPL",
-    "_RESUME_SKIP_MSG_TMPL",
     "_utc_now",
 ]

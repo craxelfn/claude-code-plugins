@@ -1,0 +1,41 @@
+id: ar_receipts
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.FinExtractAM.ArBiccExtractAM.ReceiptHeaderExtractPVO
+  pvo_id: FscmTopModelAM.FinExtractAM.ArBiccExtractAM.ReceiptHeaderExtractPVO
+  biccSchema: Financial
+  schemaOverride: null
+  incrementalCapable: true
+  auditColumnsMode: bronze_v1
+target: ar_receipts
+dependsOn:
+  bronze: []
+  silver: []
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: ar_receipts
+      column: ArCashReceiptsAllLastUpdateDate
+    naturalKey: [ArCashReceiptsAllCashReceiptId]
+requiredColumns:
+  ar_receipts:
+    - ArCashReceiptsAllCashReceiptId
+    - ArCashReceiptsAllReceiptDate
+    - ArCashReceiptsAllAmount
+    - ArCashReceiptsAllLastUpdateDate
+outputSchema:
+  columns:
+    - { name: ArCashReceiptsAllCashReceiptId, type: long, nullable: true, pii: low }
+    - { name: ArCashReceiptsAllReceiptDate, type: timestamp, nullable: true, pii: none }
+    - { name: ArCashReceiptsAllAmount, type: "decimal(28,8)", nullable: true, pii: low }
+    - { name: ArCashReceiptsAllLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+    - { name: _source_pvo, type: string, nullable: false, pii: none }
+    - { name: _run_id, type: string, nullable: false, pii: none }
+    - { name: _watermark_used, type: timestamp, nullable: true, pii: none }
+quality:
+  tests: []

@@ -19,9 +19,21 @@
 5. **BI & reporting via JDBC** — OAC, Tableau, Power BI consume the gold layer
 6. **Delta Sharing** (v3 roadmap) — share curated datasets with other teams or external partners
 
-> **Phase 1 vs Phase 2**:
-> - **Wired in 0.1.0-alpha** (✅): BICC → bronze landing, OAC connection install (REST), `dashboard install` / `validate` / `uninstall`, MCP config emission, 207 unit tests, end-to-end live validation on disposable OAC1.
-> - **Stubbed (Phase 2 / 0.2.0)** (🚧): silver/gold transforms, conformed dimensions (`dim_supplier`, `dim_account`, `dim_calendar`, `dim_item`, `dim_org`), 5 gold marts (`supplier_spend`, `gl_balance`, `ap_aging`, `ar_aging`, `po_backlog`), `.bar` release artifact.
+> **Phase status (Phase 9, 2026-06-09)**:
+> - **Single execution path** — bronze, silver, gold all dispatch
+>   through the content-pack runner. The legacy `dimensions/dim_*.py`
+>   + `transforms/gold/*.py` modules + the `--execution-backend` CLI
+>   flag + the python_legacy adapter were deleted in Phase 9.
+> - **Content pack ships at** `scripts/oracle_ai_data_platform_fusion_bundle/content_packs/fusion-finance-starter/`
+>   with per-file `bronze/<id>.yaml` (11 datasets), `silver/<id>.{yaml,sql}`
+>   (3 dims), `gold/<id>.{yaml,sql}` (3 marts) — all customer-extensible
+>   via overlay packs.
+> - **OAC integration**: `dashboard install` / `validate` /
+>   `uninstall`, MCP config emission, live-validated on disposable OAC1.
+> - **Customer extension**: `aidp-fusion-bundle catalog probe-pvo
+>   <id> --datastore X --bicc-schema Y --emit-pack-yaml <path>`
+>   drafts a bronze YAML from a metadata-only BICC probe.
+> - **1360 unit + 12 architectural + 5 integration tests pass.**
 
 ---
 

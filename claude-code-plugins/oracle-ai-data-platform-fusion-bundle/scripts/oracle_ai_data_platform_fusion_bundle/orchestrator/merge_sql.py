@@ -1,29 +1,17 @@
 """Neutral SQL-string helpers for MERGE rendering — P1.17d.
 
-This module exists to break a circular-import risk:
+This module hosts the explicit-column-list MERGE clause helpers
+(``build_explicit_when_matched_clause`` / ``build_explicit_when_not_matched_clause``)
+that the content-pack strategy executors render against silver/gold
+targets. Kept in a neutral standard-library-only module so any future
+caller — engine-side or schema-side — can import it without dragging
+in orchestrator state.
 
-  * ``orchestrator/__init__.py`` imports ``from .registry import ...`` at
-    module-load time.
-  * ``registry.py`` imports the silver/gold builder modules
-    (``dim_supplier``, ``dim_account``, ``gl_balance``) at module-load
-    time.
-  * Silver/gold builders need the explicit-column-list MERGE clause
-    helpers to render target-wider MERGE statements (P1.17d).
-
-If those helpers lived in ``orchestrator/__init__.py``, the silver/gold
-builders would attempt to import them WHILE ``__init__.py`` is still
-initializing (the registry import chain hasn't finished), producing
-either an ``ImportError: cannot import name ...`` or a partial-module
-binding with no helper defined yet.
-
-The neutral module here has no internal imports beyond the standard
-library, so both ``orchestrator/__init__.py`` AND the silver/gold
-builder modules can import it safely at module-load time.
-
-P1.17e's :func:`_payload_diff_predicate_sql` and
-:func:`_natural_key_join_sql` stay in ``orchestrator/__init__.py``
-because they are only consumed by ``_do_bronze`` (which lives in the
-same file) — no cross-module import, no cycle.
+Bronze's payload-diff helpers (``_payload_diff_predicate_sql`` /
+``_natural_key_join_sql``) live next to the bronze adapter in
+``orchestrator/__init__.py`` and are re-exported by
+``orchestrator/merge_helpers.py``; they stay there because they're
+only consumed in-module.
 
 Function names are intentionally **public** (no leading underscore)
 because they cross module boundaries. Same convention as

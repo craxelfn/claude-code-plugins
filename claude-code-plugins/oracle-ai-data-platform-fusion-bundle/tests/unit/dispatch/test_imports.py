@@ -16,8 +16,6 @@ modules):
 - ``schema.errors`` (OrchestratorConfigError + cross-boundary subclasses)
 - ``schema.refs`` (env-var rendering)
 - ``schema.run_summary`` (RunStep, RunSummary, PlanNode, PrereqNode, marker serializers)
-- ``schema.registry_metadata`` (P1.5ε-fix9 — neutral bronze/silver/gold metadata
-  consumed by ``schema.plan_resolver``)
 - ``schema.plan_resolver`` (P1.5ε-fix9 — dry-run plan resolver consumed by
   ``dispatch.dispatch_via_rest`` under ``--dry-run``)
 """
@@ -107,32 +105,63 @@ def test_import_dispatch_wheel_builder_does_not_pull_engine() -> None:
     assert not leaks, f"wheel_builder leaked: {leaks}"
 
 
+def test_import_dispatch_notebook_dispatch_does_not_pull_engine() -> None:
+    """Phase 4.1 / D3 — the neutral end-to-end helper that wraps the
+    AidpRestClient sequence. The bootstrap-specific orchestration lives
+    in ``commands/cluster_bootstrap_probe.py``; this helper stays
+    orchestrator-free per the boundary."""
+    loaded = _modules_loaded_by(
+        "from oracle_ai_data_platform_fusion_bundle.dispatch.notebook_dispatch "
+        "import dispatch_notebook_and_fetch_marker"
+    )
+    leaks = {m for m in loaded if any(m.startswith(p) for p in FORBIDDEN_PREFIXES)}
+    assert not leaks, f"notebook_dispatch leaked: {leaks}"
+
+
 def test_schema_imports_are_permitted() -> None:
     """Sanity check — the schema-level imports the dispatch package
     relies on are reachable from the same clean subprocess. If this test
     fails the boundary tests above are likely false-passing because the
     schema packages themselves got renamed.
 
-    P1.5ε-fix9 adds ``schema.plan_resolver`` + ``schema.registry_metadata``
-    to the allow-list — both are consumed by ``dispatch_via_rest`` on
-    the dry-run path and must remain clean of engine imports.
+    P1.5ε-fix9 added ``schema.plan_resolver`` to the allow-list — it's
+    consumed by ``dispatch_via_rest`` on the dry-run path and must
+    remain clean of engine imports. (``schema.registry_metadata`` was
+    also in this allow-list pre-Phase-9-followup; it was deleted along
+    with the legacy registry — see
+    ``test_deleted_modules_remain_unfindable`` below.)
     """
     loaded = _modules_loaded_by(
         "from oracle_ai_data_platform_fusion_bundle import dispatch\n"
         "from oracle_ai_data_platform_fusion_bundle.schema import "
-        "bundle, errors, refs, run_summary, registry_metadata, plan_resolver"
+        "bundle, errors, refs, run_summary, plan_resolver"
     )
     expected = {
         "oracle_ai_data_platform_fusion_bundle.schema.bundle",
         "oracle_ai_data_platform_fusion_bundle.schema.errors",
         "oracle_ai_data_platform_fusion_bundle.schema.refs",
         "oracle_ai_data_platform_fusion_bundle.schema.run_summary",
-        "oracle_ai_data_platform_fusion_bundle.schema.registry_metadata",
         "oracle_ai_data_platform_fusion_bundle.schema.plan_resolver",
     }
     assert expected.issubset(loaded), (
         f"expected schema modules not loaded: missing={expected - loaded}"
     )
+
+
+def test_deleted_modules_remain_unfindable() -> None:
+    """Phase 9 follow-up — these modules were deleted on purpose; a
+    future re-introduction must be a deliberate decision, not a
+    cargo-culted resurrection."""
+    import importlib.util
+    for name in (
+        "oracle_ai_data_platform_fusion_bundle.orchestrator.registry",
+        "oracle_ai_data_platform_fusion_bundle.schema.registry_metadata",
+    ):
+        assert importlib.util.find_spec(name) is None, (
+            f"{name} was deleted in the Phase-9 follow-up but is "
+            f"importable again — see docs/features/v2-phase-9-followup-"
+            f"registry-deletion/idea.md for why."
+        )
 
 
 def test_render_summary_with_plan_nodes_does_not_import_orchestrator_registry() -> None:

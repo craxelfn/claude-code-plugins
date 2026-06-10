@@ -49,6 +49,8 @@ def run(
     resume_run_id: str | None = None,
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
+    force_fingerprint_skip: bool = False,
+    strict_scope: bool = False,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -59,8 +61,8 @@ def run(
 
     P1.5α-fix13: ``layers`` is now accepted as a CLI flag. Parses CSV the
     same shape as ``datasets`` and threads through to ``orchestrator.run``.
-    No new validation here — ``resolve_plan`` already handles unknown layer
-    names via ``MissingDependencyError`` (P1.5α-fix12).
+    No new validation here — the content-pack plan resolver already
+    rejects unknown layer names via ``MissingDependencyError``.
     """
     console = console or Console()
 
@@ -86,11 +88,10 @@ def run(
 
     # Parse CSV → list[str] or None. Do NOT pre-resolve against
     # bundle.datasets[] — that would limit the filter to bronze IDs
-    # and silently skip silver/gold. The orchestrator's resolve_plan
-    # classifies user-typed identifiers across all three registries
-    # (BRONZE_EXTRACTS / SILVER_DIMS / GOLD_MARTS) and raises
-    # MissingDependencyError (exit 2 via OrchestratorConfigError
-    # marker) if a name doesn't exist. P1.5α-fix7.
+    # and silently skip silver/gold. The content-pack plan resolver
+    # classifies user-typed identifiers across every pack node (bronze
+    # + silver + gold) and raises MissingDependencyError (exit 2 via
+    # OrchestratorConfigError marker) if a name doesn't exist.
     dataset_filter: list[str] | None = (
         [s.strip() for s in datasets.split(",") if s.strip()]
         if datasets else None
@@ -103,6 +104,13 @@ def run(
         if layers else None
     )
 
+    # Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack backend's
+    # per-node atomic-commit model (preflight → render → drift → execute
+    # → quality → state) is the resume unit; supplying --resume with the
+    # content-pack backend is now legal. The orchestrator adopts
+    # ``resume_run_id`` as the run_id so the resumed run's state rows
+    # join with the prior failed run's rows under one identifier.
+
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
         # the file because `_render_env_vars` (§4.4a) must run BEFORE
@@ -110,13 +118,16 @@ def run(
         return _run_inline(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
+            force_fingerprint_skip=force_fingerprint_skip,
+            strict_scope=strict_scope,
         )
-    # P1.5ε-fix5: REST-dispatch resume is supported — the notebook
-    # builder injects resume_run_id into the run cell as a repr()-quoted
-    # literal, so orchestrator.run(resume_run_id=...) runs cluster-side.
-    # Banner gated on `not dry_run`: dispatch short-circuits before any
-    # resume work happens under --dry-run, so a "Resuming run X" banner
-    # there would mislead the operator.
+    # Phase 5 P1.5ε-fix5 — REST-dispatch resume is now supported. The
+    # generated notebook cell threads `resume_run_id` into the
+    # cluster-side `orchestrator.run(...)` call so the resumed run
+    # adopts the supplied id and joins state rows with the prior
+    # failed run. Banner gated on `not dry_run`: dispatch short-circuits
+    # before any resume work happens under --dry-run, so a "Resuming
+    # run X" banner there would mislead the operator.
     if resume_run_id is not None and not dry_run:
         console.print(
             f"[bold cyan]Resuming run[/bold cyan] [dim]{resume_run_id}[/dim] — "
@@ -124,7 +135,10 @@ def run(
         )
     return _run_via_aidp_dispatch(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
-        resume_run_id, dry_run, poll_timeout_s, console,
+        dry_run, poll_timeout_s, console,
+        force_fingerprint_skip=force_fingerprint_skip,
+        resume_run_id=resume_run_id,
+        strict_scope=strict_scope,
     )
 
 
@@ -136,6 +150,9 @@ def _run_inline(
     resume_run_id: str | None,
     dry_run: bool,
     console: Console,
+    *,
+    force_fingerprint_skip: bool = False,
+    strict_scope: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -154,12 +171,92 @@ def _run_inline(
     from oracle_ai_data_platform_fusion_bundle.orchestrator.errors import (
         OrchestratorConfigError,
     )
+    from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+        EXIT_CODE_SCHEMA_DRIFT,
+        SchemaDriftDetectedError,
+    )
+
+    # Phase 3c — dedicated stderr console for AIDPF hand-off messages.
+    # Rich Console.print does NOT accept a stdlib `file=` kwarg
+    # (round-4 finding); the constructor binds to its output stream.
+    error_console = Console(stderr=True)
 
     if resume_run_id is not None:
         console.print(
             f"[bold cyan]Resuming run[/bold cyan] [dim]{resume_run_id}[/dim] — "
             f"reading fusion_bundle_state, computing reattempt plan…"
         )
+
+    # Phase 9 — content-pack is the only backend. Resolve the pack
+    # + profile up front and pass them into orchestrator.run. Skip
+    # gracefully when the bundle has no contentPack block (legacy
+    # bundles still pass through the underlying orchestrator code
+    # path until they're migrated).
+    resolved_pack = None
+    tenant_profile = None
+    _has_content_pack = False
+    try:
+        from ..schema.bundle import load_bundle as _peek_load_bundle
+        _peek_bundle, _ = _peek_load_bundle(bundle_path)
+        _has_content_pack = _peek_bundle.content_pack is not None
+    except Exception:
+        _has_content_pack = False
+    if _has_content_pack:
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
+            load_bundle as _load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import (
+            load_tenant_profile,
+            resolve_profile_path,
+        )
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from ..orchestrator.content_pack_validators import validate_pack_full
+
+        bundle, _paths = _load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; "
+                f"requires it.[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        # Phase 1 full validation BEFORE any profile/stage/dispatch work.
+        # validate_dag/validate_template_variables/validate_dashboard_*/etc.
+        # catch errors that the runtime DAG resolver doesn't — e.g. a typo
+        # in dependsOn.silver that points to a non-existent node would
+        # otherwise let the dependent execute against stale upstream tables.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        tenant_profile = load_tenant_profile(profile_path)
 
     try:
         summary = orchestrator.run(
@@ -169,7 +266,22 @@ def _run_inline(
             layers=layers,
             resume_run_id=resume_run_id,
             dry_run=dry_run,
+            resolved_pack=resolved_pack,
+            tenant_profile=tenant_profile,
+            force_fingerprint_skip=force_fingerprint_skip,
+            strict_scope=strict_scope,
         )
+    except SchemaDriftDetectedError as exc:
+        # Phase 3c — runtime preflight detected bronze-schema drift.
+        # Print the multi-line §9.5.5 hand-off message on STDERR (via
+        # the dedicated error_console — Rich `Console.print(file=...)`
+        # is not a valid shape, round-4 finding) and exit 14. This arm
+        # MUST precede the OrchestratorConfigError arm because the
+        # exception does NOT inherit from OrchestratorConfigError —
+        # otherwise it'd be swallowed and we'd return exit 2 instead
+        # of the documented 14.
+        error_console.print(f"[red]{exc.summary}[/red]")
+        return EXIT_CODE_SCHEMA_DRIFT
     except (OrchestratorConfigError, NotImplementedError) as exc:
         # User-facing config / not-implemented errors. Exit 2 with a
         # single-line message and no traceback. The error class is
@@ -188,10 +300,13 @@ def _run_via_aidp_dispatch(
     datasets: list[str] | None,
     layers: list[str] | None,
     mode: str,
-    resume_run_id: str | None,
     dry_run: bool,
     poll_timeout_s: int,
     console: Console,
+    *,
+    force_fingerprint_skip: bool = False,
+    resume_run_id: str | None = None,
+    strict_scope: bool = False,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
 
@@ -214,11 +329,106 @@ def _run_via_aidp_dispatch(
     from ._config_helpers import env_or_error, load_aidp_config
     from ..dispatch import dispatch_via_rest
     from ..dispatch.errors import DispatchError
-    from ..schema.errors import OrchestratorConfigError
+    from ..schema.errors import (
+        EXIT_CODE_SCHEMA_DRIFT,
+        OrchestratorConfigError,
+        SchemaDriftDetectedError,
+    )
+
+    error_console = Console(stderr=True)
+
+    # Phase 9 — content-pack is the only backend. Prepare staging
+    # primitives at the CLI layer (orchestrator-side imports are
+    # allowed here; dispatch/ cannot import them). Bundles without
+    # a contentPack block skip the staging — they execute purely
+    # through the legacy orchestrator paths.
+    profile_yaml: str | None = None
+    pack_files: dict[str, str] | None = None
+    pack_manifest: dict | None = None
+    schema_snapshot_yaml: str | None = None
+    resolved_pack = None
+    _has_content_pack = False
+    try:
+        from ..schema.bundle import load_bundle as _peek_load_bundle
+        _peek_bundle, _ = _peek_load_bundle(bundle_path)
+        _has_content_pack = _peek_bundle.content_pack is not None
+    except Exception:
+        _has_content_pack = False
+    if _has_content_pack:
+        from ..schema.bronze_schema_snapshot import resolve_snapshot_path
+        from ..schema.bundle import (
+            AIDPF_1030_PROFILE_MISSING,
+            AIDPF_1031_CONTENT_PACK_MISSING,
+            AIDPF_1033_PROFILE_FILE_NOT_FOUND,
+            ContentPackValidationFailedError,
+            load_bundle,
+            resolve_content_pack_root,
+        )
+        from ..schema.tenant_profile import resolve_profile_path
+        from ..orchestrator.content_pack import (
+            load_full_chain,
+            make_filesystem_base_resolver,
+        )
+        from ..orchestrator.content_pack_staging import stage_pack_files
+        from ..orchestrator.content_pack_validators import validate_pack_full
+
+        bundle, _bundle_paths = load_bundle(bundle_path)
+        if bundle.content_pack is None:
+            console.print(
+                f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
+                f"`contentPack:` block; requires "
+                f"the block. Either add it or run with the legacy v1 backend (removed in Phase 9).[/red]"
+            )
+            return 2
+        if bundle.content_pack.profile is None:
+            console.print(
+                f"[red]{AIDPF_1030_PROFILE_MISSING}: bundle.yaml's "
+                f"`contentPack.profile` field is required when running under "
+                f"content-pack.[/red]"
+            )
+            return 2
+        pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
+        resolved_pack = load_full_chain(
+            pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
+        )
+        # Phase 1 full validation BEFORE staging (round-15 review fix).
+        # An invalid pack must NOT reach the cluster — fail fast at the
+        # laptop with AIDPF-1036 carrying the per-error report.
+        report = validate_pack_full(resolved_pack)
+        if not report.ok:
+            err = ContentPackValidationFailedError(report=report)
+            console.print(f"[red]{err}[/red]")
+            return 2
+        profile_path = resolve_profile_path(bundle_path, bundle.content_pack.profile)
+        if not profile_path.exists():
+            console.print(
+                f"[red]{AIDPF_1033_PROFILE_FILE_NOT_FOUND}: profile YAML not "
+                f"found at {profile_path}.[/red]"
+            )
+            return 2
+        profile_yaml = profile_path.read_text(encoding="utf-8")
+        pack_files, pack_manifest = stage_pack_files(resolved_pack)
+        # Phase 3d — stage the snapshot if it exists. Pre-3d profiles
+        # ship without one; preflight on the cluster degrades to empty
+        # `datasetDeltas` + WARN, same as the laptop path.
+        snapshot_path = resolve_snapshot_path(
+            bundle_path, bundle.content_pack.profile
+        )
+        if snapshot_path.exists():
+            schema_snapshot_yaml = snapshot_path.read_text(encoding="utf-8")
 
     try:
         config = load_aidp_config(config_path)
         env = env_or_error(config, env_name)
+        # Phase 9 — explicit backend selection from the bundle: if a
+        # contentPack block is present we staged the pack files above
+        # and want the cluster-side notebook to invoke the content-pack
+        # runner. Pre-Phase-9 default of "legacy-python" silently routed
+        # content-pack bundles through the deleted v1 dispatcher and
+        # raised OrchestratorConfigError on the cluster.
+        dispatch_execution_backend = (
+            "content-pack" if _has_content_pack else "legacy-python"
+        )
         summary = dispatch_via_rest(
             bundle_path=bundle_path,
             config=config,
@@ -231,7 +441,29 @@ def _run_via_aidp_dispatch(
             dry_run=dry_run,
             poll_timeout_s=poll_timeout_s,
             log=lambda msg: console.print(f"[dim]{msg}[/dim]"),
+            execution_backend=dispatch_execution_backend,
+            profile_yaml=profile_yaml,
+            pack_files=pack_files,
+            pack_manifest=pack_manifest,
+            force_fingerprint_skip=force_fingerprint_skip,
+            schema_snapshot_yaml=schema_snapshot_yaml,
+            # Phase 9 — pack threaded through so dispatch's dry-run path
+            # can call schema.plan_resolver without crossing §4.3.
+            resolved_pack=resolved_pack,
+            # Phase 9 — --strict-scope must reach the cluster-side
+            # orchestrator.run() AND the dispatch dry-run resolver
+            # (otherwise the default REST path silently ignores it and
+            # D-1 auto-includes the deps the operator opted out of).
+            strict_scope=strict_scope,
         )
+    except SchemaDriftDetectedError as exc:
+        # Phase 3c — drift surfaces from REST-dispatch via the marker
+        # translation in `dispatch_via_rest` (the cluster-side run cell
+        # caught + re-raised; dispatcher reconstructed the artifact
+        # locally). Same exit-14 contract as the inline path; hand-off
+        # message lands on stderr so stdout stays clean for piping.
+        error_console.print(f"[red]{exc.summary}[/red]")
+        return EXIT_CODE_SCHEMA_DRIFT
     except (DispatchError, OrchestratorConfigError) as exc:
         console.print(f"[red]{exc}[/red]")
         return 2
@@ -308,6 +540,23 @@ def _render_summary(console: Console, summary) -> None:
             f"{step.duration_seconds:.2f}",
         )
     console.print(table)
+
+    # Phase 5 — synthetic gate-failure RunSteps (dataset_id starts +
+    # ends with double-underscore) carry a multi-line error_message
+    # with the AIDPF code + remediation runbook. The table cell would
+    # truncate the message; render the full text below the table so
+    # operators see the actionable guidance.
+    for step in summary.steps:
+        if (
+            step.status == "failed"
+            and step.dataset_id.startswith("__")
+            and step.dataset_id.endswith("__")
+            and step.error_message
+        ):
+            console.print(
+                f"\n[bold red]Gate failure — {step.dataset_id}[/bold red]"
+            )
+            console.print(step.error_message)
 
     # Summary counters. `resumed_skipped` shows up only on a resumed
     # run — kept off the line for normal runs so the common case stays

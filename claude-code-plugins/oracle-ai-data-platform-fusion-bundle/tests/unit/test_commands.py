@@ -67,6 +67,64 @@ class TestValidate:
         assert result.exit_code == 1
         assert "definitely_not_in_catalog" in result.output
 
+    def test_fails_when_declared_contentpack_path_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-9 review fix: a bundle that DECLARES contentPack
+        but whose path doesn't resolve must fail validate with
+        AIDPF-1037/AIDPF-1038, NOT silently fall back to the legacy
+        fusion_catalog membership check. Pre-fix the legacy fallback
+        gave a false-green here while the run command would later
+        reject the bundle with the same code.
+        """
+        monkeypatch.chdir(tmp_path)
+        # erp_suppliers IS in fusion_catalog.CATALOG, so the legacy
+        # fallback would silently pass. The point of this test is
+        # that declaring contentPack with a bad path must surface
+        # the AIDPF-1038 error instead of falling back.
+        (tmp_path / "bundle.yaml").write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: validate-bad-pack\n"
+            "fusion:\n"
+            "  serviceUrl: https://example.com\n"
+            "  username: u\n  password: p\n  externalStorage: x\n"
+            "aidp:\n"
+            "  catalog: fusion_catalog\n"
+            "  bronzeSchema: bronze\n  silverSchema: silver\n  goldSchema: gold\n"
+            "contentPack:\n"
+            "  name: fusion-finance-starter\n"
+            "  path: ./does-not-exist\n"
+            "  profile: demo\n"
+            "datasets:\n"
+            "  - id: erp_suppliers\n"
+        )
+        (tmp_path / "aidp.config.yaml").write_text(
+            "apiVersion: aidp-fusion-bundle/v1\n"
+            "project: validate-bad-pack\n"
+            "environments:\n"
+            "  dev:\n"
+            "    workspaceKey: ws\n"
+        )
+        result = CliRunner().invoke(cli.main, ["validate"])
+        assert result.exit_code == 1, (
+            f"validate must exit 1 on bad contentPack.path; got "
+            f"exit={result.exit_code} output={result.output!r}"
+        )
+        # The error must be the same AIDPF code the run command would
+        # raise (AIDPF-1037 for installed-pack miss, AIDPF-1038 for
+        # resolved-root-no-pack.yaml). Local relative path → 1038.
+        assert (
+            "AIDPF-1037" in result.output
+            or "AIDPF-1038" in result.output
+        ), (
+            f"validate output must surface AIDPF-1037/1038; got "
+            f"{result.output!r}"
+        )
+        # And it must NOT silently fall through to the legacy catalog —
+        # erp_suppliers is in the catalog, so the legacy fallback
+        # would have printed "validation passed".
+        assert "validation passed" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # catalog list / probe
@@ -166,32 +224,36 @@ class TestRun:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, [
-            "run", "--mode", "seed", "--datasets", "gl_journal_lines",
+            "run", "--mode", "seed", "--datasets", "gl_journal_lines"
         ])
         assert result.exit_code == 2
 
-    def test_resume_with_dispatch_threads_resume_run_id(
+    def test_resume_without_inline_dispatches_via_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """P1.5ε-fix5: ``--resume`` is supported on the REST-dispatch
-        path. The CLI threads ``resume_run_id`` through to
-        ``dispatch_via_rest(...)`` and prints the cyan ``Resuming run``
-        banner before dispatching."""
+        """Phase 5 P1.5ε-fix5 — non-inline ``--resume`` is now
+        supported through the REST-dispatch path. The CLI no longer
+        rejects it with a "requires --inline" hint, and prints the cyan
+        ``Resuming run`` banner before dispatching."""
         from unittest.mock import patch
-
-        from oracle_ai_data_platform_fusion_bundle.schema.run_summary import RunSummary
 
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         with patch(
-            "oracle_ai_data_platform_fusion_bundle.dispatch.dispatch_via_rest",
-            return_value=RunSummary.empty("test", "seed"),
+            "oracle_ai_data_platform_fusion_bundle.commands.run."
+            "_run_via_aidp_dispatch",
+            return_value=0,
         ) as mock_dispatch:
             result = CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--resume", "some-run-id",
             ])
         assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
-        assert mock_dispatch.call_args.kwargs["resume_run_id"] == "some-run-id"
+        assert mock_dispatch.call_args is not None
+        assert (
+            mock_dispatch.call_args.kwargs.get("resume_run_id")
+            == "some-run-id"
+        )
+        # P1.5ε-fix5 banner printed before dispatch (not under --dry-run).
         assert "Resuming run" in result.output
         assert "some-run-id" in result.output
 
@@ -239,7 +301,7 @@ class TestRun:
             return_value=fake_summary,
         ) as mock_dispatch:
             result = CliRunner().invoke(cli.main, [
-                "run", "--mode", "seed", "--datasets", "erp_suppliers",
+                "run", "--mode", "seed", "--datasets", "erp_suppliers"
             ])
         assert result.exit_code == 0, f"got {result.exit_code}: {result.output}"
         assert mock_dispatch.called
@@ -524,7 +586,7 @@ class TestRun:
         ) as mock_run:
             CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--inline",
-                "--datasets", " ap_aging , dim_supplier ,,",
+                "--datasets", " ap_aging , dim_supplier ,,"
             ])
         # Whitespace trimmed; empty segments dropped
         assert mock_run.call_args.kwargs["datasets"] == ["ap_aging", "dim_supplier"]
@@ -591,7 +653,7 @@ class TestRun:
             CliRunner().invoke(cli.main, [
                 "run", "--mode", "seed", "--inline",
                 "--layers", "bronze, silver",
-                "--datasets", "ap_invoices",
+                "--datasets", "ap_invoices"
             ])
         # Both filters reach orchestrator.run; CSV whitespace trimmed
         call_kwargs = mock_run.call_args.kwargs
@@ -716,6 +778,7 @@ class TestRun:
         )
         assert "simulated orchestrator bug" in str(result.exception)
 
+    @pytest.mark.skip(reason="Phase 9: tested v1 resolve_plan typo detection; content-pack equivalent lives in test_content_pack_plan_resolver.")
     def test_run_inline_typoed_datasets_exits_2_no_traceback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -741,7 +804,7 @@ class TestRun:
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         result = CliRunner().invoke(cli.main, [
             "run", "--mode", "seed", "--inline",
-            "--datasets", "ap_invoies",  # typo of ap_invoices
+            "--datasets", "ap_invoies",  # typo of ap_invoices,
         ])
         assert result.exit_code == 2, (
             f"typoed --datasets must hard-fail exit 2 (NOT exit 0 with empty "
@@ -905,13 +968,23 @@ class TestRenderRecommendations:
         from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime import (
             RunStep, RunSummary,
         )
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.registry import (
-            BronzeExtractSpec,
-        )
-        # Minimal one-step summary so _render_summary's main table branch runs
-        spec = BronzeExtractSpec("erp_suppliers", "erp_suppliers")
-        step = RunStep.success(spec, "rid", "seed", row_count=10, duration_seconds=1.0)
+        # Minimal one-step summary so _render_summary's main table branch runs.
+        # Phase 9 follow-up: the spec-typed ``RunStep.success(spec, ...)``
+        # factory was deleted; the live content-pack dispatcher constructs
+        # RunStep directly with ``node.id`` / ``node.layer`` literals, so the
+        # fixture mirrors that shape.
         now = datetime.now(UTC)
+        step = RunStep(
+            run_id="rid",
+            dataset_id="erp_suppliers",
+            layer="bronze",
+            mode="seed",
+            status="success",
+            row_count=10,
+            duration_seconds=1.0,
+            error_message=None,
+            watermark_used=None,
+        )
         return RunSummary(
             run_id="rid", started_at=now, finished_at=now,
             bundle_project="test", mode="seed", steps=(step,),

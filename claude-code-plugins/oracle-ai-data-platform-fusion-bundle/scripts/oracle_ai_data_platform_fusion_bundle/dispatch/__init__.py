@@ -37,6 +37,13 @@ import oci
 _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
+from ..schema.diagnostic_artifact import (
+    DiagnosticArtifactAlreadyExistsError,
+    SchemaDriftDiagnosticV1,
+    write_schema_drift_diagnostic,
+)
+from ..schema.errors import SchemaDriftDetectedError
+from ..schema.path_segment import UnsafePathSegmentError, validate_path_segment
 from ..schema.run_summary import RunSummary
 from .errors import (
     DispatchAuthError,
@@ -85,12 +92,44 @@ def dispatch_via_rest(
     mode: Literal["seed", "incremental"],
     datasets: list[str] | None,
     layers: list[str] | None,
-    resume_run_id: str | None = None,
     dry_run: bool = False,
     plugin_checkout: Path | None = None,
     auto_start_cluster: bool = True,
     poll_timeout_s: int = 3600,
     log: Callable[[str], None] = lambda msg: None,
+    # Phase 2 additions — primitives only (no orchestrator imports here).
+    execution_backend: str = "legacy-python",
+    profile_yaml: str | None = None,
+    pack_files: "Mapping[str, str] | None" = None,
+    pack_manifest: "dict[str, Any] | None" = None,
+    # Phase 3c — passthrough only; dispatch never inspects it. Threaded
+    # into the generated notebook's orchestrator.run(...) call so the
+    # cluster-side gate honours the operator's break-glass intent.
+    force_fingerprint_skip: bool = False,
+    # Phase 3d — passthrough only. When provided, the cluster-side
+    # bootstrap cell materialises the snapshot to the resolved
+    # profiles/<tenant>.schema-snapshot.yaml path so preflight can
+    # populate `datasetDeltas` on drift. ``None`` preserves pre-3d
+    # behaviour (preflight degrades to empty `datasetDeltas` + WARN).
+    schema_snapshot_yaml: str | None = None,
+    # Phase 5 P1.5ε-fix5 — REST-dispatch resume. When provided, the
+    # generated notebook cell passes ``resume_run_id=<id>`` to the
+    # cluster-side ``orchestrator.run(...)`` call so the resumed run
+    # adopts the supplied id and joins state rows with the prior
+    # failed run. ``None`` preserves the original "fresh run only"
+    # behaviour.
+    resume_run_id: str | None = None,
+    # Phase 9 — caller-loads-and-passes the resolved pack for the
+    # dispatch dry-run path so schema.plan_resolver can walk it
+    # without crossing the §4.3 import boundary into orchestrator/*.
+    # Required when ``dry_run=True``; ignored otherwise.
+    resolved_pack: "Any | None" = None,
+    # Phase 9 — ``--strict-scope`` opt-out of D-1 implicit-transitive-
+    # include. Threaded into both the dispatch dry-run resolver (via
+    # ``resolve_dry_run_plan``) and the cluster-side orchestrator.run
+    # call (via the generated run cell). Default False matches the
+    # CLI default.
+    strict_scope: bool = False,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
@@ -117,17 +156,22 @@ def dispatch_via_rest(
         :class:`DispatchRunFailedError`: terminal status FAILED/CANCELED/TIMED_OUT.
         :class:`DispatchFetchOutputError`: ``fetchOutput`` non-200.
         :class:`DispatchMarkerMissingError`: SUCCESS but no marker.
+        :class:`SchemaDriftDetectedError`: Phase 3c — the cluster-side
+            run cell caught a drift, emitted a discriminated marker
+            (``_kind == "schema_drift"``), and re-raised; this function
+            translates the marker back into a SchemaDriftDetectedError
+            after writing the artifact locally so the CLI can return
+            exit 14 (NOT exit 2 via DispatchRunFailedError).
         :class:`DispatchMarkerDegradedError`: marker delimiters found
             but body unparseable; run_id recovered via regex fallback
             (P1.5ε-fix5, TC27 trap).
 
-    ``resume_run_id`` (P1.5ε-fix5): when non-None, the operator-supplied
-    run_id is injected into the run-cell as a ``repr()``-quoted literal
-    so the cluster-side ``orchestrator.run(resume_run_id=...)`` resolves
-    against the existing ``fusion_bundle_state`` rows. The resumed run
-    carries the original ``run_id`` through ``silver_run_id`` /
-    ``gold_run_id`` audit columns. Bad run_ids surface as cell-3 errors
-    enriched into ``DispatchRunFailedError``'s message (see also
+    Phase 5 P1.5ε-fix5: ``resume_run_id`` is supported on the REST
+    dispatch path. The notebook cell threads it into
+    ``orchestrator.run(..., resume_run_id=<id>)`` so the cluster-side
+    run adopts the supplied id and writes state rows under the same
+    identifier as the prior failed run. Bad run_ids surface as cell-3
+    errors enriched into ``DispatchRunFailedError``'s message (see also
     ``AidpRestClient.extract_cell_errors``).
     """
     # ---- Phase A — local preflight ---------------------------------------
@@ -188,10 +232,18 @@ def dispatch_via_rest(
         from ..schema.bundle import load_bundle
         from ..schema.plan_resolver import resolve_dry_run_plan
 
+        if resolved_pack is None:
+            raise ValueError(
+                "dispatch_via_rest(dry_run=True) requires resolved_pack; "
+                "the caller (commands/run.py) must load the pack via "
+                "load_full_chain(...) and pass it in. This preserves "
+                "the §4.3 dispatch import boundary."
+            )
         bundle, paths = load_bundle(bundle_path)
         plan_nodes, prereq_nodes = resolve_dry_run_plan(
-            bundle, paths,
+            resolved_pack, bundle, paths,
             datasets=datasets, layers=layers,
+            strict_scope=strict_scope,
         )
         log("dry-run requested — skipping wheel build + upload + dispatch")
         return RunSummary.empty(
@@ -214,6 +266,17 @@ def dispatch_via_rest(
         resume_run_id=resume_run_id,
         bicc_secret_name=env.bicc_secret_name,
         bicc_secret_key=env.bicc_secret_key,
+        # Phase 2 primitives — passthrough only; dispatch never inspects them.
+        execution_backend=execution_backend,
+        profile_yaml=profile_yaml,
+        pack_files=pack_files,
+        pack_manifest=pack_manifest,
+        force_fingerprint_skip=force_fingerprint_skip,
+        schema_snapshot_yaml=schema_snapshot_yaml,
+        # Phase 9 — emit ``strict_scope=...`` in the generated
+        # orchestrator.run() call so the cluster honors the operator's
+        # opt-out of D-1 implicit-transitive-include.
+        strict_scope=strict_scope,
     )
 
     workspace_root = config.defaults.workspace_root.strip("/")
@@ -307,18 +370,147 @@ def dispatch_via_rest(
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
 
+    # Phase 3c — parse marker FIRST so a drift marker (emitted by the
+    # run cell before re-raising SchemaDriftDetectedError) takes
+    # precedence over DispatchRunFailedError. Status check moves below.
+    try:
+        marker = AidpRestClient.parse_marker(
+            executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        # ValueError covers `value.index(end, b)` failure (BEGIN found but
+        # no END — truncated stdout); JSONDecodeError covers the inner
+        # `json.loads(value[b:e])` blowing up on a malformed payload that
+        # happens to sit between valid BEGIN/END delimiters.
+        raise DispatchMarkerMissingError(
+            f"marker parse failed (jobRunKey={job_run_key}); "
+            f"evidence-capture failure — underlying: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+
+    # Phase 3c — drift marker takes precedence over status. The notebook
+    # caught SchemaDriftDetectedError, emitted this marker carrying the
+    # artifact JSON, then re-raised — so the cluster-side cell errored
+    # and result.status is FAILED. We translate the marker back into a
+    # SchemaDriftDetectedError on the laptop, reconstructing the
+    # diagnostic file locally so the operator can run `bootstrap
+    # --refresh` against it.
+    #
+    # Validate the marker before honouring it: a truncated / malformed
+    # drift marker (missing run_id, summary, fingerprints, or
+    # artifact_json that isn't a parseable AIDPF-2012 payload) must NOT
+    # silently write an unusable artifact + exit 14 — that would put
+    # the operator into the drift recovery flow with no actionable
+    # diagnostic. Reject as DispatchMarkerMissingError so the standard
+    # evidence-capture failure path runs.
+    if isinstance(marker, dict) and marker.get("_kind") == "schema_drift":
+        required_fields = (
+            "run_id",
+            "summary",
+            "prior_fingerprint",
+            "current_fingerprint",
+            "artifact_json",
+        )
+        missing = [f for f in required_fields if not marker.get(f)]
+        if missing:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"missing required field(s): {', '.join(missing)}. "
+                f"Cannot reconstruct local AIDPF-2012 artifact — "
+                f"evidence-capture failure."
+            )
+        artifact_text = marker["artifact_json"]
+        if not isinstance(artifact_text, str):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not a string "
+                f"(got {type(artifact_text).__name__})."
+            )
+        try:
+            artifact_obj = json.loads(artifact_text)
+        except json.JSONDecodeError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json is not valid JSON: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        if (
+            not isinstance(artifact_obj, dict)
+            or artifact_obj.get("errorCode") != "AIDPF-2012"
+        ):
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json payload is not an AIDPF-2012 diagnostic "
+                f"(errorCode={artifact_obj.get('errorCode') if isinstance(artifact_obj, dict) else type(artifact_obj).__name__})."
+            )
+        # Treat marker payloads as untrusted: validate run_id is a safe
+        # path segment + cross-check the inner artifact's runId matches
+        # before letting it drive a filesystem write. A malicious or
+        # corrupted marker with ``run_id="../outside"`` would otherwise
+        # write outside the workdir's .aidp/diagnostics tree.
+        drift_run_id = str(marker["run_id"])
+        try:
+            validate_path_segment(drift_run_id, field="marker.run_id")
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"{exc}"
+            ) from exc
+        if str(artifact_obj.get("runId", "")) != drift_run_id:
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json.runId={artifact_obj.get('runId')!r} does "
+                f"not match marker.run_id={drift_run_id!r}."
+            )
+        # Reconstruct via the Pydantic model + canonical writer so the
+        # laptop-side artifact uses the same path-segment validation,
+        # within-root assertion, and atomic-no-overwrite semantics as
+        # the cluster-side write.
+        try:
+            artifact_model = SchemaDriftDiagnosticV1.model_validate(artifact_obj)
+        except Exception as exc:  # ValidationError, ValueError, etc.
+            raise DispatchMarkerMissingError(
+                f"drift marker malformed (jobRunKey={job_run_key}); "
+                f"artifact_json failed Pydantic validation: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ) from exc
+        try:
+            diagnostic_path = write_schema_drift_diagnostic(
+                bundle_path.resolve().parent,
+                drift_run_id,
+                artifact_model,
+            )
+        except DiagnosticArtifactAlreadyExistsError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused: a local "
+                f"AIDPF-2012 artifact already exists for "
+                f"run_id={drift_run_id!r} "
+                f"(jobRunKey={job_run_key}). Delete the prior file or "
+                f"re-run with a fresh run_id to overwrite."
+            ) from exc
+        except UnsafePathSegmentError as exc:
+            raise DispatchMarkerMissingError(
+                f"drift marker reconstruction refused (jobRunKey="
+                f"{job_run_key}); {exc}"
+            ) from exc
+        raise SchemaDriftDetectedError(
+            run_id=drift_run_id,
+            diagnostic_path=diagnostic_path,
+            summary=str(marker["summary"]),
+            prior_fingerprint=str(marker["prior_fingerprint"]),
+            current_fingerprint=str(marker["current_fingerprint"]),
+        )
+
     if result.status != "SUCCESS":
         # P1.5ε-fix5: best-effort cell-error enrichment. The generated
         # run cell does not wrap orchestrator.run(...) in try/except, so
         # a bad --resume <id> (ResumeRunNotFoundError /
         # ResumeRunNotResumableError / ResumeBundleMismatchError) fails
         # cell 3 before marker emit. Walk the executed notebook for
-        # cell-3 errors and append the typed ename/evalue so the
-        # operator sees the orchestrator exception class without
-        # opening the notebook. Same pattern as
-        # `_diagnose_partial_progress` (fix8) — diagnostic must not
-        # mask the original failure, so any exception in the enricher
-        # is swallowed.
+        # cell-3 errors and append the typed ename/evalue so the operator
+        # sees the orchestrator exception class without opening the
+        # notebook. Diagnostic must not mask the original failure, so any
+        # exception in the enricher is swallowed.
         detail = ""
         try:
             cell_errors = AidpRestClient.extract_cell_errors(executed_notebook)
@@ -340,21 +532,6 @@ def dispatch_via_rest(
             f"{result.status!r}; see AIDP console / executed notebook "
             f"for details{detail}"
         )
-
-    try:
-        marker = AidpRestClient.parse_marker(
-            executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
-        )
-    except (ValueError, json.JSONDecodeError) as exc:
-        # ValueError covers `value.index(end, b)` failure (BEGIN found but
-        # no END — truncated stdout); JSONDecodeError covers the inner
-        # `json.loads(value[b:e])` blowing up on a malformed payload that
-        # happens to sit between valid BEGIN/END delimiters.
-        raise DispatchMarkerMissingError(
-            f"marker parse failed (jobRunKey={job_run_key}); "
-            f"evidence-capture failure — underlying: "
-            f"{type(exc).__name__}: {str(exc)[:200]}"
-        ) from exc
 
     if marker is None:
         raise DispatchMarkerMissingError(

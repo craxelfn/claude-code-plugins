@@ -258,14 +258,123 @@ class TestRunCell:
         assert "dataclasses.asdict" not in run
         assert "asdict(summary)" not in run
 
-    def test_resume_run_id_parameter_on_builder(self) -> None:
-        # P1.5ε-fix5: builder accepts resume_run_id as a keyword-only
-        # parameter with default None. Locks the new API contract.
+    def test_resume_run_id_parameter_threads_into_run_cell(self, wheel: Path) -> None:
+        """Phase 5 P1.5ε-fix5 — REST-dispatch resume is supported.
+        The notebook cell threads ``resume_run_id`` into the cluster-
+        side ``orchestrator.run(...)`` call so the resumed run adopts
+        the supplied id.
+        """
         import inspect
 
+        # Locks the API: build_notebook accepts resume_run_id as a
+        # keyword-only parameter with default None.
         sig = inspect.signature(build_notebook)
         assert "resume_run_id" in sig.parameters
         assert sig.parameters["resume_run_id"].default is None
+        # When None (default), the cell still emits a literal `None`.
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        assert "resume_run_id=None" in run
+        # When set, the cell emits the literal id.
+        nb_with_id = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            resume_run_id="phase5-resume-id-007",
+        )
+        run_with_id = "".join(nb_with_id["cells"][3]["source"])
+        assert "resume_run_id='phase5-resume-id-007'" in run_with_id
+
+    def test_run_cell_catches_schema_drift_and_emits_drift_marker(
+        self, wheel: Path
+    ) -> None:
+        """Phase 3c — the run cell must wrap ``orchestrator.run`` in
+        ``try/except SchemaDriftDetectedError``, emit a discriminated
+        marker (``_kind == "schema_drift"``) carrying the artifact JSON,
+        and then re-raise. Without this the laptop dispatcher cannot
+        translate cluster-side drift into exit 14."""
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        # Import is wired (must exist for the except clause to work).
+        assert "SchemaDriftDetectedError" in run
+        # Wrapped in try/except.
+        assert "try:" in run
+        assert "except SchemaDriftDetectedError" in run
+        # Drift marker discriminator + artifact handoff.
+        assert "_kind" in run and "schema_drift" in run
+        assert "artifact_json" in run
+        # Re-raise so the cluster cell ends in error state (matches the
+        # marker-precedence contract in dispatch_via_rest).
+        assert "raise" in run
+
+    def test_force_fingerprint_skip_threaded_into_run_cell(
+        self, wheel: Path
+    ) -> None:
+        """Review finding (P3c-review #1, BLOCKING): the
+        ``--force-fingerprint-skip`` CLI flag must reach the
+        cluster-side ``orchestrator.run(...)`` kwargs, not only the
+        inline path. Without this, the REST-dispatch path silently
+        enforces the gate and the audit-row promised in the PR is
+        never written."""
+        for ffs in (False, True):
+            nb = build_notebook(
+                wheel_path=wheel,
+                bundle_yaml="",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+                force_fingerprint_skip=ffs,
+            )
+            run = "".join(nb["cells"][3]["source"])
+            assert f"force_fingerprint_skip={ffs!r}" in run
+
+    def test_force_fingerprint_skip_default_is_false(self, wheel: Path) -> None:
+        """Default must be False so existing callers don't accidentally
+        bypass the gate."""
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="incremental",
+            datasets=None,
+            layers=None,
+        )
+        run = "".join(nb["cells"][3]["source"])
+        assert "force_fingerprint_skip=False" in run
+
+    def test_run_cell_compiles_as_python(self, wheel: Path) -> None:
+        """The run cell source must be valid Python — a stray indentation
+        bug in the try/except would surface as a SyntaxError on the
+        cluster, masking the drift hand-off."""
+        for backend in ("legacy-python", "content-pack"):
+            nb = build_notebook(
+                wheel_path=wheel,
+                bundle_yaml="",
+                mode="incremental",
+                datasets=None,
+                layers=None,
+                execution_backend=backend,
+                profile_yaml="x" if backend == "content-pack" else None,
+                pack_files={"a": "b"} if backend == "content-pack" else None,
+                pack_manifest={"k": "v"} if backend == "content-pack" else None,
+            )
+            # Index depends on backend (content-pack inserts a bootstrap cell).
+            run_idx = 4 if backend == "content-pack" else 3
+            run = "".join(nb["cells"][run_idx]["source"])
+            compile(run, "<run_cell>", "exec")
 
 
 class TestVerifyCell:

@@ -1,23 +1,15 @@
-"""Conformed dimensions (dim_supplier, dim_account, dim_calendar, dim_item, dim_org).
+"""Conformed dimensions package.
 
-Phase 2 (v0.2.0) wires these one by one:
+Phase 9 (ADR-0022) deleted the v1 dim_supplier + dim_account modules —
+silver dim_supplier / dim_account now ship as SQL templates under
+``content_packs/<pack-id>/silver/`` and dispatch via
+``orchestrator.builtins.sql_runner.execute_node``.
 
-* :mod:`dim_supplier` — productized from TC8's prototype.
-* :mod:`dim_account` — Chart of Accounts; required by ``gold.gl_balance``.
-* :mod:`dim_calendar` — system-generated; required by ``gold.gl_balance`` and
-  ``gold.po_backlog``.
-* ``dim_item`` (P1.6) — pending.
-* ``dim_org`` (P1.7) — deferred until customer HCM pod is available (P3.8).
-
-Each module follows the same pattern:
-
-* module-level constants for source/target table names (and defaults like
-  date ranges for ``dim_calendar``)
-* a pure ``build_<dim>_sql(...) -> str`` SQL builder (unit-testable)
-* a ``build(spark, ...) -> DataFrame`` Spark wrapper (executes the SQL)
-* optional helpers (e.g. :func:`dim_supplier.id_populated_pct`) feeding gold-layer decisions
+The remaining module ``dim_calendar`` is the only true Python builtin
+(ADR-0011): its date-math generator is parameter-driven, not table-
+driven, so a SQL template can't express it.
 """
 
-from . import dim_account, dim_calendar, dim_supplier
+from . import dim_calendar
 
-__all__ = ["dim_account", "dim_calendar", "dim_supplier"]
+__all__ = ["dim_calendar"]

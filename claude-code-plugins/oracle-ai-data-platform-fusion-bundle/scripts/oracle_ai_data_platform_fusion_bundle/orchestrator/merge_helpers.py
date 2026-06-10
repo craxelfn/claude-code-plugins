@@ -1,0 +1,205 @@
+"""MERGE-related SQL composition helpers — canonical Phase 2 location.
+
+Phase 2 elevates the v1 MERGE helpers from CPython-private symbols on
+``orchestrator/__init__.py`` to a public module the content-pack
+strategy executors (Steps 5-6) can import without crossing package
+internals. The v1 modules (``dimensions/dim_*.py``,
+``transforms/gold/*.py``, ``orchestrator/__init__.py:_execute_node``)
+keep their existing imports — the source-of-truth functions stay in
+``orchestrator/__init__.py`` (proven working through P1.5ε) and this
+module **re-exports** them so the import path
+``oracle_ai_data_platform_fusion_bundle.orchestrator.merge_helpers``
+is stable for the new code without rewriting any v1 callsite.
+
+Why re-export instead of move
+-----------------------------
+The v1 functions are battle-tested and have golden-snapshot SQL tests
+in ``tests/unit/test_p117_builder_merge_sql.py``. Moving them would
+require updating every import sitewide and would risk subtle behavioural
+drift. The re-export approach gives Phase 2 the canonical location it
+needs without disturbing the v1 runtime.
+
+This module also houses **new** Phase 2 helpers that don't exist in
+v1:
+
+* :func:`build_natural_key_join_sql` — public-named variant of the
+  re-exported ``_natural_key_join_sql`` (no leading underscore;
+  v2 callers should prefer this name).
+* :func:`build_payload_diff_predicate_sql` — public-named variant of
+  ``_payload_diff_predicate_sql``.
+* :func:`compose_merge_sql` — assembles the full ``MERGE INTO ... USING
+  (...) ON ... WHEN MATCHED ... WHEN NOT MATCHED ...`` statement from
+  the node's natural key + source SQL + an optional payload-diff
+  predicate.
+
+References
+----------
+* PLAN §10.2 (MERGE strategy SQL shape)
+* PLAN §11 (medallion correctness invariants — NULL-safe joins, payload
+  diff, target schema reconciliation)
+* LIMITS.md P1.17-L7 (payload diff rationale)
+* LIMITS.md P1.17-L8 (NULL-safe join rationale)
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+# Re-export the battle-tested v1 helpers under the Phase 2 module path.
+from . import (
+    _natural_key_join_sql as _v1_natural_key_join_sql,
+    _payload_diff_predicate_sql as _v1_payload_diff_predicate_sql,
+)
+from .state import (
+    _ensure_target_schema_for_merge as _v1_ensure_target_schema_for_merge,
+)
+
+__all__ = [
+    # Re-exports (v1 source-of-truth; same identity).
+    "_natural_key_join_sql",
+    "_payload_diff_predicate_sql",
+    "_ensure_target_schema_for_merge",
+    # Public-named Phase 2 wrappers.
+    "build_natural_key_join_sql",
+    "build_payload_diff_predicate_sql",
+    "ensure_target_schema_for_merge",
+    # New Phase 2 composer.
+    "compose_merge_sql",
+]
+
+
+# Re-exports — these are the same callable objects as the v1 originals;
+# tests asserting `obj is module._natural_key_join_sql` will pass under
+# both import paths.
+_natural_key_join_sql = _v1_natural_key_join_sql
+_payload_diff_predicate_sql = _v1_payload_diff_predicate_sql
+_ensure_target_schema_for_merge = _v1_ensure_target_schema_for_merge
+
+
+def build_natural_key_join_sql(
+    natural_key: str | tuple[str, ...] | list[str],
+    *,
+    target_alias: str = "target",
+    src_alias: str = "src",
+) -> str:
+    """Public-named NULL-safe natural-key join predicate builder.
+
+    Phase 2 callers (``execute_merge`` strategy executor) use this name;
+    v1 callers keep the underscore-prefixed alias. Behaviour identical.
+
+    Accepts a plain ``list[str]`` in addition to ``str`` / ``tuple[str,
+    ...]`` to match ``NodeYaml.refresh.incremental.natural_key`` which
+    is a list.
+    """
+    if isinstance(natural_key, list):
+        natural_key = tuple(natural_key)
+    return _natural_key_join_sql(
+        natural_key, target_alias=target_alias, src_alias=src_alias
+    )
+
+
+def build_payload_diff_predicate_sql(
+    data_columns: Iterable[str],
+    *,
+    target_alias: str = "target",
+    src_alias: str = "src",
+) -> str | None:
+    """Public-named payload-diff predicate builder.
+
+    Same behaviour as v1; ``None`` return signals the caller to fall
+    back to unconditional ``UPDATE SET *``.
+    """
+    return _payload_diff_predicate_sql(
+        data_columns, target_alias=target_alias, src_alias=src_alias
+    )
+
+
+def ensure_target_schema_for_merge(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Public-named schema-reconciliation helper.
+
+    Re-exports ``orchestrator.state._ensure_target_schema_for_merge``.
+    Phase 2 strategy executor calls this before running the MERGE so
+    nullable-column additions in the rendered source DataFrame are
+    auto-added to the target Delta table.
+    """
+    return _ensure_target_schema_for_merge(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# compose_merge_sql — full MERGE statement assembly (Phase 2 only)
+# ---------------------------------------------------------------------------
+
+
+def compose_merge_sql(
+    *,
+    target: str,
+    source_sql: str,
+    natural_key: list[str] | tuple[str, ...],
+    payload_diff_predicate: str | None = None,
+    target_alias: str = "target",
+    src_alias: str = "src",
+) -> str:
+    """Assemble the full ``MERGE INTO`` statement for the content-pack ``merge`` strategy.
+
+    Shape (PLAN §10.2):
+
+    ::
+
+        MERGE INTO <target> AS <target_alias>
+        USING (<source_sql>) AS <src_alias>
+        ON <natural-key NULL-safe predicate>
+        WHEN MATCHED [AND <payload-diff predicate>] THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+
+    The optional payload-diff predicate gates updates so unchanged rows
+    don't rewrite their audit columns each cycle (the P1.17e
+    optimisation, generalised for v2). Supply ``None`` to disable.
+
+    Args:
+        target: fully-qualified target table identifier (already
+            allowlist-checked by the renderer / orchestrator).
+        source_sql: the rendered SELECT that produces the merge source
+            DataFrame's rows. May contain ``:param`` markers — the
+            caller supplies the corresponding ``args=`` dict to
+            ``spark.sql``.
+        natural_key: list of natural-key column names. Single-element
+            list is fine; empty list raises.
+        payload_diff_predicate: optional ``IS DISTINCT FROM`` predicate
+            from :func:`build_payload_diff_predicate_sql`. When
+            non-None, gates the ``WHEN MATCHED`` clause; the resulting
+            UPDATE only fires on rows whose payload changed.
+        target_alias / src_alias: SQL aliases. Defaults match the v1
+            helpers so existing tests stay stable.
+
+    Returns:
+        The full MERGE INTO statement as a single string (no trailing
+        semicolon — per PLAN §9.4 the rendered SQL is a single
+        statement without terminator).
+
+    Raises:
+        ValueError: ``natural_key`` is empty.
+    """
+    if not natural_key:
+        raise ValueError(
+            "compose_merge_sql: natural_key is empty. The MERGE strategy "
+            "REQUIRES a natural key per PLAN §11.3 R1 / AIDPF-2020."
+        )
+
+    on_predicate = build_natural_key_join_sql(
+        list(natural_key), target_alias=target_alias, src_alias=src_alias
+    )
+
+    if payload_diff_predicate is not None:
+        when_matched = (
+            f"WHEN MATCHED AND ({payload_diff_predicate}) THEN UPDATE SET *"
+        )
+    else:
+        when_matched = "WHEN MATCHED THEN UPDATE SET *"
+
+    return (
+        f"MERGE INTO {target} AS {target_alias}\n"
+        f"USING ({source_sql}) AS {src_alias}\n"
+        f"ON {on_predicate}\n"
+        f"{when_matched}\n"
+        f"WHEN NOT MATCHED THEN INSERT *"
+    )

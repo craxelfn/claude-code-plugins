@@ -1,11 +1,22 @@
 """Implementation of ``aidp-fusion-bundle bootstrap``.
 
-Probes live prerequisites against the Fusion pod + AIDP workspace listed
-in ``aidp.config.yaml``. Each probe is independent and reports
-PASS / FAIL / SKIP with the exact remediation step. Overall exit code:
-0 if every probe passed (or was intentionally skipped), 1 otherwise.
+Two phases:
 
-Probes performed:
+1. **Pre-onboarding probes** (existing) — validate ``bundle.yaml`` +
+   ``aidp.config.yaml``, ping BICC + AIDP REST, reconcile the catalog,
+   optionally probe IAM. Skippable via ``--skip-preonboarding-probes``
+   for ``--refresh`` flows.
+2. **Variation-resolution phase** (Phase 3a — this feature) — when
+   ``bundle.content_pack`` is set, walk the pack's declared
+   ``columnAliases`` / ``semanticVariants`` against the tenant's live
+   bronze schema, pin chosen values to ``profiles/<tenant>.yaml``,
+   write an evidence snapshot. ``--refresh`` re-walks every variation
+   point against a possibly-drifted bronze (Step 9).
+
+v1 bundles (no ``contentPack:`` block) skip phase 2 entirely; their
+existing ``bootstrap`` behaviour is unchanged.
+
+Probes performed in phase 1:
   1. ``bundle.yaml + aidp.config.yaml`` schema validate
   2. ``GET <pod>/biacm/rest/meta/datastores`` reachable + auth works
   3. Catalog reconciliation (every dataset id resolves to a live datastore)
@@ -16,7 +27,9 @@ Probes performed:
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import requests
 import yaml
@@ -26,6 +39,12 @@ from rich.table import Table
 
 from ..schema.bundle import AidpConfig, Bundle
 from ..schema.fusion_catalog import CATALOG
+from .variation_phase import (
+    RefreshRequiresConfirmation,
+    VariationPhaseOptions,
+    VariationPhaseOutcome,
+    run_variation_phase,
+)
 
 
 class _ProbeResult:
@@ -44,6 +63,112 @@ class _ProbeResult:
         self.remediation = remediation
 
 
+# ---------------------------------------------------------------------------
+# Cluster-dispatch config resolution (Phase 4.1 / D3)
+# ---------------------------------------------------------------------------
+
+
+# Env var names the CLI consults when the corresponding flag is unset.
+# Operator wires these into their `.envrc` to avoid retyping cluster
+# coords on every bootstrap.
+_ENV_VAR_CLUSTER_KEY = "AIDP_FUSION_CLUSTER_KEY"
+_ENV_VAR_CLUSTER_NAME = "AIDP_FUSION_CLUSTER_NAME"
+_ENV_VAR_WORKSPACE_DIR = "AIDP_FUSION_WORKSPACE_DIR"
+
+
+@dataclass(frozen=True)
+class ResolvedClusterDispatchConfig:
+    """Final cluster-dispatch coordinates after applying the override chain.
+
+    Construction always succeeds; field values may be ``None`` when a
+    required input is unresolved. Step 9 / AIDPF-2047 detects those
+    nulls in cluster mode and fails-closed.
+
+    Resolution chain per field: CLI flag → env var → ``EnvSpec.<field>``
+    (or ``Defaults.<field>`` for ``workspace_dir``) → ``None``. The CLI
+    flag wins because it's per-invocation; the env var is per-shell;
+    the YAML is per-bundle.
+    """
+
+    aidp_id: str | None
+    workspace_key: str
+    cluster_key: str | None
+    cluster_name: str | None
+    region: str
+    oci_profile: str
+    workspace_dir: str
+
+    def missing_fields(self) -> list[str]:
+        """Return the list of fields that must be set for cluster-mode
+        dispatch but were not resolvable. Step 9 surfaces these as the
+        ``AIDPF-2047 (reason=missing_config)`` remediation hint."""
+        missing: list[str] = []
+        if not self.aidp_id:
+            missing.append("aiDataPlatformId")
+        if not self.cluster_key:
+            missing.append("clusterKey")
+        if not self.cluster_name:
+            missing.append("clusterName")
+        # workspace_dir always has a derived default; workspace_key is
+        # already required by EnvSpec at parse time, so we never check
+        # them here.
+        return missing
+
+
+def _resolve_cluster_dispatch_config(
+    env,  # EnvSpec — typed loosely to avoid a forward-import cycle
+    defaults,  # Defaults
+    *,
+    cluster_key_override: str | None = None,
+    cluster_name_override: str | None = None,
+    workspace_dir_override: str | None = None,
+) -> ResolvedClusterDispatchConfig:
+    """Apply CLI → env-var → YAML resolution to the cluster-dispatch coords.
+
+    Pure function. Does NOT raise on missing fields — callers inspect
+    :meth:`ResolvedClusterDispatchConfig.missing_fields` and decide how
+    to react (Step 9 emits AIDPF-2047 in cluster mode; local mode
+    ignores the result).
+    """
+
+    def _resolve(
+        cli_override: str | None,
+        env_var: str,
+        yaml_value: str | None,
+    ) -> str | None:
+        if cli_override:
+            return cli_override
+        env_value = os.environ.get(env_var)
+        if env_value:
+            return env_value
+        return yaml_value
+
+    workspace_dir = _resolve(
+        workspace_dir_override,
+        _ENV_VAR_WORKSPACE_DIR,
+        defaults.workspace_dir,
+    )
+    if not workspace_dir:
+        # Step 4a "derived default" — no missing-fields entry needed
+        # since we always have a value.
+        workspace_root = (defaults.workspace_root or "Shared").strip("/")
+        workspace_dir = f"/Workspace/{workspace_root}/fusion-bundle-bootstrap"
+
+    return ResolvedClusterDispatchConfig(
+        aidp_id=env.ai_data_platform_id,
+        workspace_key=env.workspace_key,
+        cluster_key=_resolve(
+            cluster_key_override, _ENV_VAR_CLUSTER_KEY, env.cluster_key
+        ),
+        cluster_name=_resolve(
+            cluster_name_override, _ENV_VAR_CLUSTER_NAME, env.cluster_name
+        ),
+        region=env.region or defaults.region or "us-ashburn-1",
+        oci_profile=env.oci_profile or "DEFAULT",
+        workspace_dir=workspace_dir,
+    )
+
+
 def bootstrap(
     bundle_path: Path,
     config_path: Path,
@@ -51,10 +176,75 @@ def bootstrap(
     *,
     check_iam: bool = False,
     console: Console | None = None,
+    # --- Phase 3a flags ---
+    refresh: bool = False,
+    operator: str | None = None,
+    non_interactive: bool = False,
+    resolutions_path: Path | None = None,
+    skip_preonboarding_probes: bool = False,
+    spark_session=None,
+    # --- Phase 4.1 / D3 flags (cluster-side bootstrap dispatcher) ---
+    dispatch_mode: Literal["cluster", "local"] = "cluster",
+    cluster_key_override: str | None = None,
+    cluster_name_override: str | None = None,
+    workspace_dir_override: str | None = None,
 ) -> int:
-    """Probe all prereqs; return process exit code (0 if all PASS, 1 otherwise)."""
+    """Run pre-onboarding probes + variation-resolution phase.
+
+    Returns process exit code (0 on success, non-zero on any failure).
+
+    Args:
+        bundle_path: path to ``bundle.yaml``.
+        config_path: path to ``aidp.config.yaml``.
+        env_name: environment key from ``aidp.config.yaml``.
+        check_iam: optional IAM probe (phase 1 only).
+        console: Rich console for output.
+        refresh: phase 2 re-walk against possibly-drifted bronze.
+        operator: explicit ``--operator`` value (phase 2).
+        non_interactive: phase 2 multi-match auto-pick mode.
+        resolutions_path: scripted multi-match resolutions JSON.
+        skip_preonboarding_probes: skip phase 1 (power-user knob for
+            ``--refresh`` flows that already passed phase 1 on initial
+            onboarding). Incompatible with ``dispatch_mode="cluster"`` —
+            the conflict surfaces as ``AIDPF-2047 (reason=conflicting_flags)``
+            in Step 9.
+        spark_session: caller-injected Spark session (tests). Only used
+            in ``dispatch_mode="local"`` — cluster mode never
+            instantiates a local Spark session.
+        dispatch_mode: ``"cluster"`` (default, Phase 4.1) dispatches
+            the variation-phase bronze probe to the AIDP cluster via
+            a notebook. ``"local"`` keeps the legacy laptop-Spark
+            behaviour for backward compat with unit tests / laptop POC.
+        cluster_key_override: per-invocation override of
+            ``EnvSpec.cluster_key``. CLI flag → env var
+            ``AIDP_FUSION_CLUSTER_KEY`` → ``EnvSpec`` (Step 4 resolution).
+        cluster_name_override: per-invocation override of
+            ``EnvSpec.cluster_name`` (same chain).
+        workspace_dir_override: per-invocation override of
+            ``Defaults.workspace_dir`` / env var
+            ``AIDP_FUSION_WORKSPACE_DIR`` (same chain). When fully
+            unresolved, Step 4 derives
+            ``/Workspace/{workspace_root}/fusion-bundle-bootstrap``.
+    """
     console = console or Console()
     results: list[_ProbeResult] = []
+
+    # ---- Phase 4.1 / D3 — AIDPF-2047 (conflicting_flags) gate ----
+    # `--dispatch-mode=cluster` + `--skip-preonboarding-probes` is
+    # incompatible: cluster dispatch needs the aidp-rest probe to
+    # confirm auth before paying the wheel-build + notebook round-trip
+    # cost. Fail-closed at CLI parse time, no artifact (AIDPF-2047 is
+    # CLI-level per Step 8).
+    if dispatch_mode == "cluster" and skip_preonboarding_probes:
+        console.print(
+            "[red]AIDPF-2047 (reason=conflicting_flags): "
+            "--dispatch-mode=cluster is incompatible with "
+            "--skip-preonboarding-probes (the aidp-rest probe is "
+            "load-bearing in cluster mode). Drop the skip flag, or "
+            "pass --dispatch-mode=local if you genuinely want to "
+            "skip the probe and use laptop-local Spark.[/red]"
+        )
+        return 1
 
     bundle, config = _load(bundle_path, config_path, results)
     if bundle and config:
@@ -65,7 +255,7 @@ def bootstrap(
                 f"env '{env_name}' not in aidp.config.yaml",
                 f"add '{env_name}:' under environments: in aidp.config.yaml",
             ))
-        else:
+        elif not skip_preonboarding_probes:
             _probe_bicc(bundle, results)
             _probe_aidp(env, results)
             if check_iam:
@@ -74,9 +264,84 @@ def bootstrap(
                     "policy probe requires AIDP RP credentials and is not auto-discoverable",
                     "verify manually that AIDP RP can read the BICC External Storage bucket",
                 ))
+        elif skip_preonboarding_probes:
+            results.append(_ProbeResult(
+                "preonboarding-probes", "SKIP",
+                "skipped via --skip-preonboarding-probes",
+                "re-run without the flag to validate pod / AIDP reachability",
+            ))
 
     _render(results, console)
-    return 0 if all(r.status == "PASS" or r.status == "SKIP" for r in results) else 1
+    phase1_failed = any(r.status == "FAIL" for r in results)
+    if phase1_failed:
+        return 1
+
+    # ---- Phase 4.1 / D3 — AIDPF-2047 (aidp_rest_probe_failed) gate ----
+    # In cluster mode the aidp-rest probe MUST pass — a SKIP (oci SDK
+    # missing) is just as fatal as a FAIL because cluster dispatch
+    # needs the OCI signer. Locally we just printed PASS/FAIL/SKIP;
+    # cluster mode promotes SKIP to non-zero exit with the AIDPF-2047
+    # framing.
+    if dispatch_mode == "cluster" and bundle is not None and env is not None:
+        aidp_rest = next(
+            (r for r in results if r.name == "aidp-rest"), None
+        )
+        if aidp_rest is not None and aidp_rest.status == "SKIP":
+            console.print(
+                f"[red]AIDPF-2047 (reason=aidp_rest_probe_failed): "
+                f"aidp-rest probe SKIPPED — {aidp_rest.detail}. "
+                f"Cluster dispatch requires the OCI SDK; install it or "
+                f"pass --dispatch-mode=local.[/red]"
+            )
+            return 1
+
+    # ----- Phase 2: variation resolution -----
+    if bundle is None or bundle.content_pack is None:
+        # v1 bundle — phase 1 result is the only signal.
+        return 0
+
+    # Resolve the cluster-dispatch config when entering cluster mode.
+    resolved_dispatch_config = None
+    if dispatch_mode == "cluster" and bundle is not None and env is not None:
+        resolved_dispatch_config = _resolve_cluster_dispatch_config(
+            env,
+            config.defaults if config is not None else None,
+            cluster_key_override=cluster_key_override,
+            cluster_name_override=cluster_name_override,
+            workspace_dir_override=workspace_dir_override,
+        )
+        # ---- AIDPF-2047 (missing_config) gate ----
+        missing = resolved_dispatch_config.missing_fields()
+        if missing:
+            console.print(
+                f"[red]AIDPF-2047 (reason=missing_config): cluster-mode "
+                f"bootstrap requires {missing!r}. Set the field(s) in the "
+                f"active environment under "
+                f"aidp.config.yaml::environments.{env_name!r} (or Defaults "
+                f"for workspaceDir), or pass --cluster-key= / "
+                f"--cluster-name= / --workspace-dir=.[/red]"
+            )
+            return 1
+
+    options = VariationPhaseOptions(
+        refresh=refresh,
+        operator=operator,
+        non_interactive=non_interactive,
+        resolutions_path=resolutions_path,
+        spark_session=spark_session,
+        dispatch_mode=dispatch_mode,
+        dispatch_config=resolved_dispatch_config,
+        env=env if dispatch_mode == "cluster" else None,
+    )
+    try:
+        outcome: VariationPhaseOutcome = run_variation_phase(
+            bundle, bundle_path, options=options, console=console
+        )
+    except RefreshRequiresConfirmation as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
+    return outcome.exit_code
 
 
 def _load(
@@ -170,56 +435,58 @@ def _probe_bicc(bundle: Bundle, results: list[_ProbeResult]) -> None:
 
 
 def _probe_aidp(env, results: list[_ProbeResult]) -> None:
+    # Reuse AidpRestClient — single source of truth for the AIDP REST host
+    # + path construction (PLAN-aligned; see docs/v2-phase-4-live-defects.md
+    # §D4 for the historical pattern this replaced).
     try:
-        import oci  # type: ignore[import-not-found]
-    except ImportError:
+        from ..dispatch.rest_client import AidpRestClient, AidpRestError
+    except ImportError as exc:
         results.append(_ProbeResult(
             "aidp-rest", "SKIP",
-            "oci SDK not importable",
+            f"AidpRestClient not importable: {exc}",
             "pip install oci",
         ))
         return
 
-    profile = env.oci_profile or "DEFAULT"
-    try:
-        config = oci.config.from_file(profile_name=profile)
-    except Exception as exc:
+    workspace_key = env.workspace_key
+    aidp_id = getattr(env, "ai_data_platform_id", None)
+    if not aidp_id:
         results.append(_ProbeResult(
-            "aidp-rest", "FAIL", f"oci profile '{profile}': {exc}",
-            "oci session authenticate --profile " + profile,
+            "aidp-rest", "FAIL",
+            "aiDataPlatformId is not set on the environment",
+            "set `aiDataPlatformId:` for this environment in aidp.config.yaml",
         ))
         return
 
-    region = env.region or config.get("region", "us-ashburn-1")
-    workspace_key = env.workspace_key
-    api_base = f"https://{workspace_key}.aidataplatform.{region}.oci.oraclecloud.com"
+    region = env.region or "us-ashburn-1"
+    oci_profile = env.oci_profile or "DEFAULT"
     try:
-        signer = oci.signer.Signer(
-            tenancy=config["tenancy"],
-            user=config["user"],
-            fingerprint=config["fingerprint"],
-            private_key_file_location=config.get("key_file"),
-            pass_phrase=config.get("pass_phrase"),
+        client = AidpRestClient(
+            region=region,
+            aidp_id=aidp_id,
+            workspace_key=workspace_key,
+            oci_profile=oci_profile,
         )
-        response = requests.get(
-            f"{api_base}/api/v1/workspaces/{workspace_key}",
-            auth=signer,
-            timeout=30,
-        )
-    except Exception as exc:
-        results.append(_ProbeResult("aidp-rest", "FAIL", f"signer/request error: {exc}"))
+        workspaces = client.list_workspaces()
+    except AidpRestError as exc:
+        results.append(_ProbeResult("aidp-rest", "FAIL", f"AIDP REST error: {exc}"))
+        return
+    except Exception as exc:  # signer construction, oci config, network
+        results.append(_ProbeResult("aidp-rest", "FAIL", f"client init/request error: {exc}"))
         return
 
-    if response.status_code == 200:
+    if any(ws.key == workspace_key for ws in workspaces):
         results.append(_ProbeResult(
             "aidp-rest", "PASS",
             f"workspace {workspace_key} reachable in {region}",
         ))
     else:
+        visible = ", ".join(ws.key for ws in workspaces[:5]) or "<none>"
         results.append(_ProbeResult(
             "aidp-rest", "FAIL",
-            f"HTTP {response.status_code} from /api/v1/workspaces/{workspace_key}",
-            "verify workspaceKey + dataLakeOcid in aidp.config.yaml",
+            f"workspace {workspace_key!r} not found in aiDataPlatform "
+            f"{aidp_id!r}; visible: {visible}",
+            "verify workspaceKey + aiDataPlatformId in aidp.config.yaml",
         ))
 
 

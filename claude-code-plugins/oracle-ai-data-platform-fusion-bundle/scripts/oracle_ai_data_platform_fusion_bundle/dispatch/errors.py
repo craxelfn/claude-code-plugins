@@ -101,6 +101,49 @@ class DispatchMarkerMissingError(DispatchError):
     code: ClassVar[str] = "DISPATCH_MARKER_MISSING"
 
 
+class DispatchMarkerEnvelopeMissing(DispatchError):
+    """Phase 4.1 / D3 — ``parse_marker`` walked every cell + output
+    channel and never found the configured ``MARKER_BEGIN``/``MARKER_END``
+    envelope. Sibling of :class:`DispatchMarkerMissingError` but
+    carries the executed notebook + extracted stdout excerpt so the
+    caller can write the AIDPF-2049 ``cluster_stdout.log`` companion
+    (the existing class is kept for backward compat with the run
+    dispatcher, which doesn't need the payload)."""
+
+    code: ClassVar[str] = "DISPATCH_MARKER_ENVELOPE_MISSING"
+
+    def __init__(
+        self,
+        msg: str,
+        *,
+        executed_notebook: dict | None = None,
+        stdout_excerpt: str = "",
+    ) -> None:
+        super().__init__(msg)
+        self.executed_notebook = executed_notebook
+        self.stdout_excerpt = stdout_excerpt
+
+
+class DispatchMarkerDecodeError(DispatchError):
+    """Phase 4.1 / D3 — envelope was found but base64 / JSON decoding
+    failed. Same attributes as :class:`DispatchMarkerEnvelopeMissing`
+    — the AIDPF-2049 companion log needs the same payload regardless
+    of the precise failure mode."""
+
+    code: ClassVar[str] = "DISPATCH_MARKER_DECODE"
+
+    def __init__(
+        self,
+        msg: str,
+        *,
+        executed_notebook: dict | None = None,
+        stdout_excerpt: str = "",
+    ) -> None:
+        super().__init__(msg)
+        self.executed_notebook = executed_notebook
+        self.stdout_excerpt = stdout_excerpt
+
+
 class DispatchMarkerDegradedError(DispatchError):
     """Marker delimiters found in the executed notebook but the body
     failed ``json.loads`` (typically the TC27 trap — AIDP's
@@ -127,7 +170,9 @@ __all__ = [
     "DispatchError",
     "DispatchFetchOutputError",
     "DispatchJobSubmitError",
+    "DispatchMarkerDecodeError",
     "DispatchMarkerDegradedError",
+    "DispatchMarkerEnvelopeMissing",
     "DispatchMarkerMissingError",
     "DispatchPollTimeoutError",
     "DispatchPreflightError",
