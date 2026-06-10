@@ -58,7 +58,7 @@ class WatermarkMonotonicityError(OrchestratorRuntimeError):
     """Captured bronze cursor is strictly less than the prior-success
     row's persisted cursor (clock regression / bronze-clock-skew bug).
 
-    Phase β.1 captures the persisted cursor as
+    Incremental execution captures the persisted cursor as
     ``extract_started_at - WATERMARK_SAFETY_WINDOW`` where
     ``extract_started_at = datetime.now(timezone.utc)`` immediately
     before the BICC extract. Under normal forward-time conditions

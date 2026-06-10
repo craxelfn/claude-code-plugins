@@ -1,13 +1,12 @@
-"""Pinned bronze-schema snapshot (PLAN §9.5.4 / Phase 3d).
+"""Pinned bronze-schema snapshot.
 
 Bootstrap writes one file at
 ``<bundle.yaml.parent>/profiles/<profile>.schema-snapshot.yaml`` at the
-same instant it computes ``bronzeSchemaFingerprint`` (Phase 3a). The
+same instant it computes ``bronzeSchemaFingerprint``. The
 snapshot is the un-hashed input that drives the fingerprint —
-serialising it lets the Phase 3c runtime drift gate populate
+serialising it lets the runtime drift gate populate
 :attr:`SchemaDriftFailure.dataset_deltas` with column-level
-add/remove/type-changed entries instead of always-empty (Phase 3c
-v0.3).
+add/remove/type-changed entries.
 
 Layout / lifecycle:
 
@@ -78,7 +77,7 @@ class BronzeSchemaSnapshotV1(BaseModel):
     Carries enough metadata for preflight to validate the snapshot in
     isolation (without re-reading the profile):
 
-    * ``schemaVersion`` — locked to ``1`` for v0.3. Future bumps are a
+    * ``schemaVersion`` — locked to ``1``. Future bumps are a
       separate feature.
     * ``tenant`` — paired with the profile; preflight cross-checks at
       read time but does not require equality (the profile's tenant

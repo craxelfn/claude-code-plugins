@@ -1,8 +1,8 @@
-"""Cross-boundary RunStep + RunSummary dataclasses (P1.5ε §Step 1b).
+"""Cross-boundary RunStep + RunSummary dataclasses.
 
 The orchestrator produces these objects cluster-side; the CLI renderer
 consumes them laptop-side. Under the `--inline` execution surface both sides
-live in the same Python process. Under the REST-dispatch surface (P1.5ε)
+live in the same Python process. Under the REST-dispatch surface
 the orchestrator emits a JSON marker that the dispatch package deserializes
 back into a ``RunSummary`` for the same renderer to format.
 
@@ -16,7 +16,7 @@ Identity is preserved:
 ``orchestrator.runtime.RunStep is schema.run_summary.RunStep``
 ``orchestrator.runtime.RunSummary is schema.run_summary.RunSummary``
 
-Phase 9 follow-up: the spec-typed factory classmethods (``RunStep.success`` /
+Spec-typed factory classmethods (``RunStep.success`` /
 ``.failed`` / ``.skipped_cascade`` / ``.skipped_aborted`` / ``.deferred`` /
 ``.resumed_skip``) were deleted along with the v1 execution path. The live
 content-pack dispatcher constructs ``RunStep`` directly with positional args
@@ -24,7 +24,7 @@ content-pack dispatcher constructs ``RunStep`` directly with positional args
 package deserializes via ``RunSummary.from_marker_dict`` (pure JSON →
 dataclass; no factory, no spec, no engine import). ``RunStep.gate_failed``
 survives because it takes no spec object and is still used by
-``_phase5_top_level_dispatch`` for AIDPF-207x medallion gate failures.
+``_dispatch_content_pack_run`` for AIDPF-207x medallion gate failures.
 """
 
 from __future__ import annotations
@@ -117,11 +117,11 @@ class PrereqNode:
 
 @dataclass(frozen=True)
 class RunStep:
-    """One row of orchestrator telemetry. Mirrors the
-    ``fusion_bundle_state`` schema (§3.2). Constructed via classmethod
-    factories (``success`` / ``failed`` / ``skipped_cascade`` /
-    ``skipped_aborted`` / ``deferred`` / ``resumed_skip``) engine-side, or
-    via :meth:`RunSummary.from_marker_dict` dispatch-side.
+    """One row of orchestrator telemetry.
+
+    Mirrors the ``fusion_bundle_state`` schema and can be constructed
+    directly engine-side or via :meth:`RunSummary.from_marker_dict`
+    dispatch-side.
     """
 
     run_id: str
@@ -149,7 +149,7 @@ class RunStep:
         aidpf_code: str,
         error_message: str,
     ) -> "RunStep":
-        """Synthetic ``RunStep`` for a Phase 5 medallion gate failure.
+        """Synthetic ``RunStep`` for a medallion gate failure.
 
         Used by the top-level dispatcher when ``assert_bronze_readiness``
         (AIDPF-2071) or ``assert_fusion_pvo_compatibility`` (AIDPF-2072)

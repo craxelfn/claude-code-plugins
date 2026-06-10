@@ -1,9 +1,9 @@
-"""Phase 2 state-layer additions — additive migration + atomic batch write.
+"""Content-pack state-layer additions: additive migration + atomic batch write.
 
 This module sits ALONGSIDE the existing ``orchestrator/state.py`` (v1)
 and adds:
 
-* :data:`PHASE2_NEW_COLUMNS` — the tuple of new nullable columns added
+* :data:`CONTENT_PACK_STATE_COLUMNS` — the tuple of nullable columns added
   to ``fusion_bundle_state`` for content-pack runs.
 * :func:`ensure_state_columns_v2` — additive migration using the same
   introspect-then-ADD COLUMNS pattern v1 uses (Spark rejects ``ADD
@@ -22,9 +22,8 @@ and adds:
   partially commit (which would advance the primary's
   output_watermark without the lookup audit rows reaching the table).
 
-The v1 ``ensure_state_table`` and ``write_state_row`` continue to work
-unchanged — Phase 2 callers (Step 11 ``execute_node``) explicitly invoke
-the Phase 2 helpers.
+The base ``ensure_state_table`` and ``write_state_row`` continue to work
+unchanged. Content-pack callers explicitly invoke these helpers.
 
 References:
 
@@ -64,10 +63,10 @@ class StateCommitError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 column set
+# Content-pack column set
 # ---------------------------------------------------------------------------
 
-PHASE2_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+CONTENT_PACK_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
     # Pack / profile identity.
     ("pack_id", "STRING"),
     ("pack_version", "STRING"),
@@ -100,19 +99,19 @@ readers read them when present."""
 
 
 def ensure_state_columns_v2(spark: "SparkSession", paths: "TablePaths") -> None:
-    """Apply the Phase 2 additive column migration to ``fusion_bundle_state``.
+    """Apply content-pack additive columns to ``fusion_bundle_state``.
 
     Uses Spark's introspect-then-ADD COLUMNS pattern (matches the v1
     ``ensure_state_table`` migration logic). Spark's ``ALTER TABLE ...
     ADD COLUMNS`` parser rejects ``IF NOT EXISTS`` — we DESCRIBE the
     table, compute the missing column set, and emit a single ALTER
-    with ONLY those columns. Empty-diff (every Phase 2 column already
+    with ONLY those columns. Empty-diff (every content-pack column already
     present) is a no-op.
 
     This function ALSO redeploys the ``fusion_bundle_state_latest``
-    view with the Phase 2 grain (PARTITION BY widened to include
+    view with the content-pack grain (PARTITION BY widened to include
     ``layer`` + ``source_id``). The view's DDL is updated to project
-    the new Phase 2 columns alongside the v1 columns.
+    the new content-pack columns alongside the base columns.
 
     Idempotent. Safe to call on every content-pack run (re-running
     after the migration has applied is a no-op).
@@ -133,18 +132,18 @@ def ensure_state_columns_v2(spark: "SparkSession", paths: "TablePaths") -> None:
 
     existing = v1_state._existing_state_columns(spark, table_path)
     missing = [
-        (name, dtype) for name, dtype in PHASE2_NEW_COLUMNS if name not in existing
+        (name, dtype) for name, dtype in CONTENT_PACK_STATE_COLUMNS if name not in existing
     ]
     if missing:
         spark.sql(v1_state._build_add_columns_ddl(table_path, missing))
 
-    # Redeploy the latest view with the Phase 2 grain. CREATE OR REPLACE
+    # Redeploy the latest view with the content-pack grain. CREATE OR REPLACE
     # VIEW is idempotent and updates the projection in place.
     spark.sql(_phase2_latest_view_ddl(table_path, view_path))
 
 
 def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
-    """The Phase 2 ``fusion_bundle_state_latest`` view DDL.
+    """The content-pack ``fusion_bundle_state_latest`` view DDL.
 
     Widens the PARTITION BY to ``(run_id, dataset_id, layer, source_id)``.
 
@@ -154,14 +153,14 @@ def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
     dataset_id share the same layer value; adding ``source_id`` doesn't
     split because v1 rows leave it NULL.
 
-    Multi-source Phase 2 rows project as N rows per ``(run_id,
+    Multi-source content-pack rows project as N rows per ``(run_id,
     dataset_id, layer)`` where N = number of sources, each
     distinguished by its ``source_id``. Multi-layer dataset_id (rare;
     v1 collapsed them silently — that was a latent bug) now correctly
     returns one row per layer.
 
-    Projects v1 columns + the Phase 2 column set so v2 readers see
-    them; v1 readers ignore the new columns. Both the v1 and v2 column
+    Projects base columns + the content-pack column set so readers see
+    them. Both the base and content-pack column
     sets MUST exist on the underlying table for this view to compile —
     callers MUST run :func:`ensure_state_columns_v2` first (which
     drops + redeploys this view as part of its idempotent flow).
@@ -206,9 +205,9 @@ def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
 def _build_state_row_schema():
     """Construct the canonical state-row StructType.
 
-    Round-16 fix: real PySpark rejects ``createDataFrame([{"a": None}])``
+    Real PySpark rejects ``createDataFrame([{"a": None}])``
     because it can't infer a type for a column whose only value is
-    None — and Phase 2 state rows legitimately have all-None columns
+    None — and content-pack state rows legitimately have all-None columns
     in the common case (``node_version``, ``fusion_version``,
     ``input_watermark_start``, ``input_watermark_end``,
     ``consumed_version`` are None on every single-source success row;
@@ -219,7 +218,7 @@ def _build_state_row_schema():
     effort writers catch the same failure).
 
     The schema covers v1 base columns (matching ``state.py::_ddl``)
-    plus :data:`PHASE2_NEW_COLUMNS`. Every field is declared nullable
+    plus :data:`CONTENT_PACK_STATE_COLUMNS`. Every field is declared nullable
     here even though some v1 columns are ``NOT NULL`` in the Delta
     DDL — Spark accepts a more-permissive read schema; the table's
     own DDL still enforces the v1 NOT NULL constraints on the
@@ -242,7 +241,7 @@ def _build_state_row_schema():
                 "LONG": LongType(), "BIGINT": LongType(), "DOUBLE": DoubleType()}
 
     fields = [
-        # v1 base columns (mirror state.py::_ddl). Phase 2 declares
+        # Base columns (mirror state.py::_ddl). The DataFrame schema declares
         # them nullable=True on the DataFrame side; the Delta table's
         # own DDL preserves the v1 NOT NULL constraints.
         StructField("run_id", StringType(), True),
@@ -259,15 +258,15 @@ def _build_state_row_schema():
         StructField("plan_hash", StringType(), True),
         StructField("plan_snapshot", StringType(), True),
     ]
-    # Phase 2 columns — every entry is nullable by design (PLAN §10a
+    # Content-pack columns — every entry is nullable by design (PLAN §10a
     # additive migration).
-    for name, dtype in PHASE2_NEW_COLUMNS:
+    for name, dtype in CONTENT_PACK_STATE_COLUMNS:
         fields.append(StructField(name, type_map[dtype], True))
 
     return StructType(fields)
 
 
-# v1 columns declared NOT NULL in the table DDL. Phase 2 diagnostic
+# Base columns declared NOT NULL in the table DDL. Content-pack diagnostic
 # rows that legitimately have None for these (e.g. cascade-skip with
 # duration_seconds=None) get coerced before the append so the Delta
 # constraint check doesn't reject the batch.
@@ -302,7 +301,7 @@ def write_state_rows_hard(
 ) -> None:
     """Append a batch of state rows to ``fusion_bundle_state`` atomically.
 
-    Phase 2 (PLAN §11.9) writes one state row per source per node per
+    Content-pack execution writes one state row per source per node per
     run for a successful content-pack execution. Per-row writes would
     leave a window where the primary's ``output_watermark`` has
     committed but a lookup audit row hasn't — that would silently
@@ -310,13 +309,13 @@ def write_state_rows_hard(
     **single Delta append** of the full row list so the entire batch
     commits or none of it does.
 
-    The caller (Step 11 ``execute_node``) assembles every row (primary
+    The caller assembles every row (primary
     + every lookup) in memory FIRST, then calls this function exactly
     once. ``rows`` may be a single-element list for single-source
     nodes; the API shape is uniform.
 
-    **Round-16 schema fix:** builds the DataFrame with an explicit
-    :class:`StructType` covering v1 base columns + ``PHASE2_NEW_COLUMNS``
+    Builds the DataFrame with an explicit
+    :class:`StructType` covering base columns + ``CONTENT_PACK_STATE_COLUMNS``
     so Spark doesn't try to infer types from row dicts where some
     columns are None in every row. The v1 NOT NULL fields
     (``duration_seconds``) get coerced to safe defaults via

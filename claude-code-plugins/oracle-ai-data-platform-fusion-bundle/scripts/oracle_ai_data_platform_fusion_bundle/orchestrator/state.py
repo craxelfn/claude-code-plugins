@@ -17,8 +17,8 @@ row's ``last_watermark`` for a given ``(dataset_id, layer)`` pair, ordered
 by ``last_run_at DESC, last_watermark DESC NULLS LAST LIMIT 1``. Read is
 SOFT: an underlying Spark/metastore exception returns ``None`` and emits
 a structured WARN log carrying the marker ``watermark_read_soft_failed``
-that operators can grep / alert on. Phase α stub semantics (always
-``None``) are preserved for the no-prior-row + NULL-watermark cases.
+that operators can grep / alert on. No-prior-row and NULL-watermark
+cases still return ``None``.
 
 Resume + multi-row semantics
 ============================
@@ -519,7 +519,7 @@ def ensure_state_table(spark: "SparkSession", paths: TablePaths) -> None:
     spark.sql(_ddl(table_path))
     # Schema-aware additive migration. `CREATE TABLE IF NOT EXISTS`
     # is a no-op when the table exists, so the new columns need an
-    # `ALTER TABLE` follow-up to materialize on tables created by
+    # `ALTER TABLE` migration to materialize on tables created by
     # earlier plugin builds. We can't write `ADD COLUMNS IF NOT
     # EXISTS (...)` — Spark SQL grammar rejects that — so introspect
     # the existing columns and ADD only the ones that are missing.
@@ -607,9 +607,9 @@ def write_state_row(
     # P1.5β.1: persist ``step.last_watermark`` (the OUTPUT cursor —
     # captured pre-extract as ``extract_started_at -
     # WATERMARK_SAFETY_WINDOW`` for bronze, preserved on empty deltas,
-    # ``None`` for silver/gold until P1.17). Phase α conflated
-    # ``watermark_used`` (INPUT) with this column; β.1 separates the
-    # two — ``watermark_used`` stays in-memory only on ``RunStep``
+    # ``None`` for silver/gold until incremental strategies provide
+    # stable output cursors). ``watermark_used`` is the input cursor and
+    # stays in-memory only on ``RunStep``
     # for debug/logs/__repr__, no state column carries it. See B0
     # of the P1.5β plan.
     spark.sql(
@@ -644,7 +644,7 @@ def write_fingerprint_skip_row(
     prior_fingerprint: str,
     current_fingerprint: str,
 ) -> None:
-    """Append a Phase 3c ``--force-fingerprint-skip`` audit row to
+    """Append a ``--force-fingerprint-skip`` audit row to
     ``fusion_bundle_state``.
 
     Dedicated single-purpose helper because
@@ -674,8 +674,8 @@ def write_fingerprint_skip_row(
     Args:
         spark: active Spark session.
         paths: bundle's ``TablePaths``.
-        run_id: SAME run_id the rest of the run would use — Phase 3c
-            audit-correlation invariant (drift artifact + this row +
+        run_id: Same run_id the rest of the run would use; the drift
+            artifact, skip audit row, and
             RunSummary all share one id).
         prior_fingerprint: pinned profile fingerprint.
         current_fingerprint: live bronze fingerprint computed at
@@ -790,15 +790,15 @@ def read_last_watermark(
       WARN + return ``None``; the exception is swallowed).
 
     Ordering — ``last_run_at DESC, last_watermark DESC NULLS LAST
-    LIMIT 1``. ``last_run_at`` is the primary key per Phase α's
-    convention (see ``state.py:194`` and ``read_resumable_state``);
+    LIMIT 1``. ``last_run_at`` is the primary key for persisted state
+    rows (see ``state.py:194`` and ``read_resumable_state``);
     the secondary key breaks ties deterministically by preferring the
     row that recorded more progress, aligning with the monotonicity
     invariant. There is no ``finished_at`` column on the schema —
     do not order by it.
 
-    Read is issued via ``spark.sql(...)`` (matching Phase α's
-    ``read_resumable_state`` convention so the same in-memory
+    Read is issued via ``spark.sql(...)`` (matching
+    ``read_resumable_state`` so the same in-memory
     ``_FakeSpark`` test harness works); user-controlled identifiers
     (``dataset_id``, ``layer``) are escaped via the helper inside
     :func:`_build_last_watermark_query` to defeat apostrophe-bearing
@@ -1179,7 +1179,7 @@ def read_resumable_state(
 
 
 # ---------------------------------------------------------------------------
-# Content-pack resume reader (Phase 5 Step 9b)
+# Content-pack resume reader
 # ---------------------------------------------------------------------------
 
 

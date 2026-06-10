@@ -1,7 +1,6 @@
 """Conformed dimensions package.
 
-Phase 9 (ADR-0022) deleted the v1 dim_supplier + dim_account modules —
-silver dim_supplier / dim_account now ship as SQL templates under
+silver dim_supplier / dim_account ship as SQL templates under
 ``content_packs/<pack-id>/silver/`` and dispatch via
 ``orchestrator.builtins.sql_runner.execute_node``.
 

@@ -20,9 +20,9 @@ two axes:
    resume drift gate (AIDPF-4040) compares the prior row's hash against
    the freshly-computed one.
 
-Phase 9 deleted the v1 plan-hash entrypoints (``hash_resolved_plan``,
+The v1 plan-hash entrypoints (``hash_resolved_plan``,
 ``serialize_plan_snapshot``, ``build_current_diagnostics``, ``_node_tuple``,
-``_canonical_payload``) along with the dead ``_execute_node`` dispatcher.
+``_canonical_payload``) were retired with the old ``_execute_node`` dispatcher.
 Legacy snapshots stored under the v1 shape remain readable by
 :func:`orchestrator.resume.check_identity_drift` — that helper only reads
 the ``identity`` half of the JSON; the ``nodes`` half is fed back into

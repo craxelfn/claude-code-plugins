@@ -4,10 +4,9 @@ Two layers of checking:
   1. **Schema** — ``bundle.yaml`` and ``aidp.config.yaml`` parse via Pydantic v2.
   2. **Ref integrity** — every dataset id resolves cross-layer in the
      configured content pack (``pack.bronze ∪ pack.silver ∪ pack.gold``).
-     Phase 9 replaced the old ``fusion_catalog.CATALOG``-membership
-     check; bundles may now declare silver/gold node ids as high-level
-     intent, and customer overlay packs may declare custom PVOs not in
-     the curated catalog (per Phase 9 WARN-only ``AIDPF-2080`` contract).
+     Bundles may declare silver/gold node ids as high-level intent, and
+     customer overlay packs may declare custom PVOs not in the curated
+     catalog (``AIDPF-2080`` is WARN-only for those custom PVOs).
      Variable / vault references are noted but NOT resolved here.
 
 No network calls.
@@ -49,7 +48,7 @@ def validate(
         )
 
     if bundle:
-        # Cross-layer pack dataset resolution (Phase 9).
+        # Cross-layer pack dataset resolution.
         _validate_datasets_against_pack(bundle, bundle_path, issues, console)
 
         # Surface Vault refs (informational only)
@@ -85,28 +84,20 @@ def _validate_datasets_against_pack(
     issues: list[str],
     console: Console,
 ) -> None:
-    """Phase 9: every ``datasets[].id`` must resolve in
+    """Every ``datasets[].id`` must resolve in
     ``pack.bronze ∪ pack.silver ∪ pack.gold`` (cross-layer intent).
 
     Loads the bundle's content pack (with overlay chain) via
     :func:`load_full_chain` — mirrors what the runtime path does so
     customer overlay-pack-authored bronze ids are visible.
 
-    Round-9 review fix: a bundle that DECLARES ``contentPack`` but
-    whose pack root cannot be resolved (missing path / no pack.yaml /
-    overlay chain busted) MUST surface the error as a validation
-    issue, NOT silently fall through to the legacy
-    ``fusion_catalog.CATALOG`` membership check. Pre-fix the legacy
-    fallback gave false greens on bundles that the run command would
-    later reject with AIDPF-1037 / AIDPF-1038.
-
     The legacy catalog fallback is reserved for bundles WITHOUT a
-    declared ``contentPack`` block (pre-Phase-9 shape).
+    declared ``contentPack`` block.
     """
     if bundle.content_pack is None:
         # No content pack declared — legacy bundle shape. Fall back
-        # to the catalog membership check so pre-Phase-9 bundles
-        # (bronze-only datasets) still get typo detection.
+        # to the catalog membership check so bronze-only bundles still
+        # get typo detection.
         from ..schema.fusion_catalog import CATALOG
         unknown = [ds.id for ds in bundle.datasets if ds.id not in CATALOG]
         if unknown:
@@ -117,11 +108,10 @@ def _validate_datasets_against_pack(
             )
         return
 
-    # Bundle DECLARES a content pack — round-9 contract: any failure
-    # to resolve the pack root must be a validation issue, not a
-    # silent fallback to the legacy catalog. The run command uses
-    # the same resolver and will fail with the same code; validate
-    # must catch it first.
+    # Bundle DECLARES a content pack: any failure to resolve the pack
+    # root is a validation issue, not a silent fallback to the legacy
+    # catalog. The run command uses the same resolver and will fail
+    # with the same code; validate must catch it first.
     from ..schema.bundle import (
         ContentPackRootInvalidError,
         ContentPackRootNotFoundError,

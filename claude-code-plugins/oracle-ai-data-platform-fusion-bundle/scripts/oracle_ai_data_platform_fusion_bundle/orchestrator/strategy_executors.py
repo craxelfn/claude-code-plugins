@@ -1,4 +1,4 @@
-"""Strategy executors for the content-pack runner (Phase 2 Steps 5-6).
+"""Strategy executors for the content-pack runner.
 
 Two strategies are implemented in v0.3:
 
@@ -13,7 +13,7 @@ Two strategies are implemented in v0.3:
 Both executors:
 
 * Accept the already-rendered :class:`~oracle_ai_data_platform_fusion_bundle.orchestrator.sql_renderer.RenderedSql`
-  produced by Step 11's :func:`execute_node` — never re-render.
+  produced by :func:`execute_node` — never re-render.
 * Thread profile values through Spark parameter markers via
   ``spark.sql(stmt, args=rendered.params)``. **Never** ``spark.sql(stmt)``
   alone.
@@ -60,7 +60,7 @@ class StrategyExecutorError(Exception):
 
 
 class UnsupportedStrategyError(StrategyExecutorError):
-    """Strategy not implemented in Phase 2 (AIDPF-4030)."""
+    """Strategy not implemented by the content-pack runner (AIDPF-4030)."""
 
 
 class TargetIdentifierError(StrategyExecutorError):
@@ -140,8 +140,8 @@ def _spark_sql_with_params(
 ) -> Any:
     """Invoke ``spark.sql`` with parameter-marker bindings.
 
-    Phase 2 contract: every SQL string from the renderer or composer is
-    passed to Spark via ``args=`` so untrusted profile / run-id /
+    Every SQL string from the renderer or composer is passed to Spark
+    via ``args=`` so untrusted profile / run-id /
     watermark values are bound as literals, not concatenated. If
     ``params`` is empty Spark accepts the empty dict.
     """
@@ -177,7 +177,7 @@ def execute_replace(
         spark: live Spark session.
         node: the validated NodeYaml (used for identity / audit only —
             the actual SQL came from ``rendered``).
-        rendered: the rendered SQL + parameter bindings from Step 3's
+        rendered: the rendered SQL + parameter bindings from
             ``render_node_sql``.
         target: fully-qualified target table (catalog.schema.table).
         ctx: render context (unused here; threaded through for
@@ -229,7 +229,7 @@ def execute_merge(
 ) -> StrategyExecutionResult:
     """Execute the ``merge`` refresh strategy.
 
-    Flow (PLAN §10.2 + §11.7):
+    Flow:
 
     1. Validate ``target`` identifier.
     2. Resolve the natural key from
@@ -245,7 +245,7 @@ def execute_merge(
        nullable columns in the rendered source are added to the target.
     5. **Compose and execute the MERGE**: assemble via
        :func:`merge_helpers.compose_merge_sql` with a NULL-safe natural-key
-       join (``<=>``). Phase 2 does NOT supply a payload-diff predicate
+       join (``<=>``). This runner does NOT supply a payload-diff predicate
        for the silver/gold merge — the predicate is a bronze-layer
        optimisation; silver/gold's row count is small enough that
        unconditional UPDATE is fine. (Future bronze-strategy work can
@@ -303,7 +303,7 @@ def execute_merge(
     # helper (which takes a DataFrame) can inspect its schema. The temp
     # view's name is run_id-scoped to avoid collisions across concurrent
     # tests.
-    temp_view = f"_phase2_merge_source_{_sanitise_view_segment(ctx.run_id)}"
+    temp_view = f"_content_pack_merge_source_{_sanitise_view_segment(ctx.run_id)}"
     source_df = _spark_sql_with_params(spark, rendered.sql, dict(rendered.params))
     source_df.createOrReplaceTempView(temp_view)
     try:
@@ -311,10 +311,10 @@ def execute_merge(
             spark=spark, target_table=target, source_df=source_df
         )
 
-        # Phase 2 v0.3: no payload-diff predicate at the silver/gold
-        # layer (PLAN §11 — silver/gold deltas are small enough that
-        # unconditional UPDATE is fine; the optimisation lives in
-        # bronze MERGE per LIMITS.md §P1.17-L7).
+        # No payload-diff predicate at the silver/gold layer:
+        # silver/gold deltas are small enough that unconditional UPDATE
+        # is fine; the optimisation lives in bronze MERGE per
+        # LIMITS.md §P1.17-L7.
         merge_stmt = merge_helpers.compose_merge_sql(
             target=target,
             source_sql=f"SELECT * FROM {temp_view}",
@@ -370,7 +370,7 @@ def execute_strategy(
 ) -> StrategyExecutionResult:
     """Dispatch to the executor matching ``node.refresh.<mode>.strategy``.
 
-    Phase 2 v0.3 supports only ``replace`` and ``merge``. Any other
+    Supports only ``replace`` and ``merge``. Any other
     declared strategy (``append``, ``replace_partition``,
     ``aggregate_merge``, ``snapshot``, ``scd2``, ``custom``) raises
     :class:`UnsupportedStrategyError` with AIDPF-4030.
@@ -379,7 +379,7 @@ def execute_strategy(
         spark: live Spark session.
         node: the validated NodeYaml whose refresh block was used to
             produce ``rendered``.
-        rendered: rendered SQL + params from Step 3.
+        rendered: rendered SQL + params.
         target: fully-qualified target table.
         ctx: render context.
         mode: ``"seed"`` or ``"incremental"`` — picks which leg of
@@ -411,7 +411,7 @@ def execute_strategy(
 
     raise UnsupportedStrategyError(
         f"{AIDPF_4030_UNSUPPORTED_STRATEGY}: strategy {strategy!r} not "
-        f"supported in v0.3. Phase 2 supports only 'replace' and 'merge'. "
+        f"supported. The content-pack runner supports only 'replace' and 'merge'. "
         f"Deferred: append, replace_partition, aggregate_merge, snapshot, "
         f"scd2, custom (see PLAN §10)."
     )

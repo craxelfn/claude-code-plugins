@@ -1,4 +1,4 @@
-"""Bootstrap's variation-resolution phase (PLAN §9.5.4 + §9.5.5).
+"""Bootstrap's variation-resolution phase.
 
 Runs after the existing pre-onboarding probes (or in place of them when
 ``--skip-preonboarding-probes`` is set) iff ``bundle.content_pack`` is
@@ -128,7 +128,7 @@ class VariationPhaseOptions:
     ``--refresh`` when a pinned value would change. ``None`` falls back
     to stdlib ``input()``. Tests pass a lambda to drive accept/decline."""
 
-    # --- Phase 4.1 / D3 — cluster-side bootstrap dispatcher knobs ---
+    # --- Cluster-side bootstrap dispatcher knobs ---
     dispatch_mode: Literal["cluster", "local"] = "local"
     """``"local"`` (default in this dataclass to keep existing test
     behaviour) runs today's in-process Spark + walker path.
@@ -271,7 +271,7 @@ def run_variation_phase(
     # --- Pack load + Spark probe ---
     pack_root = resolve_content_pack_root(bundle_path, bundle.content_pack)
     pack: ResolvedPack = load_full_chain(pack_root)
-    # Phase 3b: also load the unmerged entry overlay (if any) to access
+    # Also load the unmerged entry overlay, if any, to access
     # its untouched ``provenance`` block. ``merge_overlay`` discards
     # overlay-level provenance (see content_pack.py:486), so we re-read
     # the entry root to detect skill-authored overlays.
@@ -287,7 +287,7 @@ def run_variation_phase(
             console=console,
         )
     except Exception as exc:  # noqa: BLE001 — typed by class below
-        # Phase 4.1 / D3 — translate cluster-dispatch failures into
+        # Translate cluster-dispatch failures into
         # diagnostic artifacts + a non-zero VariationPhaseOutcome.
         # Local imports keep the cluster-side module out of the
         # local-mode import graph.
@@ -341,7 +341,7 @@ def run_variation_phase(
     if options.refresh and profile_path.exists():
         prior_profile = load_tenant_profile(profile_path)
         if prior_profile.bronze_schema_fingerprint == fingerprint:
-            # Phase 3d: back-fill the snapshot if missing / desynced /
+            # Back-fill the snapshot if missing / desynced /
             # hand-edited. This is the only path that exits the no-drift
             # branch with a write — profile + evidence stay untouched so
             # the back-fill is observably scoped (no audit-trail noise on
@@ -476,7 +476,7 @@ def run_variation_phase(
     #      make a silent decision; raises ``RefreshRequiresConfirmation``.
     #   3. Interactive y/N prompt — must read a real answer and abort
     #      on no/default. The prior print-only branch fell through and
-    #      wrote the profile silently — that was the round-2 blocking bug.
+    #      wrote the profile silently.
     if options.refresh and prior_profile is not None:
         for (name, kind), outcome in walker_results.items():
             chosen = _chosen_value(outcome, picks.get((name, kind)))
@@ -547,7 +547,7 @@ def run_variation_phase(
     )
     _write_profile_yaml(profile_path, profile)
 
-    # Phase 3b: thread skill_version from the entry overlay (when
+    # Thread skill_version from the entry overlay, when
     # skill-authored) into the snapshot's top-level provenance so audit
     # tooling can correlate evidence files with the skill version that
     # produced them.
@@ -582,7 +582,7 @@ def run_variation_phase(
     )
     evidence_path = write_evidence_snapshot(workdir, snapshot)
 
-    # Phase 3d: snapshot writes AFTER profile + evidence so the snapshot
+    # Snapshot writes AFTER profile + evidence so the snapshot
     # is never present without a matching profile (rules out a confusing
     # "snapshot exists but profile is gone" state for preflight). Pin-time
     # writer for both initial-pin and `--refresh`-with-drift paths.
@@ -622,7 +622,7 @@ def _generate_run_id() -> str:
 def _bronze_dataset_ids(pack: ResolvedPack) -> list[str]:
     """Extract bronze dataset ids from the pack.
 
-    Phase 9: ``pack.bronze`` (per-file bronze YAMLs) is the source of
+    ``pack.bronze`` (per-file bronze YAMLs) is the source of
     truth; legacy ``pack.bronze_yaml`` is retained transitionally.
     """
     out: list[str] = list(pack.bronze.keys())
@@ -744,7 +744,7 @@ def _assemble_resolutions(
     * ``mechanism_record``: the strongest mechanism applied across all picks
       (used in the profile's approvedBy block).
 
-    Phase 3b: when ``entry_overlay_pack`` is a skill-authored overlay,
+    When ``entry_overlay_pack`` is a skill-authored overlay,
     stamp ``mechanism: skill_proposed`` on resolutions whose chosen
     candidate matches the overlay's ``provenance.proposals[vp].candidate_added``,
     and copy ``provenance.incremental_impact[vp]`` into the resolved
@@ -782,7 +782,7 @@ def _assemble_resolutions(
             if override is not None and override.chosen == chosen:
                 mechanism = override.mechanism
             elif skill_authored and skill_proposals.get(name) == chosen:
-                # Phase 3b: AutoResolved on a skill-proposed candidate —
+                # AutoResolved on a skill-proposed candidate:
                 # record skill_proposed instead of bare auto_resolve so
                 # the audit trail attributes the resolution to the skill.
                 mechanism = "skill_proposed"
@@ -795,7 +795,7 @@ def _assemble_resolutions(
             pick = picks[key]
             chosen = pick.chosen
             mechanism = pick.mechanism
-            # Phase 3b: cli_flag picks driven by a skill-authored overlay
+            # cli_flag picks driven by a skill-authored overlay
             # become skill_proposed — BUT only when the operator actually
             # picked the skill-proposed candidate. A scripted
             # resolutions.json may legitimately edit the choice (e.g.
@@ -818,7 +818,7 @@ def _assemble_resolutions(
 
         resolutions[key] = chosen
         mechanisms.append(mechanism)
-        # Phase 3b: copy incrementalImpact onto the resolution ONLY when
+        # Copy incrementalImpact onto the resolution ONLY when
         # the chosen candidate matches the skill-proposed candidate.
         # If the operator edited the resolutions.json to pick a
         # DIFFERENT MultiMatch candidate, the skill's impact analysis
@@ -852,7 +852,7 @@ def _assemble_resolutions(
     operator_touched = [m for m in mechanisms if m != "auto_resolve"]
     if not operator_touched:
         mechanism_record = "auto_resolve"
-        # Phase 3b: if all resolutions are auto_resolve but ANY came
+        # If all resolutions are auto_resolve but ANY came
         # via a skill-proposed candidate, the run is skill-driven.
         if skill_authored and "skill_proposed" in mechanisms:
             mechanism_record = "skill_proposed"
@@ -876,7 +876,7 @@ def _load_entry_overlay_provenance(pack_root: Path):
     """Re-load the entry overlay pack (unmerged) to access its untouched
     ``provenance`` block.
 
-    Phase 3b: ``merge_overlay`` discards overlay-level provenance (see
+    ``merge_overlay`` discards overlay-level provenance (see
     ``orchestrator/content_pack.py:486``), so the merged pack returned
     by ``load_full_chain`` always reflects the BASE's provenance. To
     detect skill-authored overlays we need to re-read the entry root
@@ -904,8 +904,8 @@ def _impact_if_candidate_matches(
     """Return ``impact`` iff the chosen candidate matches what the skill
     proposed — otherwise ``None``.
 
-    Phase 3b round-5 finding: the skill's per-VP ``incrementalImpact``
-    is computed for its proposed candidate. If the operator edits
+    The skill's per-VP ``incrementalImpact`` is computed for its
+    proposed candidate. If the operator edits
     ``resolutions.json`` to pick a different MultiMatch candidate, the
     skill's impact analysis no longer applies. Copying it onto the
     resolution would mislabel the audit trail (e.g. record a "promotion
@@ -1004,7 +1004,7 @@ def _snapshot_needs_repair(
     tenant_name: str,
     live_fingerprint: str,
 ) -> str | None:
-    """Decide whether the Phase 3d back-fill should rewrite the snapshot
+    """Decide whether no-drift refresh should rewrite the snapshot
     inside the no-drift ``--refresh`` branch.
 
     Returns ``None`` when the snapshot is healthy (file exists, parses,
@@ -1150,7 +1150,7 @@ def _acquire_probe_result(
     ``compute_bronze_fingerprint``, walk each variation point
     in-process.
 
-    Cluster mode (Phase 4.1 / D3): dispatch a notebook to the AIDP
+    Cluster mode: dispatch a notebook to the AIDP
     cluster via
     :func:`commands.cluster_bootstrap_probe.dispatch_cluster_probe`,
     convert the returned :class:`ClusterProbeMarker` into the same

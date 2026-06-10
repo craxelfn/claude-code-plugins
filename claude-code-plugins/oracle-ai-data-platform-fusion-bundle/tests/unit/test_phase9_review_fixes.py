@@ -286,8 +286,8 @@ class TestPvoDriftGateScopeFromResolvedPlan:
 
 
 class TestBundleScopeRespectedByResolver:
-    """Phase 9 round-3 review: production resolver call sites
-    (_phase5_top_level_dispatch PVO drift gate +
+    """Production resolver call sites
+    (_dispatch_content_pack_run PVO drift gate +
     _build_content_pack_dry_run_plan + _run_content_pack_backend
     execution loop) must pass ``bundle_scope=`` to the resolver so:
 

@@ -1,4 +1,4 @@
-"""Shared `IncrementalImpact` Pydantic model (Phase 3b).
+"""Shared `IncrementalImpact` Pydantic model.
 
 Lives here rather than in :mod:`evidence_snapshot` or
 :mod:`medallion_pack` because BOTH modules need to reference it:
@@ -16,8 +16,8 @@ Defining the model here keeps the import direction
 ``evidence_snapshot.py → incremental_impact.py`` and ``medallion_pack.py
 → incremental_impact.py`` — no circular dependency.
 
-Schema version 1 corresponds to Phase 3b's initial release. The model
-is **additive-only** going forward per PLAN §9.5.8 forward-compat rule.
+Schema version 1 is **additive-only** going forward per the
+forward-compat rule.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ RiskLabel = Literal["likely-rename", "likely-different-semantics", "unknown"]
 
 
 RemediationOption = Literal["A", "B", "C", "D", "E"]
-"""Phase 3b remediation menu:
+"""Remediation menu:
 
 * ``A`` — no action (rename only).
 * ``B`` — surgical backfill MERGE (skill-drafted SQL; operator review).
@@ -88,9 +88,9 @@ class IncrementalImpact(BaseModel):
     evidence snapshot.
 
     The medallion-author skill populates this when drafting an overlay;
-    bootstrap (feature #2) mirrors it into the per-resolution evidence
-    on the ``--refresh`` commit (and on initial commit when the
-    overlay is skill-authored).
+    bootstrap mirrors it into the per-resolution evidence on the
+    ``--refresh`` commit and on initial commit when the overlay is
+    skill-authored.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)

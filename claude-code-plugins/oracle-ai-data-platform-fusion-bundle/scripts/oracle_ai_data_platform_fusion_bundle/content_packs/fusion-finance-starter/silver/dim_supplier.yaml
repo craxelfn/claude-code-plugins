@@ -36,9 +36,9 @@ requiredColumns:
     - _source_pvo
 
 # Output schema matches dim_supplier.sql's 15-column projection (v1
-# `_projection_select_sql` at dimensions/dim_supplier.py:76-121). Phase 3
-# Step 5 widened the previously-shipped 9-column subset so the
-# materialized-schema assertion (AIDPF-4070) passes on the v2 path.
+# `_projection_select_sql` at dimensions/dim_supplier.py:76-121). The
+# declared schema must stay aligned with the SQL projection so the
+# materialized-schema assertion (AIDPF-4070) passes.
 outputSchema:
   columns:
     - name: supplier_key

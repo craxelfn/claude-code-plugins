@@ -17,9 +17,8 @@ refresh:
   # No incremental block — dim_calendar is rebuilt every cycle (PLAN §10.x).
 
 # outputSchema must match what dim_calendar.build_dim_calendar_sql actually
-# emits (dim_calendar.py:94-138). Phase 3 widened this from 6 cols to the
-# real 16 — the materialized-schema assertion in execute_node would
-# otherwise fail every run.
+# emits (dim_calendar.py:94-138); otherwise the materialized-schema
+# assertion in execute_node fails every run.
 outputSchema:
   columns:
     - name: calendar_key

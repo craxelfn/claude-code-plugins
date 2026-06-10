@@ -6,14 +6,14 @@ Two phases:
    ``aidp.config.yaml``, ping BICC + AIDP REST, reconcile the catalog,
    optionally probe IAM. Skippable via ``--skip-preonboarding-probes``
    for ``--refresh`` flows.
-2. **Variation-resolution phase** (Phase 3a — this feature) — when
+2. **Variation-resolution phase** — when
    ``bundle.content_pack`` is set, walk the pack's declared
    ``columnAliases`` / ``semanticVariants`` against the tenant's live
    bronze schema, pin chosen values to ``profiles/<tenant>.yaml``,
    write an evidence snapshot. ``--refresh`` re-walks every variation
-   point against a possibly-drifted bronze (Step 9).
+   point against a possibly-drifted bronze.
 
-v1 bundles (no ``contentPack:`` block) skip phase 2 entirely; their
+v1 bundles (no ``contentPack:`` block) skip variation resolution; their
 existing ``bootstrap`` behaviour is unchanged.
 
 Probes performed in phase 1:
@@ -64,7 +64,7 @@ class _ProbeResult:
 
 
 # ---------------------------------------------------------------------------
-# Cluster-dispatch config resolution (Phase 4.1 / D3)
+# Cluster-dispatch config resolution
 # ---------------------------------------------------------------------------
 
 
@@ -81,7 +81,7 @@ class ResolvedClusterDispatchConfig:
     """Final cluster-dispatch coordinates after applying the override chain.
 
     Construction always succeeds; field values may be ``None`` when a
-    required input is unresolved. Step 9 / AIDPF-2047 detects those
+    required input is unresolved. AIDPF-2047 detects those
     nulls in cluster mode and fails-closed.
 
     Resolution chain per field: CLI flag → env var → ``EnvSpec.<field>``
@@ -176,14 +176,14 @@ def bootstrap(
     *,
     check_iam: bool = False,
     console: Console | None = None,
-    # --- Phase 3a flags ---
+    # --- Variation-resolution flags ---
     refresh: bool = False,
     operator: str | None = None,
     non_interactive: bool = False,
     resolutions_path: Path | None = None,
     skip_preonboarding_probes: bool = False,
     spark_session=None,
-    # --- Phase 4.1 / D3 flags (cluster-side bootstrap dispatcher) ---
+    # --- Cluster-side bootstrap dispatcher flags ---
     dispatch_mode: Literal["cluster", "local"] = "cluster",
     cluster_key_override: str | None = None,
     cluster_name_override: str | None = None,
@@ -197,39 +197,39 @@ def bootstrap(
         bundle_path: path to ``bundle.yaml``.
         config_path: path to ``aidp.config.yaml``.
         env_name: environment key from ``aidp.config.yaml``.
-        check_iam: optional IAM probe (phase 1 only).
+        check_iam: optional IAM probe.
         console: Rich console for output.
-        refresh: phase 2 re-walk against possibly-drifted bronze.
-        operator: explicit ``--operator`` value (phase 2).
-        non_interactive: phase 2 multi-match auto-pick mode.
+        refresh: re-walk against possibly-drifted bronze.
+        operator: explicit ``--operator`` value.
+        non_interactive: multi-match auto-pick mode.
         resolutions_path: scripted multi-match resolutions JSON.
-        skip_preonboarding_probes: skip phase 1 (power-user knob for
-            ``--refresh`` flows that already passed phase 1 on initial
+        skip_preonboarding_probes: skip pre-onboarding probes (power-user knob for
+            ``--refresh`` flows that already passed them on initial
             onboarding). Incompatible with ``dispatch_mode="cluster"`` —
             the conflict surfaces as ``AIDPF-2047 (reason=conflicting_flags)``
             in Step 9.
         spark_session: caller-injected Spark session (tests). Only used
             in ``dispatch_mode="local"`` — cluster mode never
             instantiates a local Spark session.
-        dispatch_mode: ``"cluster"`` (default, Phase 4.1) dispatches
+        dispatch_mode: ``"cluster"`` (default) dispatches
             the variation-phase bronze probe to the AIDP cluster via
             a notebook. ``"local"`` keeps the legacy laptop-Spark
             behaviour for backward compat with unit tests / laptop POC.
         cluster_key_override: per-invocation override of
             ``EnvSpec.cluster_key``. CLI flag → env var
-            ``AIDP_FUSION_CLUSTER_KEY`` → ``EnvSpec`` (Step 4 resolution).
+            ``AIDP_FUSION_CLUSTER_KEY`` → ``EnvSpec``.
         cluster_name_override: per-invocation override of
             ``EnvSpec.cluster_name`` (same chain).
         workspace_dir_override: per-invocation override of
             ``Defaults.workspace_dir`` / env var
             ``AIDP_FUSION_WORKSPACE_DIR`` (same chain). When fully
-            unresolved, Step 4 derives
+            unresolved, derives
             ``/Workspace/{workspace_root}/fusion-bundle-bootstrap``.
     """
     console = console or Console()
     results: list[_ProbeResult] = []
 
-    # ---- Phase 4.1 / D3 — AIDPF-2047 (conflicting_flags) gate ----
+    # ---- AIDPF-2047 (conflicting_flags) gate ----
     # `--dispatch-mode=cluster` + `--skip-preonboarding-probes` is
     # incompatible: cluster dispatch needs the aidp-rest probe to
     # confirm auth before paying the wheel-build + notebook round-trip

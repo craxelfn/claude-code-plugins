@@ -1,7 +1,6 @@
-"""Gold-layer business marts (Phase 9: now empty).
+"""Gold-layer business marts.
 
-The v1 modules supplier_spend, gl_balance, ap_aging were deleted in
-Phase 9 (ADR-0022) — all gold marts now ship as SQL templates under
+supplier_spend, gl_balance, and ap_aging ship as SQL templates under
 ``content_packs/<pack-id>/gold/`` and dispatch via
 ``orchestrator.sql_runner.execute_node``.
 

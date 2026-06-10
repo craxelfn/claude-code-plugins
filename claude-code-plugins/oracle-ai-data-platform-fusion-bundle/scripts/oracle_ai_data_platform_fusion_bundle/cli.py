@@ -93,10 +93,10 @@ def validate(ctx: click.Context) -> None:
 @click.option(
     "--skip-preonboarding-probes", is_flag=True,
     help=(
-        "Skip phase-1 BICC / AIDP probes; useful for --refresh after initial "
+        "Skip BICC / AIDP pre-onboarding probes; useful for --refresh after initial "
         "onboarding succeeded. INCOMPATIBLE with --dispatch-mode=cluster "
-        "(the aidp-rest probe is load-bearing in cluster mode — see "
-        "Phase 4.1 / AIDPF-2047 reason=conflicting_flags)."
+        "(the aidp-rest probe is load-bearing in cluster mode; "
+        "conflicting use raises AIDPF-2047)."
     ),
 )
 @click.option(
@@ -107,7 +107,7 @@ def validate(ctx: click.Context) -> None:
     show_default=True,
     help=(
         "Where the variation-phase bronze probe runs. 'cluster' "
-        "(default, Phase 4.1) dispatches a notebook to the AIDP cluster "
+        "(default) dispatches a notebook to the AIDP cluster "
         "where 3-part-namespace DESCRIBE works natively. 'local' uses "
         "the laptop's in-process Spark session — backward-compat for "
         "unit tests and laptop-POC bundles."
@@ -292,7 +292,7 @@ def catalog_probe_pvo(
     "--dry-run", "dry_run", is_flag=True, default=False,
     help="Resolve the plan + run preflight, then exit 0 without dispatching. "
          "On --inline: returns the orchestrator's dry-run summary. On REST "
-         "dispatch: runs Phase A + B preflight (bundle, config, OCI, AIDP "
+         "dispatch: runs local and remote preflight (bundle, config, OCI, AIDP "
          "plane, cluster state) and returns an empty RunSummary. No wheel "
          "build, no notebook upload, no job submission.",
 )
@@ -314,14 +314,14 @@ def catalog_probe_pvo(
     is_flag=True,
     default=False,
     hidden=True,
-    help="Phase 3c — dev/sandbox: bypass the bronze-schema fingerprint "
+    help="Dev/sandbox: bypass the bronze-schema fingerprint "
          "drift gate. Records an audit warn row in fusion_bundle_state "
          "with mode='fingerprint_skip'. Production runs MUST NOT use "
          "this; SOX-audit environments should policy-disable.",
 )
 @click.option(
     "--strict-scope", "strict_scope", is_flag=True, default=False,
-    help="Phase 9 — disable D-1 implicit-transitive-include. When set, "
+    help="Disable implicit transitive include. When set, "
          "every declared root's `dependsOn` must ALSO appear in "
          "`--datasets` / `bundle.datasets[]` explicitly; missing deps "
          "raise AIDPF-1042 STRICT_SCOPE_MISSING_DEPENDENCY. Use for "

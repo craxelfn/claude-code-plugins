@@ -1,7 +1,5 @@
 """Implementation of ``aidp-fusion-bundle run`` and ``status``.
 
-Post-P1.5α (Phase 5) wiring:
-
   * ``run --inline`` calls ``orchestrator.run(bundle_path, ...)`` directly
     (the architectural primary — Spark + checkpointer + vault + Delta
     catalog all live inside the AIDP notebook session). Catches every
@@ -11,17 +9,12 @@ Post-P1.5α (Phase 5) wiring:
     user error.
 
   * ``run`` without ``--inline`` is the laptop-terminal REST dispatch
-    path. Today it prints a "what would happen" message and exits 2;
-    BACKLOG P1.5ε wires it to `dispatch/aidp_rest.py` (the empirical
-    probe already validated the schema; remaining work is just the
-    client wrapper).
+    path.
 
   * ``status`` reads ``fusion_bundle_state`` with one-row-per-dataset
     semantics (``ROW_NUMBER() OVER (PARTITION BY dataset_id ORDER BY
     last_run_at DESC)``) and surfaces the ``skip_reason`` column
-    distinctly (Should-fix-5 — was previously returning every historical
-    row, ordered by time, which made the dashboard repeat each dataset N
-    times for N runs).
+    distinctly.
 """
 
 from __future__ import annotations
@@ -55,14 +48,10 @@ def run(
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
 
-    P1.5α-fix2: default mode is ``"seed"`` (was previously the retired
-    ``"incremental"`` default — which would immediately exit 2 via the
-    orchestrator's `NotImplementedError` guard, hostile UX).
-
-    P1.5α-fix13: ``layers`` is now accepted as a CLI flag. Parses CSV the
-    same shape as ``datasets`` and threads through to ``orchestrator.run``.
-    No new validation here — the content-pack plan resolver already
-    rejects unknown layer names via ``MissingDependencyError``.
+    ``layers`` parses as the same CSV shape as ``datasets`` and threads
+    through to ``orchestrator.run``. Validation lives in the content-pack
+    plan resolver, which raises ``MissingDependencyError`` for unknown
+    layer names.
     """
     console = console or Console()
 
@@ -96,20 +85,18 @@ def run(
         [s.strip() for s in datasets.split(",") if s.strip()]
         if datasets else None
     )
-    # P1.5α-fix13: same CSV-parse shape as `datasets`. Empty string after
-    # split → None (consistent with --datasets "" behavior). Typo validation
-    # lives in resolve_plan (P1.5α-fix12), NOT here.
+    # Same CSV-parse shape as `datasets`. Empty string after split -> None
+    # (consistent with --datasets "" behavior). Typo validation lives in
+    # the plan resolver, not here.
     layer_filter: list[str] | None = (
         [s.strip() for s in layers.split(",") if s.strip()]
         if layers else None
     )
 
-    # Phase 5 Step 9b — AIDPF-1032 resolved. The content-pack backend's
-    # per-node atomic-commit model (preflight → render → drift → execute
-    # → quality → state) is the resume unit; supplying --resume with the
-    # content-pack backend is now legal. The orchestrator adopts
-    # ``resume_run_id`` as the run_id so the resumed run's state rows
-    # join with the prior failed run's rows under one identifier.
+    # The content-pack backend's per-node atomic-commit model is the
+    # resume unit. The orchestrator adopts ``resume_run_id`` as the
+    # run_id so the resumed run's state rows join with the prior failed
+    # run's rows under one identifier.
 
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
@@ -121,8 +108,7 @@ def run(
             force_fingerprint_skip=force_fingerprint_skip,
             strict_scope=strict_scope,
         )
-    # Phase 5 P1.5ε-fix5 — REST-dispatch resume is now supported. The
-    # generated notebook cell threads `resume_run_id` into the
+    # REST-dispatch resume threads `resume_run_id` into the
     # cluster-side `orchestrator.run(...)` call so the resumed run
     # adopts the supplied id and joins state rows with the prior
     # failed run. Banner gated on `not dry_run`: dispatch short-circuits
@@ -176,9 +162,9 @@ def _run_inline(
         SchemaDriftDetectedError,
     )
 
-    # Phase 3c — dedicated stderr console for AIDPF hand-off messages.
+    # Dedicated stderr console for AIDPF hand-off messages.
     # Rich Console.print does NOT accept a stdlib `file=` kwarg
-    # (round-4 finding); the constructor binds to its output stream.
+    # the constructor binds to its output stream.
     error_console = Console(stderr=True)
 
     if resume_run_id is not None:
@@ -187,7 +173,7 @@ def _run_inline(
             f"reading fusion_bundle_state, computing reattempt plan…"
         )
 
-    # Phase 9 — content-pack is the only backend. Resolve the pack
+    # Content-pack is the only backend. Resolve the pack
     # + profile up front and pass them into orchestrator.run. Skip
     # gracefully when the bundle has no contentPack block (legacy
     # bundles still pass through the underlying orchestrator code

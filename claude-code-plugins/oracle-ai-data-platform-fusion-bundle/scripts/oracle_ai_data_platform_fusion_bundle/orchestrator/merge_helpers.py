@@ -1,26 +1,20 @@
-"""MERGE-related SQL composition helpers — canonical Phase 2 location.
+"""MERGE-related SQL composition helpers.
 
-Phase 2 elevates the v1 MERGE helpers from CPython-private symbols on
-``orchestrator/__init__.py`` to a public module the content-pack
-strategy executors (Steps 5-6) can import without crossing package
-internals. The v1 modules (``dimensions/dim_*.py``,
-``transforms/gold/*.py``, ``orchestrator/__init__.py:_execute_node``)
-keep their existing imports — the source-of-truth functions stay in
-``orchestrator/__init__.py`` (proven working through P1.5ε) and this
-module **re-exports** them so the import path
-``oracle_ai_data_platform_fusion_bundle.orchestrator.merge_helpers``
-is stable for the new code without rewriting any v1 callsite.
+Content-pack strategy executors import MERGE helpers from this public
+module instead of reaching through package internals. The source-of-truth
+functions stay in ``orchestrator/__init__.py`` and this module
+**re-exports** them so the import path
+``oracle_ai_data_platform_fusion_bundle.orchestrator.merge_helpers`` is
+stable without rewriting existing callsites.
 
 Why re-export instead of move
 -----------------------------
-The v1 functions are battle-tested and have golden-snapshot SQL tests
-in ``tests/unit/test_p117_builder_merge_sql.py``. Moving them would
-require updating every import sitewide and would risk subtle behavioural
-drift. The re-export approach gives Phase 2 the canonical location it
-needs without disturbing the v1 runtime.
+The existing helpers have golden-snapshot SQL tests. Moving them would
+require updating every import sitewide and would risk subtle behavioral
+drift. The re-export approach gives content-pack execution a canonical
+location without disturbing established callsites.
 
-This module also houses **new** Phase 2 helpers that don't exist in
-v1:
+This module also houses public wrappers and composition helpers:
 
 * :func:`build_natural_key_join_sql` — public-named variant of the
   re-exported ``_natural_key_join_sql`` (no leading underscore;
@@ -45,7 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-# Re-export the battle-tested v1 helpers under the Phase 2 module path.
+# Re-export the established helpers under the public module path.
 from . import (
     _natural_key_join_sql as _v1_natural_key_join_sql,
     _payload_diff_predicate_sql as _v1_payload_diff_predicate_sql,
@@ -55,15 +49,15 @@ from .state import (
 )
 
 __all__ = [
-    # Re-exports (v1 source-of-truth; same identity).
+    # Re-exports (source-of-truth; same identity).
     "_natural_key_join_sql",
     "_payload_diff_predicate_sql",
     "_ensure_target_schema_for_merge",
-    # Public-named Phase 2 wrappers.
+    # Public-named wrappers.
     "build_natural_key_join_sql",
     "build_payload_diff_predicate_sql",
     "ensure_target_schema_for_merge",
-    # New Phase 2 composer.
+    # MERGE statement composer.
     "compose_merge_sql",
 ]
 
@@ -84,8 +78,8 @@ def build_natural_key_join_sql(
 ) -> str:
     """Public-named NULL-safe natural-key join predicate builder.
 
-    Phase 2 callers (``execute_merge`` strategy executor) use this name;
-    v1 callers keep the underscore-prefixed alias. Behaviour identical.
+    Content-pack callers use this name; existing callers keep the
+    underscore-prefixed alias. Behavior is identical.
 
     Accepts a plain ``list[str]`` in addition to ``str`` / ``tuple[str,
     ...]`` to match ``NodeYaml.refresh.incremental.natural_key`` which
@@ -118,15 +112,15 @@ def ensure_target_schema_for_merge(*args, **kwargs):  # type: ignore[no-untyped-
     """Public-named schema-reconciliation helper.
 
     Re-exports ``orchestrator.state._ensure_target_schema_for_merge``.
-    Phase 2 strategy executor calls this before running the MERGE so
-    nullable-column additions in the rendered source DataFrame are
-    auto-added to the target Delta table.
+    Strategy executors call this before running MERGE so nullable-column
+    additions in the rendered source DataFrame are auto-added to the
+    target Delta table.
     """
     return _ensure_target_schema_for_merge(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
-# compose_merge_sql — full MERGE statement assembly (Phase 2 only)
+# compose_merge_sql — full MERGE statement assembly
 # ---------------------------------------------------------------------------
 
 

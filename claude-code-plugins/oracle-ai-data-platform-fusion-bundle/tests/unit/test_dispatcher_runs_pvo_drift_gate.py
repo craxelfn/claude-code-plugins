@@ -1,8 +1,8 @@
-"""Phase 5 Step 2d — the top-level dispatcher invokes the Fusion PVO
-drift gate (AIDPF-2072) BEFORE the bronze branch.
+"""The top-level dispatcher invokes the Fusion PVO drift gate (AIDPF-2072)
+before the bronze branch.
 
 Companion to ``test_dispatcher_invokes_pvo_drift.py`` (helper-level)
-and ``test_dispatcher_invokes_readiness.py`` (Step 2c, sibling gate).
+and ``test_dispatcher_invokes_readiness.py`` (sibling gate).
 This module proves the dispatcher-side wiring: the gate runs first,
 its failure short-circuits the run, and the bronze branch never
 dispatches when the gate trips.
@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from oracle_ai_data_platform_fusion_bundle.orchestrator import (
-    _phase5_top_level_dispatch,
+    _dispatch_content_pack_run,
 )
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import (
     load_full_chain,
@@ -77,7 +77,7 @@ class TestDispatcherRunsPvoDriftGate:
                 error_message="test-forced PVO drift",
             )
 
-        monkeypatch.setattr(_o, "_phase5_run_fusion_pvo_drift_gate", fake_gate)
+        monkeypatch.setattr(_o, "_run_fusion_pvo_drift_gate", fake_gate)
 
         # If the dispatcher ever calls the recursive run() for bronze,
         # fail the test loudly. The gate fires BEFORE the bronze
@@ -89,7 +89,7 @@ class TestDispatcherRunsPvoDriftGate:
             # Only the bronze branch's recursive call passes
             #. The outer call from
             # the test still routes through the patched dispatcher
-            # via run() → _phase5_top_level_dispatch.
+            # via run() -> _dispatch_content_pack_run.
             if kwargs.get("execution_backend") == "legacy-python":
                 bronze_run_calls.append(kwargs)
                 raise AssertionError(
@@ -100,7 +100,7 @@ class TestDispatcherRunsPvoDriftGate:
 
         monkeypatch.setattr(_o, "run", trap_run)
 
-        summary = _phase5_top_level_dispatch(
+        summary = _dispatch_content_pack_run(
             bundle_path=FIXTURE_BUNDLE,
             spark=MagicMock(name="FakeSpark"),
             mode="seed",
@@ -145,7 +145,7 @@ class TestDispatcherRunsPvoDriftGate:
 
         gate_calls: list[dict] = []
         monkeypatch.setattr(
-            _o, "_phase5_run_fusion_pvo_drift_gate",
+            _o, "_run_fusion_pvo_drift_gate",
             lambda **kw: (gate_calls.append(kw) or None),
         )
 
@@ -162,7 +162,7 @@ class TestDispatcherRunsPvoDriftGate:
             sql_runner, "execute_node",
             lambda *a, **kw: NodeExecutionResult(status="success", row_count=0),
         )
-        # Bypass the Phase 3c fingerprint gate (needs a real backend).
+        # Bypass the fingerprint gate; it needs a real backend.
         from oracle_ai_data_platform_fusion_bundle.orchestrator import preflight_evidence
         from oracle_ai_data_platform_fusion_bundle.orchestrator.preflight_evidence import (
             PreflightOutcome,
@@ -183,7 +183,7 @@ class TestDispatcherRunsPvoDriftGate:
             lambda *a, **kw: None,
         )
 
-        _phase5_top_level_dispatch(
+        _dispatch_content_pack_run(
             bundle_path=FIXTURE_BUNDLE,
             spark=fake_spark,
             mode="seed",
