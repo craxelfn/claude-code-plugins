@@ -294,17 +294,33 @@ live PVO schema). Correcting them is per-column pack-authoring work
 — a *pack defect fix*, not a per-tenant `columnAlias`. Ground-truth PVO
 schemas captured to `dev/bronze_actual_schema.json`.
 
-**Status**: **partially fixed 2026-06-11 (Option A)** — 5 of 7 nodes
-corrected (`ar_invoices`, `ar_receipts`, `po_orders`, `ap_payments`,
-`scm_items`): names+types aligned to the live PVO by core-exact matching,
-two non-key attributes (`ap_payments…InvoiceId`, `scm_items…Segment1`)
-trimmed. Offline-verified (declared ⊆ PVO); pack validates. The remaining
-2 — `gl_journal_lines` and `po_receipts` — are deferred to **Option B**
-(their `naturalKey` column has no clean live counterpart, so each needs a
-modelling decision; see `dev/PLAN…md` §27). Live bronze extract of the 5
-fixed nodes still pending (no downstream mart validates them). Do not
-trust automated name-matching (difflib) — it collides across these varied
-prefixes; use core-exact / semantic matching.
+**Status**: **partially fixed + live-verified 2026-06-11 (Option A)**.
+5 of 7 nodes had names+types corrected to the live PVO by core-exact
+matching (two non-key attributes — `ap_payments…InvoiceId`,
+`scm_items…Segment1` — trimmed). **4 of those 5 are live-verified
+materialized** on saasfademo1: `ap_payments` 3,476,916 rows / `ar_invoices`
+187,970 / `ar_receipts` 64,007 / `po_orders` 16,769 (column counts =
+PVO + 4 audit). The name fix is confirmed correct for these four.
+
+`scm_items` is a **separate, deeper problem**: the name fix is correct
+(passes the AIDPF-4071 gate) but the node **fails to materialize** — the
+`ItemExtractPVO` extract creates no `bronze.scm_items` table on this
+tenant (cf. the root-level `FIX_step6_scm_items_schema*.py` history). Not
+a P3-L3 name issue; reclassified into **Option B** for investigation.
+
+The remaining 2 (`gl_journal_lines`, `po_receipts`) stay in **Option B**
+(natural-key column has no clean live counterpart; see `dev/PLAN…md` §27).
+
+**Robustness gap surfaced**: when a bronze node's target table never
+materializes, `DESCRIBE TABLE` raises an uncaught `AnalysisException` that
+aborts the whole run. Step 8 (`_assert_materialized_matches_declared`) is
+now hardened to convert this to a graceful per-node `output_schema_drift`
+(2026-06-11). The sibling site — `node_preflight._check_required_columns`
+DESCRIBE-ing a missing bronze table — has the **same gap, not yet fixed**;
+it's what crashes a fresh `scm_items` run before Step 8 is reached.
+
+Do not trust automated name-matching (difflib) — it collides across these
+varied prefixes; use core-exact / semantic matching.
 
 ---
 

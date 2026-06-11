@@ -428,6 +428,26 @@ class TestMaterialisedSchemaAssertion:
             _assert_materialized_matches_declared(spark, "cat.silver.dim_thing", node)
         assert AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT in str(exc_info.value)
 
+    def test_missing_target_raises_4070_not_raw_exception(self) -> None:
+        """A missing target after execution (DESCRIBE TABLE throws
+        TABLE_OR_VIEW_NOT_FOUND) must surface as MaterializedSchemaDriftError
+        — a graceful per-node failure — not a raw AnalysisException that
+        would abort the whole run."""
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            MaterializedSchemaDriftError,
+        )
+        from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import NodeYaml
+
+        node = NodeYaml.model_validate(yaml.safe_load(NODE_YAML))
+        spark = MagicMock()
+        spark.sql.side_effect = RuntimeError(
+            "[TABLE_OR_VIEW_NOT_FOUND] cat.bronze.x cannot be found"
+        )
+        with pytest.raises(MaterializedSchemaDriftError) as exc_info:
+            _assert_materialized_matches_declared(spark, "cat.bronze.x", node)
+        assert AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT in str(exc_info.value)
+        assert "no table" in str(exc_info.value)
+
     def test_type_mismatch_raises_4070(self) -> None:
         from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
             MaterializedSchemaDriftError,
@@ -687,3 +707,55 @@ class TestBronzeSourceSchemaGate:
         assert _bronze_source_schema_gate(
             MagicMock(), node=_bronze_node(), pack=MagicMock(), profile=_gate_profile(), ctx=_gate_ctx()
         ) is None
+
+
+class TestBatchBronzeSourceSchemaGate:
+    """check_bronze_source_schemas — ONE probe over all in-scope bronze
+    nodes, returns a failure list (fail-fast, before any extract)."""
+
+    def _patch(self, monkeypatch, schemas_by_node):
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.builtins.bronze_extract_adapter as bea
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.runtime as rt
+        from types import SimpleNamespace
+        monkeypatch.setattr(rt, "_resolve_password",
+                            lambda _v: SimpleNamespace(get_secret_value=lambda: "pw"))
+        monkeypatch.setattr(bea, "probe_bronze_schemas", lambda *a, **k: schemas_by_node)
+
+    def _pack(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(bronze={"test_bronze": _bronze_node()})
+
+    def _call(self, **kw):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            check_bronze_source_schemas,
+        )
+        from unittest.mock import MagicMock
+        from types import SimpleNamespace
+        return check_bronze_source_schemas(
+            MagicMock(), pack=self._pack(),
+            bundle=SimpleNamespace(fusion=SimpleNamespace(password="x")),
+            profile=SimpleNamespace(tenant="t"),
+            bronze_node_ids=["test_bronze"], run_id="run-batch", **kw,
+        )
+
+    def test_all_present_returns_empty(self, monkeypatch):
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(["VENDORID", "SEGMENT1", "x"])})
+        assert self._call() == []
+
+    def test_missing_returns_failure_with_diagnostic(self, monkeypatch):
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(["vendorid"])})  # SEGMENT1 absent
+        out = self._call()
+        assert len(out) == 1
+        assert out[0]["node"] == "test_bronze"
+        assert AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING in out[0]["message"]
+        assert out[0]["diagnostic"]["missingColumns"] == ["SEGMENT1"]
+
+    def test_probe_failure_degrades_to_empty(self, monkeypatch):
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.builtins.bronze_extract_adapter as bea
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.runtime as rt
+        from types import SimpleNamespace
+        monkeypatch.setattr(rt, "_resolve_password",
+                            lambda _v: SimpleNamespace(get_secret_value=lambda: "pw"))
+        def _boom(*a, **k): raise RuntimeError("BICC down")
+        monkeypatch.setattr(bea, "probe_bronze_schemas", _boom)
+        assert self._call() == []

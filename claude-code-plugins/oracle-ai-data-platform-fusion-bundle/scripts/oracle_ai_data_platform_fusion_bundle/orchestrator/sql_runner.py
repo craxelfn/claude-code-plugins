@@ -423,7 +423,21 @@ def _assert_materialized_matches_declared(
     success — the caller threads it into the success state row for
     audit.
     """
-    rows = spark.sql(f"DESCRIBE TABLE {target}").collect()
+    # A "successful" execute that left no target table (empty/degenerate
+    # extract, or a write that silently no-op'd) makes DESCRIBE raise
+    # TABLE_OR_VIEW_NOT_FOUND. Convert it to a graceful per-node
+    # MaterializedSchemaDriftError (the callers catch it → output_schema_drift)
+    # rather than letting the raw AnalysisException propagate and abort the
+    # entire run, taking unrelated nodes down with it.
+    try:
+        rows = spark.sql(f"DESCRIBE TABLE {target}").collect()
+    except Exception as exc:  # noqa: BLE001 — missing target / broken describe
+        raise MaterializedSchemaDriftError(
+            f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: target {target!r} could not "
+            f"be described after execution — the node produced no table (empty "
+            f"or failed extract/write). Underlying: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
     materialized: list[tuple[str, str]] = []
     for r in rows:
         try:
@@ -1034,63 +1048,27 @@ def _execute_builtin_node(
 # ---------------------------------------------------------------------------
 
 
-def _bronze_source_schema_gate(
-    spark: "SparkSession",  # noqa: F821
-    *,
+def _source_schema_miss(
     node: "NodeYaml",  # noqa: F821
-    pack: "ResolvedPack",  # noqa: F821
-    profile: "TenantProfile",  # noqa: F821
-    ctx: RunContext,
+    st: "object | None",
+    *,
+    run_id: str,
+    tenant: str | None,
 ) -> tuple[str, dict] | None:
-    """Pre-ingest source-schema gate (AIDPF-4071).
+    """Given a bronze node and its live PVO ``StructType`` (or None),
+    return ``(message, AIDPF-4071 diagnostic)`` if any declared non-audit
+    ``outputSchema`` column is absent from the PVO (presence-only,
+    case-insensitive); ``None`` when all present / nothing to check.
 
-    Metadata-only BICC ``inferSchema`` probe over THIS node's PVO (no row
-    pull, no write). When a column the pack declares it wants (non-audit
-    ``outputSchema`` columns) is absent from the live PVO, returns
-    ``(error_message, diagnostic_dict)``; returns ``None`` when every wanted
-    column is present.
-
-    The diagnostic dict is a JSON-able ``BronzeSourceColumnMissingV1``
-    payload (by alias) — the orchestrator collects it into
-    ``RunSummary.diagnostics`` and the laptop dispatcher persists it to
-    ``.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json`` for
-    ``medallion-author`` to resolve (renamed column → columnAlias overlay).
-
-    Presence-only + case-insensitive — types are BICC's to decide (silver
-    casts) and BICC lowercases names. The point is to fail in *seconds*
-    before a multi-minute extract that would only fail the post-write
-    AIDPF-4070 subset check anyway.
-
-    Degrades to ``None`` (proceed) on any probe failure — the real extract
-    surfaces a connectivity/auth problem with a better diagnostic than this
-    gate could.
+    Shared by the per-node gate and the batch gate so the message +
+    diagnostic shape stay identical.
     """
-    from .builtins import bronze_extract_adapter as _bronze_adapter
-    from .runtime import _resolve_password
-
-    bundle = ctx.bundle
-    if bundle is None:
-        return None  # run() raises with a precise contract error downstream
-
     wanted = [
         col.name for col in node.output_schema.columns
         if not col.name.startswith("_")  # audit cols are adapter-generated
     ]
-    if not wanted:
+    if not wanted or st is None:
         return None
-
-    try:
-        pw = _resolve_password(bundle.fusion.password).get_secret_value()
-        schemas = _bronze_adapter.probe_bronze_schemas(
-            spark, pack=pack, bundle=bundle,
-            resolved_password=pw, dataset_ids=[node.id],
-        )
-    except Exception:  # noqa: BLE001 — probe failure → defer to the real extract
-        return None
-    st = schemas.get(node.id)
-    if st is None:
-        return None
-
     present_ci = {f.name.lower() for f in st.fields}
     missing = sorted(c for c in wanted if c.lower() not in present_ci)
     if not missing:
@@ -1107,8 +1085,8 @@ def _bronze_source_schema_gate(
     )
     diagnostic = {
         "schemaVersion": 1,
-        "runId": ctx.run_id,
-        "tenant": getattr(profile, "tenant", None),
+        "runId": run_id,
+        "tenant": tenant,
         "errorCode": AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING,
         "errorMessage": message,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -1122,6 +1100,94 @@ def _bronze_source_schema_gate(
         ],
     }
     return message, diagnostic
+
+
+def check_bronze_source_schemas(
+    spark: "SparkSession",  # noqa: F821
+    *,
+    pack: "ResolvedPack",  # noqa: F821
+    bundle: "object",
+    profile: "TenantProfile",  # noqa: F821
+    bronze_node_ids: "list[str]",
+    run_id: str,
+) -> list[dict]:
+    """Batch pre-ingest source-schema gate (AIDPF-4071).
+
+    ONE metadata-only ``probe_bronze_schemas`` call over every in-scope
+    bronze node, BEFORE the orchestrator extracts anything. Returns a list
+    of ``{"node", "message", "diagnostic"}`` — one per node declaring a
+    column the live PVO lacks; empty list when all clear.
+
+    The orchestrator runs this before the per-node loop so a bad node
+    aborts the run in seconds (fail-fast) instead of after the healthy
+    nodes ahead of it have already been (re-)seeded. Degrades to ``[]`` on
+    any probe failure — the per-node gate / real extract surface
+    connectivity/auth problems with a better diagnostic.
+    """
+    from .builtins import bronze_extract_adapter as _bronze_adapter
+    from .runtime import _resolve_password
+
+    if not bronze_node_ids or bundle is None:
+        return []
+    try:
+        pw = _resolve_password(bundle.fusion.password).get_secret_value()
+        schemas = _bronze_adapter.probe_bronze_schemas(
+            spark, pack=pack, bundle=bundle,
+            resolved_password=pw, dataset_ids=list(bronze_node_ids),
+        )
+    except Exception:  # noqa: BLE001 — probe failure → defer to per-node/extract
+        return []
+    tenant = getattr(profile, "tenant", None)
+    failures: list[dict] = []
+    for nid in bronze_node_ids:
+        node = pack.bronze.get(nid)
+        if node is None:
+            continue
+        res = _source_schema_miss(node, schemas.get(nid), run_id=run_id, tenant=tenant)
+        if res is not None:
+            msg, diag = res
+            failures.append({"node": nid, "message": msg, "diagnostic": diag})
+    return failures
+
+
+def _bronze_source_schema_gate(
+    spark: "SparkSession",  # noqa: F821
+    *,
+    node: "NodeYaml",  # noqa: F821
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: RunContext,
+) -> tuple[str, dict] | None:
+    """Per-node pre-ingest source-schema gate (AIDPF-4071) — defense-in-depth.
+
+    Metadata-only BICC ``inferSchema`` probe over THIS node's PVO (no row
+    pull, no write). Returns ``(message, diagnostic)`` when a declared
+    non-audit ``outputSchema`` column is absent from the live PVO, else
+    ``None``. The orchestrator normally catches this earlier via the batch
+    :func:`check_bronze_source_schemas`; this per-node check still guards
+    direct ``execute_node`` callers that bypass the batch pass.
+
+    Degrades to ``None`` (proceed) on any probe failure — the real extract
+    surfaces a connectivity/auth problem with a better diagnostic.
+    """
+    from .builtins import bronze_extract_adapter as _bronze_adapter
+    from .runtime import _resolve_password
+
+    bundle = ctx.bundle
+    if bundle is None:
+        return None  # run() raises with a precise contract error downstream
+    try:
+        pw = _resolve_password(bundle.fusion.password).get_secret_value()
+        schemas = _bronze_adapter.probe_bronze_schemas(
+            spark, pack=pack, bundle=bundle,
+            resolved_password=pw, dataset_ids=[node.id],
+        )
+    except Exception:  # noqa: BLE001 — probe failure → defer to the real extract
+        return None
+    return _source_schema_miss(
+        node, schemas.get(node.id),
+        run_id=ctx.run_id, tenant=getattr(profile, "tenant", None),
+    )
 
 
 def _execute_bronze_extract_node(
