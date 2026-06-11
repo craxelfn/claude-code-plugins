@@ -113,6 +113,42 @@ the run in **0.00 s of extraction** — `erp_suppliers` FAILED, `ap_invoices`
 need its bronze source can't satisfy fails in seconds, before the
 multi-minute pull — not after.
 
+## G — mart-only run does NOT re-seed bronze
+
+`run --mode seed --layers silver,gold` now keys off the requested layers:
+bronze stays in the plan for lineage but is NOT executed; the marts rebuild
+against the LANDED bronze tables. Live (`run_id fe9da2e5…`): all 6 marts
+SUCCESS — `dim_account` 63,464 / `dim_calendar` 4,018 / `dim_supplier` 209 /
+`ap_aging` 131 / `gl_balance` 10,184,102 / `supplier_spend` 309 — in
+**~5 min (300s), zero bronze rows, no re-extract** (`gl_balance` read 10.18M
+from the existing table). Before the fix this re-extracted all bronze (~28
+min, incl. the ~18-min `gl_period_balances` pull).
+
+## H — missing bronze table → fail fast with seed-command suggestion
+
+A mart-only run validates the landed bronze via the readiness gate before
+any mart runs. Live: dropped `bronze.erp_suppliers`, then
+`run --layers silver,gold` aborted in **0.00s** with one
+`__bronze_readiness_gate__` FAILED step:
+
+```
+[AIDPF-2071] bronze readiness gate failed for tables: ['erp_suppliers'].
+  - erp_suppliers: table missing (run `aidp-fusion-bundle run --layers bronze
+    --datasets erp_suppliers` first).
+```
+
+Running that suggested command then restored the table (`erp_suppliers`
+209 rows, `run_id 1abcd6df…`) — proving the remediation the gate hands the
+operator actually works.
+
+**First-seed blocker found + fixed here:** the suggested re-seed initially
+crashed because `bronze_extract` preflight `DESCRIBE`d its own
+not-yet-existent target (uncaught `AnalysisException`). That blocks the
+**first-ever seed of any bronze node on a fresh tenant** — hidden until now
+only because the starter pack's bronze tables pre-existed. Fixed:
+preflight skips table-introspection for `bronze_extract` nodes (source is
+the PVO). Re-seed then succeeded.
+
 ## Notes
 
 - 7 starter-pack bronze nodes with no downstream silver/gold shipped

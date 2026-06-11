@@ -1,12 +1,14 @@
-"""Step 5 dispatcher invokes the bronze readiness gate exactly when
-``cp_filter is not None AND dry_run is False AND bronze branch ran``.
+"""The content-pack backend invokes the bronze readiness gate.
 
-Per the Phase 5 plan, the readiness gate fires BETWEEN the bronze
-branch (Step 5 step d) and the content-pack branch (Step 5 step f).
-The gate's invocation MUST NOT happen in any other branch (silver/
-gold-only direct calls against pre-seeded bronze skip the gate
-because the caller asserts the bronze invariant out of band; dry_run
-skips because no DESCRIBE TABLE work should happen during planning).
+As of Option A, the gate fires automatically for **silver/gold-only
+runs** (marts in scope, no bronze nodes this run → bronze pre-exists in
+AIDP): it ``DESCRIBE``s the landed bronze tables and batch-validates
+every in-scope mart's required columns BEFORE any mart runs. ``dry_run``
+still skips it (no DESCRIBE work during planning). Full seeds (bronze in
+scope) do NOT fire it — the pre-extraction PVO source gate already
+fail-fasts them, and an all-or-nothing gate would regress their
+per-node cascade. (The legacy ``enable_bronze_readiness_gate`` flag still
+force-enables it for back-compat callers.)
 
 When the gate raises, the dispatcher catches it, appends a synthetic
 gate-failure ``RunStep`` to the merged ``RunSummary``, and returns
@@ -56,10 +58,11 @@ def profile():
 
 
 class TestDispatcherInvokesReadinessGate:
-    def test_gate_NOT_invoked_when_disabled(self, monkeypatch, pack, profile) -> None:
-        """When ``enable_bronze_readiness_gate=False`` (silver/gold-only
-        direct calls), the gate MUST NOT fire even if it would have
-        found gaps."""
+    def test_gate_auto_invoked_for_silver_gold_only(self, monkeypatch, pack, profile) -> None:
+        """Option A: a silver/gold-only run (marts in scope, NO bronze this
+        run → bronze pre-exists) auto-fires the readiness gate even with
+        ``enable_bronze_readiness_gate=False`` — to validate the landed
+        bronze tables before any mart runs."""
         from oracle_ai_data_platform_fusion_bundle.orchestrator import (
             bronze_readiness, sql_runner,
         )
@@ -68,17 +71,13 @@ class TestDispatcherInvokesReadinessGate:
         )
         import oracle_ai_data_platform_fusion_bundle.orchestrator as _o
 
-        # Spy on the gate.
         gate_calls = []
-        original_gate = bronze_readiness.assert_bronze_readiness
+        # Stub to record + pass (don't run the real DESCRIBE against the mock).
+        monkeypatch.setattr(
+            bronze_readiness, "assert_bronze_readiness",
+            lambda *a, **kw: gate_calls.append(kw),
+        )
 
-        def spy_gate(*args, **kwargs):
-            gate_calls.append(kwargs)
-            return original_gate(*args, **kwargs)
-
-        monkeypatch.setattr(bronze_readiness, "assert_bronze_readiness", spy_gate)
-
-        # Mock all the spark stuff.
         from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
             NodeExecutionResult,
         )
@@ -104,11 +103,12 @@ class TestDispatcherInvokesReadinessGate:
             resume_run_id=None,
             resolved_pack=pack,
             tenant_profile=profile,
-            enable_bronze_readiness_gate=False,
+            enable_bronze_readiness_gate=False,  # auto-enabled for silver/gold-only
         )
-        assert gate_calls == [], (
-            "bronze readiness gate fired even though enable_bronze_readiness_gate=False"
+        assert len(gate_calls) == 1, (
+            "readiness gate did not auto-fire for a silver/gold-only run"
         )
+        assert gate_calls[0]["cp_filter"] == (None, ["silver", "gold"])
 
     def test_gate_NOT_invoked_in_dry_run(self, monkeypatch, pack, profile) -> None:
         """``dry_run=True`` MUST skip the gate — no Spark DESCRIBE work
@@ -198,3 +198,27 @@ class TestDispatcherInvokesReadinessGate:
             "execute_node was called after gate failure — silver/gold "
             "MUST NOT run when bronze readiness fails"
         )
+
+
+class TestMartOnlyDetection:
+    """Mart-only detection keys off the REQUESTED layers (operator intent),
+    not plan contents: ``--layers silver,gold`` = bronze not in scope →
+    bronze is NOT re-seeded; the readiness gate validates landed tables."""
+
+    def test_silver_gold_layers_is_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        assert _is_mart_only_run(["silver", "gold"]) is True
+        assert _is_mart_only_run(["silver"]) is True
+        assert _is_mart_only_run(["gold"]) is True
+
+    def test_bronze_in_layers_is_not_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        # bronze requested → full run → bronze IS seeded
+        assert _is_mart_only_run(["bronze", "silver", "gold"]) is False
+        assert _is_mart_only_run(["bronze"]) is False  # bronze-only
+
+    def test_no_layer_filter_is_not_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        # None / empty = all layers = full run
+        assert _is_mart_only_run(None) is False
+        assert _is_mart_only_run([]) is False

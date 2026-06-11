@@ -361,3 +361,59 @@ refresh:
         spark = _fake_describe_spark(["x"])  # no _extract_ts but seed-only node doesn't need it
         report = preflight_node(spark, node, pack=_pack(), profile=_profile(), ctx=_ctx())
         assert report.ok  # No watermark check because there's no incremental.merge.
+
+
+# ---------------------------------------------------------------------------
+# bronze_extract nodes skip table-introspection preflight (first-seed safety)
+# ---------------------------------------------------------------------------
+
+BRONZE_EXTRACT_NODE_YAML = """
+id: erp_thing
+layer: bronze
+implementation:
+  type: bronze_extract
+  datastore: FscmTopModelAM.Test.TestPVO
+  pvo_id: FscmTopModelAM.Test.TestPVO
+  biccSchema: Financial
+  incrementalCapable: true
+target: erp_thing
+dependsOn:
+  bronze: []
+  silver: []
+requiredColumns:
+  erp_thing:
+    - SEGMENT1
+    - VENDORID
+refresh:
+  seed:
+    strategy: replace
+  incremental:
+    strategy: merge
+    watermark:
+      source: erp_thing
+      column: LASTUPDATEDATE
+    naturalKey: [SEGMENT1]
+outputSchema:
+  columns:
+    - { name: SEGMENT1, type: string, nullable: true, pii: low }
+    - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
+quality:
+  tests: []
+"""
+
+
+class TestBronzeExtractSkipsTableChecks:
+    def test_bronze_extract_preflight_does_not_describe_table(self) -> None:
+        """A bronze_extract node CREATES its target from the live PVO; the
+        table doesn't exist yet on a first-ever seed (or after a drop).
+        preflight MUST NOT DESCRIBE it (that raised an uncaught
+        AnalysisException and blocked the seed). Even with a spark whose
+        every sql() call raises, preflight returns ok without touching it."""
+        node = NodeYaml.model_validate(yaml.safe_load(BRONZE_EXTRACT_NODE_YAML))
+        spark = MagicMock()
+        spark.sql.side_effect = AssertionError(
+            "DESCRIBE must not be called during bronze_extract preflight"
+        )
+        report = preflight_node(spark, node, pack=_pack(), profile=_profile(), ctx=_ctx())
+        assert report.ok
+        spark.sql.assert_not_called()

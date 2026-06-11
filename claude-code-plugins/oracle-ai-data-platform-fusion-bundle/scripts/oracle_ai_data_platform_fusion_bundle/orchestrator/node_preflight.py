@@ -152,6 +152,16 @@ def preflight_node(
     """
     errors: list[PreflightError] = []
 
+    # bronze_extract nodes CREATE their target table from the live PVO —
+    # they don't read a pre-existing bronze table. The checks below all
+    # `DESCRIBE` the node's bronze table, which doesn't exist yet on a
+    # first-ever seed (or after a drop) and would raise an uncaught
+    # AnalysisException. The bronze source is validated against the PVO by
+    # the AIDPF-4071 source gate + the post-write AIDPF-4070 assertion, so
+    # there's nothing for table-introspection preflight to do here.
+    if getattr(node.implementation, "type", None) == "bronze_extract":
+        return PreflightReport(errors=())
+
     # 1. Required columns on each declared source.
     errors.extend(_check_required_columns(spark, node, pack, profile, ctx))
 
