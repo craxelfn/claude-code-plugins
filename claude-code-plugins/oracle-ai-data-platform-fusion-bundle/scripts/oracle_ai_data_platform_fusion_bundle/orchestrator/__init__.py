@@ -1265,15 +1265,28 @@ def _run_content_pack_backend(
     # healthy nodes ahead of it (a per-node gate would only spare that one
     # node's extract, not the nodes before it). Skipped on dry-run.
     if not dry_run:
+        from .bronze_readiness import (
+            _compute_required_columns,
+            _resolve_in_scope_nodes,
+        )
         from .sql_runner import check_bronze_source_schemas
 
         _bronze_ids = [
             n.id for n in plan
             if n.layer == "bronze" and n.implementation.type == "bronze_extract"
         ]
+        # What in-scope silver/gold need from each bronze source (transitive
+        # silver->silver->bronze; $column aliases resolved). Folding this into
+        # the source probe means a silver/gold column its bronze PVO can't
+        # supply aborts BEFORE extraction — not after the bronze pull lands.
+        _in_scope_sg = _resolve_in_scope_nodes(resolved_pack, (datasets, layers))
+        _downstream_required = _compute_required_columns(
+            _in_scope_sg, resolved_pack, tenant_profile
+        )
         _src_failures = check_bronze_source_schemas(
             spark, pack=resolved_pack, bundle=bundle, profile=tenant_profile,
             bronze_node_ids=_bronze_ids, run_id=run_id,
+            downstream_required=_downstream_required,
         )
         if _src_failures:
             _failed = {f["node"] for f in _src_failures}

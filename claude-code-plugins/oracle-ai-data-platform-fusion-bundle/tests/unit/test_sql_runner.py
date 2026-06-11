@@ -759,3 +759,48 @@ class TestBatchBronzeSourceSchemaGate:
         def _boom(*a, **k): raise RuntimeError("BICC down")
         monkeypatch.setattr(bea, "probe_bronze_schemas", _boom)
         assert self._call() == []
+
+
+class TestBatchGateDownstreamNeeds:
+    """The batch gate also fails when an in-scope silver/gold node needs a
+    column the bronze source's PVO can't supply — caught BEFORE extraction."""
+
+    def _patch(self, monkeypatch, schemas_by_node):
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.builtins.bronze_extract_adapter as bea
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.runtime as rt
+        from types import SimpleNamespace
+        monkeypatch.setattr(rt, "_resolve_password",
+                            lambda _v: SimpleNamespace(get_secret_value=lambda: "pw"))
+        monkeypatch.setattr(bea, "probe_bronze_schemas", lambda *a, **k: schemas_by_node)
+
+    def _call(self, **kw):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_runner import (
+            check_bronze_source_schemas,
+        )
+        from unittest.mock import MagicMock
+        from types import SimpleNamespace
+        return check_bronze_source_schemas(
+            MagicMock(), pack=SimpleNamespace(bronze={"test_bronze": _bronze_node()}),
+            bundle=SimpleNamespace(fusion=SimpleNamespace(password="x")),
+            profile=SimpleNamespace(tenant="t"),
+            bronze_node_ids=["test_bronze"], run_id="run-ds", **kw,
+        )
+
+    def test_downstream_need_missing_from_pvo_fails(self, monkeypatch):
+        # declared (VENDORID, SEGMENT1) all present; silver needs a col the PVO lacks.
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(["vendorid", "segment1"])})
+        out = self._call(downstream_required={"test_bronze": {"SILVER_NEEDS_THIS"}})
+        assert len(out) == 1
+        assert "SILVER_NEEDS_THIS" in out[0]["diagnostic"]["missingColumns"]
+
+    def test_downstream_need_present_passes(self, monkeypatch):
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(["vendorid", "segment1"])})
+        out = self._call(downstream_required={"test_bronze": {"VENDORID"}})  # present (ci)
+        assert out == []
+
+    def test_downstream_audit_columns_ignored(self, monkeypatch):
+        # _extract_ts is adapter-generated; a silver dep on it must NOT trip
+        # the gate even though it's absent from the PVO.
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(["vendorid", "segment1"])})
+        out = self._call(downstream_required={"test_bronze": {"_extract_ts"}})
+        assert out == []

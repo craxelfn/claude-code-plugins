@@ -1054,19 +1054,28 @@ def _source_schema_miss(
     *,
     run_id: str,
     tenant: str | None,
+    extra_required: "set[str] | frozenset[str]" = frozenset(),
 ) -> tuple[str, dict] | None:
     """Given a bronze node and its live PVO ``StructType`` (or None),
-    return ``(message, AIDPF-4071 diagnostic)`` if any declared non-audit
-    ``outputSchema`` column is absent from the PVO (presence-only,
-    case-insensitive); ``None`` when all present / nothing to check.
+    return ``(message, AIDPF-4071 diagnostic)`` if any *wanted* column is
+    absent from the PVO (presence-only, case-insensitive); ``None`` when
+    all present / nothing to check.
+
+    *Wanted* = the node's declared non-audit ``outputSchema`` columns,
+    PLUS ``extra_required`` — the columns in-scope silver/gold nodes need
+    from this bronze source (passed by the batch gate so a downstream
+    need that bronze's PVO can't satisfy fails BEFORE extraction, not
+    after a 21-minute pull). Audit columns (``_``-prefixed) are excluded
+    from both: they're adapter-generated and always present post-extract.
 
     Shared by the per-node gate and the batch gate so the message +
     diagnostic shape stay identical.
     """
-    wanted = [
+    wanted = {
         col.name for col in node.output_schema.columns
         if not col.name.startswith("_")  # audit cols are adapter-generated
-    ]
+    }
+    wanted |= {c for c in extra_required if not c.startswith("_")}
     if not wanted or st is None:
         return None
     present_ci = {f.name.lower() for f in st.fields}
@@ -1076,12 +1085,12 @@ def _source_schema_miss(
     sample = sorted(f.name for f in st.fields)[:40]
     message = (
         f"{AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING}: bronze node {node.id!r} "
-        f"declares column(s) absent from live PVO "
-        f"{node.implementation.datastore!r}: {missing!r}. The PVO exposes "
-        f"{len(st.fields)} column(s) (sample: {sample!r}). Extract skipped "
-        f"to avoid a multi-minute pull that would fail the post-write gate. "
-        f"Fix the node's declared column names or author a columnAlias "
-        f"overlay (run /medallion-author)."
+        f"(or an in-scope silver/gold node) requires column(s) absent from "
+        f"live PVO {node.implementation.datastore!r}: {missing!r}. The PVO "
+        f"exposes {len(st.fields)} column(s) (sample: {sample!r}). Extract "
+        f"skipped to avoid a multi-minute pull that can't feed the medallion. "
+        f"Fix the declared column names or author a columnAlias overlay "
+        f"(run /medallion-author)."
     )
     diagnostic = {
         "schemaVersion": 1,
@@ -1110,25 +1119,30 @@ def check_bronze_source_schemas(
     profile: "TenantProfile",  # noqa: F821
     bronze_node_ids: "list[str]",
     run_id: str,
+    downstream_required: "dict[str, set[str]] | None" = None,
 ) -> list[dict]:
-    """Batch pre-ingest source-schema gate (AIDPF-4071).
+    """Batch pre-ingest source-schema gate (AIDPF-4071) for the whole run.
 
     ONE metadata-only ``probe_bronze_schemas`` call over every in-scope
-    bronze node, BEFORE the orchestrator extracts anything. Returns a list
-    of ``{"node", "message", "diagnostic"}`` — one per node declaring a
-    column the live PVO lacks; empty list when all clear.
+    bronze node, BEFORE the orchestrator extracts anything. For each bronze
+    node it checks that the live PVO can supply BOTH (a) the node's declared
+    ``outputSchema`` columns AND (b) ``downstream_required[node_id]`` — the
+    columns in-scope silver/gold nodes need from it (transitively resolved
+    by the caller). Returns ``{"node", "message", "diagnostic"}`` per bad
+    node; empty when all clear.
 
-    The orchestrator runs this before the per-node loop so a bad node
-    aborts the run in seconds (fail-fast) instead of after the healthy
-    nodes ahead of it have already been (re-)seeded. Degrades to ``[]`` on
-    any probe failure — the per-node gate / real extract surface
-    connectivity/auth problems with a better diagnostic.
+    Running this before the per-node loop means a node whose source can't
+    feed the medallion aborts the run in *seconds* — before the
+    multi-minute bronze extract — and reports every gap at once. Degrades
+    to ``[]`` on any probe failure (the per-node gate / real extract then
+    surface connectivity/auth problems with a better diagnostic).
     """
     from .builtins import bronze_extract_adapter as _bronze_adapter
     from .runtime import _resolve_password
 
     if not bronze_node_ids or bundle is None:
         return []
+    downstream_required = downstream_required or {}
     try:
         pw = _resolve_password(bundle.fusion.password).get_secret_value()
         schemas = _bronze_adapter.probe_bronze_schemas(
@@ -1143,7 +1157,10 @@ def check_bronze_source_schemas(
         node = pack.bronze.get(nid)
         if node is None:
             continue
-        res = _source_schema_miss(node, schemas.get(nid), run_id=run_id, tenant=tenant)
+        res = _source_schema_miss(
+            node, schemas.get(nid), run_id=run_id, tenant=tenant,
+            extra_required=downstream_required.get(nid, frozenset()),
+        )
         if res is not None:
             msg, diag = res
             failures.append({"node": nid, "message": msg, "diagnostic": diag})
