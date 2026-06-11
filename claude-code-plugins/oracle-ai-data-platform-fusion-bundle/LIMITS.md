@@ -311,13 +311,23 @@ a P3-L3 name issue; reclassified into **Option B** for investigation.
 The remaining 2 (`gl_journal_lines`, `po_receipts`) stay in **Option B**
 (natural-key column has no clean live counterpart; see `dev/PLAN…md` §27).
 
-**Robustness gap surfaced**: when a bronze node's target table never
-materializes, `DESCRIBE TABLE` raises an uncaught `AnalysisException` that
-aborts the whole run. Step 8 (`_assert_materialized_matches_declared`) is
-now hardened to convert this to a graceful per-node `output_schema_drift`
-(2026-06-11). The sibling site — `node_preflight._check_required_columns`
-DESCRIBE-ing a missing bronze table — has the **same gap, not yet fixed**;
-it's what crashes a fresh `scm_items` run before Step 8 is reached.
+**Robustness gaps surfaced — both now FIXED (2026-06-11)**: when a bronze
+node's target table doesn't exist, `DESCRIBE TABLE` raised an uncaught
+`AnalysisException` that aborted the whole run. Two sites:
+- **Step 8** (`_assert_materialized_matches_declared`) — now converts a
+  missing target after a "successful" extract to a graceful per-node
+  `output_schema_drift`.
+- **Preflight** (`node_preflight.preflight_node`) — now SKIPS the
+  table-introspection checks (required-cols / watermark / partition) for
+  `bronze_extract` nodes entirely. Those nodes *create* their target from
+  the PVO; DESCRIBE-ing the not-yet-existent table was wrong AND crashed
+  the **first-ever seed of any bronze node** (a fresh-tenant blocker, and
+  what crashed both `scm_items` and a post-drop `erp_suppliers` re-seed).
+  Live-verified: dropping `bronze.erp_suppliers` then re-seeding via the
+  gate's own suggested command (`run --layers bronze --datasets
+  erp_suppliers`) now succeeds (209 rows). With these fixes `scm_items`
+  fails gracefully (its extract still produces no table — the real Option-B
+  issue — but it no longer crashes the run).
 
 Do not trust automated name-matching (difflib) — it collides across these
 varied prefixes; use core-exact / semantic matching.
