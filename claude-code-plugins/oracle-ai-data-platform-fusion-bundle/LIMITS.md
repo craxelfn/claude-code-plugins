@@ -294,9 +294,17 @@ live PVO schema). Correcting them is per-column pack-authoring work
 — a *pack defect fix*, not a per-tenant `columnAlias`. Ground-truth PVO
 schemas captured to `dev/bronze_actual_schema.json`.
 
-**Status**: tracked; deferred until a node is actually needed (no
-consumer today). Do it node-by-node with live verification — automated
-name-matching (difflib) collides and mis-maps across these varied prefixes.
+**Status**: **partially fixed 2026-06-11 (Option A)** — 5 of 7 nodes
+corrected (`ar_invoices`, `ar_receipts`, `po_orders`, `ap_payments`,
+`scm_items`): names+types aligned to the live PVO by core-exact matching,
+two non-key attributes (`ap_payments…InvoiceId`, `scm_items…Segment1`)
+trimmed. Offline-verified (declared ⊆ PVO); pack validates. The remaining
+2 — `gl_journal_lines` and `po_receipts` — are deferred to **Option B**
+(their `naturalKey` column has no clean live counterpart, so each needs a
+modelling decision; see `dev/PLAN…md` §27). Live bronze extract of the 5
+fixed nodes still pending (no downstream mart validates them). Do not
+trust automated name-matching (difflib) — it collides across these varied
+prefixes; use core-exact / semantic matching.
 
 ---
 

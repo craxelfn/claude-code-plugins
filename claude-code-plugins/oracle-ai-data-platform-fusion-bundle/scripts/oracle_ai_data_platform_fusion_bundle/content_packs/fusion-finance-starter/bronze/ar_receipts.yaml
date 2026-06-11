@@ -19,20 +19,20 @@ refresh:
     strategy: merge
     watermark:
       source: ar_receipts
-      column: ArCashReceiptsAllLastUpdateDate
-    naturalKey: [ArCashReceiptsAllCashReceiptId]
+      column: ArCashReceiptLastUpdateDate
+    naturalKey: [ArCashReceiptCashReceiptId]
 requiredColumns:
   ar_receipts:
-    - ArCashReceiptsAllCashReceiptId
-    - ArCashReceiptsAllReceiptDate
-    - ArCashReceiptsAllAmount
-    - ArCashReceiptsAllLastUpdateDate
+    - ArCashReceiptCashReceiptId
+    - ArCashReceiptReceiptDate
+    - ArCashReceiptAmount
+    - ArCashReceiptLastUpdateDate
 outputSchema:
   columns:
-    - { name: ArCashReceiptsAllCashReceiptId, type: long, nullable: true, pii: low }
-    - { name: ArCashReceiptsAllReceiptDate, type: timestamp, nullable: true, pii: none }
-    - { name: ArCashReceiptsAllAmount, type: "decimal(28,8)", nullable: true, pii: low }
-    - { name: ArCashReceiptsAllLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: ArCashReceiptCashReceiptId, type: "decimal(18,0)", nullable: true, pii: low }
+    - { name: ArCashReceiptReceiptDate, type: date, nullable: true, pii: none }
+    - { name: ArCashReceiptAmount, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: ArCashReceiptLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }
     - { name: _run_id, type: string, nullable: false, pii: none }
