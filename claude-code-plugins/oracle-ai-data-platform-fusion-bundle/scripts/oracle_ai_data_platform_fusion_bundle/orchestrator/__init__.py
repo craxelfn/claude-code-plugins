@@ -935,6 +935,23 @@ def _resolve_node_from_pack(
 # ---------------------------------------------------------------------------
 
 
+def _is_silver_gold_only_run(plan: "list") -> bool:
+    """True when the resolved plan has silver/gold nodes but NO bronze
+    nodes — i.e. a run against *pre-existing* bronze tables (bronze isn't
+    being extracted this run).
+
+    Such runs auto-fire the bronze-readiness gate (validate the landed
+    bronze tables before any mart runs), since there's no pre-extraction
+    PVO source gate to lean on. A full seed (bronze in the plan) returns
+    False: it's covered by the pre-extraction PVO gate + the per-node
+    cascade, and an all-or-nothing readiness gate would regress its
+    partial-success semantics.
+    """
+    has_bronze = any(n.layer == "bronze" for n in plan)
+    has_marts = any(n.layer in ("silver", "gold") for n in plan)
+    return has_marts and not has_bronze
+
+
 def _run_content_pack_backend(
     *,
     bundle_path: "Path",
@@ -1184,7 +1201,16 @@ def _run_content_pack_backend(
     # empty) plan plus a synthetic gate-failure RunStep so the CLI
     # exits non-zero AND operators see the gap. No silver/gold state
     # rows are written.
-    if enable_bronze_readiness_gate and not dry_run:
+    # Silver/gold-only run = marts in scope but NO bronze nodes this run
+    # (bronze pre-exists in AIDP). There's no pre-extraction PVO gate to
+    # lean on (nothing is being extracted), so batch-validate every in-scope
+    # mart's required columns against the LANDED bronze tables (DESCRIBE)
+    # upfront — fail fast, all gaps at once, before any mart runs. Full
+    # seeds deliberately DON'T trigger this: the pre-extraction PVO source
+    # gate already fail-fasts them, and an all-or-nothing gate here would
+    # regress their per-node cascade (independent marts proceeding past one
+    # bronze failure).
+    if (enable_bronze_readiness_gate or _is_silver_gold_only_run(plan)) and not dry_run:
         from .bronze_readiness import (
             BronzeReadinessGateError,
             AIDPF_2071_BRONZE_READINESS_GATE_FAILED,

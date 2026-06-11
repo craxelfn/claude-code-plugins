@@ -28,6 +28,20 @@ FIXTURE_PROFILE = REPO_ROOT / "tests" / "fixtures" / "projects" / "phase2_projec
 FIXTURE_PACK = REPO_ROOT / "tests" / "fixtures" / "content_packs" / "phase2_test_pack"
 
 
+@pytest.fixture(autouse=True)
+def _stub_bronze_readiness_gate(monkeypatch):
+    """These tests exercise the run loop / execute_node wiring, not the
+    bronze-readiness gate. As of Option A the gate auto-fires for
+    silver/gold-only runs (which most tests here use), so stub it to a
+    no-op pass; the gate's own behaviour is covered by
+    test_dispatcher_invokes_readiness.py. Bronze-in-scope tests don't
+    trigger it, so this is a harmless no-op for them."""
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import bronze_readiness
+    monkeypatch.setattr(
+        bronze_readiness, "assert_bronze_readiness", lambda *a, **k: None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Signature contract — orchestrator.run accepts Phase 2 kwargs
 # ---------------------------------------------------------------------------
