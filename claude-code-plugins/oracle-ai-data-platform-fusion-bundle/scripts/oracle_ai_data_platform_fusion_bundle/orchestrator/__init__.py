@@ -1260,6 +1260,7 @@ def _run_content_pack_backend(
     #      and skip-cascade any dependent.
     started_at = _dt.now(_tz.utc)
     steps: list[RunStep] = []
+    diagnostics: list[dict] = []
     failed_node_ids: set[str] = set()
     for node in plan:
         # Resume short-circuit. Nodes whose latest
@@ -1367,6 +1368,11 @@ def _run_content_pack_backend(
         status: str = "success" if result.status == "success" else "failed"
         if status != "success":
             failed_node_ids.add(node.id)
+        # Collect any structured failure context (e.g. AIDPF-4071) so the
+        # laptop dispatcher can persist it under .aidp/diagnostics/ for
+        # skill consumption. Rides RunSummary.diagnostics → the marker.
+        if getattr(result, "diagnostic", None):
+            diagnostics.append(result.diagnostic)
         steps.append(
             RunStep(
                 run_id=run_id,
@@ -1392,6 +1398,7 @@ def _run_content_pack_backend(
         bundle_project=bundle_project,
         mode=mode,
         steps=tuple(steps),
+        diagnostics=tuple(diagnostics),
     )
 
 

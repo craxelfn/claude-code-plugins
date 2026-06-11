@@ -232,3 +232,58 @@ class TestIdentityWriter:
         diag_dir = tmp_path / ".aidp" / "diagnostics" / "run-test-1"
         files = sorted(p.name for p in diag_dir.iterdir())
         assert files == ["AIDPF-1020.json"]
+
+
+# ---------------------------------------------------------------------------
+# AIDPF-4071 — bronze source-column-missing diagnostic (model + writer)
+# ---------------------------------------------------------------------------
+
+
+def _bronze_4071_artifact():
+    from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+        BronzeSourceColumnMissingV1,
+    )
+    return BronzeSourceColumnMissingV1.model_validate({
+        "schemaVersion": 1,
+        "runId": "run-test-4071",
+        "tenant": "saasfademo1",
+        "errorCode": "AIDPF-4071",
+        "errorMessage": "bronze node 'ap_payments' declares column(s) absent…",
+        "generatedAt": "2026-06-11T00:00:00+00:00",
+        "node": "ap_payments",
+        "datastore": "FscmTopModelAM.FinExtractAM.ApBiccExtractAM.PaymentHistoryDistributionExtractPVO",
+        "missingColumns": ["ApPayHistDistInvoicePaymentId"],
+        "pvoColumns": [
+            {"name": "ApPaymentHistDistsInvoicePaymentId", "type": "decimal(18,0)", "nullable": True},
+            {"name": "ApPaymentHistDistsAmount", "type": "decimal(38,30)", "nullable": True},
+        ],
+    })
+
+
+class TestBronzeSourceColumnMissingDiagnostic:
+    def test_model_roundtrip(self) -> None:
+        from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+            BronzeSourceColumnMissingV1,
+        )
+        artifact = _bronze_4071_artifact()
+        payload = json.loads(artifact.model_dump_json(by_alias=True))
+        again = BronzeSourceColumnMissingV1.model_validate(payload)
+        assert again.node == "ap_payments"
+        assert again.missing_columns == ["ApPayHistDistInvoicePaymentId"]
+        assert again.pvo_columns[0].name == "ApPaymentHistDistsInvoicePaymentId"
+
+    def test_writes_under_diagnostics_subtree_with_node_discriminator(self, tmp_path: Path) -> None:
+        from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+            write_bronze_source_column_missing_diagnostic,
+        )
+        result_path = write_bronze_source_column_missing_diagnostic(
+            tmp_path, "run-test-4071", _bronze_4071_artifact()
+        )
+        assert result_path == (
+            tmp_path / ".aidp" / "diagnostics" / "run-test-4071"
+            / "AIDPF-4071__ap_payments.json"
+        )
+        body = json.loads(result_path.read_text())
+        assert body["errorCode"] == "AIDPF-4071"
+        assert body["node"] == "ap_payments"
+        assert body["pvoColumns"][0]["name"] == "ApPaymentHistDistsInvoicePaymentId"

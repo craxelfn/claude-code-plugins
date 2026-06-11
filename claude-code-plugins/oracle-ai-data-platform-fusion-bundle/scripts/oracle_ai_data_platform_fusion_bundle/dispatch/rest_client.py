@@ -583,7 +583,21 @@ class AidpRestClient:
                         e = value.index(end, b)
                         payload = value[b:e].strip()
                         if decode_base64:
-                            payload = base64.b64decode(payload).decode("utf-8")
+                            # The run/drift producer base64-wraps the marker so
+                            # it survives AIDP's display_data text/plain capture
+                            # (which strips JSON-escape backslashes and corrupts
+                            # any payload carrying quotes/reprs — e.g. a failed
+                            # step's error_message). Tolerate a raw-JSON payload
+                            # too (pre-fix notebooks / test fixtures):
+                            # validate=True makes b64decode RAISE on raw JSON's
+                            # non-alphabet chars ({ " : ...) rather than silently
+                            # stripping them, so the fallback is unambiguous.
+                            try:
+                                payload = base64.b64decode(
+                                    payload, validate=True
+                                ).decode("utf-8")
+                            except ValueError:
+                                pass  # not base64 — treat as raw JSON
                         try:
                             return json.loads(payload)
                         except json.JSONDecodeError:

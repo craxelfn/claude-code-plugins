@@ -84,6 +84,16 @@ which catches YAML-author-induced drift pre-dispatch. Both gates fire
 independently; if both conditions hold, the pre-dispatch gate fires first
 and the SQL is never executed."""
 
+AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING = "AIDPF-4071"
+"""A column the pack wants from a bronze PVO is absent from the live source.
+
+Detected PRE-ingest (Step 3 of the bronze_extract flow) via a metadata-only
+BICC ``inferSchema`` probe — fails fast before the multi-minute extract that
+would otherwise fail the post-write AIDPF-4070 subset check anyway.
+Presence-only + case-insensitive: types are BICC's to decide (silver casts),
+so AIDPF-4071 fires only on a genuinely missing/renamed column — the
+columnAlias / medallion-author case, not a type or casing difference."""
+
 AIDPF_5014_UNKNOWN_BUILTIN_DISPATCH = "AIDPF-5014"
 """Content-pack execute_node dispatched a ``type: builtin`` node whose
 ``implementation.callable`` is not in the builtin registry. The
@@ -127,6 +137,10 @@ class NodeExecutionResult:
             actual Spark schema (None on non-success paths).
         error_message: human-readable diagnostic for non-success paths.
         plan_hash: expected_plan_hash computed during the run.
+        diagnostic: optional structured failure context (a JSON-able dict)
+            the orchestrator collects into ``RunSummary.diagnostics`` and
+            the laptop dispatcher persists under ``.aidp/diagnostics/``
+            for skill consumption (e.g. the AIDPF-4071 payload).
     """
 
     status: str
@@ -135,6 +149,7 @@ class NodeExecutionResult:
     materialized_schema_hash: str | None = None
     error_message: str = ""
     plan_hash: str = ""
+    diagnostic: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -385,12 +400,25 @@ def execute_node(
 
 
 def _assert_materialized_matches_declared(
-    spark: "SparkSession", target: str, node: "NodeYaml"  # noqa: F821
+    spark: "SparkSession", target: str, node: "NodeYaml",  # noqa: F821
+    *,
+    subset: bool = False,
 ) -> str:
     """Validate the materialised target's Spark schema against node.outputSchema.
 
-    Compares column name + type + nullable field-by-field. Mismatch
-    raises :class:`MaterializedSchemaDriftError` with AIDPF-4070.
+    Two modes:
+
+    * **Exact** (``subset=False``, the default — SQL silver/gold nodes):
+      the materialised table must match ``node.outputSchema`` column-for-
+      column (count + order + name + type). A SQL node ``SELECT``s an exact
+      column list, so any divergence is a genuine contract break.
+    * **Subset** (``subset=True`` — ``bronze_extract`` nodes): bronze writes
+      the FULL raw PVO (hundreds of tenant-/release-dependent columns), while
+      ``outputSchema`` is the MINIMUM guaranteed contract the silver layer
+      consumes. We assert every declared column is present with a matching
+      type; extra raw columns are allowed. AIDPF-4070 fires only on a
+      missing or mistyped declared column.
+
     Returns a sha256 of the canonicalised materialised schema on
     success — the caller threads it into the success state row for
     audit.
@@ -410,23 +438,46 @@ def _assert_materialized_matches_declared(
     declared = [
         (col.name, col.type.lower()) for col in node.output_schema.columns
     ]
-    if len(materialized) != len(declared):
-        raise MaterializedSchemaDriftError(
-            f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: target {target!r} has "
-            f"{len(materialized)} column(s) but node declares {len(declared)}. "
-            f"Declared: {declared!r}. Materialised: {materialized!r}."
-        )
-    for (m_name, m_type), (d_name, d_type) in zip(materialized, declared):
-        if m_name != d_name:
+
+    if subset:
+        # Case-insensitive name match: Spark/Delta resolve column names
+        # case-insensitively, and the Fusion bronze write lowercases every
+        # column while the pack declares Fusion-native PascalCase
+        # (e.g. declared ``ApInvoicesInvoiceId`` vs materialised
+        # ``apinvoicesinvoiceid``). Mirrors the case-insensitive contract in
+        # node_preflight._check_required_columns — the two gates MUST agree.
+        materialized_ci = {n.lower(): t for n, t in materialized}
+        for d_name, d_type in declared:
+            m_type = materialized_ci.get(d_name.lower())
+            if m_type is None:
+                raise MaterializedSchemaDriftError(
+                    f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: target {target!r} is "
+                    f"missing declared column {d_name!r}. Materialised columns "
+                    f"({len(materialized)}): {sorted(n for n, _ in materialized)!r}."
+                )
+            if _normalise_spark_type(m_type) != _normalise_spark_type(d_type):
+                raise MaterializedSchemaDriftError(
+                    f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: column {d_name!r} type "
+                    f"mismatch — materialised={m_type!r} declared={d_type!r}."
+                )
+    else:
+        if len(materialized) != len(declared):
             raise MaterializedSchemaDriftError(
-                f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: column name mismatch — "
-                f"materialised={m_name!r} declared={d_name!r}."
+                f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: target {target!r} has "
+                f"{len(materialized)} column(s) but node declares {len(declared)}. "
+                f"Declared: {declared!r}. Materialised: {materialized!r}."
             )
-        if _normalise_spark_type(m_type) != _normalise_spark_type(d_type):
-            raise MaterializedSchemaDriftError(
-                f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: column {m_name!r} type "
-                f"mismatch — materialised={m_type!r} declared={d_type!r}."
-            )
+        for (m_name, m_type), (d_name, d_type) in zip(materialized, declared):
+            if m_name != d_name:
+                raise MaterializedSchemaDriftError(
+                    f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: column name mismatch — "
+                    f"materialised={m_name!r} declared={d_name!r}."
+                )
+            if _normalise_spark_type(m_type) != _normalise_spark_type(d_type):
+                raise MaterializedSchemaDriftError(
+                    f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: column {m_name!r} type "
+                    f"mismatch — materialised={m_type!r} declared={d_type!r}."
+                )
 
     canonical = "\n".join(f"{n}|{t}" for n, t in materialized)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -983,6 +1034,96 @@ def _execute_builtin_node(
 # ---------------------------------------------------------------------------
 
 
+def _bronze_source_schema_gate(
+    spark: "SparkSession",  # noqa: F821
+    *,
+    node: "NodeYaml",  # noqa: F821
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: RunContext,
+) -> tuple[str, dict] | None:
+    """Pre-ingest source-schema gate (AIDPF-4071).
+
+    Metadata-only BICC ``inferSchema`` probe over THIS node's PVO (no row
+    pull, no write). When a column the pack declares it wants (non-audit
+    ``outputSchema`` columns) is absent from the live PVO, returns
+    ``(error_message, diagnostic_dict)``; returns ``None`` when every wanted
+    column is present.
+
+    The diagnostic dict is a JSON-able ``BronzeSourceColumnMissingV1``
+    payload (by alias) — the orchestrator collects it into
+    ``RunSummary.diagnostics`` and the laptop dispatcher persists it to
+    ``.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json`` for
+    ``medallion-author`` to resolve (renamed column → columnAlias overlay).
+
+    Presence-only + case-insensitive — types are BICC's to decide (silver
+    casts) and BICC lowercases names. The point is to fail in *seconds*
+    before a multi-minute extract that would only fail the post-write
+    AIDPF-4070 subset check anyway.
+
+    Degrades to ``None`` (proceed) on any probe failure — the real extract
+    surfaces a connectivity/auth problem with a better diagnostic than this
+    gate could.
+    """
+    from .builtins import bronze_extract_adapter as _bronze_adapter
+    from .runtime import _resolve_password
+
+    bundle = ctx.bundle
+    if bundle is None:
+        return None  # run() raises with a precise contract error downstream
+
+    wanted = [
+        col.name for col in node.output_schema.columns
+        if not col.name.startswith("_")  # audit cols are adapter-generated
+    ]
+    if not wanted:
+        return None
+
+    try:
+        pw = _resolve_password(bundle.fusion.password).get_secret_value()
+        schemas = _bronze_adapter.probe_bronze_schemas(
+            spark, pack=pack, bundle=bundle,
+            resolved_password=pw, dataset_ids=[node.id],
+        )
+    except Exception:  # noqa: BLE001 — probe failure → defer to the real extract
+        return None
+    st = schemas.get(node.id)
+    if st is None:
+        return None
+
+    present_ci = {f.name.lower() for f in st.fields}
+    missing = sorted(c for c in wanted if c.lower() not in present_ci)
+    if not missing:
+        return None
+    sample = sorted(f.name for f in st.fields)[:40]
+    message = (
+        f"{AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING}: bronze node {node.id!r} "
+        f"declares column(s) absent from live PVO "
+        f"{node.implementation.datastore!r}: {missing!r}. The PVO exposes "
+        f"{len(st.fields)} column(s) (sample: {sample!r}). Extract skipped "
+        f"to avoid a multi-minute pull that would fail the post-write gate. "
+        f"Fix the node's declared column names or author a columnAlias "
+        f"overlay (run /medallion-author)."
+    )
+    diagnostic = {
+        "schemaVersion": 1,
+        "runId": ctx.run_id,
+        "tenant": getattr(profile, "tenant", None),
+        "errorCode": AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING,
+        "errorMessage": message,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "node": node.id,
+        "datastore": node.implementation.datastore,
+        "missingColumns": missing,
+        "pvoColumns": [
+            {"name": f.name, "type": f.dataType.simpleString(),
+             "nullable": bool(f.nullable)}
+            for f in st.fields
+        ],
+    }
+    return message, diagnostic
+
+
 def _execute_bronze_extract_node(
     spark: "SparkSession",
     *,
@@ -1017,6 +1158,26 @@ def _execute_bronze_extract_node(
             spark, paths, node=node, ctx=ctx, message=message, profile=profile,
         )
         return NodeExecutionResult(status="preflight_blocked", error_message=message)
+
+    # ----- Step 3: pre-ingest source-schema gate (AIDPF-4071) --------
+    # Metadata-only PVO probe BEFORE the extract: fail fast (seconds) if a
+    # column the pack wants is absent from the live PVO, rather than after
+    # a multi-minute pull. Presence-only + case-insensitive (silver casts;
+    # BICC lowercases). Runs for seed AND incremental.
+    source_gate = _bronze_source_schema_gate(
+        spark, node=node, pack=pack, profile=profile, ctx=ctx
+    )
+    if source_gate is not None:
+        source_gate_msg, source_gate_diag = source_gate
+        _safe_write_failure_row(
+            spark, paths, node=node, ctx=ctx,
+            status="source_schema_missing", message=source_gate_msg,
+            profile=profile,
+        )
+        return NodeExecutionResult(
+            status="source_schema_missing", error_message=source_gate_msg,
+            diagnostic=source_gate_diag,
+        )
 
     # ----- Step 4: compute plan-hash inputs --------------------------
     callable_id = f"bronze_extract:{node.implementation.datastore}"
@@ -1094,9 +1255,12 @@ def _execute_bronze_extract_node(
         )
 
     # ----- Step 8: materialised-schema assertion ---------------------
+    # Subset semantics: bronze writes the full raw PVO; outputSchema is
+    # the minimum guaranteed contract, not an exact mirror. Assert every
+    # declared column is present + typed; allow extra raw columns.
     try:
         materialized_schema_hash = _assert_materialized_matches_declared(
-            spark, target, node
+            spark, target, node, subset=True
         )
     except MaterializedSchemaDriftError as exc:
         message = str(exc)

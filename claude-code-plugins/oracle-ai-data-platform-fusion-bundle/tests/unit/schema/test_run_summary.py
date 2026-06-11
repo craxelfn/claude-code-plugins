@@ -90,6 +90,36 @@ class TestRunStepMarker:
             RunStep.from_marker_dict(payload)
 
 
+class TestRunSummaryDiagnostics:
+    def test_diagnostics_roundtrip_through_marker(self) -> None:
+        diag = {
+            "schemaVersion": 1, "runId": "run-1", "tenant": "t",
+            "errorCode": "AIDPF-4071", "errorMessage": "missing",
+            "generatedAt": "2026-06-11T00:00:00+00:00",
+            "node": "ap_payments",
+            "datastore": "FscmTopModelAM...PaymentHistoryDistributionExtractPVO",
+            "missingColumns": ["ApPayHistDistInvoicePaymentId"],
+            "pvoColumns": [{"name": "ApPaymentHistDistsInvoicePaymentId",
+                            "type": "decimal(18,0)", "nullable": True}],
+        }
+        summary = RunSummary(
+            run_id="run-1",
+            started_at=datetime(2026, 6, 3, 14, 0, 0, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 6, 3, 14, 5, 0, tzinfo=timezone.utc),
+            bundle_project="p", mode="seed", steps=(),
+            diagnostics=(diag,),
+        )
+        restored = RunSummary.from_marker_dict(summary.to_marker_dict())
+        assert restored.diagnostics == (diag,)
+
+    def test_diagnostics_default_empty_when_absent(self) -> None:
+        # A marker from a pre-diagnostics wheel has no "diagnostics" key.
+        payload = _make_summary().to_marker_dict()
+        payload.pop("diagnostics", None)
+        restored = RunSummary.from_marker_dict(payload)
+        assert restored.diagnostics == ()
+
+
 class TestRunSummaryMarker:
     def test_empty_steps_roundtrip(self) -> None:
         summary = _make_summary(steps=())

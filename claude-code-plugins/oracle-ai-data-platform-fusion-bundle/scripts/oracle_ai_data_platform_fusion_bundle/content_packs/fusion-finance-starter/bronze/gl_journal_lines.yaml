@@ -30,7 +30,7 @@ requiredColumns:
 outputSchema:
   columns:
     - { name: GlJeHeadersJeHeaderId, type: long, nullable: true, pii: none }
-    - { name: GlJeHeadersLedgerId, type: long, nullable: true, pii: none }
+    - { name: GlJeHeadersLedgerId, type: "decimal(18,0)", nullable: true, pii: none }
     - { name: GlJeHeadersPeriodName, type: string, nullable: true, pii: none }
     - { name: GlJeHeadersLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }

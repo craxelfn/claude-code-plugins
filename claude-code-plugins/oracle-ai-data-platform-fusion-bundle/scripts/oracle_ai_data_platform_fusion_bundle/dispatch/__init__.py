@@ -38,8 +38,10 @@ _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
 from ..schema.diagnostic_artifact import (
+    BronzeSourceColumnMissingV1,
     DiagnosticArtifactAlreadyExistsError,
     SchemaDriftDiagnosticV1,
+    write_bronze_source_column_missing_diagnostic,
     write_schema_drift_diagnostic,
 )
 from ..schema.errors import SchemaDriftDetectedError
@@ -375,7 +377,8 @@ def dispatch_via_rest(
     # precedence over DispatchRunFailedError. Status check moves below.
     try:
         marker = AidpRestClient.parse_marker(
-            executed_notebook, begin=MARKER_BEGIN, end=MARKER_END
+            executed_notebook, begin=MARKER_BEGIN, end=MARKER_END,
+            decode_base64=True,
         )
     except (ValueError, json.JSONDecodeError) as exc:
         # ValueError covers `value.index(end, b)` failure (BEGIN found but
@@ -562,6 +565,23 @@ def dispatch_via_rest(
         raise DispatchMarkerMissingError(
             f"marker payload malformed (jobRunKey={job_run_key}): {exc}"
         ) from exc
+
+    # Persist any structured per-node diagnostics the run carried (e.g.
+    # AIDPF-4071 bronze source-column-missing) under the laptop's
+    # .aidp/diagnostics/<run_id>/ so `/medallion-author` can resolve them.
+    # Best-effort: a malformed/partial diagnostic must never mask a
+    # successful run's summary.
+    _workdir = bundle_path.resolve().parent
+    for _diag in summary.diagnostics:
+        try:
+            if _diag.get("errorCode") == "AIDPF-4071":
+                _artifact = BronzeSourceColumnMissingV1.model_validate(_diag)
+                _path = write_bronze_source_column_missing_diagnostic(
+                    _workdir, summary.run_id, _artifact
+                )
+                log(f"wrote diagnostic {_path}")
+        except Exception:  # noqa: BLE001 — diagnostic write is best-effort
+            continue
 
     log(f"orchestrator run_id={summary.run_id}")
     return summary

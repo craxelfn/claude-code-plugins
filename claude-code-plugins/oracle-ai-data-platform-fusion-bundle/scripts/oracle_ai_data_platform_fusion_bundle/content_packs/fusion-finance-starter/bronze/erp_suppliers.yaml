@@ -32,10 +32,10 @@ requiredColumns:
 outputSchema:
   columns:
     - { name: SEGMENT1, type: string, nullable: true, pii: low }
-    - { name: VENDORID, type: long, nullable: true, pii: low }
-    - { name: PARTYID, type: long, nullable: true, pii: low }
-    - { name: PARENTVENDORID, type: long, nullable: true, pii: low }
-    - { name: PARENTPARTYID, type: long, nullable: true, pii: low }
+    - { name: VENDORID, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: PARTYID, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: PARENTVENDORID, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: PARENTPARTYID, type: "decimal(38,30)", nullable: true, pii: low }
     - { name: LASTUPDATEDATE, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }

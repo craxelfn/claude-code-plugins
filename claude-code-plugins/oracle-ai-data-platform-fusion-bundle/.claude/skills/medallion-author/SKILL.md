@@ -24,6 +24,10 @@ ADRs 0014 / 0017 / 0019 / 0021.
 ## When to use
 
 - The CLI exited 1 with `AIDPF-2010` or `AIDPF-2011`.
+- A `run --mode seed`/`incremental` left an `AIDPF-4071__<node>.json`
+  diagnostic under `.aidp/diagnostics/<run_id>/` — a bronze node
+  declares a column the live PVO doesn't expose (see the dedicated
+  section below).
 - The operator wants to author a pack overlay extending the starter
   pack with new variation-point candidates observed on their tenant.
 - Mid-Fusion-upgrade recovery: a column got renamed and the existing
@@ -62,6 +66,55 @@ preserved. Surface those directly in any human hand-off message
 instead of asking the operator to re-probe + diff manually against
 the most recent evidence snapshot. The reader contract is unchanged
 — the field just becomes useful.
+
+## AIDPF-4071 — bronze source column missing (runtime seed gate)
+
+The pre-ingest source-schema gate (sql_runner Step 3) fails a bronze
+node in *seconds* — before the multi-minute extract — when a column the
+pack declares is absent from the live PVO, and writes
+`.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json`. The reader exposes
+these via `DiagnosticReadResult.source_column_failures`. Each artifact
+carries:
+
+- `node` — the bronze node id (e.g. `ap_payments`).
+- `datastore` — the full BICC PVO path it extracts from.
+- `missingColumns` — declared columns absent from the live PVO.
+- `pvoColumns` — **every** column the live PVO exposes, with `name` +
+  `type` (this is the candidate set — you do NOT need to re-probe).
+
+### Resolution algorithm (do this for each missing column)
+
+1. **Get the Fusion PVO schema first.** It's already in the artifact's
+   `pvoColumns`. (Only re-probe — `aidp-fusion-bundle catalog probe
+   --datastore <ds>` — if the artifact is stale or absent.)
+2. **Classify the mismatch, then act:**
+   - **Renamed column (the common case)** — the logical column exists
+     in `pvoColumns` under a *different physical name* (e.g. declared
+     `ApPayHistDistInvoicePaymentId` vs live
+     `ApPaymentHistDistsInvoicePaymentId`). Match by suffix / token
+     similarity / semantic meaning. Resolve by authoring a
+     **`columnAlias` overlay** (the standard 8-step workflow below) that
+     maps the logical column to the real physical name. This is the
+     `AIDPF-4071` path.
+   - **Type-only mismatch** — the column name IS present in the PVO but
+     the bronze YAML declares a different `type` than Fusion returns.
+     Note: this does **not** trigger `AIDPF-4071` (the pre-gate is
+     presence-only); it surfaces post-write as `AIDPF-4070`. The fix is
+     different and simpler: **go to the PVO schema, read the actual
+     type, and update that column's `type:` in the bronze node YAML to
+     the corresponding Fusion/BICC type** (e.g. `long` →
+     `"decimal(38,30)"`, `timestamp` → `date`). BICC maps all numerics
+     to `decimal(p,s)` and lowercases names — match the live type
+     verbatim. This is a direct YAML edit, **not** a columnAlias, and
+     **not** a profile write.
+   - **Genuinely absent** — the logical column has no counterpart in the
+     PVO at all (dropped in this Fusion release). Surface to the
+     operator; the pack node may need its `requiredColumns` /
+     `outputSchema` trimmed, or the feature isn't available on this
+     tenant. Do not invent a mapping.
+3. **Never edit `profiles/` or hand-write `resolved.*`** — same rule as
+   the bootstrap variation-point path (§9.5.6 #6). The columnAlias goes
+   in the overlay; bootstrap pins the resolved value on `--refresh`.
 
 ## The seven §9.5.6 MUSTs (verbatim)
 

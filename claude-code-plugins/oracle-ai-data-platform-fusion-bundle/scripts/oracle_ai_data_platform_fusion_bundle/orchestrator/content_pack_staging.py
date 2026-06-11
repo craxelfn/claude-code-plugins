@@ -235,7 +235,13 @@ def _stage_yaml_manifests(
         if path.exists():
             files_by_relpath[f"{layer_subdir}/{relname}"] = path.read_text(encoding="utf-8")
 
-    for subdir in ("silver", "gold", "dashboards"):
+    # Phase 9 moved bronze to per-file ``bronze/<id>.yaml`` nodes; the
+    # legacy monolithic ``bronze.yaml`` (staged above) no longer exists
+    # in starter packs. ``bronze`` MUST be globbed here or the cluster
+    # reconstructs an empty ``pack.bronze`` and every content-pack
+    # dispatch fails AIDPF-1045 (LayerFilterEmptiedPlanError) — local
+    # ``load_full_chain`` reads the dir, but staging never shipped it.
+    for subdir in ("bronze", "silver", "gold", "dashboards"):
         d = layer_root / subdir
         if not d.exists():
             continue

@@ -64,6 +64,14 @@ AIDPF_2012_SCHEMA_DRIFT_DETECTED = "AIDPF-2012"
 Live bronze fingerprint differs from the value pinned in the tenant profile;
 the run blocks until the operator runs ``aidp-fusion-bundle bootstrap --refresh``."""
 
+AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING = "AIDPF-4071"
+"""A column the pack declares for a bronze node is absent from the live PVO,
+detected by the pre-ingest source-schema gate (sql_runner Step 3). Diagnostic
+at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json`` carries the
+missing column(s) + the live PVO column list (name+type). Consumed by
+``medallion-author``: a present-but-renamed column → columnAlias overlay; a
+present-but-wrong-type column is caught instead by AIDPF-4070 post-write."""
+
 AIDPF_2047_CLUSTER_BOOTSTRAP_PREDISPATCH = "AIDPF-2047"
 """Phase 4.1 / D3 — cluster-mode bootstrap pre-dispatch readiness failure.
 CLI-level only (no artifact). Sub-reason in the message: ``missing_config`` /
@@ -217,6 +225,30 @@ class IdentityDiagnosticV1(DiagnosticArtifactBase):
     error_code: Literal["AIDPF-1020"] = Field(alias="errorCode")
     tenant: None = None
     identity_probe: IdentityProbeFailure = Field(alias="identityProbe")
+
+
+class BronzeSourceColumnMissingV1(DiagnosticArtifactBase):
+    """Diagnostic for a bronze node declaring a column the live PVO lacks (AIDPF-4071).
+
+    Emitted by the pre-ingest source-schema gate. ``medallion-author``
+    reads it to author a columnAlias overlay: the missing column is almost
+    always a *renamed* column present in ``pvo_columns`` under a different
+    physical name (e.g. ``ApPayHistDist…`` → ``ApPaymentHistDists…``).
+    """
+
+    error_code: Literal["AIDPF-4071"] = Field(alias="errorCode")
+    node: str
+    """Bronze node id (e.g. ``ap_payments``)."""
+
+    datastore: str
+    """Full BICC PVO datastore path the node extracts from."""
+
+    missing_columns: list[str] = Field(alias="missingColumns")
+    """Declared columns absent from the live PVO (case-insensitive)."""
+
+    pvo_columns: list[ObservedColumn] = Field(alias="pvoColumns")
+    """Every column the live PVO exposes (name + type) — the candidate set
+    for resolving each missing column to its real physical name."""
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +629,34 @@ def write_schema_drift_diagnostic(
     diag_dir = _diagnostics_dir(workdir, run_id).resolve()
     target = diag_dir / "AIDPF-2012.json"
     assert_within_root(target, diag_dir, field="run_id")
+    payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
+    _atomic_write_json(target, payload)
+    return target
+
+
+def write_bronze_source_column_missing_diagnostic(
+    workdir: Path,
+    run_id: str,
+    artifact: BronzeSourceColumnMissingV1,
+) -> Path:
+    """Write an AIDPF-4071 bronze source-column-missing diagnostic.
+
+    Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json``.
+    One artifact per failing bronze node (the node id discriminates), so a
+    run that hits the gate on several nodes leaves one file each for
+    ``medallion-author`` to resolve independently.
+
+    Raises:
+        UnsafePathSegmentError: ``run_id`` or ``artifact.node`` is not a
+            safe filesystem segment.
+    """
+    from .path_segment import assert_within_root, validate_path_segment
+
+    validate_path_segment(run_id, field="run_id")
+    validate_path_segment(artifact.node, field="node")
+    diag_dir = _diagnostics_dir(workdir, run_id).resolve()
+    target = diag_dir / f"AIDPF-4071__{artifact.node}.json"
+    assert_within_root(target, diag_dir, field="node")
     payload = artifact.model_dump_json(by_alias=True, indent=2) + "\n"
     _atomic_write_json(target, payload)
     return target
