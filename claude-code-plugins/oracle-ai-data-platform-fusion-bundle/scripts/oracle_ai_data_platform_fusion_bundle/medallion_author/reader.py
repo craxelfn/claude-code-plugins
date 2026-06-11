@@ -28,6 +28,8 @@ from ..schema.diagnostic_artifact import (
     AIDPF_2012_SCHEMA_DRIFT_DETECTED,
     AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED,
     AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID,
+    AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING,
+    BronzeSourceColumnMissingV1,
     IdentityDiagnosticV1,
     SchemaDriftDiagnosticV1,
     VariationPointDiagnosticV1,
@@ -70,6 +72,12 @@ class DiagnosticReadResult:
     variation_failures: list[VariationPointDiagnosticV1] = field(default_factory=list)
     """One entry per ``AIDPF-2010__<vp>.json`` or
     ``AIDPF-2011__<vp>.json`` found in the directory."""
+
+    source_column_failures: list[BronzeSourceColumnMissingV1] = field(default_factory=list)
+    """One entry per ``AIDPF-4071__<node>.json`` — a bronze node declaring
+    a column the live PVO lacks. Skill-recoverable: resolve each by
+    authoring a columnAlias overlay mapping the declared name to the
+    renamed physical column found in the diagnostic's ``pvoColumns``."""
 
     identity_failure: IdentityDiagnosticV1 | None = None
     """Set if ``AIDPF-1020.json`` is present. Skill refuses to draft
@@ -137,6 +145,7 @@ class DiagnosticReadResult:
         feature #2 exited cleanly on this run)."""
         return (
             not self.variation_failures
+            and not self.source_column_failures
             and self.identity_failure is None
             and not self.unknown_schema_paths
             and not self.malformed_paths
@@ -168,7 +177,7 @@ class DiagnosticReadResult:
         work; the drift artifact is surfaced as context.
         """
         return (
-            bool(self.variation_failures)
+            (bool(self.variation_failures) or bool(self.source_column_failures))
             and not self.has_identity_failure
             and not self.has_unknown_schema_version
             and not self.has_malformed_artifacts
@@ -206,6 +215,7 @@ def read_run(
         return DiagnosticReadResult(run_id=resolved_run_id, run_dir=diagnostics_root)
 
     variation_failures: list[VariationPointDiagnosticV1] = []
+    source_column_failures: list[BronzeSourceColumnMissingV1] = []
     identity_failure: IdentityDiagnosticV1 | None = None
     schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
     unknown_schema_paths: list[Path] = []
@@ -247,6 +257,14 @@ def read_run(
                 # operator but doesn't make the skill proceed: drift
                 # recovery is `bootstrap --refresh`, not a skill draft.
                 schema_drift_failure = SchemaDriftDiagnosticV1.model_validate(payload)
+            elif error_code == AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING:
+                # A bronze node wants a column the live PVO lacks — almost
+                # always a rename. Skill-recoverable: draft a columnAlias
+                # overlay mapping declared → real physical name (from
+                # the diagnostic's pvoColumns).
+                source_column_failures.append(
+                    BronzeSourceColumnMissingV1.model_validate(payload)
+                )
             else:
                 malformed_paths.append(artifact_path)
         except Exception:  # noqa: BLE001 — Pydantic raises a variety of types
@@ -256,6 +274,7 @@ def read_run(
         run_id=resolved_run_id,
         run_dir=run_dir,
         variation_failures=variation_failures,
+        source_column_failures=source_column_failures,
         identity_failure=identity_failure,
         schema_drift_failure=schema_drift_failure,
         unknown_schema_paths=unknown_schema_paths,

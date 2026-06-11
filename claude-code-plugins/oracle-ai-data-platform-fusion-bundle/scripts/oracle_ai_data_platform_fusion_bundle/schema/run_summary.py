@@ -239,6 +239,10 @@ class RunSummary:
     plan: tuple[object, ...] | None = None
     prereqs: tuple[object, ...] | None = None
     recommendations: tuple[str, ...] = ()
+    diagnostics: tuple[dict, ...] = ()
+    """Structured per-node failure payloads (JSON-able dicts) the laptop
+    dispatcher persists under ``.aidp/diagnostics/<run_id>/`` for skill
+    consumption — e.g. AIDPF-4071 source-column-missing diagnostics."""
 
     @property
     def succeeded(self) -> int:
@@ -310,6 +314,7 @@ class RunSummary:
             "mode": self.mode,
             "recommendations": list(self.recommendations),
             "steps": [step.to_marker_dict() for step in self.steps],
+            "diagnostics": [dict(d) for d in self.diagnostics],
         }
 
     @classmethod
@@ -343,6 +348,7 @@ class RunSummary:
             plan=None,
             prereqs=None,
             recommendations=tuple(payload.get("recommendations", ())),
+            diagnostics=tuple(payload.get("diagnostics", ())),
         )
 
 

@@ -109,3 +109,49 @@ def test_parse_marker_extracts_json_payload():
         }],
     }
     assert AidpRestClient.parse_marker(nb, begin="X_BEGIN", end="X_END") == {"ok": True}
+
+
+# parse_marker decode_base64 — the run/drift markers are base64-wrapped so
+# they survive AIDP's display_data text/plain capture (which strips JSON-escape
+# backslashes and corrupts raw payloads carrying quotes/reprs).
+# ---------------------------------------------------------------------------
+
+
+def _b64_marker(payload, begin="X_BEGIN", end="X_END"):
+    import base64
+    import json
+    token = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    return f"before {begin} {token} {end} after"
+
+
+def test_parse_marker_decodes_base64_payload():
+    """decode_base64=True round-trips a base64-wrapped marker — including a
+    payload with quotes/brackets that raw text/plain would corrupt."""
+    payload = {
+        "run_id": "abc-123",
+        "failed": 1,
+        "steps": [
+            {"dataset_id": "ap_invoices", "status": "source_schema_missing",
+             "error_message": "AIDPF-4071: missing ['X'] — type \"decimal(38,30)\""},
+        ],
+    }
+    nb = {"cells": [{"outputs": [{"text": _b64_marker(payload)}]}]}
+    out = AidpRestClient.parse_marker(
+        nb, begin="X_BEGIN", end="X_END", decode_base64=True
+    )
+    assert out == payload
+
+
+def test_parse_marker_base64_mode_tolerates_raw_json():
+    """decode_base64=True must still parse a raw-JSON marker (pre-fix
+    notebooks / fixtures) — b64decode(validate=True) raises on raw JSON's
+    non-alphabet chars, so the consumer falls back to raw."""
+    nb = {
+        "cells": [{
+            "outputs": [{"text": 'X_BEGIN {"ok": true} X_END'}],
+        }],
+    }
+    out = AidpRestClient.parse_marker(
+        nb, begin="X_BEGIN", end="X_END", decode_base64=True
+    )
+    assert out == {"ok": True}

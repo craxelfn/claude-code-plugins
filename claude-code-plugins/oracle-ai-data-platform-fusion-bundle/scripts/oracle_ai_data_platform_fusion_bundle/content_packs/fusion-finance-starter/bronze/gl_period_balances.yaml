@@ -43,18 +43,18 @@ requiredColumns:
     - BalancePeriodNetDr
 outputSchema:
   columns:
-    - { name: BalanceLedgerId, type: long, nullable: true, pii: none }
-    - { name: BalanceCodeCombinationId, type: long, nullable: true, pii: none }
-    - { name: BalancePeriodYear, type: int, nullable: true, pii: none }
-    - { name: BalancePeriodNum, type: int, nullable: true, pii: none }
+    - { name: BalanceLedgerId, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: BalanceCodeCombinationId, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: BalancePeriodYear, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: BalancePeriodNum, type: "decimal(18,0)", nullable: true, pii: none }
     - { name: BalancePeriodName, type: string, nullable: true, pii: none }
     - { name: BalanceCurrencyCode, type: string, nullable: true, pii: none }
     - { name: BalanceActualFlag, type: string, nullable: true, pii: none }
     - { name: BalanceTranslatedFlag, type: string, nullable: true, pii: none }
-    - { name: BalancePeriodNetCr, type: "decimal(28,8)", nullable: true, pii: low }
-    - { name: BalancePeriodNetDr, type: "decimal(28,8)", nullable: true, pii: low }
-    - { name: BalanceBeginBalanceCr, type: "decimal(28,8)", nullable: true, pii: low }
-    - { name: BalanceBeginBalanceDr, type: "decimal(28,8)", nullable: true, pii: low }
+    - { name: BalancePeriodNetCr, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: BalancePeriodNetDr, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: BalanceBeginBalanceCr, type: "decimal(38,30)", nullable: true, pii: low }
+    - { name: BalanceBeginBalanceDr, type: "decimal(38,30)", nullable: true, pii: low }
     - { name: BalanceLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }

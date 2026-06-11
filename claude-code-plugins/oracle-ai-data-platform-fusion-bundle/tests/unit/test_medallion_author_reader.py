@@ -362,3 +362,49 @@ class TestPhase41ClusterDispatchScope:
         result = read_run(tmp_path / ".aidp" / "diagnostics", run_id)
         assert unknown in result.malformed_paths
         assert result.cluster_dispatch_skipped_paths == []
+
+
+# ---------------------------------------------------------------------------
+# AIDPF-4071 — bronze source-column-missing (runtime seed gate)
+# ---------------------------------------------------------------------------
+
+
+def _write_4071(tmp_path: Path, run_id: str, node: str = "ap_payments") -> None:
+    from oracle_ai_data_platform_fusion_bundle.schema.diagnostic_artifact import (
+        BronzeSourceColumnMissingV1,
+        write_bronze_source_column_missing_diagnostic,
+    )
+    artifact = BronzeSourceColumnMissingV1.model_validate({
+        "schemaVersion": 1, "runId": run_id, "tenant": "saasfademo1",
+        "errorCode": "AIDPF-4071", "errorMessage": "missing",
+        "generatedAt": "2026-06-11T00:00:00+00:00",
+        "node": node,
+        "datastore": "FscmTopModelAM.FinExtractAM.ApBiccExtractAM.PaymentHistoryDistributionExtractPVO",
+        "missingColumns": ["ApPayHistDistInvoicePaymentId"],
+        "pvoColumns": [{"name": "ApPaymentHistDistsInvoicePaymentId",
+                        "type": "decimal(18,0)", "nullable": True}],
+    })
+    write_bronze_source_column_missing_diagnostic(tmp_path, run_id, artifact)
+
+
+class TestAidpf4071Reader:
+    def test_4071_parsed_into_source_column_failures(self, tmp_path: Path) -> None:
+        _write_4071(tmp_path, "run-4071")
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-4071")
+        assert len(result.source_column_failures) == 1
+        f = result.source_column_failures[0]
+        assert f.node == "ap_payments"
+        assert f.missing_columns == ["ApPayHistDistInvoicePaymentId"]
+        assert f.pvo_columns[0].name == "ApPaymentHistDistsInvoicePaymentId"
+
+    def test_4071_is_skill_recoverable(self, tmp_path: Path) -> None:
+        _write_4071(tmp_path, "run-4071")
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-4071")
+        assert not result.is_empty
+        assert result.can_proceed()
+
+    def test_multiple_4071_nodes_parse_independently(self, tmp_path: Path) -> None:
+        _write_4071(tmp_path, "run-4071", node="ap_payments")
+        _write_4071(tmp_path, "run-4071", node="po_orders")
+        result = read_run(tmp_path / ".aidp" / "diagnostics", "run-4071")
+        assert {f.node for f in result.source_column_failures} == {"ap_payments", "po_orders"}

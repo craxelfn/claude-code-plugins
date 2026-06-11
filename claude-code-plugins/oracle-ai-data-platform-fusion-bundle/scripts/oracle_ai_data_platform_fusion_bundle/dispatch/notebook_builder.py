@@ -166,7 +166,9 @@ def _build_run_cell(
         f"        'current_fingerprint': _drift_exc.current_fingerprint,\n"
         f"        'artifact_json': _drift_artifact_json,\n"
         f"    }}\n"
-        f"    print({MARKER_BEGIN!r}, json.dumps(_drift_payload), {MARKER_END!r})\n"
+        f"    import base64 as _b64d\n"
+        f"    _b64_drift = _b64d.b64encode(json.dumps(_drift_payload).encode('utf-8')).decode('ascii')\n"
+        f"    print({MARKER_BEGIN!r}, _b64_drift, {MARKER_END!r})\n"
         f"    raise\n"
         f"_twall = time.time() - _tstart\n"
         f'print(f"run_id={{summary.run_id}}")\n'
@@ -188,8 +190,16 @@ def _build_run_cell(
         f"    )\n"
         f"# Marker emit — use to_marker_dict() so the laptop-side dispatcher\n"
         f"# can round-trip via RunSummary.from_marker_dict (P1.5ε §4.3a).\n"
+        f"# base64-wrap the JSON: AIDP's Jupyter captures stdout as\n"
+        f"# display_data text/plain and strips JSON-escape backslashes,\n"
+        f"# corrupting any payload with quotes/reprs (e.g. a failed step's\n"
+        f"# error_message) — which silently degraded the run summary to a\n"
+        f"# regex-recovered run_id only. The base64 alphabet has no chars\n"
+        f"# the text/plain formatter touches, so it round-trips intact.\n"
         f"_payload = summary.to_marker_dict()\n"
-        f'print({MARKER_BEGIN!r}, json.dumps(_payload), {MARKER_END!r})\n'
+        f"import base64 as _b64\n"
+        f"_b64_marker = _b64.b64encode(json.dumps(_payload).encode('utf-8')).decode('ascii')\n"
+        f'print({MARKER_BEGIN!r}, _b64_marker, {MARKER_END!r})\n'
     )
 
 
