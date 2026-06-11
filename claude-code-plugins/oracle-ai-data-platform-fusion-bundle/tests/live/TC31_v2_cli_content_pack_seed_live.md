@@ -79,12 +79,46 @@ Injected a column absent from the PVO (`DRIFT_TEST_NONEXISTENT_COL`) into
   with `erp_suppliers │ bronze │ FAILED`, `0 success · 1 failed`, total
   32.6 s. `grep DISPATCH_MARKER_DEGRADED` → 0.
 
+## E — P3-L3 bronze node corrections, live-verified (Option A)
+
+Five never-live-validated bronze nodes had names+types corrected to the
+live PVO (core-exact matching). A `--datasets`-scoped bronze seed
+materialized **4 of 5** with real data:
+
+| node | rows | cols |
+|---|---|---|
+| ap_payments | 3,476,916 | 40 |
+| ar_invoices | 187,970 | 250 |
+| ar_receipts | 64,007 | 139 |
+| po_orders | 16,769 | 158 |
+
+`scm_items`: name fix correct (passes the gate) but the `ItemExtractPVO`
+extract creates no table on this tenant — a separate, deeper issue
+deferred to Option B (`LIMITS.md` P3-L3 / `dev/PLAN…md` §27).
+
+## F — upfront source gate (fail-fast, pre-extract)
+
+The `AIDPF-4071` gate runs as a single metadata-only probe over all
+in-scope bronze PVOs **before any extraction**, checking each bronze
+node's declared `outputSchema` columns AND the columns in-scope
+silver/gold nodes require from it (transitive, audit cols excluded).
+
+Live-verified (`run_id fee8c664…`): a **valid bronze** (`erp_suppliers`,
+all declared cols present in PVO) with an **invalid silver need**
+(`dim_supplier` injected to require a column absent from the PVO) aborted
+the run in **0.00 s of extraction** — `erp_suppliers` FAILED, `ap_invoices`
++ `dim_supplier` + `supplier_spend` SKIPPED (aborted), the
+`AIDPF-4071__erp_suppliers.json` diagnostic written (missing col + full
+143-col PVO schema), `DISPATCH_MARKER_DEGRADED` → 0. Confirms a silver/gold
+need its bronze source can't satisfy fails in seconds, before the
+multi-minute pull — not after.
+
 ## Notes
 
-- The 7 starter-pack bronze nodes with no downstream silver/gold
-  (`ap_payments`, `ar_invoices`, `ar_receipts`, `gl_journal_lines`,
-  `po_orders`, `po_receipts`, `scm_items`) ship with never-live-validated
-  column **names** that don't match the live PVO. Tracked separately (see
-  `LIMITS.md`); the `AIDPF-4071` gate now diagnoses them automatically.
+- 7 starter-pack bronze nodes with no downstream silver/gold shipped
+  never-live-validated column names. Option A (§E) corrected 5; 2
+  (`gl_journal_lines`, `po_receipts`) + the `scm_items` extract issue
+  remain in Option B (`LIMITS.md` P3-L3, `dev/PLAN…md` §27). The
+  `AIDPF-4071` gate diagnoses any remaining mismatch automatically.
 - Non-`saasfademo1` tenant evidence (P3.7 / P3.9) is still outstanding for
   any "plugin-portable" claim — this run proves the demo pod only.
