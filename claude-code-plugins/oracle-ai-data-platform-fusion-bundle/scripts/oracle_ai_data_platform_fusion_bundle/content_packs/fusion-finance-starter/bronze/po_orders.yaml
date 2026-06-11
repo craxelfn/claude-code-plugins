@@ -19,21 +19,21 @@ refresh:
     strategy: merge
     watermark:
       source: po_orders
-      column: PoHeadersAllLastUpdateDate
-    naturalKey: [PoHeadersAllPoHeaderId]
+      column: LastUpdateDate
+    naturalKey: [PoHeaderId]
 requiredColumns:
   po_orders:
-    - PoHeadersAllPoHeaderId
-    - PoHeadersAllSegment1
-    - PoHeadersAllVendorId
-    - PoHeadersAllLastUpdateDate
+    - PoHeaderId
+    - Segment1
+    - VendorId
+    - LastUpdateDate
 outputSchema:
   columns:
-    - { name: PoHeadersAllPoHeaderId, type: long, nullable: true, pii: none }
-    - { name: PoHeadersAllSegment1, type: string, nullable: true, pii: none }
-    - { name: PoHeadersAllVendorId, type: long, nullable: true, pii: low }
-    - { name: PoHeadersAllCurrencyCode, type: string, nullable: true, pii: none }
-    - { name: PoHeadersAllLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: PoHeaderId, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: Segment1, type: string, nullable: true, pii: none }
+    - { name: VendorId, type: "decimal(18,0)", nullable: true, pii: low }
+    - { name: CurrencyCode, type: string, nullable: true, pii: none }
+    - { name: LastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }
     - { name: _run_id, type: string, nullable: false, pii: none }

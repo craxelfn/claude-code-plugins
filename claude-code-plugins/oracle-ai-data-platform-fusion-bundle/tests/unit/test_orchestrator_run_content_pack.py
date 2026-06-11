@@ -733,6 +733,11 @@ class TestCascadeAbort:
             return NodeExecutionResult(status="success", row_count=0)
         monkeypatch.setattr(sql_runner, "execute_node", fake_execute_node)
 
+        # The upfront batch source-schema gate (AIDPF-4071) probes BICC
+        # before the node loop; this test exercises execution-time cascade,
+        # so stub it to "no source failures" and let the loop run.
+        monkeypatch.setattr(sql_runner, "check_bronze_source_schemas", lambda *a, **k: [])
+
         state_write_calls: list[list[dict]] = []
         def spy_write_state_rows_hard(spark, paths, rows):
             state_write_calls.append(list(rows))

@@ -1258,6 +1258,62 @@ def _run_content_pack_backend(
     #      pre-existing upstream tables and commit success rows after
     #      the current run's upstream failed. We track failed node IDs
     #      and skip-cascade any dependent.
+    # Upfront bronze source-schema gate (AIDPF-4071, batch). Probe every
+    # in-scope bronze PVO's schema in ONE metadata-only call BEFORE
+    # extracting anything; if any node declares a column the live PVO
+    # lacks, abort the whole run now — fail-fast before seeding the
+    # healthy nodes ahead of it (a per-node gate would only spare that one
+    # node's extract, not the nodes before it). Skipped on dry-run.
+    if not dry_run:
+        from .bronze_readiness import (
+            _compute_required_columns,
+            _resolve_in_scope_nodes,
+        )
+        from .sql_runner import check_bronze_source_schemas
+
+        _bronze_ids = [
+            n.id for n in plan
+            if n.layer == "bronze" and n.implementation.type == "bronze_extract"
+        ]
+        # What in-scope silver/gold need from each bronze source (transitive
+        # silver->silver->bronze; $column aliases resolved). Folding this into
+        # the source probe means a silver/gold column its bronze PVO can't
+        # supply aborts BEFORE extraction — not after the bronze pull lands.
+        _in_scope_sg = _resolve_in_scope_nodes(resolved_pack, (datasets, layers))
+        _downstream_required = _compute_required_columns(
+            _in_scope_sg, resolved_pack, tenant_profile
+        )
+        _src_failures = check_bronze_source_schemas(
+            spark, pack=resolved_pack, bundle=bundle, profile=tenant_profile,
+            bronze_node_ids=_bronze_ids, run_id=run_id,
+            downstream_required=_downstream_required,
+        )
+        if _src_failures:
+            _failed = {f["node"] for f in _src_failures}
+            _msg_by = {f["node"]: f["message"] for f in _src_failures}
+            _gnow = _dt.now(_tz.utc)
+            _gsteps: list[RunStep] = []
+            for n in plan:
+                if n.id in _failed:
+                    _gsteps.append(RunStep(
+                        run_id=run_id, dataset_id=n.id, layer=n.layer, mode=mode,
+                        status="failed", row_count=0, duration_seconds=0.0,
+                        error_message=_msg_by[n.id], watermark_used=None,
+                    ))
+                else:
+                    _gsteps.append(RunStep(
+                        run_id=run_id, dataset_id=n.id, layer=n.layer, mode=mode,
+                        status="skipped", row_count=None, duration_seconds=0.0,
+                        error_message=None, watermark_used=None,
+                        skip_reason="aborted",
+                    ))
+            return RunSummary(
+                run_id=run_id, started_at=_gnow, finished_at=_gnow,
+                bundle_project=bundle_project, mode=mode,
+                steps=tuple(_gsteps),
+                diagnostics=tuple(f["diagnostic"] for f in _src_failures),
+            )
+
     started_at = _dt.now(_tz.utc)
     steps: list[RunStep] = []
     diagnostics: list[dict] = []

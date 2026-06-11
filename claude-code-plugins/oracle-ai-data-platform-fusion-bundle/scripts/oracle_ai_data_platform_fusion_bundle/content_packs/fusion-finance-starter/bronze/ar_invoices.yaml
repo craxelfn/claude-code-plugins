@@ -19,20 +19,20 @@ refresh:
     strategy: merge
     watermark:
       source: ar_invoices
-      column: RaCustTrxAllLastUpdateDate
-    naturalKey: [RaCustTrxAllCustomerTrxId]
+      column: RaCustomerTrxLastUpdateDate
+    naturalKey: [RaCustomerTrxCustomerTrxId]
 requiredColumns:
   ar_invoices:
-    - RaCustTrxAllCustomerTrxId
-    - RaCustTrxAllBillToCustomerId
-    - RaCustTrxAllInvoiceCurrencyCode
-    - RaCustTrxAllLastUpdateDate
+    - RaCustomerTrxCustomerTrxId
+    - RaCustomerTrxBillToCustomerId
+    - RaCustomerTrxInvoiceCurrencyCode
+    - RaCustomerTrxLastUpdateDate
 outputSchema:
   columns:
-    - { name: RaCustTrxAllCustomerTrxId, type: long, nullable: true, pii: low }
-    - { name: RaCustTrxAllBillToCustomerId, type: long, nullable: true, pii: low }
-    - { name: RaCustTrxAllInvoiceCurrencyCode, type: string, nullable: true, pii: none }
-    - { name: RaCustTrxAllLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: RaCustomerTrxCustomerTrxId, type: "decimal(18,0)", nullable: true, pii: low }
+    - { name: RaCustomerTrxBillToCustomerId, type: "decimal(18,0)", nullable: true, pii: low }
+    - { name: RaCustomerTrxInvoiceCurrencyCode, type: string, nullable: true, pii: none }
+    - { name: RaCustomerTrxLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }
     - { name: _run_id, type: string, nullable: false, pii: none }

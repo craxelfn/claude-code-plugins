@@ -257,6 +257,73 @@ treats a `bronzeSchemaFingerprint` value that is `None`, the sentinel
 
 ---
 
+### P3-L3 — 7 starter-pack bronze nodes ship never-live-validated column names
+
+**What**: seven `fusion-finance-starter` bronze nodes — `ap_payments`,
+`ar_invoices`, `ar_receipts`, `gl_journal_lines`, `po_orders`,
+`po_receipts`, `scm_items` — declare `requiredColumns` / `outputSchema`
+column names that do **not** match the live BICC PVO. The names were
+authored from guessed prefix conventions and never live-validated (only
+the four finance datasets — `erp_suppliers`, `ap_invoices`, `gl_coa`,
+`gl_period_balances` — were exercised). Confirmed 2026-06-11 by a
+metadata-only `probe_bronze_schemas` sweep of all 11 PVOs on saasfademo1.
+
+The mismatches are varied per node, not a uniform rename:
+- `ap_payments`: `ApPayHistDist*` → live `ApPaymentHistDists*` (and
+  declared `…InvoiceId` has no direct live counterpart).
+- `ar_invoices`: `RaCustTrxAll*` → live `RaCustomerTrx*`.
+- `ar_receipts`: `ArCashReceiptsAll*` → live `ArCashReceipt*`.
+- `po_orders`: `PoHeadersAll*` → live **bare** (`PoHeaderId`, `Segment1`,
+  `VendorId`, …) — the prefix should be dropped entirely.
+- `po_receipts`: `RcvTransactions*` → live `ReceivingTransactionPARPEO*`.
+- `scm_items`: `EgpSystemItemsB*` → live `ItemBasePEO*` (and declared
+  `…Segment1` has no obvious live counterpart).
+- `gl_journal_lines`: 3 columns EXACT, but declared `JeHeaderId` absent.
+
+**Where it bites**: a seed that includes any of these seven fails the
+`AIDPF-4071` pre-ingest gate (or, pre-gate, would fail the post-write
+`AIDPF-4070`). The four finance datasets + the silver/gold marts that
+consume them are unaffected and seed green (TC31). **Nothing in the
+starter pack consumes these seven** — they have no downstream silver/gold
+— so the live finance medallion is not blocked.
+
+**Mitigation**: the `AIDPF-4071` gate now diagnoses each automatically
+(writes `.aidp/diagnostics/<run_id>/AIDPF-4071__<node>.json` with the full
+live PVO schema). Correcting them is per-column pack-authoring work
+(verify each against the real PVO; trim columns with no live counterpart)
+— a *pack defect fix*, not a per-tenant `columnAlias`. Ground-truth PVO
+schemas captured to `dev/bronze_actual_schema.json`.
+
+**Status**: **partially fixed + live-verified 2026-06-11 (Option A)**.
+5 of 7 nodes had names+types corrected to the live PVO by core-exact
+matching (two non-key attributes — `ap_payments…InvoiceId`,
+`scm_items…Segment1` — trimmed). **4 of those 5 are live-verified
+materialized** on saasfademo1: `ap_payments` 3,476,916 rows / `ar_invoices`
+187,970 / `ar_receipts` 64,007 / `po_orders` 16,769 (column counts =
+PVO + 4 audit). The name fix is confirmed correct for these four.
+
+`scm_items` is a **separate, deeper problem**: the name fix is correct
+(passes the AIDPF-4071 gate) but the node **fails to materialize** — the
+`ItemExtractPVO` extract creates no `bronze.scm_items` table on this
+tenant (cf. the root-level `FIX_step6_scm_items_schema*.py` history). Not
+a P3-L3 name issue; reclassified into **Option B** for investigation.
+
+The remaining 2 (`gl_journal_lines`, `po_receipts`) stay in **Option B**
+(natural-key column has no clean live counterpart; see `dev/PLAN…md` §27).
+
+**Robustness gap surfaced**: when a bronze node's target table never
+materializes, `DESCRIBE TABLE` raises an uncaught `AnalysisException` that
+aborts the whole run. Step 8 (`_assert_materialized_matches_declared`) is
+now hardened to convert this to a graceful per-node `output_schema_drift`
+(2026-06-11). The sibling site — `node_preflight._check_required_columns`
+DESCRIBE-ing a missing bronze table — has the **same gap, not yet fixed**;
+it's what crashes a fresh `scm_items` run before Step 8 is reached.
+
+Do not trust automated name-matching (difflib) — it collides across these
+varied prefixes; use core-exact / semantic matching.
+
+---
+
 ## Resolved limits
 
 ### AIDPF-1032 — `--resume` rejected on content-pack backend (RESOLVED 2026-06-08 by Phase 5 Step 9b)
