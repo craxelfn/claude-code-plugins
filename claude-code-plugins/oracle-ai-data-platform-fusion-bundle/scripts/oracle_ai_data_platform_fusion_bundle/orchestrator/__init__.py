@@ -935,21 +935,24 @@ def _resolve_node_from_pack(
 # ---------------------------------------------------------------------------
 
 
-def _is_silver_gold_only_run(plan: "list") -> bool:
-    """True when the resolved plan has silver/gold nodes but NO bronze
-    nodes — i.e. a run against *pre-existing* bronze tables (bronze isn't
-    being extracted this run).
+def _is_mart_only_run(layers: "list[str] | None") -> bool:
+    """True when the operator scoped the run to silver/gold only —
+    ``bronze`` is NOT in the requested ``layers`` — i.e. a mart run against
+    *pre-existing* bronze tables.
 
-    Such runs auto-fire the bronze-readiness gate (validate the landed
-    bronze tables before any mart runs), since there's no pre-extraction
-    PVO source gate to lean on. A full seed (bronze in the plan) returns
-    False: it's covered by the pre-extraction PVO gate + the per-node
-    cascade, and an all-or-nothing readiness gate would regress its
-    partial-success semantics.
+    Drives off the operator's REQUESTED layers, not the resolved plan:
+    the D-1 transitive include always pulls a mart's bronze deps into the
+    plan (for lineage), but a mart-only run must NOT *execute* (re-seed)
+    them. For such runs the orchestrator skips bronze nodes and the
+    pre-extraction PVO gate, and instead fires the readiness gate to
+    validate the LANDED bronze tables before any mart runs.
+
+    ``layers`` falsy (no filter) means "all layers" → full run → False.
     """
-    has_bronze = any(n.layer == "bronze" for n in plan)
-    has_marts = any(n.layer in ("silver", "gold") for n in plan)
-    return has_marts and not has_bronze
+    if not layers:
+        return False
+    requested = {layer.strip().lower() for layer in layers}
+    return ("bronze" not in requested) and bool(requested & {"silver", "gold"})
 
 
 def _run_content_pack_backend(
@@ -1210,7 +1213,8 @@ def _run_content_pack_backend(
     # gate already fail-fasts them, and an all-or-nothing gate here would
     # regress their per-node cascade (independent marts proceeding past one
     # bronze failure).
-    if (enable_bronze_readiness_gate or _is_silver_gold_only_run(plan)) and not dry_run:
+    _mart_only = _is_mart_only_run(layers)
+    if (enable_bronze_readiness_gate or _mart_only) and not dry_run:
         from .bronze_readiness import (
             BronzeReadinessGateError,
             AIDPF_2071_BRONZE_READINESS_GATE_FAILED,
@@ -1289,8 +1293,10 @@ def _run_content_pack_backend(
     # extracting anything; if any node declares a column the live PVO
     # lacks, abort the whole run now — fail-fast before seeding the
     # healthy nodes ahead of it (a per-node gate would only spare that one
-    # node's extract, not the nodes before it). Skipped on dry-run.
-    if not dry_run:
+    # node's extract, not the nodes before it). Skipped on dry-run, and on
+    # mart-only runs (bronze isn't being extracted — the readiness gate
+    # above validated the LANDED tables instead).
+    if not dry_run and not _mart_only:
         from .bronze_readiness import (
             _compute_required_columns,
             _resolve_in_scope_nodes,
@@ -1345,6 +1351,12 @@ def _run_content_pack_backend(
     diagnostics: list[dict] = []
     failed_node_ids: set[str] = set()
     for node in plan:
+        # Mart-only run: bronze is in the plan for lineage but must NOT be
+        # re-seeded — the marts run against the pre-existing landed tables
+        # (already validated by the readiness gate above). Skip executing
+        # bronze nodes entirely (no state row, no re-extract).
+        if _mart_only and node.layer == "bronze":
+            continue
         # Resume short-circuit. Nodes whose latest
         # terminal state row under this run_id is 'success' (or a
         # carry-forwarded 'resumed_skipped') emit a fresh

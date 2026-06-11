@@ -200,27 +200,25 @@ class TestDispatcherInvokesReadinessGate:
         )
 
 
-class TestSilverGoldOnlyDetection:
-    """The scoping that decides when the readiness gate auto-fires:
-    silver/gold in the plan but NO bronze (run against pre-existing bronze)."""
+class TestMartOnlyDetection:
+    """Mart-only detection keys off the REQUESTED layers (operator intent),
+    not plan contents: ``--layers silver,gold`` = bronze not in scope →
+    bronze is NOT re-seeded; the readiness gate validates landed tables."""
 
-    def _n(self, layer):
-        from types import SimpleNamespace
-        return SimpleNamespace(layer=layer)
+    def test_silver_gold_layers_is_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        assert _is_mart_only_run(["silver", "gold"]) is True
+        assert _is_mart_only_run(["silver"]) is True
+        assert _is_mart_only_run(["gold"]) is True
 
-    def test_silver_gold_only_is_true(self):
-        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_silver_gold_only_run
-        assert _is_silver_gold_only_run([self._n("silver"), self._n("gold")]) is True
-        assert _is_silver_gold_only_run([self._n("silver")]) is True
+    def test_bronze_in_layers_is_not_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        # bronze requested → full run → bronze IS seeded
+        assert _is_mart_only_run(["bronze", "silver", "gold"]) is False
+        assert _is_mart_only_run(["bronze"]) is False  # bronze-only
 
-    def test_full_seed_is_false(self):
-        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_silver_gold_only_run
-        # bronze present in the plan → full seed → gate must NOT auto-fire
-        assert _is_silver_gold_only_run(
-            [self._n("bronze"), self._n("silver"), self._n("gold")]
-        ) is False
-
-    def test_bronze_only_and_empty_are_false(self):
-        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_silver_gold_only_run
-        assert _is_silver_gold_only_run([self._n("bronze")]) is False
-        assert _is_silver_gold_only_run([]) is False
+    def test_no_layer_filter_is_not_mart_only(self):
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import _is_mart_only_run
+        # None / empty = all layers = full run
+        assert _is_mart_only_run(None) is False
+        assert _is_mart_only_run([]) is False
