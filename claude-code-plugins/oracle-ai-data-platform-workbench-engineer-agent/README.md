@@ -8,7 +8,7 @@ Operate the entire Oracle AI Data Platform (AIDP) Workbench in natural language 
 per-column value dictionaries), turns plain English into accurate Spark SQL, runs the full lakehouse SQL
 lifecycle (CREATE/INSERT/UPDATE/DELETE/MERGE/OPTIMIZE/VACUUM/DESCRIBE HISTORY/time-travel), ingests files,
 profiles data and sets quality rules, authors and repairs cron pipelines, provisions clusters
-(GPU/AI-Compute/BI JDBC-ODBC), and debugs jobs through the Spark UI — then keeps going where orchestrators
+(Compute/AI Compute), and debugs jobs through the Spark UI — then keeps going where orchestrators
 stop: governing the platform (roles + per-resource permissions, credential store, Delta Sharing, audit logs,
 MLOps/MLflow) and shipping AI (Agent Flows across 13 node types **with guardrails**, Knowledge Base RAG,
 high-code LangGraph/aidputils agents, reusable Tools). A semantic model + verified-query repository are
@@ -16,7 +16,7 @@ matched before free generation for accuracy. **Signature differentiators:** LLM-
 `ai_generate('openai.gpt-5.4', '<prompt>')`, and cross-source federation in one Spark session.
 
 **Engine precedence** (see [references/aidp-cli-map.md](./references/aidp-cli-map.md)): control-plane
-operations prefer the official `aidp` CLI when installed and fall back to `oci raw-request` against the same
+operations prefer the official AIDP CLI when installed and fall back to `oci raw-request` against the same
 AIDP REST API; interactive Spark-SQL / notebook cells run via the bundled `scripts/aidp_sql.py` helper.
 
 > **Status:** **v0.5.0** — 37 skills across the AIDP data-engineering lifecycle (api_key **or** session-token auth). Endpoint + verification log:
@@ -30,7 +30,7 @@ AIDP REST API; interactive Spark-SQL / notebook cells run via the bundled `scrip
 | Pipeline orchestration | Author DAG + cron, run, monitor, repair/retry/parameterize | **Theirs** — Airflow DAG authoring + failure RCA |
 | Airflow 2→3 migration · dbt · data lineage (incl. column-level) | Not offered (ours migrates **Databricks→AIDP**) | **Theirs** |
 | Full lakehouse SQL DDL/DML + Delta maintenance | CREATE…MERGE / OPTIMIZE / VACUUM / time-travel | Warehouse-read oriented |
-| Compute provisioning | Clusters + GPU/AI-Compute/BI-JDBC, notebooks, Spark-UI debug | Astro/Airflow runtime |
+| Compute provisioning | Clusters + Compute/AI Compute, notebooks, Spark-UI debug | Astro/Airflow runtime |
 | **LLM-in-SQL (`ai_generate`)** | **Yes** | No equivalent |
 | **AI Agent Flows + guardrails** | **Yes** (13 node types) | No equivalent |
 | **Knowledge Bases / RAG + high-code agents** | **Yes** | No equivalent |
@@ -45,7 +45,7 @@ AIDP REST API; interactive Spark-SQL / notebook cells run via the bundled `scrip
 
 ## What it does
 
-37 skills across the AIDP data-engineering lifecycle (each maps to an official `aidp` CLI command group —
+37 skills across the AIDP data-engineering lifecycle (each maps to an official AIDP CLI command group —
 see [references/aidp-cli-map.md](./references/aidp-cli-map.md)):
 
 | Area | Skills |
@@ -68,21 +68,26 @@ see [references/aidp-cli-map.md](./references/aidp-cli-map.md)):
 
 > **Prerequisites (3) — no MCP required:**
 > 1. The [`oci` CLI](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm)
->    configured with a **`DEFAULT` (api_key) profile**. This single profile drives everything: it signs
->    `oci raw-request` control-plane calls, and `scripts/aidp_sql.py` mints a short-lived UPST from it for
->    the Spark WebSocket. An `AIDP_SESSION` security-token profile is **optional** — used only as the
->    auth-ladder fallback if a tenancy rejects the api_key, or via `aidp_sql.py --session-profile`.
+>    configured with a **`DEFAULT` profile — either an api_key profile *or* an `oci session authenticate`
+>    session-token profile** (both are first-class). The one profile signs `oci raw-request` control-plane
+>    calls and drives `scripts/aidp_sql.py`: an api_key profile mints a short-lived UPST for the Spark
+>    WebSocket; a session-token profile reuses its token directly (no mint). `aidp_sql.py --session-profile`
+>    can still override the WebSocket token explicitly.
 > 2. **Python 3.x** — the helper deps (`oci`, `requests`, `websocket-client`, `cryptography`; no `aidp_agent`)
 >    **auto-install on your first session** via the bundled SessionStart hook. No manual `pip` step needed; if
 >    the readiness banner reports a dep still missing, install it from the plugin dir (`claude plugin list` →
 >    `python -m pip install -r scripts/requirements.txt`, path relative to the plugin root, not your cwd).
-> 3. That's it. There is **no `aidp` MCP to install or register.** An MCP is an optional accelerator only.
+> 3. That's it. There is **no AIDP MCP to install or register.** An MCP is an optional accelerator only.
 
 ```bash
-claude plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-engineer-agent
-claude plugin install  oracle-ai-data-platform-workbench-engineer-agent@aidp-engineer-agent
+# Current home — the personal umbrella marketplace (pre-release):
+claude plugin marketplace add ahmedawan-oracle/claude-code-plugins
+claude plugin install  oracle-ai-data-platform-workbench-engineer-agent@oracle-ai-data-platform-workbench-suite
 ```
 > Helper deps auto-install on first session (SessionStart hook) — no manual `pip` needed.
+> **Canonical home (coming):** once this lands in `oracle-samples/oracle-aidp-samples/ai/claude-code-plugins/`,
+> end users install from the community marketplace — `claude plugin marketplace add anthropics/claude-plugins-community`
+> then `claude plugin install oracle-ai-data-platform-workbench-engineer-agent`.
 
 Then run the one-time bootstrap and catalog discovery:
 
@@ -107,9 +112,9 @@ python scripts/aidp_sql.py \
   [--profile DEFAULT] [--session-profile AIDP_SESSION] [--timeout 180]
 ```
 
-It auto-creates a scratch notebook, mints a UPST from the api_key `DEFAULT` profile (no `AIDP_SESSION`
-required), and prints JSON: `{"status", "execution_count", "outputs", "spark_job_ids", ...}`. Exit code
-`0` on success, `1` on cell error.
+It auto-creates a scratch notebook and authenticates per `--profile`: an **api_key** profile mints a
+short-lived UPST; a **session-token** profile reuses its token directly (no mint). It prints JSON:
+`{"status", "execution_count", "outputs", "spark_job_ids", ...}`. Exit code `0` on success, `1` on cell error.
 
 ### Optional MCP accelerator
 
@@ -140,14 +145,14 @@ PLUGIN: oracle-ai-data-platform-workbench-engineer-agent (37 skills)
  (CONTROL PLANE, REST): │            (INTERACTIVE SPARK-SQL):         │
  catalogs · schemas ·   │            spark.sql(...) / notebook cells  │
  tables · clusters ·    │            over Jupyter v5.3 WebSocket;     │
- jobs · volumes ·       │            mints UPST from api_key DEFAULT  │
+ jobs · volumes ·       │            api_key→UPST or session reused │
  files · roles ·        │            → JSON {status,outputs,          │
  credentials · sharing ·│               spark_job_ids,…}              │
  git · bundle · mlops ·  │                                            │
  models · agent-flows    │                                            │
  (Preview/LA flagged)    │                                            │
    └─────────┬──────────┘                 └─────────────┬─────────────┘
-             │  OCI auth: DEFAULT (api_key); AIDP_SESSION token only as fallback
+             │  OCI auth: DEFAULT profile — api_key (→UPST) or session-token (reused directly)
              └───────────────────────┬───────────────────┘
                                      ▼
    ORACLE AI DATA PLATFORM REST API  (20240831 · dataLakes · <DATALAKE_OCID>):
@@ -159,8 +164,8 @@ PLUGIN: oracle-ai-data-platform-workbench-engineer-agent (37 skills)
 
 ### One-time setup (install + 2 commands)
 ```
-claude plugin marketplace add ahmedawan-oracle/oracle-ai-data-platform-workbench-engineer-agent
-claude plugin install  oracle-ai-data-platform-workbench-engineer-agent@aidp-engineer-agent
+claude plugin marketplace add ahmedawan-oracle/claude-code-plugins
+claude plugin install  oracle-ai-data-platform-workbench-engineer-agent@oracle-ai-data-platform-workbench-suite
    │
    ▼ first session: SessionStart hook auto-installs helper deps (oci/requests/websocket-client/cryptography)
    ▼ /aidp-engineer-bootstrap  → reads ~/.oci/config (DEFAULT), lists DataLakes/workspaces;
@@ -177,7 +182,7 @@ NL request → [ROUTER] classify intent → select skill
    │     └─ match verified-queries.md?  yes→reuse validated SQL
    │        no→ground from catalog.md + semantic.md (names/FKs/value-dicts)
    │           → python scripts/aidp_sql.py --cluster … --code "spark.sql(…)"
-   │             (mints UPST from DEFAULT api_key; auto scratch notebook)
+   │             (api_key→UPST or session-token reused; auto scratch notebook)
    │           → show result → cache new verified pair/mappings
    │
    └─ control-plane op (catalog/clusters/jobs/ingest/volumes/files/
