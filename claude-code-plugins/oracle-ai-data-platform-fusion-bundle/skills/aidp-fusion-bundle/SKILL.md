@@ -60,6 +60,11 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    aidp-fusion-bundle run --mode seed     # first-time full extract
    aidp-fusion-bundle run --mode incremental  # daily delta
    ```
+   Prefer to drive this conversationally? The [`aidp-fusion-seed`](../aidp-fusion-seed/SKILL.md)
+   skill turns "seed", "seed supplier_spend", "seed just bronze", or "resume
+   the seed" into the correct guarded `run --mode seed` invocation — it parses
+   the scope, auto-satisfies preconditions (validate / bootstrap / cluster),
+   and **fail-closed-confirms** before overwriting populated silver/gold marts.
 
 5. **Install OAC dashboards** (one-time per OAC instance):
    ```bash
@@ -89,7 +94,7 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    ```bash
    aidp-fusion-bundle dashboard mcp-config
    ```
-   Paste into `claude_desktop_config.json` (or Claude Code / Cline / Copilot equivalent), restart the AI client. Then ask "what's our AR aging?" and watch MCP call `discoverData` → `describeData` → `executeLogicalSQL` against `fusion_catalog.gold.ar_aging`.
+   Paste into `claude_desktop_config.json` (or Claude Code / Cline / Copilot equivalent), restart the AI client. Then ask "what's our AR aging?" and watch MCP call `discover_data` → `describe_data` → `execute_logical_sql` against `fusion_catalog.gold.ar_aging`.
 
 ## Key gotchas (live-validated where ✅)
 
