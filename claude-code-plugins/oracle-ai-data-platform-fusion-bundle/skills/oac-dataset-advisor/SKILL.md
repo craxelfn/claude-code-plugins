@@ -51,6 +51,7 @@ PII tags may be layered on as an **advisory overlay**, never as the evidence.
 
 | File | Role | Invoked via |
 |---|---|---|
+| `../../tests/live/aidp_catalog_probe_live.py` | Produces the live listing: dispatches a `SHOW TABLES`/`DESCRIBE` notebook to an ACTIVE cluster (the only way — no control-plane metastore REST). | `Bash`, writes live.json |
 | `catalog_inventory.py` | Structures the **live** AIDP catalog listing (tables→columns) into an inventory + join-key candidates. **Evidence of what EXISTS.** Refuses to read pack YAMLs. | `Bash`, JSON in/out |
 | `pack_capability.py` | Reads the content pack's gold/silver YAMLs → the **buildable menu** (what could be materialized if seeded). **NOT evidence of existence.** Used only to route seed-vs-gap when live is empty/insufficient. | `Bash`, JSON out |
 
@@ -71,20 +72,34 @@ subjects (→ a join/blend is needed).
 
 ### 2 — Inspect the LIVE AIDP gold layer (EVIDENCE)
 
-List the gold tables that actually exist and their real columns. Use whatever
-AIDP catalog access the environment provides — do NOT read the pack YAMLs:
+List the gold tables that actually exist and their real columns — do NOT read
+the pack YAMLs.
 
-- **Preferred:** the workbench `aidp-catalog-explore` skill (list schema tables
-  + describe columns), or `aidp-analyzing-data` / `aidp_sql.py` running:
-  ```sql
-  SHOW TABLES IN <catalog>.<goldSchema>;          -- e.g. fusion_catalog.gold
-  DESCRIBE TABLE <catalog>.<goldSchema>.<table>;  -- for each table
-  ```
-- **Or** the AIDP catalog REST via `oci raw-request`.
-- Resolve `<catalog>`/`<goldSchema>` from `bundle.yaml`'s `aidp.catalog` /
-  `aidp.goldSchema`.
+> **The AIDP metastore is Spark-side, not on the control plane.** A control-plane
+> `GET .../catalogs` returns **404 `NotAuthorizedOrNotFound`** (verified live
+> 2026-06-15) — there is **no** REST metastore browse. The listing MUST come
+> from **SQL run on an ACTIVE cluster** (`SHOW TABLES` / `DESCRIBE`).
 
-Shape the result into the live-catalog JSON and structure it:
+**Proven method — dispatch a tiny catalog-probe notebook** (no wheel, reuses
+the bundle's `AidpRestClient`):
+
+```bash
+.venv/bin/python tests/live/aidp_catalog_probe_live.py \
+  --aidp-id <OCID> --workspace-key <key> --cluster-key <key> \
+  --cluster-name <name> --schema gold --out live.json
+```
+
+It runs `SHOW TABLES IN <catalog>.gold` + `DESCRIBE TABLE` for each on the
+cluster and writes the live-catalog JSON directly. Coords come from
+`aidp.config.yaml` / the gitignored `.env` (`AIDP_DATALAKE_OCID`,
+`AIDP_WORKSPACE_KEY`, `AIDP_CLUSTER_ID`, …); the cluster must be ACTIVE
+(start it first if STOPPED). Resolve `<catalog>`/`<goldSchema>` from
+`bundle.yaml`'s `aidp.catalog` / `aidp.goldSchema`.
+
+*Alternative:* the workbench `aidp-catalog-explore` / `aidp-analyzing-data`
+skills run the same `SHOW TABLES`/`DESCRIBE` if that plugin is installed.
+
+Then structure the listing:
 
 ```bash
 # live.json = {"catalog":"fusion_catalog","schema":"gold",
@@ -206,8 +221,10 @@ as a substitute for it.
   - **never disturbs already-materialized delta** (bronze/silver may hold
     terabytes; no destructive rebuilds).
   After it ships + seeds, this advisor re-evaluates against the new **live** table.
-- **Depends on** live AIDP catalog access (workbench `aidp-catalog-explore` /
-  `aidp_sql.py` / catalog REST) and OAC MCP read tools.
+- **Depends on** live AIDP catalog access — a cluster SQL probe
+  (`tests/live/aidp_catalog_probe_live.py`, or workbench
+  `aidp-catalog-explore`); there is no control-plane metastore REST. Plus OAC
+  MCP read tools and an ACTIVE cluster.
 
 ## Safety invariants (do not regress)
 
