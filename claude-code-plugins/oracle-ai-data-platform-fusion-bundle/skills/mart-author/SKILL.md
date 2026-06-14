@@ -39,7 +39,9 @@ enforces it).
    change to an existing node's **grain or natural key**.
 3. **New bronze extracts are additive** — a new `bronze_extract` node, never an
    edit to an existing one.
-4. **Write to an overlay pack**, never the shipped starter pack.
+4. **Write to a persistent overlay pack beside the bundle**
+   (`<bundle.yaml.parent>/overlays/<name>/`) — never `/tmp`, never the shipped
+   installed `content_packs/` tree.
 5. **Inspect the Fusion PVO source schema, not bronze**, to discover raw fields
    (metadata-only; cheap; authoritative for "what could be extracted").
 
@@ -85,7 +87,7 @@ not bronze**:
 aidp-fusion-bundle catalog probe --pod <url>            # list/reconcile PVOs
 aidp-fusion-bundle catalog probe-pvo <dataset_id> \      # one PVO's schema, metadata-only
   --datastore <DatastorePVO> --bicc-schema <Financial|HCM|SCM> \
-  --emit-pack-yaml content_packs/<overlay>/bronze/<id>.yaml
+  --emit-pack-yaml overlays/<name>/bronze/<id>.yaml   # persistent, beside bundle.yaml
 ```
 `probe-pvo` does a schema-only roundtrip (no row pull) and emits a **draft
 bronze YAML** — the additive extract for rung 4.
@@ -105,9 +107,13 @@ warnings, touchesLivingDelta, nodeSpecs}`. Act on it:
   and resolve any `warnings` (e.g. add `currency_code` to an aggregate's grain).
 
 ### 5 — Author the artifacts (correct-by-construction)
-Into an **overlay pack** `content_packs/<overlay>/` (or
-`<bundle.yaml.parent>/overlays/<overlay>/`) with `extends: fusion-finance-starter`
-— never the shipped pack. For each `nodeSpec`:
+Write to a **persistent overlay pack beside the bundle**:
+**`<bundle.yaml.parent>/overlays/<name>/`** (e.g. `overlays/fusion-finance-ar-ext/`),
+with `pack.yaml` declaring `extends: fusion-finance-starter@<version>`. This is
+the canonical home — mirrors `medallion-author`'s write boundary, survives
+reboots, and is what the customer commits/points the bundle at.
+**Never** write to a temp dir (`/tmp` is lost on reboot) and **never** to the
+shipped installed `content_packs/` tree. For each `nodeSpec`:
 - **`<id>.yaml`** — `implementation.type: sql` (or `bronze_extract`),
   `dependsOn`, the planner's `refresh` strategy **with its documented reason**,
   and `outputSchema.columns` with a **mandatory `pii` classification per column**
