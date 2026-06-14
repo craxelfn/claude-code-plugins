@@ -160,6 +160,18 @@ class OacOauthFlow:
         self._persist(self._cached)
         return self._cached.access_token
 
+    def get_bundle(self, *, force_refresh: bool = False) -> TokenBundle:
+        """Return the full :class:`TokenBundle` (access + refresh + expiry).
+
+        Drives the same cache → refresh → interactive ladder as :meth:`get_token`,
+        but exposes the refresh token and absolute expiry so callers can re-serialize
+        the token into other formats (e.g. the OAC MCP connector's
+        ``{accessToken, refreshToken, expiresIn}`` shape — see :mod:`..mcp_token`).
+        """
+        self.get_token(force_refresh=force_refresh)
+        assert self._cached is not None  # get_token populates or raises
+        return self._cached
+
     # ------------------------------------------------------------ persistence
     def _persist(self, bundle: TokenBundle) -> None:
         self._token_path.parent.mkdir(parents=True, exist_ok=True)

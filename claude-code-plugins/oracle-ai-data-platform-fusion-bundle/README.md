@@ -88,7 +88,7 @@ aidp-fusion-bundle dashboard mcp-config --oac-url https://your-oac.example.com \
   --oac-mcp-connect-js /path/to/oac-mcp-connect.js
 ```
 
-After step 7, restart your AI client and ask "what's our AR aging?" — OAC MCP will route through `discoverData` → `describeData` → `executeLogicalSQL` against `fusion_catalog.gold.ar_aging`.
+After step 7, restart your AI client and ask "what's our AR aging?" — OAC MCP will route through `discover_data` → `describe_data` → `execute_logical_sql` against `fusion_catalog.gold.ar_aging`.
 
 ---
 
@@ -209,9 +209,9 @@ Both signals show up in the orchestrator stdout under the same `[step]` line for
                                                                  ▼
                                                   ┌──────────────────────────────┐
                                                   │   OAC MCP Server (Preview)   │
-                                                  │   - discoverData             │
-                                                  │   - describeData             │
-                                                  │   - executeLogicalSQL        │
+                                                  │   - discover_data            │
+                                                  │   - describe_data            │
+                                                  │   - execute_logical_sql      │
                                                   └──────────────┬───────────────┘
                                                                  │ MCP (stdio)
                                                                  ▼

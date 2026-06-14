@@ -173,9 +173,9 @@ Evidence files: 5 markdown results files + 16 screenshots + 5 reference SQL quer
          │                                                        ▼
          │                                         ┌──────────────────────────────┐
          │                                         │   OAC MCP Server (Preview)   │
-         │                                         │   - discoverData             │
-         │                                         │   - describeData             │
-         │                                         │   - executeLogicalSQL        │
+         │                                         │   - discover_data            │
+         │                                         │   - describe_data            │
+         │                                         │   - execute_logical_sql      │
          │                                         └──────────────┬───────────────┘
          │                                                        │ MCP (stdio)
          │                                                        ▼

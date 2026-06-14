@@ -16,10 +16,11 @@ import sys
 import time
 from pathlib import Path
 
-# Import the sibling aidp-rest skill's client. Skills live as siblings under
-# .claude/skills/, so we add that parent to sys.path before importing.
-_SKILLS_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_SKILLS_DIR / "aidp-rest"))
+# Import the aidp-rest skill's client. As of the skill reorg, aidp-rest ships
+# under the plugin's top-level ``skills/`` dir while this dev-only dispatcher
+# stays under ``.claude/skills/`` — reach across to the repo-root skills/ dir.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT / "skills" / "aidp-rest"))
 from client import AidpRestClient, AidpRestError  # type: ignore[import-not-found]  # noqa: E402
 
 PLUGIN_NAME = "oracle_ai_data_platform_fusion_bundle"

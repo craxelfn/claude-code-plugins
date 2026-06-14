@@ -1,6 +1,6 @@
 """medallion_author — the operator-side Tier-2 overlay-drafting helpers.
 
-The Claude Code plugin skill at ``.claude/skills/medallion-author/``
+The Claude Code plugin skill at ``skills/medallion-author/``
 imports from this package via thin re-export shims (sibling pattern to
 ``aidp-rest``'s ``client.py``). All implementation, validation, and unit
 tests live here so the package is pip-installable + testable without
