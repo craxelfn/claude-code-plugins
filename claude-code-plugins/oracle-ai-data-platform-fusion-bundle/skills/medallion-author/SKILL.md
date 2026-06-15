@@ -1,6 +1,6 @@
 ---
 name: medallion-author
-description: "Draft a content-pack overlay extending the starter pack's variation-point candidate lists when `aidp-fusion-bundle bootstrap` fails AIDPF-2010 / AIDPF-2011. Reads diagnostic artifacts feature #2 wrote under `.aidp/diagnostics/<run_id>/`, proposes new candidates from the observed bronze schema, presents a draft overlay for operator approval, and drafts a backend-aware remediation runbook (Option A/B/D/E; Option C deferred to v0.4). Use when the CLI exits 1 with AIDPF-2010 or AIDPF-2011 on a fresh tenant or after a Fusion-release upgrade. NOT for runtime drift detection (feature #4 owns that) or for authoring net-new silver/gold nodes (§9.5.6 #1 MAY-NOT forbids skill-authored SQL templates)."
+description: "Draft a content-pack overlay extending the starter pack's variation-point candidate lists when `aidp-fusion-bundle bootstrap` fails AIDPF-2010 / AIDPF-2011. Reads diagnostic artifacts under `.aidp/diagnostics/<run_id>/`, proposes new candidates from the observed bronze schema, presents a draft overlay for operator approval, and drafts a backend-aware remediation runbook (Option A/B/D/E; Option C deferred to v0.4). Use when the CLI exits 1 with AIDPF-2010 or AIDPF-2011 on a fresh tenant or after a Fusion-release upgrade. NOT for runtime drift detection or for authoring net-new silver/gold nodes; skill-authored SQL templates are forbidden."
 ---
 
 # medallion-author — Tier-2 overlay-author skill
@@ -11,15 +11,13 @@ tenant's bronze), it writes a diagnostic artifact and exits non-zero.
 This skill is the recovery path: read the artifact, propose new
 candidates from the observed bronze schema, present a draft overlay
 for operator approval, and draft a remediation runbook. The operator
-runs `bootstrap --refresh` with the overlay applied; the engine
-(feature #2) commits the resolution.
+runs `bootstrap --refresh` with the overlay applied; bootstrap commits the
+resolution.
 
-**Architectural authority**:
-`dev/PLAN_plugin_engine_medallion_content_packs.md`
-§9.5.4.1 (CLI ↔ skill one-way interaction), §9.5.5 Tier-2 (overlay
-drafting), §9.5.6 (7 MUSTs / 3 MAY-NOTs), §9.5.7 (storage rules),
-§9.5.8 (loose version coupling), §9.5.9 (`skill_proposed` mechanism),
-ADRs 0014 / 0017 / 0019 / 0021.
+**Architectural authority**: `docs/workflow.md`,
+`docs/project_setup.md`, and `docs/aidpf-error-codes.md` are current
+guidance. The skill is operator-initiated, drafts overlay candidates only,
+and never writes profile resolutions directly.
 
 ## When to use
 
@@ -35,18 +33,17 @@ ADRs 0014 / 0017 / 0019 / 0021.
 
 ## When NOT to use
 
-- During `run --mode seed` / `run --mode incremental` — the engine
-  has zero LLM dependency at runtime per ADR-0017. This skill is
-  operator-initiated and runs between bootstraps.
+- During `run --mode seed` / `run --mode incremental` — the engine has zero
+  LLM dependency at runtime. This skill is operator-initiated and runs between
+  bootstraps.
 - When the diagnostic artifact is missing — the skill refuses to
   invent context (no synthesised proposals from thin air).
 - When `AIDPF-1020` is present — operator-identity gate is unrelated
   to overlay drafting; fix the identity environment first.
-- To author NEW silver/gold nodes (a SQL template the pack doesn't
-  declare). Per §9.5.6 #1 MAY-NOT, the skill only EXTENDS existing
-  variation-point candidate lists.
+- To author NEW silver/gold nodes (a SQL template the pack doesn't declare).
+  The skill only EXTENDS existing variation-point candidate lists.
 
-## AIDPF-2012 read-only context (Phase 3c + 3d)
+## AIDPF-2012 read-only context
 
 When a runtime drift artifact (`AIDPF-2012.json`) is present alongside
 2010/2011 in the same `<run_id>/` directory, the reader exposes it via
@@ -54,12 +51,11 @@ When a runtime drift artifact (`AIDPF-2012.json`) is present alongside
 to the operator as context but DOES NOT act on it — drift recovery is
 `bootstrap --refresh`, not an overlay draft.
 
-As of **Phase 3d** the artifact's
-`schema_drift_failure.schema_drift.dataset_deltas` field is populated
-whenever bootstrap pinned a `profiles/<tenant>.schema-snapshot.yaml`
-file (Phase 3a-vintage bootstraps and earlier still emit empty
-`dataset_deltas` and a one-time WARN on the operator's terminal —
-remediation is the same `--refresh`). When `dataset_deltas` is
+The artifact's `schema_drift_failure.schema_drift.dataset_deltas` field is
+populated whenever bootstrap pinned a
+`profiles/<tenant>.schema-snapshot.yaml` file. Profiles without a snapshot emit
+empty `dataset_deltas` and a one-time WARN on the operator's terminal;
+remediation is the same `--refresh`. When `dataset_deltas` is
 non-empty, each entry carries `addedColumns` / `removedColumns` /
 `typeChangedColumns` lists with the operator-facing original casing
 preserved. Surface those directly in any human hand-off message
@@ -113,10 +109,10 @@ carries:
      `outputSchema` trimmed, or the feature isn't available on this
      tenant. Do not invent a mapping.
 3. **Never edit `profiles/` or hand-write `resolved.*`** — same rule as
-   the bootstrap variation-point path (§9.5.6 #6). The columnAlias goes
+   the bootstrap variation-point path. The columnAlias goes
    in the overlay; bootstrap pins the resolved value on `--refresh`.
 
-## The seven §9.5.6 MUSTs (verbatim)
+## Required overlay rules
 
 1. **Probe bronze before declaring**. Skill reads the diagnostic
    artifact's `observedBronzeSchema`; never invents columns.
@@ -131,16 +127,15 @@ carries:
    `columnAliases` / `semanticVariants`; the SQL templates that
    reference the tokens are unchanged.
 5. **Run `bootstrap --refresh` for final commit**. Skill never invokes
-   bootstrap itself — operator gates every commit. §9.5.7 #6
-   preserved (bootstrap is the only writer to `profiles/` and
-   `evidence/`).
+   bootstrap itself — operator gates every commit. Bootstrap is the only writer
+   to `profiles/` and `evidence/`.
 6. **Never hand-write `profile.resolved.*`**. Skill emits an
    overlay; bootstrap pins the resolved values.
 7. **Stamp every artifact with `provenance` metadata**. Overlay
    carries `skillId`, `skillVersion`, `modelId`, `generatedAt`,
    `diagnosticRunId`, `proposals`, `incrementalImpact`.
 
-## The three §9.5.6 MAY-NOTs (verbatim)
+## Forbidden actions
 
 1. **Never hardcode the winning candidate into a SQL template**.
    The skill's drafter rejects any overlay that introduces a node
@@ -168,7 +163,7 @@ When invoked via `/medallion-author [<run_id>]`:
 
 - `AIDPF-1020.json` present → refuse: "identity gate must be fixed
   before overlay drafting".
-- Unknown `schemaVersion` → refuse per §9.5.8.
+- Unknown `schemaVersion` → refuse for forward compatibility.
 - Diagnostics directory missing / empty → refuse.
 
 ### 3. Pack load + affected-nodes computation
@@ -227,9 +222,7 @@ After approval, call:
 
 ### 7. Hand-off
 
-Print one of TWO templates per the conditional matrix. Phase 9 follow-up
-deleted the legacy backend (and the `--execution-backend` flag), so the
-prior 4-template matrix collapsed to 2.
+Print one of TWO templates per the conditional matrix.
 
 #### 7a. Initial-onboarding
 
@@ -337,5 +330,5 @@ Option E (full re-seed) is the audit-baseline reset — rare.
 - Schema of the overlay's `provenance` block (breaking → major).
 - The 8-step workflow contract (breaking → major).
 
-Skill version is loose-coupled per §9.5.8 — recorded in evidence
+Skill version is loose-coupled with runtime execution: recorded in evidence
 snapshots as audit metadata, NOT a plan-hash input.

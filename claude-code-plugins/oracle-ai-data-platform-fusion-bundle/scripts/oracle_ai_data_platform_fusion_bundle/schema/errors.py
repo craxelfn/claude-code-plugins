@@ -64,7 +64,7 @@ class MissingDependencyError(OrchestratorConfigError):
 
 EXIT_CODE_SCHEMA_DRIFT = 14
 """Process exit code emitted by the CLI when bronze-schema fingerprint
-drift is detected at runtime (PLAN §9.5.5).
+drift is detected at runtime.
 
 Reserved bootstrap/runtime exit codes:
 * 11 — AIDPF-1020 (operator identity unresolved)
@@ -77,7 +77,7 @@ Reserved bootstrap/runtime exit codes:
 class SchemaDriftDetectedError(Exception):
     """Raised when ``check_bronze_fingerprint_drift`` finds the live
     bronze fingerprint differs from the value pinned in the tenant
-    profile (PLAN §9.5.5 / AIDPF-2012).
+    profile (AIDPF-2012).
 
     **Boundary placement**: this exception lives in ``schema/errors.py``
     (neutral module) — NOT in ``orchestrator/`` — because
@@ -115,8 +115,7 @@ class SchemaDriftDetectedError(Exception):
         the marker payload at the same shape before raising."""
 
         self.summary = summary
-        """The multi-line §9.5.5 hand-off message the CLI prints on
-        stderr."""
+        """The multi-line hand-off message the CLI prints on stderr."""
 
         self.prior_fingerprint = prior_fingerprint
         self.current_fingerprint = current_fingerprint

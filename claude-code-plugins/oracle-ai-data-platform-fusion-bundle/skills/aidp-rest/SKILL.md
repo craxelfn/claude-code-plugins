@@ -5,13 +5,13 @@ description: "AIDP control-plane REST client primitives: OCI signing, workspace/
 
 # aidp-rest — AIDP control-plane REST primitives
 
-> **Canonical location (P1.5ε §Step 2)**: the Python client now lives in the plugin source at `scripts/oracle_ai_data_platform_fusion_bundle/dispatch/rest_client.py`. The skill's `client.py` is a path-resolving re-export shim — it adds the checkout's `scripts/` directory to `sys.path` and re-exports the canonical names. Edits to the client land in the plugin first; this skill documents the contract and the empirically-confirmed gotchas.
+> **Canonical location**: the Python client lives in the plugin source at `scripts/oracle_ai_data_platform_fusion_bundle/dispatch/rest_client.py`. The skill's `client.py` is a path-resolving re-export shim — it adds the checkout's `scripts/` directory to `sys.path` and re-exports the canonical names. Edits to the client land in the plugin first; this skill documents the contract and the empirically-confirmed gotchas.
 
 Reusable Python client for the AIDP `/aiDataPlatforms/<id>/workspaces/<key>/...` REST surface. Encapsulates OCI request signing (both API-key and session-token profiles), the empirically-confirmed request shapes, and the gotchas that aren't in Oracle's swagger.
 
 ## When to use
 
-- Building a skill that dispatches a notebook to a live cluster (TC26, regression runs, demos).
+- Building a skill that dispatches a notebook to a live cluster.
 - Diagnosing a job run — fetching its executed notebook, parsing output markers, finding the failed task.
 - Resolving workspace / cluster display names to UUIDs.
 - Starting a STOPPED cluster + waiting for ACTIVE before submitting work.

@@ -14,11 +14,8 @@ renderer is invoked exactly once in ``execute_node``, *after*
 this preflight passes. This separation is what makes the
 ``preflight-blocked`` unit test branch assert "renderer never called".
 
-References:
-
-* PLAN §11.6 (preflight gates)
-* PLAN §11.10 (multi-source primary/lookup; per-source watermark checks)
-* PLAN §11.3 R6 (replace_partition partition column invariant)
+Preflight covers required-column, watermark-column, and partition-column
+gates only; SQL rendering and execution stay in ``sql_runner``.
 """
 
 from __future__ import annotations
@@ -131,9 +128,7 @@ def preflight_node(
         node: validated NodeYaml.
         pack: assembled ResolvedPack (consulted for source-id → table
             mapping when ctx doesn't already carry it).
-        profile: validated TenantProfile (unused in v0.3 preflight; kept
-            in the signature for forward compatibility with §11.6 Gate 4
-            bronze-schema-fingerprint drift detection).
+        profile: validated TenantProfile (used for column-alias resolution).
         ctx: render context — used for ``bronze_table_for_source`` map
             (which the introspection calls use to identify the live
             bronze tables to DESCRIBE).
@@ -316,7 +311,7 @@ def _check_watermark_column(
     inc = node.refresh.incremental
     if inc is None or inc.watermark is None:
         # Static validator should have rejected merge without watermark
-        # config (PLAN §11.3 R2 / AIDPF-2050); defensive check anyway.
+        # config (AIDPF-2050); defensive check anyway.
         return []
     source_id = inc.watermark.source
     column = inc.watermark.column
@@ -368,7 +363,7 @@ def _check_partition_columns(
                 source=None,
                 message=(
                     f"replace_partition strategy declared without "
-                    f"`partitionColumns` (PLAN §11.3 R6 / AIDPF-2054). Static "
+                    f"`partitionColumns` (AIDPF-2054). Static "
                     f"validator should reject this earlier."
                 ),
             )

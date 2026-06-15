@@ -12,8 +12,8 @@ the DTOs (``PlanNode`` + ``PrereqNode``) this module produces.
 Boundary contract: this module MUST NOT import from ``orchestrator/*``,
 ``dimensions/*``, ``transforms/*``, or ``extractors/*``. The pack is
 loaded by the caller (``commands/run.py`` for both the inline and the
-REST paths) and passed in — this preserves the §4.3 import boundary
-that ``tests/unit/dispatch/test_imports.py`` enforces.
+REST paths) and passed in; this preserves the dispatch import boundary that
+``tests/unit/dispatch/test_imports.py`` enforces.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 # Closed set of layer values. Inlined here so the schema-layer
 # resolver does not need to import from orchestrator (which would
-# defeat the §4.3 import-boundary).
+# defeat the dispatch import boundary).
 _VALID_LAYERS: Final[frozenset[str]] = frozenset({"bronze", "silver", "gold"})
 
 # Mirrors orchestrator.content_pack_plan_resolver's strict-scope error
@@ -41,7 +41,7 @@ _VALID_LAYERS: Final[frozenset[str]] = frozenset({"bronze", "silver", "gold"})
 AIDPF_1042_STRICT_SCOPE_MISSING_DEPENDENCY: Final[str] = "AIDPF-1042"
 
 # Mirrors orchestrator.content_pack_plan_resolver's empty-plan error
-# code. Inlined here for the §4.3 boundary.
+# code. Inlined here for the dispatch import boundary.
 AIDPF_1045_LAYER_FILTER_EMPTIED_PLAN: Final[str] = "AIDPF-1045"
 
 # Bundle-section names per layer — operator-facing remediation strings.

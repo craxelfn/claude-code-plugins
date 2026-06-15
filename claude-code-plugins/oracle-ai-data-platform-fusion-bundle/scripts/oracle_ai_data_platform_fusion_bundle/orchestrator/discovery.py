@@ -1,4 +1,4 @@
-"""BICC offering schema auto-discovery helper (P1.5α-fix19).
+"""BICC offering schema auto-discovery helper.
 
 Hits ``/biacm/rest/meta/datastores`` once per orchestrator run + returns a
 mapping of ``{datastore_name: {offering_schemas}}``. Preflight calls this
@@ -7,9 +7,9 @@ contains a PVO, instead of forcing every new customer to edit the plugin's
 catalog when their tenant publishes a PVO under a different offering.
 
 Distinct from ``commands/catalog.py::_extract_datastore_names`` (which
-collects bare datastore names without schema context) — fix19 needs the
-schema↔datastore PAIRING so it can auto-correct in the unique-match case
-and present candidates in the ambiguous case.
+collects bare datastore names without schema context): this helper needs the
+schema/datastore pairing so it can auto-correct in the unique-match case and
+present candidates in the ambiguous case.
 """
 from __future__ import annotations
 

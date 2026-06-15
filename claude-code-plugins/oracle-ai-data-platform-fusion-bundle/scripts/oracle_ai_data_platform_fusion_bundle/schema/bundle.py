@@ -249,8 +249,7 @@ class IncrementalConfig(BaseModel):
     Cloud; matches the runtime module's default ``WATERMARK_SAFETY_WINDOW``.
     Validated ``gt=0`` because zero would erase the buffer and a
     negative value would move the cursor INTO THE FUTURE relative to
-    ``extract_started_at`` (BICC returns zero rows even when data
-    exists). See TC28b clock-skew probe.
+    ``extract_started_at`` (BICC returns zero rows even when data exists).
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -287,7 +286,7 @@ class OacSnapshotSpec(BaseModel):
 class OacDashboardSpec(BaseModel):
     """OAC integration block under ``oac:`` in bundle.yaml.
 
-    Architecture (TC10h-2 refactor, 2026-05-01) — strictly Oracle-documented endpoints:
+    Architecture — strictly Oracle-documented endpoints:
       1. POST /api/20210901/catalog/connections             (create AIDP connection)
       2. POST /api/20210901/snapshots                       (register customer-uploaded .bar)
       3. POST /api/20210901/system/actions/restoreSnapshot  (async restore)

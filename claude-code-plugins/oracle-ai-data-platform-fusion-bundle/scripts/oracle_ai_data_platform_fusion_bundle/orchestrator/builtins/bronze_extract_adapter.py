@@ -1,11 +1,8 @@
-"""Bronze content-pack extract adapter (Phase 9 Step 2).
+"""Bronze content-pack extract adapter.
 
-Implements the P1.17 bronze extraction algorithm as a content-pack
-adapter — replacing the v1 ``_run_with_legacy_python_backend`` bronze
-arm. The adapter is a thin wrapper around the v1 extract + write
-logic; the algorithm steps are preserved byte-for-byte so a v1 bronze
-run and a Phase 9 bronze run produce identical bronze targets +
-identical cursor advances on the same input.
+Implements the bronze extraction algorithm as a content-pack adapter.
+The adapter keeps extraction, cursoring, payload diffing, schema
+reconciliation, and write strategy in one bronze-owned surface.
 
 The adapter exposes two surfaces:
 
@@ -16,12 +13,11 @@ The adapter exposes two surfaces:
   ``_compute_output_watermark`` (which is source-row-max semantics —
   correct for silver/gold, wrong for bronze).
 * :func:`probe_bronze_schemas` — metadata-only BICC ``inferSchema``
-  probe over the bronze nodes in a resolved plan (rehomed from
-  ``orchestrator/preflight.py``, which is deleted in Step 5). Backs
-  Phase 5's ``AIDPF-2072`` PVO drift gate. Reads ``NodeYaml`` directly
-  off the resolved pack; no engine-spec lookup involved.
+  probe over the bronze nodes in a resolved plan. Backs the
+  ``AIDPF-2072`` PVO drift gate. Reads ``NodeYaml`` directly off the
+  resolved pack; no engine-spec lookup involved.
 
-Algorithm (see plan §Step 2):
+Algorithm:
 
 1. Construct ``PvoEntry``-equivalent descriptor from node YAML fields
    (no ``fusion_catalog.get()`` lookup — pack YAML is self-contained
@@ -36,8 +32,7 @@ Algorithm (see plan §Step 2):
    ``extract_started_at - safety_window`` on non-empty extract.
 5. Call BICC ``extract_pvo`` with effective schema + push-down
    (None for seed / first-incremental / incremental_capable=False).
-6. Payload-diff for ``incremental_capable=False`` PVOs with prior
-   cursor (P1.17e).
+6. Payload-diff for ``incremental_capable=False`` PVOs with prior cursor.
 7. Schema reconciliation BEFORE write.
 8. Add deterministic audit cols
    (``_extract_ts``, ``_source_pvo``, ``_run_id``, ``_watermark_used``).
@@ -76,11 +71,11 @@ _LOG = logging.getLogger(__name__)
 
 VERSION: str = "1.0.0"
 """Adapter version constant. Flows into the content-pack plan-hash
-substitute for bronze_extract nodes — bumping this triggers the §11.9
-drift gate, same contract as a SQL-template edit."""
+substitute for bronze_extract nodes — bumping this triggers the same
+drift gate as a SQL-template edit."""
 
 
-# Error codes (registered in PLAN §25).
+# Error codes documented in docs/aidpf-error-codes.md.
 AIDPF_2092_BRONZE_CURSOR_TARGET_DESYNC = "AIDPF-2092"
 
 
@@ -139,7 +134,7 @@ def _to_bicc_iso(wm: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# probe_bronze_schemas — rehomed from orchestrator/preflight.py
+# probe_bronze_schemas
 # ---------------------------------------------------------------------------
 
 
@@ -153,10 +148,8 @@ def probe_bronze_schemas(
 ) -> dict[str, "StructType"]:
     """Metadata-only BICC ``inferSchema`` probe over the pack's bronze nodes.
 
-    Rehomed from ``orchestrator/preflight.py::preflight_bronze_schemas`` as
-    part of Phase 9 Step 5 (bronze ownership consolidates in the adapter).
-    Returns per-dataset live ``StructType`` for callers (Phase 5's
-    ``AIDPF-2072`` drift gate consumes this map).
+    Returns per-dataset live ``StructType`` for callers; the
+    ``AIDPF-2072`` drift gate consumes this map.
 
     Args:
         spark: live Spark session.
@@ -238,7 +231,7 @@ def run(
 ) -> "tuple[DataFrame, datetime | None]":
     """Execute a single bronze_extract node end-to-end.
 
-    Preserves the P1.17 bronze algorithm byte-for-byte:
+    Implements the bronze algorithm:
 
     * Capture ``extract_started_at`` BEFORE BICC pull.
     * Persisted cursor = ``extract_started_at - safety_window`` on

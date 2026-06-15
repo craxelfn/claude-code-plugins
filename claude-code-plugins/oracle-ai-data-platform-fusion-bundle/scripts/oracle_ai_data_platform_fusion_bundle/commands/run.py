@@ -61,8 +61,8 @@ def run(
     # `_resolve_password` (literal-credential WARN) surface on stderr with
     # Rich formatting alongside the run summary. The orchestrator emits via
     # stdlib `logging.getLogger(__name__).warning(...)` and takes no
-    # `console` parameter (§4.7 + Option-2 design); the CLI wires the
-    # RichHandler so the output is consistent.
+    # `console` parameter; the CLI wires the RichHandler so output is
+    # consistent.
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=logging.WARNING,
@@ -101,8 +101,8 @@ def run(
 
     if inline:
         # Pass the PATH (not parsed dict): orchestrator.run re-reads
-        # the file because `_render_env_vars` (§4.4a) must run BEFORE
-        # Pydantic validation, and that step needs the raw YAML text.
+        # the file because `_render_env_vars` must run BEFORE Pydantic
+        # validation, and that step needs the raw YAML text.
         return _run_inline(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
@@ -229,7 +229,7 @@ def _run_inline(
         resolved_pack = load_full_chain(
             pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
         )
-        # Phase 1 full validation BEFORE any profile/stage/dispatch work.
+        # Full validation BEFORE any profile/stage/dispatch work.
         # validate_dag/validate_template_variables/validate_dashboard_*/etc.
         # catch errors that the runtime DAG resolver doesn't — e.g. a typo
         # in dependsOn.silver that points to a non-existent node would
@@ -263,14 +263,10 @@ def _run_inline(
             strict_scope=strict_scope,
         )
     except SchemaDriftDetectedError as exc:
-        # Phase 3c — runtime preflight detected bronze-schema drift.
-        # Print the multi-line §9.5.5 hand-off message on STDERR (via
-        # the dedicated error_console — Rich `Console.print(file=...)`
-        # is not a valid shape, round-4 finding) and exit 14. This arm
-        # MUST precede the OrchestratorConfigError arm because the
-        # exception does NOT inherit from OrchestratorConfigError —
-        # otherwise it'd be swallowed and we'd return exit 2 instead
-        # of the documented 14.
+        # Runtime preflight detected bronze-schema drift. Print the hand-off
+        # message on STDERR and exit 14. This arm MUST precede the
+        # OrchestratorConfigError arm because the exception does NOT inherit
+        # from OrchestratorConfigError; otherwise we'd return exit 2 instead.
         error_console.print(f"[red]{exc.summary}[/red]")
         return EXIT_CODE_SCHEMA_DRIFT
     except (OrchestratorConfigError, NotImplementedError) as exc:
@@ -300,7 +296,7 @@ def _run_via_aidp_dispatch(
     resume_run_id: str | None = None,
     strict_scope: bool = False,
 ) -> int:
-    """Submit the bundle to AIDP via the REST job API (P1.5ε §Step 7b).
+    """Submit the bundle to AIDP via the REST job API.
 
     Loads ``aidp.config.yaml``, runs preflight, builds the wheel, generates
     the orchestrator notebook, uploads it, creates a job, submits a run,
@@ -310,9 +306,9 @@ def _run_via_aidp_dispatch(
     Same exit-code contract as :func:`_run_inline`: 0 on success, 1 if any
     step failed, 2 on any dispatch-layer error (config, preflight, network).
 
-    ``resume_run_id`` (P1.5ε-fix5): threaded into ``dispatch_via_rest``
-    which injects it into the run-cell as a ``repr()``-quoted literal.
-    Bad run_ids surface as cell-3 ``ResumeRunNotFoundError`` /
+    ``resume_run_id`` is threaded into ``dispatch_via_rest`` which injects it
+    into the run-cell as a ``repr()``-quoted literal. Bad run_ids surface as
+    cell-3 ``ResumeRunNotFoundError`` /
     ``ResumeRunNotResumableError`` / ``ResumeBundleMismatchError`` —
     enriched into ``DispatchRunFailedError``'s message by
     ``dispatch_via_rest`` so the operator sees the typed orchestrator
@@ -329,11 +325,9 @@ def _run_via_aidp_dispatch(
 
     error_console = Console(stderr=True)
 
-    # Phase 9 — content-pack is the only backend. Prepare staging
-    # primitives at the CLI layer (orchestrator-side imports are
-    # allowed here; dispatch/ cannot import them). Bundles without
-    # a contentPack block skip the staging — they execute purely
-    # through the legacy orchestrator paths.
+    # Prepare content-pack staging primitives at the CLI layer
+    # (orchestrator-side imports are allowed here; dispatch/ cannot import
+    # them). Bundles without a contentPack block skip staging.
     profile_yaml: str | None = None
     pack_files: dict[str, str] | None = None
     pack_manifest: dict | None = None
@@ -369,7 +363,8 @@ def _run_via_aidp_dispatch(
             console.print(
                 f"[red]{AIDPF_1031_CONTENT_PACK_MISSING}: bundle.yaml has no "
                 f"`contentPack:` block; requires "
-                f"the block. Either add it or run with the legacy v1 backend (removed in Phase 9).[/red]"
+                f"the block. Add `contentPack.name` and `contentPack.profile` "
+                f"before running.[/red]"
             )
             return 2
         if bundle.content_pack.profile is None:
@@ -383,9 +378,9 @@ def _run_via_aidp_dispatch(
         resolved_pack = load_full_chain(
             pack_root, base_resolver=make_filesystem_base_resolver(pack_root),
         )
-        # Phase 1 full validation BEFORE staging (round-15 review fix).
-        # An invalid pack must NOT reach the cluster — fail fast at the
-        # laptop with AIDPF-1036 carrying the per-error report.
+        # Full validation BEFORE staging. An invalid pack must NOT reach the
+        # cluster; fail fast on the laptop with AIDPF-1036 carrying the
+        # per-error report.
         report = validate_pack_full(resolved_pack)
         if not report.ok:
             err = ContentPackValidationFailedError(report=report)
@@ -400,9 +395,8 @@ def _run_via_aidp_dispatch(
             return 2
         profile_yaml = profile_path.read_text(encoding="utf-8")
         pack_files, pack_manifest = stage_pack_files(resolved_pack)
-        # Phase 3d — stage the snapshot if it exists. Pre-3d profiles
-        # ship without one; preflight on the cluster degrades to empty
-        # `datasetDeltas` + WARN, same as the laptop path.
+        # Stage the snapshot if it exists. Profiles without one degrade to
+        # empty `datasetDeltas` + WARN, same as the laptop path.
         snapshot_path = resolve_snapshot_path(
             bundle_path, bundle.content_pack.profile
         )
@@ -412,12 +406,9 @@ def _run_via_aidp_dispatch(
     try:
         config = load_aidp_config(config_path)
         env = env_or_error(config, env_name)
-        # Phase 9 — explicit backend selection from the bundle: if a
-        # contentPack block is present we staged the pack files above
-        # and want the cluster-side notebook to invoke the content-pack
-        # runner. Pre-Phase-9 default of "legacy-python" silently routed
-        # content-pack bundles through the deleted v1 dispatcher and
-        # raised OrchestratorConfigError on the cluster.
+        # Explicit backend selection from the bundle: if a contentPack block
+        # is present we staged the pack files above and want the cluster-side
+        # notebook to invoke the content-pack runner.
         dispatch_execution_backend = (
             "content-pack" if _has_content_pack else "legacy-python"
         )
@@ -440,21 +431,17 @@ def _run_via_aidp_dispatch(
             force_fingerprint_skip=force_fingerprint_skip,
             repin_plan_hash=repin_plan_hash,
             schema_snapshot_yaml=schema_snapshot_yaml,
-            # Phase 9 — pack threaded through so dispatch's dry-run path
-            # can call schema.plan_resolver without crossing §4.3.
+            # Pack threaded through so dispatch's dry-run path can call the
+            # schema plan resolver without importing orchestrator modules.
             resolved_pack=resolved_pack,
-            # Phase 9 — --strict-scope must reach the cluster-side
-            # orchestrator.run() AND the dispatch dry-run resolver
-            # (otherwise the default REST path silently ignores it and
-            # D-1 auto-includes the deps the operator opted out of).
+            # --strict-scope must reach the cluster-side orchestrator.run()
+            # AND the dispatch dry-run resolver.
             strict_scope=strict_scope,
         )
     except SchemaDriftDetectedError as exc:
-        # Phase 3c — drift surfaces from REST-dispatch via the marker
-        # translation in `dispatch_via_rest` (the cluster-side run cell
-        # caught + re-raised; dispatcher reconstructed the artifact
-        # locally). Same exit-14 contract as the inline path; hand-off
-        # message lands on stderr so stdout stays clean for piping.
+        # Drift surfaces from REST-dispatch via marker translation in
+        # `dispatch_via_rest`. Same exit-14 contract as the inline path;
+        # hand-off message lands on stderr so stdout stays clean for piping.
         error_console.print(f"[red]{exc.summary}[/red]")
         return EXIT_CODE_SCHEMA_DRIFT
     except (DispatchError, OrchestratorConfigError) as exc:
@@ -534,8 +521,8 @@ def _render_summary(console: Console, summary) -> None:
         )
     console.print(table)
 
-    # Phase 5 — synthetic gate-failure RunSteps (dataset_id starts +
-    # ends with double-underscore) carry a multi-line error_message
+    # Synthetic gate-failure RunSteps (dataset_id starts + ends with
+    # double-underscore) carry a multi-line error_message
     # with the AIDPF code + remediation runbook. The table cell would
     # truncate the message; render the full text below the table so
     # operators see the actionable guidance.
@@ -568,10 +555,10 @@ def _render_summary(console: Console, summary) -> None:
         + f" · total {summary.total_duration_seconds:.2f}s"
     )
 
-    # P1.5α-fix19: recommendations footer — auto-correction by preflight
-    # emits one entry per PVO whose schema diverged from the catalog.
-    # Operator should add these to bundle.fusion.schemaOverrides to skip
-    # the discovery probe + WARN on subsequent runs.
+    # Recommendations footer: auto-correction by preflight emits one entry per
+    # PVO whose schema diverged from the catalog. Operator should add these to
+    # bundle.fusion.schemaOverrides to skip the discovery probe + WARN on
+    # subsequent runs.
     if summary.recommendations:
         console.print(
             f"\n[bold yellow]Recommendations[/bold yellow] "

@@ -1,9 +1,9 @@
-"""Dispatch package — laptop-CLI → AIDP REST round-trip (P1.5ε).
+"""Dispatch package for the laptop-CLI to AIDP REST round-trip.
 
-Promotes the empirically-validated dispatcher from
-``.claude/skills/fusion-tc26-run/dispatch.py`` into the plugin source so
-``aidp-fusion-bundle run --mode seed`` (no ``--inline``) actually works
-from a bare laptop terminal instead of printing a stub.
+Owns the REST path used by ``aidp-fusion-bundle run`` when the command is not
+executing inline inside an AIDP notebook. It validates local configuration,
+builds the wheel, generates the cluster notebook, submits it through AIDP REST,
+polls the run, and parses the notebook marker back into a ``RunSummary``.
 
 The package is a strict client of the ``schema/`` layer
 (:mod:`oracle_ai_data_platform_fusion_bundle.schema.bundle`,
@@ -12,7 +12,7 @@ The package is a strict client of the ``schema/`` layer
 NOT import from :mod:`oracle_ai_data_platform_fusion_bundle.orchestrator`
 or any submodule under ``orchestrator/`` — that pulls extractors,
 dimensions, transforms, and the registry into ``sys.modules`` and breaks
-the §4.3 separation. The boundary is locked by
+the schema/dispatch/orchestrator separation. The boundary is locked by
 ``tests/unit/dispatch/test_imports.py``.
 """
 
@@ -27,13 +27,13 @@ from typing import Any, Literal
 
 import oci
 
-# P1.5ε-fix8 — diagnose-on-timeout enrichment budget. Total wall time the
-# dispatcher spends fetching the partial executed-notebook + walking cell
-# outputs before re-raising DispatchPollTimeoutError. The operator already
-# waited --poll-timeout seconds; another 10s for diagnostic enrichment is
-# fine. Each diagnostic HTTP call passes ``timeout=_remaining()`` so
-# requests itself bounds the per-call latency — `time.monotonic()` alone
-# can't cancel a blocking HTTP call (reviewer-caught invariant).
+# Diagnose-on-timeout enrichment budget. Total wall time the dispatcher spends
+# fetching the partial executed notebook and walking cell outputs before
+# re-raising DispatchPollTimeoutError. The operator already waited
+# --poll-timeout seconds; another 10s for diagnostic enrichment is acceptable.
+# Each diagnostic HTTP call passes ``timeout=_remaining()`` so requests bounds
+# the per-call latency; ``time.monotonic()`` alone cannot cancel a blocking
+# HTTP call.
 _DIAG_BUDGET_S = 10
 
 from ..schema.bundle import AidpConfig, EnvSpec
@@ -99,51 +99,46 @@ def dispatch_via_rest(
     auto_start_cluster: bool = True,
     poll_timeout_s: int = 3600,
     log: Callable[[str], None] = lambda msg: None,
-    # Phase 2 additions — primitives only (no orchestrator imports here).
+    # Content-pack primitives only; dispatch never imports orchestrator code.
     execution_backend: str = "legacy-python",
     profile_yaml: str | None = None,
     pack_files: "Mapping[str, str] | None" = None,
     pack_manifest: "dict[str, Any] | None" = None,
-    # Phase 3c — passthrough only; dispatch never inspects it. Threaded
-    # into the generated notebook's orchestrator.run(...) call so the
-    # cluster-side gate honours the operator's break-glass intent.
+    # Passthrough only; dispatch never inspects it. Threaded into the generated
+    # notebook's orchestrator.run(...) call so the cluster-side gate honours the
+    # operator's break-glass intent.
     force_fingerprint_skip: bool = False,
-    # P-incr-L1 — passthrough only; dispatch never inspects it. Threaded
-    # into the generated notebook's orchestrator.run(...) call so the
-    # cluster-side AIDPF-4040 gate honours --repin-plan-hash.
+    # Passthrough only; dispatch never inspects it. Threaded into the generated
+    # notebook's orchestrator.run(...) call so the cluster-side AIDPF-4040 gate
+    # honours --repin-plan-hash.
     repin_plan_hash: bool = False,
-    # Phase 3d — passthrough only. When provided, the cluster-side
-    # bootstrap cell materialises the snapshot to the resolved
-    # profiles/<tenant>.schema-snapshot.yaml path so preflight can
-    # populate `datasetDeltas` on drift. ``None`` preserves pre-3d
-    # behaviour (preflight degrades to empty `datasetDeltas` + WARN).
+    # Passthrough only. When provided, the cluster-side bootstrap cell
+    # materializes the snapshot to the resolved
+    # profiles/<tenant>.schema-snapshot.yaml path so preflight can populate
+    # `datasetDeltas` on drift.
     schema_snapshot_yaml: str | None = None,
-    # Phase 5 P1.5ε-fix5 — REST-dispatch resume. When provided, the
-    # generated notebook cell passes ``resume_run_id=<id>`` to the
-    # cluster-side ``orchestrator.run(...)`` call so the resumed run
-    # adopts the supplied id and joins state rows with the prior
-    # failed run. ``None`` preserves the original "fresh run only"
-    # behaviour.
+    # REST-dispatch resume. When provided, the generated notebook cell passes
+    # ``resume_run_id=<id>`` to the cluster-side ``orchestrator.run(...)`` call
+    # so the resumed run adopts the supplied id and joins state rows with the
+    # prior failed run.
     resume_run_id: str | None = None,
-    # Phase 9 — caller-loads-and-passes the resolved pack for the
-    # dispatch dry-run path so schema.plan_resolver can walk it
-    # without crossing the §4.3 import boundary into orchestrator/*.
-    # Required when ``dry_run=True``; ignored otherwise.
+    # Caller loads and passes the resolved pack for dispatch dry-run so
+    # schema.plan_resolver can walk it without crossing the dispatch import
+    # boundary into orchestrator/*. Required when ``dry_run=True``; ignored
+    # otherwise.
     resolved_pack: "Any | None" = None,
-    # Phase 9 — ``--strict-scope`` opt-out of D-1 implicit-transitive-
-    # include. Threaded into both the dispatch dry-run resolver (via
-    # ``resolve_dry_run_plan``) and the cluster-side orchestrator.run
-    # call (via the generated run cell). Default False matches the
-    # CLI default.
+    # ``--strict-scope`` opt-out of implicit transitive include. Threaded into
+    # both the dispatch dry-run resolver and the cluster-side orchestrator.run
+    # call. Default False matches the CLI default.
     strict_scope: bool = False,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 
     Composes the dispatch package's primitives:
 
-    1. Phase A preflight (bundle.yaml, dispatch coords, OCI profile + session).
-    2. Build the :class:`AidpRestClient` once Phase A is all-PASS.
-    3. Phase B preflight (control plane reachable, cluster state + auto-start).
+    1. Local preflight (bundle.yaml, dispatch coords, OCI profile + session).
+    2. Build the :class:`AidpRestClient` once local preflight is all-PASS.
+    3. Remote preflight (control plane, credential store, cluster state).
     4. **If** ``dry_run`` — return :meth:`RunSummary.empty` and stop.
     5. Build the wheel (content-hash cached).
     6. Generate the 4-cell notebook in-memory.
@@ -162,25 +157,23 @@ def dispatch_via_rest(
         :class:`DispatchRunFailedError`: terminal status FAILED/CANCELED/TIMED_OUT.
         :class:`DispatchFetchOutputError`: ``fetchOutput`` non-200.
         :class:`DispatchMarkerMissingError`: SUCCESS but no marker.
-        :class:`SchemaDriftDetectedError`: Phase 3c — the cluster-side
-            run cell caught a drift, emitted a discriminated marker
+        :class:`SchemaDriftDetectedError`: the cluster-side run cell caught a
+            drift, emitted a discriminated marker
             (``_kind == "schema_drift"``), and re-raised; this function
             translates the marker back into a SchemaDriftDetectedError
             after writing the artifact locally so the CLI can return
             exit 14 (NOT exit 2 via DispatchRunFailedError).
         :class:`DispatchMarkerDegradedError`: marker delimiters found
             but body unparseable; run_id recovered via regex fallback
-            (P1.5ε-fix5, TC27 trap).
+            so the operator can resume.
 
-    Phase 5 P1.5ε-fix5: ``resume_run_id`` is supported on the REST
-    dispatch path. The notebook cell threads it into
-    ``orchestrator.run(..., resume_run_id=<id>)`` so the cluster-side
-    run adopts the supplied id and writes state rows under the same
-    identifier as the prior failed run. Bad run_ids surface as cell-3
-    errors enriched into ``DispatchRunFailedError``'s message (see also
-    ``AidpRestClient.extract_cell_errors``).
+    ``resume_run_id`` is supported on the REST dispatch path. The notebook
+    cell threads it into ``orchestrator.run(..., resume_run_id=<id>)`` so the
+    cluster-side run adopts the supplied id and writes state rows under the
+    same identifier as the prior failed run. Bad run_ids surface as cell-3
+    errors enriched into ``DispatchRunFailedError``'s message.
     """
-    # ---- Phase A — local preflight ---------------------------------------
+    # ---- Local preflight --------------------------------------------------
     local_results = run_local_preflight(
         bundle_path=bundle_path,
         config=config,
@@ -192,7 +185,7 @@ def dispatch_via_rest(
         raise DispatchPreflightError(_format_preflight_failure(local_results))
 
     # ---- Construct the REST client (cannot fail "out of band" of preflight
-    # because Phase A validated the OCI profile already; defense in depth
+    # because local preflight validated the OCI profile already; defense in depth
     # catches malformed key files that slipped past from_file()).
     try:
         client = AidpRestClient(
@@ -216,7 +209,7 @@ def dispatch_via_rest(
         # remediation hint.
         raise DispatchAuthError(str(exc)) from exc
 
-    # ---- Phase B — remote preflight --------------------------------------
+    # ---- Remote preflight -------------------------------------------------
     remote_results = run_remote_preflight(
         client=client,
         env=env,
@@ -228,12 +221,10 @@ def dispatch_via_rest(
         raise DispatchPreflightError(_format_preflight_failure(remote_results))
 
     # ---- Dry-run short-circuit -------------------------------------------
-    # P1.5ε-fix9 — resolve the plan laptop-side from neutral schema
-    # metadata so the renderer can show "Would dispatch" + "Extra-plan
-    # prerequisites" Rich tables (same shape the --inline --dry-run path
-    # produces today). The bundle YAML was already validated by Phase A
-    # check 1; load_bundle here is a sub-millisecond re-parse with no
-    # Spark involvement.
+    # Resolve the plan laptop-side from neutral schema metadata so the renderer
+    # can show "Would dispatch" + "Extra-plan prerequisites" Rich tables. The
+    # bundle YAML was already validated by local preflight; load_bundle here is
+    # a sub-millisecond re-parse with no Spark involvement.
     if dry_run:
         from ..schema.bundle import load_bundle
         from ..schema.plan_resolver import resolve_dry_run_plan
@@ -243,7 +234,7 @@ def dispatch_via_rest(
                 "dispatch_via_rest(dry_run=True) requires resolved_pack; "
                 "the caller (commands/run.py) must load the pack via "
                 "load_full_chain(...) and pass it in. This preserves "
-                "the §4.3 dispatch import boundary."
+                "the dispatch import boundary."
             )
         bundle, paths = load_bundle(bundle_path)
         plan_nodes, prereq_nodes = resolve_dry_run_plan(
@@ -272,7 +263,7 @@ def dispatch_via_rest(
         resume_run_id=resume_run_id,
         bicc_secret_name=env.bicc_secret_name,
         bicc_secret_key=env.bicc_secret_key,
-        # Phase 2 primitives — passthrough only; dispatch never inspects them.
+        # Content-pack primitives; passthrough only, dispatch never inspects them.
         execution_backend=execution_backend,
         profile_yaml=profile_yaml,
         pack_files=pack_files,
@@ -280,9 +271,9 @@ def dispatch_via_rest(
         force_fingerprint_skip=force_fingerprint_skip,
         repin_plan_hash=repin_plan_hash,
         schema_snapshot_yaml=schema_snapshot_yaml,
-        # Phase 9 — emit ``strict_scope=...`` in the generated
-        # orchestrator.run() call so the cluster honors the operator's
-        # opt-out of D-1 implicit-transitive-include.
+        # Emit ``strict_scope=...`` in the generated orchestrator.run() call so
+        # the cluster honors the operator's opt-out of implicit transitive
+        # include.
         strict_scope=strict_scope,
     )
 
@@ -331,9 +322,9 @@ def dispatch_via_rest(
     except AidpRestError as exc:
         msg = str(exc)
         if "deadline exceeded" in msg:
-            # P1.5ε-fix8 — opportunistically enrich the timeout with the
-            # cluster-side partial-progress snapshot so operators don't have
-            # to drop into `oci raw-request` to see where the job is stuck.
+            # Opportunistically enrich the timeout with the cluster-side
+            # partial-progress snapshot so operators don't have to drop into
+            # `oci raw-request` to see where the job is stuck.
             enriched = _diagnose_partial_progress(
                 client, job_run_key, task_key, log
             )
@@ -377,9 +368,9 @@ def dispatch_via_rest(
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
 
-    # Phase 3c — parse marker FIRST so a drift marker (emitted by the
-    # run cell before re-raising SchemaDriftDetectedError) takes
-    # precedence over DispatchRunFailedError. Status check moves below.
+    # Parse marker FIRST so a drift marker emitted by the run cell before
+    # re-raising SchemaDriftDetectedError takes precedence over
+    # DispatchRunFailedError. Status check moves below.
     try:
         marker = AidpRestClient.parse_marker(
             executed_notebook, begin=MARKER_BEGIN, end=MARKER_END,
@@ -396,13 +387,12 @@ def dispatch_via_rest(
             f"{type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
 
-    # Phase 3c — drift marker takes precedence over status. The notebook
-    # caught SchemaDriftDetectedError, emitted this marker carrying the
-    # artifact JSON, then re-raised — so the cluster-side cell errored
-    # and result.status is FAILED. We translate the marker back into a
-    # SchemaDriftDetectedError on the laptop, reconstructing the
-    # diagnostic file locally so the operator can run `bootstrap
-    # --refresh` against it.
+    # Drift marker takes precedence over status. The notebook caught
+    # SchemaDriftDetectedError, emitted this marker carrying the artifact JSON,
+    # then re-raised, so the cluster-side cell errored and result.status is
+    # FAILED. We translate the marker back into a SchemaDriftDetectedError on
+    # the laptop, reconstructing the diagnostic file locally so the operator can
+    # run `bootstrap --refresh` against it.
     #
     # Validate the marker before honouring it: a truncated / malformed
     # drift marker (missing run_id, summary, fingerprints, or
@@ -510,9 +500,9 @@ def dispatch_via_rest(
         )
 
     if result.status != "SUCCESS":
-        # P1.5ε-fix5: best-effort cell-error enrichment. The generated
-        # run cell does not wrap orchestrator.run(...) in try/except, so
-        # a bad --resume <id> (ResumeRunNotFoundError /
+        # Best-effort cell-error enrichment. The generated run cell does not
+        # wrap orchestrator.run(...) in try/except, so a bad --resume <id>
+        # (ResumeRunNotFoundError /
         # ResumeRunNotResumableError / ResumeBundleMismatchError) fails
         # cell 3 before marker emit. Walk the executed notebook for
         # cell-3 errors and append the typed ename/evalue so the operator
@@ -547,12 +537,10 @@ def dispatch_via_rest(
             f"(jobRunKey={job_run_key}); evidence-capture failure"
         )
 
-    # P1.5ε-fix5: parse_marker's regex fallback fired — JSON body was
-    # unparseable (typically AIDP's display_data escape-stripping
-    # against failed-step repr(exc), the TC27 trap) but a run_id was
-    # recovered. Surface as a typed exception carrying the resume
-    # handle in the message so the operator can pass --resume <id>
-    # back to the same CLI without grepping the executed notebook.
+    # parse_marker's regex fallback fired: JSON body was unparseable but a
+    # run_id was recovered. Surface as a typed exception carrying the resume
+    # handle in the message so the operator can pass --resume <id> back to the
+    # same CLI without grepping the executed notebook.
     if marker.get("_marker_parse_failed"):
         recovered_run_id = marker["run_id"]
         raise DispatchMarkerDegradedError(
@@ -613,8 +601,9 @@ def _diagnose_partial_progress(
     task_key: str,
     log: Callable[[str], None],
 ) -> str:
-    """P1.5ε-fix8 — fetch the partial executed notebook + return a
-    per-cell progress summary, bounded by ``_DIAG_BUDGET_S`` total wall.
+    """Fetch the partial executed notebook and return per-cell progress.
+
+    Bounded by ``_DIAG_BUDGET_S`` total wall time.
 
     Best-effort: any exception in the diagnostic path is swallowed and
     we return ``""`` so the caller emits the original

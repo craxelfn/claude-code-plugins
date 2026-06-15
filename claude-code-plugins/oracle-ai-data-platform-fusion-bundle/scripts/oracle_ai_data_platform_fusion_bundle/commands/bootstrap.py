@@ -276,7 +276,7 @@ def bootstrap(
     if phase1_failed:
         return 1
 
-    # ---- Phase 4.1 / D3 — AIDPF-2047 (aidp_rest_probe_failed) gate ----
+    # ---- AIDPF-2047 (aidp_rest_probe_failed) gate ----
     # In cluster mode the aidp-rest probe MUST pass — a SKIP (oci SDK
     # missing) is just as fatal as a FAIL because cluster dispatch
     # needs the OCI signer. Locally we just printed PASS/FAIL/SKIP;
@@ -295,7 +295,7 @@ def bootstrap(
             )
             return 1
 
-    # ----- Phase 2: variation resolution -----
+    # ----- Variation resolution -----
     if bundle is None or bundle.content_pack is None:
         # v1 bundle — phase 1 result is the only signal.
         return 0
@@ -435,9 +435,8 @@ def _probe_bicc(bundle: Bundle, results: list[_ProbeResult]) -> None:
 
 
 def _probe_aidp(env, results: list[_ProbeResult]) -> None:
-    # Reuse AidpRestClient — single source of truth for the AIDP REST host
-    # + path construction (PLAN-aligned; see docs/v2-phase-4-live-defects.md
-    # §D4 for the historical pattern this replaced).
+    # Reuse AidpRestClient as the single source of truth for the AIDP REST
+    # host and path construction.
     try:
         from ..dispatch.rest_client import AidpRestClient, AidpRestError
     except ImportError as exc:

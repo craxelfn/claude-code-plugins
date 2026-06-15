@@ -1,14 +1,13 @@
-"""Evidence snapshot schema (PLAN §9.5.7 + §9.5.9).
+"""Evidence snapshot schema.
 
 Every successful bootstrap run writes one snapshot file at
 ``<workdir>/evidence/<tenant>/<ISO-ts>.yaml`` recording exactly which
 variation-point candidates matched, which one won, and the audit
 metadata around the approval. The directory accumulates per the
-§9.5.7 #2 rule — old snapshots are NEVER deleted on a ``--refresh``;
-the history grows monotonically and provides the SOX-floor audit
-trail.
+audit rule: old snapshots are NEVER deleted on a ``--refresh``; the history
+grows monotonically and provides the SOX-floor audit trail.
 
-Schema follows the canonical PLAN §9.5.7 / §9.5.9 nested shape:
+Schema shape:
 
 ```
 schemaVersion: 1
@@ -42,11 +41,9 @@ run. The list-of-entries shape (rather than a single entry) lets
 feature #3's skill batch-append multiple snapshots when committing
 overlays in a single profile-update transaction.
 
-The ``mechanism: auto_resolve`` value extends the §9.5.9 mechanism
-enum (originally ``terminal_prompt`` / ``non_interactive`` /
-``cli_flag`` / ``skill_proposed``) for the single-candidate case where
-no prompt fired. Forward-compatible per §9.5.9: readers treat unknown
-mechanism values as opaque audit metadata.
+The ``mechanism: auto_resolve`` value covers the single-candidate case where
+no prompt fired. Readers treat unknown mechanism values as opaque audit
+metadata for forward compatibility.
 """
 
 from __future__ import annotations
@@ -77,11 +74,11 @@ ApprovalMechanism = Literal[
     "skill_proposed",
 ]
 """Recorded under ``provenance.approvedBy.mechanism``. The ``auto_resolve``
-value extends the §9.5.9 enum for the no-prompt single-candidate path."""
+value covers the no-prompt single-candidate path."""
 
 
 class ApprovedBy(BaseModel):
-    """Operator-identity + approval-mechanism record (PLAN §9.5.9)."""
+    """Operator-identity + approval-mechanism record."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -116,8 +113,8 @@ class ResolvedVariationPoint(BaseModel):
     incremental_impact: IncrementalImpact | None = Field(
         default=None, alias="incrementalImpact"
     )
-    """Phase 3b extension — populated by bootstrap when the resolution
-    came via a skill-authored overlay carrying ``provenance.incrementalImpact``.
+    """Populated when the resolution came via a skill-authored overlay
+    carrying ``provenance.incrementalImpact``.
     ``None`` for non-skill paths (preserves backwards-compat with
     pre-Phase-3b evidence files). See
     :class:`schema.incremental_impact.IncrementalImpact`."""

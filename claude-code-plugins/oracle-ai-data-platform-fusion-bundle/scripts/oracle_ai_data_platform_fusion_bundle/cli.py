@@ -607,7 +607,7 @@ def dashboard_install(
 ) -> None:
     """Register AIDP JDBC connection in OAC + restore the workbook snapshot via REST.
 
-    Architecture (TC10h-2 refactor, 2026-05-01) — Oracle-documented endpoints only:
+    Architecture — Oracle-documented endpoints only:
       1. POST /catalog/connections                       (creates AIDP connection)
       2. POST /snapshots                                 (registers customer-uploaded .bar)
       3. POST /system/actions/restoreSnapshot            (async restore)
@@ -838,9 +838,8 @@ def dashboard_mcp_token(
     """Produce a token file the OAC MCP connector can use non-interactively, and wire .mcp.json.
 
     The connector falls back to interactive browser auth otherwise, which cannot
-    complete inside the Claude Code MCP client (elicitation unsupported) — see
-    tests/live/TC32. This command seeds a Bearer token so tool calls authenticate
-    silently.
+    complete inside the Claude Code MCP client (elicitation unsupported). This
+    command seeds a Bearer token so tool calls authenticate silently.
 
     Two modes:
       * --import-from <tokens.json>: reuse an OAC Profile -> Access Tokens download

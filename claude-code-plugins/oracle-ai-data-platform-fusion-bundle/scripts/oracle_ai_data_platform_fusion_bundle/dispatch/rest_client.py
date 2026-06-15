@@ -1,12 +1,8 @@
 """AidpRestClient — typed primitives for the AIDP control-plane REST surface.
 
-P1.5ε §Step 2 — canonical location. Reusable across plugin and skills.
-``skills/aidp-rest/client.py`` is a path-resolving re-export shim
-that imports from here.
-
-Empirically-confirmed REST shapes baked in. See
-``skills/aidp-rest/SKILL.md`` for the receipts and
-``dev/RESEARCH_aidp_rest_api_probe_results.md`` for the full probe log.
+Canonical implementation used by the plugin and the ``aidp-rest`` skill.
+``skills/aidp-rest/client.py`` is a path-resolving re-export shim that imports
+from here.
 """
 from __future__ import annotations
 
@@ -60,7 +56,7 @@ class AidpRestError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Signer factory (P1.5ε §Step 2 — supports both API-key and session-token profiles)
+# Signer factory
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +218,7 @@ class AidpRestClient:
                 )
         raise AidpRestError(f"no workspace with displayName={display_name!r}")
 
-    # ---- Credential store (P1.5ε-fix1 — Phase B preflight check 6) -------
+    # ---- Credential store -----------------------------------------------
 
     def check_credential_exists(
         self,
@@ -233,10 +229,8 @@ class AidpRestClient:
         """Return True iff a credential with the given ``display_name``
         exists in the AIDP credential store for the current data-lake.
 
-        **Per-AIDP scope, NOT per-workspace** (empirically confirmed
-        2026-06-03 — see ``dev/RESEARCH_aidp_rest_api_probe_results.md``
-        §11). All workspaces under the same ``aiDataPlatformId`` share
-        one credential store.
+        **Per-AIDP scope, NOT per-workspace**. All workspaces under the
+        same ``aiDataPlatformId`` share one credential store.
 
         Implementation note: the per-resource ``GET /credentials/<key>``
         endpoint expects a UUID, not a display name (it 400s with
@@ -426,12 +420,12 @@ class AidpRestClient:
     def get_run(
         self, run_key: str, *, timeout: int | None = None
     ) -> dict[str, Any]:
-        """``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
-        timeout override; default ``None`` falls back to
-        ``self.request_timeout_s`` (today's behavior). Used by
-        ``dispatch_via_rest``'s post-timeout enrichment to bound the
-        diagnostic round-trip; existing call sites pass nothing → no
-        behavior change."""
+        """Return a job-run payload.
+
+        ``timeout`` is a per-call HTTP timeout override; default ``None``
+        falls back to ``self.request_timeout_s``. ``dispatch_via_rest`` uses
+        it for bounded post-timeout diagnostics.
+        """
         r = self._request(
             "GET", f"{self.base}/jobRuns/{run_key}", timeout=timeout
         )
@@ -505,11 +499,9 @@ class AidpRestClient:
         ``"main"`` returns a misleading 404. The notebook JSON lands at
         ``data[0].value`` (NOT ``data[0].content``).
 
-        ``timeout`` (P1.5ε-fix8 — diagnose-on-timeout): per-call HTTP
-        timeout override; default ``None`` falls back to
-        ``self.request_timeout_s`` (today's behavior). Used by
-        ``dispatch_via_rest``'s post-timeout enrichment to bound the
-        diagnostic round-trip.
+        ``timeout`` is a per-call HTTP timeout override; default ``None``
+        falls back to ``self.request_timeout_s``. ``dispatch_via_rest`` uses
+        it for bounded post-timeout diagnostics.
         """
         r = self._request(
             "POST",
@@ -541,30 +533,20 @@ class AidpRestClient:
         """Walk ``cells[*].outputs[*]`` of an executed notebook for a stdout
         marker block. Returns the parsed JSON or None if absent.
 
-        ``decode_base64=True`` (Phase 4.1 / D3): the payload between
-        ``begin`` and ``end`` is base64-encoded JSON — decode it before
-        ``json.loads``. Required for the bootstrap cluster cell because
+        ``decode_base64=True`` means the payload between ``begin`` and ``end``
+        is base64-encoded JSON; decode it before ``json.loads``. Required for
+        cluster-side markers because
         AIDP's Jupyter wraps stdout as ``display_data text/plain`` and
         strips JSON-escape backslashes, corrupting embedded quotes
-        (D5-class issue documented in
-        ``docs/v2-phase-4-live-defects.md`` appendix bug 6). The run
-        dispatcher continues to use the plain default — its markers
-        ship through a different code path that doesn't hit the
-        corruption.
+        inside failed-step messages.
 
-        P1.5ε-fix5 hardening: on ``json.JSONDecodeError`` against the
-        ``BEGIN..END`` body (the plain-decode run-dispatch path), attempt
-        a regex extraction of ``run_id`` and return a sentinel payload
+        Hardening: on ``json.JSONDecodeError`` against the ``BEGIN..END``
+        body, attempt a regex extraction of ``run_id`` and return a sentinel
+        payload
         ``{"run_id": "<id>", "_marker_parse_failed": True, "_raw_marker": ...}``
-        so the dispatcher can surface a typed
-        ``DispatchMarkerDegradedError`` carrying the resume handle.
-        Triggered by AIDP's ``display_data text/plain`` capture
-        stripping JSON escapes from failed-step ``repr(exc)`` (TC27).
-        Regex matches against the already-sliced ``BEGIN..END`` body
-        only — no false-positive surface beyond the marker block.
-        If the regex also can't find a ``run_id``, the original
-        ``json.JSONDecodeError`` propagates unchanged (caller still
-        raises ``DispatchMarkerMissingError``).
+        so the dispatcher can surface a typed ``DispatchMarkerDegradedError``
+        carrying the resume handle. If the regex also can't find a
+        ``run_id``, the original ``json.JSONDecodeError`` propagates.
         """
         import base64
 
@@ -601,11 +583,10 @@ class AidpRestClient:
                         try:
                             return json.loads(payload)
                         except json.JSONDecodeError:
-                            # P1.5ε-fix5 — TC27 trap: plain-decode run-
-                            # dispatch markers can arrive with JSON escapes
-                            # stripped. Recover the run_id via regex so the
-                            # operator gets a resume handle; if even that
-                            # fails, re-raise the original decode error.
+                            # Plain-decode markers can arrive with JSON
+                            # escapes stripped. Recover the run_id via regex
+                            # so the operator gets a resume handle; if even
+                            # that fails, re-raise the original decode error.
                             m = re.search(
                                 r'"run_id"\s*:\s*"([^"]+)"', payload,
                             )
@@ -619,16 +600,14 @@ class AidpRestClient:
         return None
 
     # Pattern for "ExceptionClass: message" lines in a Python traceback
-    # emitted by AIDP's notebook runtime as an stderr stream (TC29b live
-    # finding: AIDP does NOT use output_type=error for cell exceptions
-    # — it emits the full traceback into output_type=stream,
-    # name=stderr instead). Single-line ($ end-of-line, no dotall) so
-    # chained exceptions ("During handling of the above exception…")
-    # produce separate matches; the LAST match is the outermost
-    # exception that propagated. Anchored on the start of a
-    # non-indented line so we don't false-match "Exception:" inside a
-    # stack frame body. Ename must be a Python identifier (dots
-    # allowed for module-path enames like aidputils.errors.X).
+    # emitted by AIDP's notebook runtime as an stderr stream. Some AIDP
+    # outputs do not use output_type=error for cell exceptions; they emit the
+    # full traceback into output_type=stream, name=stderr instead.
+    # Single-line ($ end-of-line, no dotall) so chained exceptions produce
+    # separate matches; the LAST match is the outermost exception that
+    # propagated. Anchored on the start of a non-indented line so we don't
+    # false-match "Exception:" inside a stack frame body. Ename must be a
+    # Python identifier; dots are allowed for module-path enames.
     _STDERR_TRACEBACK_PATTERN = re.compile(
         r"(?m)^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
         r"(?:Error|Exception|Warning|Interrupt|Exit|Timeout|Failure)):"
@@ -647,14 +626,14 @@ class AidpRestClient:
            the documented shape for cells that raised. Produced by
            ``nbconvert`` and most kernels.
 
-        2. **AIDP stderr-stream tracebacks** (TC29b live finding) — AIDP's
-           notebook runtime captures cell exceptions as
+        2. **AIDP stderr-stream tracebacks** — some AIDP notebook runtime
+           outputs capture cell exceptions as
            ``output_type="stream", name="stderr"`` with the Python
            traceback in ``text``. The final ``ExceptionClass: message``
            line is regex-matched and surfaced as
            ``{"ename": ..., "evalue": ...}``. This is what makes
            dispatch_via_rest's cell-error enrichment fire on real cluster
-           output (P1.5ε-fix5).
+           output.
         """
         errors: list[dict[str, Any]] = []
         for i, cell in enumerate(executed_notebook.get("cells", [])):

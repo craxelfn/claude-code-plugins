@@ -1,18 +1,15 @@
-"""Live Fusion PVO schema drift gate (Phase 5 Step 2d).
+"""Live Fusion PVO schema drift gate.
 
-Phase 5 Step 2c (``bronze_readiness.py``) catches gaps AFTER bronze
-extraction lands. Step 2d closes the gap upstream — BEFORE bronze
-extraction starts, probe the live Fusion PVO schemas via metadata-only
-``extract_pvo(...).schema`` (BICC ``inferSchema`` round-trip; no row
-transfer) and compare against:
+Before bronze extraction starts, probe the live Fusion PVO schemas via
+metadata-only ``extract_pvo(...).schema`` (BICC ``inferSchema`` round-trip;
+no row transfer) and compare against:
 
 * The downstream silver/gold ``requiredColumns`` /
   ``watermark.column`` union — proves the live PVO still surfaces the
   columns the pack expects.
 * The pinned per-dataset snapshot at
-  ``profiles/<tenant>.schema-snapshot.yaml`` (Phase 3d) — catches
-  incompatible **type** narrowing AND surfaces paired
-  missing+extra columns as renames.
+  ``profiles/<tenant>.schema-snapshot.yaml`` — catches incompatible
+  **type** narrowing AND surfaces paired missing+extra columns as renames.
 
 When the snapshot is absent (legacy tenant), the gate degrades to
 missing-column / renamed-column detection only and logs a one-time
@@ -26,14 +23,7 @@ The gate raises :class:`FusionPvoDriftError` (AIDPF-2072) with a
 consolidated, operator-actionable message. The dispatcher catches it
 and translates to a synthetic gate-failure :class:`RunStep`.
 
-References:
-
-* PLAN §15 Phase 5 Step 2d.
-* ``orchestrator/preflight.py::preflight_bronze_schemas`` — the
-  existing metadata-only BICC probe primitive Step 2d threads through.
-* ``schema/bronze_schema_snapshot.py`` — Phase 3d snapshot Pydantic
-  models (``BronzeSchemaSnapshotV1`` / ``SnapshotDataset`` /
-  ``SnapshotColumn``).
+Snapshot models live in ``schema/bronze_schema_snapshot.py``.
 """
 
 from __future__ import annotations
@@ -212,8 +202,8 @@ def assert_fusion_pvo_compatibility(
             bronze ids the caller actually intends to extract. The
             gate only complains about PVOs in this filter (an out-of-
             scope PVO's drift is for a future run to discover).
-        schema_snapshot: Phase 3d pinned snapshot. ``None`` for legacy
-            tenants — gate degrades to required-column-only mode
+        schema_snapshot: pinned snapshot. ``None`` for tenants without a
+            snapshot — gate degrades to required-column-only mode
             (type-change detection requires the snapshot's types).
         run_id: shared run identifier for the diagnostic path.
         diagnostics_root: override for tests; defaults to
@@ -240,8 +230,8 @@ def assert_fusion_pvo_compatibility(
 
     if schema_snapshot is None:
         logger.warning(
-            "Phase 5 fusion PVO drift gate: pinned schema snapshot is "
-            "absent — degrading to missing-column / renamed-column "
+            "Fusion PVO drift gate: pinned schema snapshot is absent; "
+            "degrading to missing-column / renamed-column "
             "detection. Run `aidp-fusion-bundle bootstrap --refresh` "
             "to pin the snapshot and enable type-change detection."
         )

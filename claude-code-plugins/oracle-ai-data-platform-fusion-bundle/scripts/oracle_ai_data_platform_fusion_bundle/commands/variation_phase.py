@@ -188,10 +188,9 @@ class VariationPhaseOutcome:
 
 class RefreshRequiresConfirmation(Exception):
     """Raised in ``--refresh --non-interactive`` mode when re-walk would
-    change a pinned variation-point value. The §9.5.5 rule is that
-    pinned values may not change silently; non-interactive runs must
-    refuse and direct the operator to re-run interactively (or supply
-    ``--resolutions``)."""
+    change a pinned variation-point value. Pinned values may not change
+    silently; non-interactive runs must refuse and direct the operator to
+    re-run interactively (or supply ``--resolutions``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -465,9 +464,8 @@ def run_variation_phase(
         )
         picks[key] = result
 
-    # --- Step 9 (cont.): if --refresh changes a pinned value, prompt confirm ---
-    # Per §9.5.5: no silent change to a previously-pinned value. Three
-    # acceptance paths:
+    # If --refresh changes a pinned value, prompt confirm. No silent change to
+    # a previously-pinned value. Three acceptance paths:
     #   1. ``--resolutions`` (scripted) — operator supplied an entry
     #      that names this VP; the validator above confirmed it matches
     #      either a MultiMatch outcome or an AutoResolved-change
@@ -840,7 +838,7 @@ def _assemble_resolutions(
             )
         )
 
-    # Record the profile-level mechanism per §9.5.9 audit-floor semantics:
+    # Record the profile-level mechanism for audit:
     #   1. ``auto_resolve`` is the baseline — any operator-touched
     #      mechanism takes precedence (an operator-touched profile
     #      should NOT look identical to an all-auto profile in the

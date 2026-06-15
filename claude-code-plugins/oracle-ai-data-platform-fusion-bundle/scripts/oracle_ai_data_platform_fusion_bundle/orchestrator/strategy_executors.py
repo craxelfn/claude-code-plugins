@@ -21,13 +21,8 @@ Both executors:
   scanned / written count + a "merge happened" flag the caller uses for
   watermark advancement.
 
-References
-----------
-* PLAN §10 (refresh strategy taxonomy)
-* PLAN §10.2 (MERGE SQL shape)
-* PLAN §11.7 (empty-delta watermark preservation)
-* PLAN §11.10 (multi-source primary/lookup)
-* LIMITS.md P1.17-L8 (NULL-safe joins)
+The MERGE path must preserve NULL-safe joins and empty-delta watermark
+semantics.
 """
 
 from __future__ import annotations
@@ -169,7 +164,7 @@ def execute_replace(
 
     Used for:
 
-    * Seed-mode runs of every node (PLAN §10).
+    * Seed-mode runs of every node.
     * Incremental-mode runs of nodes whose grain forbids row-level
       MERGE (``supplier_spend``, ``ap_aging``, ``dim_calendar``).
 
@@ -234,12 +229,12 @@ def execute_merge(
     1. Validate ``target`` identifier.
     2. Resolve the natural key from
        ``node.refresh.incremental.natural_key``. Empty → ValueError
-       (caller's responsibility to pre-validate; PLAN §11.3 R1).
+       (caller's responsibility to pre-validate).
     3. **Empty-delta probe**: run the rendered source SELECT through
        Spark with ``args=rendered.params`` and probe the row count via
        ``LIMIT 1``. If 0 rows, skip the MERGE entirely, return
        ``merge_skipped_empty_delta=True`` so the caller preserves the
-       prior ``output_watermark`` (PLAN §11.7).
+       prior ``output_watermark``.
     4. **Schema reconciliation**: call
        :func:`merge_helpers.ensure_target_schema_for_merge` so any new
        nullable columns in the rendered source are added to the target.
@@ -278,13 +273,13 @@ def execute_merge(
     if inc is None or not inc.natural_key:
         raise ValueError(
             f"execute_merge: node {node.id!r} has no "
-            f"refresh.incremental.natural_key. PLAN §11.3 R1 / AIDPF-2020 "
+            f"refresh.incremental.natural_key. AIDPF-2020 "
             f"should have rejected this at validation."
         )
     natural_key = list(inc.natural_key)
 
     # Empty-delta probe — same params as the actual MERGE source. The
-    # probe MUST use args=rendered.params for consistency (PLAN §11.7).
+    # probe MUST use args=rendered.params for consistency with the MERGE.
     probe_stmt = f"SELECT 1 FROM ({rendered.sql}) AS _probe LIMIT 1"
     probe_df = _spark_sql_with_params(spark, probe_stmt, dict(rendered.params))
     probe_rows = probe_df.collect() if probe_df is not None else []
@@ -311,10 +306,9 @@ def execute_merge(
             spark=spark, target_table=target, source_df=source_df
         )
 
-        # No payload-diff predicate at the silver/gold layer:
-        # silver/gold deltas are small enough that unconditional UPDATE
-        # is fine; the optimisation lives in bronze MERGE per
-        # LIMITS.md §P1.17-L7.
+        # No payload-diff predicate at the silver/gold layer: silver/gold
+        # deltas are small enough that unconditional UPDATE is fine; the
+        # optimisation lives in bronze MERGE.
         merge_stmt = merge_helpers.compose_merge_sql(
             target=target,
             source_sql=f"SELECT * FROM {temp_view}",
@@ -413,5 +407,5 @@ def execute_strategy(
         f"{AIDPF_4030_UNSUPPORTED_STRATEGY}: strategy {strategy!r} not "
         f"supported. The content-pack runner supports only 'replace' and 'merge'. "
         f"Deferred: append, replace_partition, aggregate_merge, snapshot, "
-        f"scd2, custom (see PLAN §10)."
+        f"scd2, custom."
     )

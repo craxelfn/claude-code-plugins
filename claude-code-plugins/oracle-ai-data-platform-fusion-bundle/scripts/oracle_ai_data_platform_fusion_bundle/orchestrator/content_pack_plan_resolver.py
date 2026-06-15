@@ -6,11 +6,8 @@ high-level node (e.g. ``supplier_spend`` gold), the resolver
 auto-includes the transitive bronze + silver dependencies needed to
 materialize it. ``--strict-scope`` opts out of that auto-include.
 
-References:
-
-* PLAN §11 (medallion correctness invariants)
-* PLAN §11.10 (multi-source primary/lookup)
-* ADR-0022 (single content-pack execution path)
+The resolver enforces medallion correctness for dependency closure and the
+multi-source primary/lookup contract.
 """
 
 from __future__ import annotations

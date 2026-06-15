@@ -32,7 +32,7 @@ Use this skill to generate full workbook JSON that is both schema-shaped and plu
      non-interactive path for Claude Code), then **restart/reconnect Claude
      Code** (`/mcp` → reconnect `oac-mcp-server`) so the tools activate, then
      re-invoke. MCP servers bind at session start; the connection cannot be
-     established mid-session. (Autopilot front-loads this as its Phase 1b.)
+     established mid-session. (Autopilot front-loads this as Step 1b.)
    - A save-unavailable connection is fine (disk-first fallback below); a fully
      *dead* connection is not.
 

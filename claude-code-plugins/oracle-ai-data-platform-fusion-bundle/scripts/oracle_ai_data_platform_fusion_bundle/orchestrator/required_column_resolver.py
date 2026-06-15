@@ -23,11 +23,8 @@ this is on the default-flipped path.
 This module factors the resolver into one helper so both gates can
 reuse it without duplicating the ``$column.`` prefix logic.
 
-References:
-
-* PLAN §11.6 / §15 Phase 5 Step 2c-2d.
-* :func:`orchestrator.node_preflight._resolve_required_column_entry` —
-  the original per-node implementation.
+The per-node equivalent is
+:func:`orchestrator.node_preflight._resolve_required_column_entry`.
 """
 
 from __future__ import annotations

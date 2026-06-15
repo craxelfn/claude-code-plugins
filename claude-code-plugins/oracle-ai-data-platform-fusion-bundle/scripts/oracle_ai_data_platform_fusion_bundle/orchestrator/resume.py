@@ -61,11 +61,9 @@ def reconstruct_resume_scope(
     return datasets, layers
 
 
-# Phase 9 (ADR-0022) — compute_reattempt_extra_deps deleted. It belonged
-# to the v1 dispatcher's resume path. The content-pack runner's
-# per-node atomic-commit model handles resume natively (each
-# execute_node is a full preflight → render → drift → execute →
-# quality → state commit cycle, and is the resume unit).
+# The content-pack runner's per-node atomic-commit model handles resume
+# natively: each execute_node is a full preflight → render → drift → execute →
+# quality → state commit cycle, and is the resume unit.
 
 
 def render_drift_error(

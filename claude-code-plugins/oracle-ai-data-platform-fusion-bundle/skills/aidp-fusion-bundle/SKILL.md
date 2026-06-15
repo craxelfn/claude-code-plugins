@@ -104,16 +104,16 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    `fusion_catalog.gold.*`. **Scope the OAC user to least privilege** — the v1.4
    connector exposes catalog write/delete/ACL tools governed by that user's grants.
 
-## Key gotchas (live-validated where ✅)
+## Key gotchas
 
-- **BICC role required** — Fusion user must hold `BIA_ADMINISTRATOR_DUTY` *or* `ORA_ASM_APPLICATION_IMPLEMENTATION_ADMIN_ABSTRACT`. Without it, `/biacm/api/v[12]/*` endpoints 302-redirect to IDCS. Bootstrap probes for this. (✅ Casey.Brown demo pod: BIAdmin granted; works.)
+- **BICC role required** — Fusion user must hold `BIA_ADMINISTRATOR_DUTY` *or* `ORA_ASM_APPLICATION_IMPLEMENTATION_ADMIN_ABSTRACT`. Without it, `/biacm/api/v[12]/*` endpoints 302-redirect to IDCS. Bootstrap probes for this.
 - **BICC External Storage profile** — must be configured **once in the BICC console** (admin task: BICC Console → Configure External Storage → OCI Object Storage Connection tab → bucket name + namespace + region + OCI username + auth token → Test Connection → Save). The `fusion.external.storage` Spark option references this BICC profile name. **There is no parallel AIDP-side registration.** Bundle does not provision the BICC profile; bootstrap verifies it exists.
 - **First extract is slow** — BICC builds a full snapshot on first call; subsequent runs use `fusion.initial.extract-date` for incremental.
 - **499 row/page hard cap on Fusion REST** (per MOS Doc ID 2429019.1) — bundle's REST fallback enforces this; anything >5k rows must use BICC.
 - **OAC MCP (v1.4) is NOT read-only** — it exposes catalog **write** tools too. The bundle authors workbooks via `save_catalog_content` (live-verified 2026-06-15: created `gold_balance_2viz` on a real OAC). It still **cannot create datasets** (no create-dataset tool — dataset modeling is an OAC UI step), and the write/delete/ACL tools run with the connecting user's grants → use a least-privilege MCP user. (Supersedes the earlier "MCP is read-only" note.)
-- **`POST /catalog/connections` REST validator does not bless AIDP `idljdbc`** — Oracle's validator falls through to generic Oracle DB schemas requiring `serviceName`/`password`/`connectionString`. The realistic flow is therefore: customer creates the connection via OAC UI once (using the 6-key JSON written by `--print-only`). Legacy `dashboard install` can re-use that connection via the precheck on subsequent `.bar` snapshot deployments. (✅ Live-validated TC10h-4, 2026-05-03 against disposable OAC1.)
-- **Snapshot BAR URI shape is `file:///<folder>/<name>.bar`** — NOT `oci://...`, NOT bare object name, NOT the OCI Object Storage HTTPS URL. None of the seven URI variants tried during TC10h were correct. Verified live TC10h-3.
-- **OAC catalog browse needs `search=*`** — `GET /catalog?type=connections` (no search) returns a single-element TypeInfo header (`[{"type":"connections"}]`), NOT the actual list. Bundle's `list_connections` defaults `search="*"` so the precheck works. (Caught + fixed during TC10h-3 live validation.)
+- **`POST /catalog/connections` REST validator does not bless AIDP `idljdbc`** — Oracle's validator falls through to generic Oracle DB schemas requiring `serviceName`/`password`/`connectionString`. The realistic flow is therefore: customer creates the connection via OAC UI once (using the 6-key JSON written by `--print-only`). Legacy `dashboard install` can re-use that connection via the precheck on subsequent `.bar` snapshot deployments.
+- **Snapshot BAR URI shape is `file:///<folder>/<name>.bar`** — NOT `oci://...`, NOT bare object name, NOT the OCI Object Storage HTTPS URL.
+- **OAC catalog browse needs `search=*`** — `GET /catalog?type=connections` (no search) returns a single-element TypeInfo header (`[{"type":"connections"}]`), NOT the actual list. Bundle's `list_connections` defaults `search="*"` so the precheck works.
 - **Use ExtractPVOs for bulk, NOT OTBI reporting PVOs** — pdf1 Pro Tip; bundle's catalog refuses OTBI PVOs with a clear warning.
 
 ## References

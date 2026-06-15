@@ -417,7 +417,7 @@ def _build_handoff_message(
     affected_vps: list[AffectedVariationPoint],
     diagnostic_path: Path,
 ) -> str:
-    """Build the multi-line §9.5.5 hand-off message for stderr."""
+    """Build the multi-line schema-drift hand-off message for stderr."""
     affected_lines = [
         f"      - {vp.name} (pinned '{vp.pinned_candidate}' "
         f"{'still exists on bronze' if vp.still_exists_on_bronze else 'NO LONGER EXISTS on bronze'})"
@@ -442,7 +442,7 @@ def _build_handoff_message(
         f"    aidp-fusion-medallion-author skill to draft an overlay.\n"
         f"\n"
         f"    Diagnostic artifact: {diagnostic_path}\n"
-        f"    Documentation:       PLAN.md §9.5.5\n"
+        f"    Documentation:       workflow.md and docs/aidpf-error-codes.md\n"
         f"    run_id:              {run_id}"
     )
 

@@ -1,18 +1,16 @@
-"""4-cell ipynb generator for REST dispatch (P1.5ε §Step 4).
+"""4-cell ipynb generator for REST dispatch.
 
-Productized from ``.claude/skills/fusion-tc26-run/dispatch.py:build_notebook``.
-Differences from the TC26 template:
+Builds the notebook uploaded by the laptop dispatcher. The generated
+notebook is intentionally self-contained: it installs the local wheel,
+loads AIDP secrets, stages the bundle/content pack, runs the orchestrator,
+and emits a machine-readable run marker.
 
-- ``mode`` / ``datasets`` / ``layers`` come from the operator's CLI flags
-  (not hardcoded ``mode="seed"``); the orchestrator interprets them.
-- ``bundle_yaml`` is the operator's bundle.yaml content verbatim (not a
-  ``NARROW_BUNDLE`` / ``FULL_BUNDLE`` template).
 - The run-cell emits the FULL ``RunSummary`` payload via
   ``summary.to_marker_dict()`` (NOT a hand-rolled subset dict —
   hand-rolled dicts drift from the schema and break
   ``RunSummary.from_marker_dict`` laptop-side).
-- ``resume_run_id`` is NOT a parameter — it's hardcoded to ``None`` in
-  the run cell. Resume-over-REST is tracked as ``P1.5ε-fix5`` follow-up.
+- ``resume_run_id`` is threaded into the cluster-side orchestrator call
+  when a run is resumed from the laptop CLI.
 
 The notebook contract is the **only** boundary between the laptop-side
 dispatcher and the cluster-side orchestrator. Adding a new orchestrator
@@ -113,15 +111,12 @@ def _build_run_cell(
     force_fingerprint_skip: bool = False,
     repin_plan_hash: bool = False,
     resume_run_id: str | None = None,
-    # Phase 9 — ``--strict-scope`` opt-out of D-1
-    # implicit-transitive-include. Emitted as ``strict_scope=...`` in
-    # the generated orchestrator.run() call so the cluster honors the
-    # operator's opt-out; default False matches the CLI default.
+    # ``--strict-scope`` opts out of implicit transitive include. Emit it
+    # as ``strict_scope=...`` so the cluster honors the operator's choice.
     strict_scope: bool = False,
 ) -> str:
-    # Phase 2: when execution_backend == "content-pack", the bootstrap
-    # cell that ran just before this one set up _resolved_pack and
-    # _tenant_profile; we thread them into orchestrator.run as kwargs.
+    # For content-pack execution, the previous bootstrap cell set up
+    # _resolved_pack and _tenant_profile; thread them into orchestrator.run.
     if execution_backend == "content-pack":
         # 8-space indent — sits inside `try:` block + inside `orchestrator.run(` call.
         backend_kwargs = (
@@ -153,8 +148,8 @@ def _build_run_cell(
         f"{backend_kwargs}"
         f"    )\n"
         f"except SchemaDriftDetectedError as _drift_exc:\n"
-        f"    # Phase 3c — emit drift marker (artifact_json carries the\n"
-        f"    # full AIDPF-2012 payload so the laptop dispatcher can\n"
+        f"    # Emit drift marker (artifact_json carries the full\n"
+        f"    # AIDPF-2012 payload so the laptop dispatcher can\n"
         f"    # reconstruct the diagnostic locally + raise\n"
         f"    # SchemaDriftDetectedError on the operator's machine).\n"
         f"    _drift_artifact_json = _drift_exc.diagnostic_path.read_text(\n"
@@ -191,7 +186,7 @@ def _build_run_cell(
         f'        f"dur={{step.duration_seconds:.2f}}s{{_err}}"\n'
         f"    )\n"
         f"# Marker emit — use to_marker_dict() so the laptop-side dispatcher\n"
-        f"# can round-trip via RunSummary.from_marker_dict (P1.5ε §4.3a).\n"
+        f"# can round-trip via RunSummary.from_marker_dict.\n"
         f"# base64-wrap the JSON: AIDP's Jupyter captures stdout as\n"
         f"# display_data text/plain and strips JSON-escape backslashes,\n"
         f"# corrupting any payload with quotes/reprs (e.g. a failed step's\n"
@@ -251,8 +246,7 @@ def _build_content_pack_bootstrap_cell(
     4. Reconstructs ResolvedPack via load_full_chain(top_root,
        base_resolver=...).
     5. Reconstructs TenantProfile via load_tenant_profile_from_string.
-    6. **Phase 3d**: when ``schema_snapshot_yaml`` is provided,
-       materialises the snapshot to
+    6. When ``schema_snapshot_yaml`` is provided, materialises the snapshot to
        ``<BUNDLE_PATH.parent>/profiles/<profile>.schema-snapshot.yaml``
        — the same path the laptop-side bootstrap writes, resolved on
        the cluster via the shared ``resolve_snapshot_path`` helper.
@@ -289,7 +283,7 @@ def _build_content_pack_bootstrap_cell(
             f"_snapshot_path = resolve_snapshot_path(BUNDLE_PATH, _snapshot_profile_name)  # noqa: F821\n"
             f"_snapshot_path.parent.mkdir(parents=True, exist_ok=True)\n"
             f"_snapshot_path.write_text(_SCHEMA_SNAPSHOT_YAML, encoding='utf-8')\n"
-            f'print(f"phase 3d snapshot staged at {{_snapshot_path}}")\n'
+            f'print(f"schema snapshot staged at {{_snapshot_path}}")\n'
         )
 
     return (
@@ -359,33 +353,27 @@ def build_notebook(
     layers: list[str] | None,
     bicc_secret_name: str = "fusion_bicc_password",
     bicc_secret_key: str = "password",
-    title: str = "P1.5ε dispatch",
-    # Phase 2 additions — primitives only (no orchestrator imports).
+    title: str = "AIDP Fusion Bundle dispatch",
+    # Primitives only; this module must not import orchestrator types.
     execution_backend: str = "legacy-python",
     profile_yaml: str | None = None,
     pack_files: Mapping[str, str] | None = None,
     pack_manifest: dict[str, Any] | None = None,
-    # Phase 3c — splices into the orchestrator.run kwargs in the run
-    # cell so the cluster-side gate honours the break-glass intent.
+    # Splices into orchestrator.run kwargs so the cluster-side gate honors
+    # the break-glass intent.
     force_fingerprint_skip: bool = False,
-    # P-incr-L1 — splices ``repin_plan_hash=...`` into the run-cell
-    # orchestrator.run call so the cluster-side AIDPF-4040 gate honours
-    # --repin-plan-hash.
+    # Splices ``repin_plan_hash=...`` into the run-cell orchestrator.run
+    # call so the cluster-side AIDPF-4040 gate honors --repin-plan-hash.
     repin_plan_hash: bool = False,
-    # Phase 3d — when provided, the bootstrap cell materialises the
-    # pinned bronze-schema snapshot at the cluster-side resolved path
-    # so preflight can populate `datasetDeltas` on drift. ``None``
-    # preserves pre-3d behaviour (snapshot absent → empty
-    # `datasetDeltas` + WARN).
+    # When provided, the bootstrap cell materializes the pinned bronze-schema
+    # snapshot at the cluster-side resolved path so preflight can populate
+    # `datasetDeltas` on drift. ``None`` means snapshot absent.
     schema_snapshot_yaml: str | None = None,
-    # Phase 5 P1.5ε-fix5 — splices into the orchestrator.run kwargs
-    # in the run cell so the cluster-side run adopts the supplied
-    # resume run_id. ``None`` preserves the original fresh-run
-    # behaviour.
+    # Splices into the run-cell orchestrator.run kwargs so the cluster-side
+    # run adopts the supplied resume run_id. ``None`` starts a fresh run.
     resume_run_id: str | None = None,
-    # Phase 9 — ``--strict-scope`` opt-out of D-1
-    # implicit-transitive-include. Threaded into the generated
-    # orchestrator.run() call as a literal kwarg.
+    # ``--strict-scope`` opts out of implicit transitive include. Threaded
+    # into the generated orchestrator.run() call as a literal kwarg.
     strict_scope: bool = False,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
@@ -401,17 +389,14 @@ def build_notebook(
          audit-col matches for the run_id.
 
     The run cell injects ``mode`` / ``datasets`` / ``layers`` as literals
-    (via ``repr()``). ``resume_run_id`` is hardcoded to ``None`` — REST-
-    dispatch resume is out of scope in this PR.
+    (via ``repr()``), and threads ``resume_run_id`` when supplied.
 
     Returns an nbformat-4 dict ready to pass to
     :meth:`AidpRestClient.upload_notebook`.
     """
-    # Phase 2 invariant check: content-pack backend requires all three
-    # Phase 9 — content-pack is the only backend at the CLI level,
-    # but the dispatch boundary retains backend dispatch for the
-    # tests that lock the staging primitive contract. The kwargs
-    # are still asserted symmetrically.
+    # Content-pack is the CLI backend, but this boundary retains backend
+    # dispatch for tests that lock the staging primitive contract. Keep the
+    # kwargs asserted symmetrically.
     if execution_backend == "content-pack":
         assert profile_yaml is not None, (
             "build_notebook(execution_backend='content-pack', ...) requires profile_yaml"
