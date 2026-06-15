@@ -140,11 +140,13 @@ cluster_state, config_placeholders[], validate_ok, details{}}`. Act on
 - **Requested node lives in an overlay not wired into `contentPack`** (e.g. a
   mart `mart-author` just authored under `overlays/<name>/`). The orchestrator
   only knows nodes in the **active** `contentPack`, so a node not in it parses
-  as unknown. Wire the bundle for the client (mirror `mart-author` step 7):
-  point `bundle.yaml`'s `contentPack` at the overlay (`name`/`path`/`profile`),
-  ensure `dimensions.build` / `gold.marts` list only real pack nodes (incl. the
-  new one), then re-run. If the overlay doesn't exist yet, route to
-  `/mart-author`.
+  as unknown. Wire it for the client with the one-command verb:
+  ```bash
+  aidp-fusion-bundle use-pack overlays/<name> --profile <tenant>
+  ```
+  (sets `contentPack`, aligns `dimensions`/`marts`, normalizes the credential
+  ref — see `mart-author` step 7), then re-run. If the overlay doesn't exist
+  yet, route to `/mart-author`.
 
 - **Cluster-side credential gotcha (pre-empt before dispatch).** If
   `bundle.yaml`'s `fusion.password` is a placeholder vault OCID, the cluster run

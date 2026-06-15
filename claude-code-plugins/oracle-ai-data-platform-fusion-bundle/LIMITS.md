@@ -24,10 +24,15 @@ things; there is no `aidp-fusion-bundle use-pack` command yet:
 3. `fusion.password: ${FUSION_BICC_PASSWORD}` (credential-store env) — a
    placeholder vault OCID fails cluster-side with `CredentialResolutionError`;
    and every `${ENV}` ref must resolve both client-side and cluster-side.
-**Mitigation today:** `mart-author` step 7 + `aidp-fusion-seed` ladder perform
-this wiring for the client. **Proper fix (tracked):** an `init` template that
-defaults `fusion.password` to the env form, and a `use-pack`/`wire-overlay` CLI
-verb so the skills call one command instead of editing YAML.
+**Mostly resolved 2026-06-15:** the `aidp-fusion-bundle use-pack <pack>
+--profile <tenant>` verb now does the whole wiring in one command (sets
+`contentPack`, aligns `dimensions`/`marts` to the resolved pack, normalizes a
+placeholder-vault `fusion.password` to `${FUSION_BICC_PASSWORD}`; comment-
+preserving), and the `init` example templates now default `fusion.password` to
+the env form. `mart-author` step 7 + the `aidp-fusion-seed` ladder call
+`use-pack`. **Residual:** `use-pack` only handles the bundle wiring — missing
+`aidp.config.yaml` coords still route to `/aidp-fusion-config`, and a missing
+profile still needs `bootstrap`.
 
 ### L1 — PVO schema drift across Fusion releases requires patch releases
 

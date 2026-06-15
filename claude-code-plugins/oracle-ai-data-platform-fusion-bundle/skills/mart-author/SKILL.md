@@ -135,37 +135,31 @@ Fix until clean — schema + content validators cover PII-missing (AIDPF-2030),
 dependency/SQL integrity, and the no-new-legacy-module rule. (New error codes,
 if any, register in PLAN §25 first.)
 
-### 7 — Wire the bundle for the client, then hand off to seed (do not seed here)
-An overlay isn't seeded until the bundle points at it. **Do this wiring FOR the
-client** — apply the edits with `Edit`/`Write`, show the diff, and confirm
-before saving; don't just print instructions. (This exact recipe is
-live-proven — `ar_invoice_summary` materialized 49 rows on saasfademo1,
-2026-06-15.)
+### 7 — Wire the bundle for the client (one command), then hand off to seed
+An overlay isn't seeded until the bundle points at it. **Do this FOR the
+client** with the single wiring verb — don't hand-edit YAML:
 
-1. **Point `bundle.yaml` at the overlay** (and only at real pack nodes) — edit it:
-   ```yaml
-   contentPack:
-     name: <overlay-id>
-     path: overlays/<name>
-     profile: <tenant>
-   ```
-   Also ensure `dimensions.build` / `gold.marts` list **only nodes the pack
-   actually has** (incl. the new one) — stale v1 entries like `dim_org` /
-   `po_backlog` make the content-pack plan resolver fail.
-2. **Profile present** — confirm `profiles/<tenant>.yaml` exists (else run
-   `bootstrap`, or reuse an existing one).
-3. **Normalize credentials/config so the client's seed won't fail cluster-side**
-   (the two gotchas this skill must pre-empt):
-   - if `bundle.yaml`'s `fusion.password` is a **placeholder vault OCID**, fix
-     it to `fusion.password: ${FUSION_BICC_PASSWORD}` — the cluster notebook
-     loads that from the AIDP credential store (`biccSecretName`); a placeholder
-     vault ref fails with `CredentialResolutionError`;
-   - any other `${ENV}` ref in `bundle.yaml` must resolve **both** client-side
-     (preflight `load_bundle`) and cluster-side — literalize tenant values or
-     ensure the env var is set in both places;
-   - if `aidp.config.yaml` coords are missing/placeholder, route to
-     `/aidp-fusion-config` (don't make the client hand-copy OCIDs).
-4. **Then hand to the seed step** — `/aidp-fusion-seed` (or
+```bash
+aidp-fusion-bundle use-pack overlays/<name> --profile <tenant>
+```
+
+`use-pack` does the whole recipe in one step (live-proven — `ar_invoice_summary`
+materialized 49 rows on saasfademo1, 2026-06-15): sets
+`contentPack: {name: <overlay-id>, path: overlays/<name>, profile}`, **aligns
+`dimensions.build` / `gold.marts`** to the resolved pack's real nodes (so stale
+v1 entries like `dim_org` / `po_backlog` can't break the plan resolver), and
+**normalizes a placeholder-vault `fusion.password` to `${FUSION_BICC_PASSWORD}`**
+(the cluster loads it from the AIDP credential store; a placeholder vault ref
+fails with `CredentialResolutionError`). It's comment-preserving and validates
+the result. Then:
+
+1. **Profile present** — `use-pack` warns if `profiles/<tenant>.yaml` is absent;
+   run `bootstrap` (or reuse one) so it exists.
+2. **Config coords** — if `aidp.config.yaml` coords are missing/placeholder,
+   route to `/aidp-fusion-config` (don't make the client hand-copy OCIDs). Any
+   remaining `${ENV}` ref in `bundle.yaml` must resolve **both** client-side
+   (preflight) and cluster-side (literalize tenant values or set the env var).
+3. **Hand to the seed step** — `/aidp-fusion-seed` (or
    `aidp-fusion-bundle run --mode seed --datasets <new-id> --layers gold`).
    `--layers gold` lets the bronze-readiness gate verify the existing bronze
    dep instead of re-extracting it from BICC (the plan still lists the bronze

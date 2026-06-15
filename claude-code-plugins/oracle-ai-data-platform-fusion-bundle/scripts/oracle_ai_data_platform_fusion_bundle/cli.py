@@ -118,6 +118,27 @@ def init_config(
     ))
 
 
+@main.command("use-pack")
+@click.argument("pack")
+@click.option("--profile", required=True, help="Tenant profile name (contentPack.profile).")
+@click.option("--align/--no-align", default=True, show_default=True,
+              help="Align dimensions.build / gold.marts to the resolved pack's nodes.")
+@click.option("--fix-credentials/--no-fix-credentials", default=True, show_default=True,
+              help="Rewrite a placeholder-vault fusion.password to ${FUSION_BICC_PASSWORD}.")
+@click.pass_context
+def use_pack(ctx: click.Context, pack: str, profile: str, align: bool, fix_credentials: bool) -> None:
+    """Wire bundle.yaml to a content pack / overlay (contentPack + marts + creds) in one step."""
+    from .commands.use_pack import use_pack as use_pack_impl
+    sys.exit(use_pack_impl(
+        bundle_path=ctx.obj["bundle_path"],
+        pack_spec=pack,
+        profile=profile,
+        align=align,
+        fix_credentials=fix_credentials,
+        console=console,
+    ))
+
+
 @main.command()
 @click.pass_context
 def validate(ctx: click.Context) -> None:
