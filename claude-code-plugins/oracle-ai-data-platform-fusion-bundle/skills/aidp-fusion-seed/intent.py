@@ -126,13 +126,16 @@ def _node_spellings(node_id: str) -> list[str]:
     return sorted(forms, key=len, reverse=True)
 
 
-def parse(phrase: str, known_nodes: list[str]) -> IntentResult:
+def parse(phrase: str, known_nodes: list[str], mode: str = "seed") -> IntentResult:
     """Parse ``phrase`` against the set of ``known_nodes`` (pack node ids).
 
     Pure function — no I/O, no dispatch. Deterministic for a given
-    (phrase, known_nodes) pair.
+    (phrase, known_nodes, mode) tuple. ``mode`` (``seed`` default, or
+    ``incremental``) sets the run mode + the emitted ``--mode`` flag, so the
+    same parser serves both the seed and incremental skills.
     """
     result = IntentResult()
+    result.mode = mode
     known = [n for n in dict.fromkeys(n.strip() for n in known_nodes) if n]
     known_lower = {n.lower(): n for n in known}
 
@@ -226,7 +229,7 @@ def build_argv(r: IntentResult) -> list[str]:
     / ``needs_run_id`` before dispatching — argv reflects only what parsed
     cleanly.
     """
-    argv = ["run", "--mode", "seed"]
+    argv = ["run", "--mode", r.mode]
     if r.datasets:
         argv += ["--datasets", ",".join(r.datasets)]
     if r.layers:
@@ -278,9 +281,13 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Comma-separated known pack node ids (bronze datasets + silver + gold).",
     )
+    ap.add_argument(
+        "--mode", default="seed", choices=["seed", "incremental"],
+        help="Run mode for the emitted argv (default: seed).",
+    )
     ns = ap.parse_args(argv)
     known = [s for s in ns.known_nodes.split(",") if s.strip()]
-    result = parse(ns.phrase, known)
+    result = parse(ns.phrase, known, mode=ns.mode)
     print(json.dumps(asdict(result), indent=2))
     return 0
 

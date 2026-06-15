@@ -109,9 +109,13 @@ On a pause, state exactly what you need from the user and which phase resumes.
 
 ## Skill family (what autopilot conducts)
 `/aidp-fusion-config` · `bootstrap` / `medallion-author` · `/aidp-fusion-seed` ·
-`/oac-dataset-advisor` · `/mart-author` (+ `use-pack`) · `/workbook-authoring` ·
-`dashboard mcp-setup`. Autopilot adds no mechanism — it sequences these and
-holds the user's goal across them.
+`/aidp-fusion-status` · `/oac-dataset-advisor` · `/mart-author` (+ `use-pack`) ·
+`/workbook-authoring` · `dashboard mcp-setup`. Day-2: `/aidp-fusion-incremental`
+(deltas) with `/fusion-drift-doctor` as its drift precheck. **On any gate
+failure (AIDPF-2072/4070/4071/2012/4040 — schema/PVO drift, plan-hash) route to
+`/fusion-drift-doctor`**, which diagnoses and hands to `bootstrap --refresh` /
+`/medallion-author` / re-seed. Autopilot adds no mechanism — it sequences these
+and holds the user's goal across them.
 
 ## Safety invariants (do not regress)
 - Never weaken a sub-skill's guard to "keep moving."
