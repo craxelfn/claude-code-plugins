@@ -26,7 +26,21 @@ changes belong in an overlay pack under the customer bundle directory.
 
 The overlay is not active until the bundle points at it. Use
 `aidp-fusion-bundle use-pack`; do not hand-edit `contentPack.path` for the
-normal workflow.
+normal workflow. Editing the bundle scope lists (`datasets`, `dimensions.build`,
+and `gold.marts`) is normal when you want a narrow customer bundle.
+
+By default, `use-pack` aligns `dimensions.build` and `gold.marts` to every
+silver and gold node in the resolved pack chain. That is useful for a full
+starter pack run, but it can broaden a narrow customer bundle. Use `--no-align`
+when applying an overlay to a narrow bundle or when overriding one shipped mart:
+
+```bash
+aidp-fusion-bundle use-pack overlays/<name> --profile <tenant> --no-align
+```
+
+With `--no-align`, `use-pack` still updates `contentPack`, but it preserves the
+existing `dimensions.build` and `gold.marts` lists. If the overlay adds a new
+mart, add only that mart to `gold.marts` before running it.
 
 ## Use A Shipped Mart
 
@@ -154,10 +168,20 @@ Validate, wire, and seed:
 
 ```bash
 aidp-fusion-bundle content-pack validate overlays/supplier-currency-summary
-aidp-fusion-bundle use-pack overlays/supplier-currency-summary --profile finance-default
+aidp-fusion-bundle use-pack overlays/supplier-currency-summary --profile finance-default --no-align
 aidp-fusion-bundle validate
 aidp-fusion-bundle bootstrap --check-iam
 aidp-fusion-bundle run --mode seed --datasets supplier_spend_by_currency --layers gold
+```
+
+Because `--no-align` preserves the existing bundle scope, make sure
+`bundle.yaml` selects the new mart:
+
+```yaml
+gold:
+  marts:
+    - supplier_spend
+    - supplier_spend_by_currency
 ```
 
 After the table exists in AIDP, run `oac-dataset-advisor` again. It must use
@@ -208,10 +232,14 @@ Validate and wire:
 
 ```bash
 aidp-fusion-bundle content-pack validate overlays/gl-balance-custom
-aidp-fusion-bundle use-pack overlays/gl-balance-custom --profile finance-default
+aidp-fusion-bundle use-pack overlays/gl-balance-custom --profile finance-default --no-align
 aidp-fusion-bundle validate
 aidp-fusion-bundle run --mode seed --datasets gl_balance --layers gold
 ```
+
+Use `--no-align` here so an override for `gl_balance` does not expand a narrow
+bundle to every shipped gold mart. The existing `gold.marts: [gl_balance]`
+selection remains intact.
 
 ## Full YAML Replacement
 

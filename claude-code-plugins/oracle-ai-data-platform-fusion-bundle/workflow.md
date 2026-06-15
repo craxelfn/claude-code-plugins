@@ -246,6 +246,8 @@ After authoring, validate and wire the overlay:
 
 ```bash
 aidp-fusion-bundle content-pack validate overlays/<name>
+# --no-align keeps a narrow bundle / one-mart override as-is; the default
+# --align broadens datasets/gold.marts to every node in the resolved pack
 aidp-fusion-bundle use-pack overlays/<name> --profile <profile>
 aidp-fusion-bundle validate
 ```
@@ -427,6 +429,7 @@ aidp-fusion-bundle content-pack list
 aidp-fusion-bundle content-pack info fusion-finance-starter
 aidp-fusion-bundle content-pack validate fusion-finance-starter
 
-# Wire an overlay
+# Wire an overlay (add --no-align for a narrow bundle / one-mart override —
+# keeps existing datasets/gold.marts instead of aligning to the full pack)
 aidp-fusion-bundle use-pack overlays/<name> --profile <profile>
 ```

@@ -145,8 +145,10 @@ cluster_state, config_placeholders[], validate_ok, details{}}`. Act on
   aidp-fusion-bundle use-pack overlays/<name> --profile <tenant>
   ```
   (sets `contentPack`, aligns `dimensions`/`marts`, normalizes the credential
-  ref — see `mart-author` step 7), then re-run. If the overlay doesn't exist
-  yet, route to `/mart-author`.
+  ref — see `mart-author` step 7), then re-run. For a **narrow bundle** or a
+  **one-mart override**, add `--no-align` so it keeps the bundle's existing
+  `datasets`/`gold.marts` instead of broadening to every node in the resolved
+  pack. If the overlay doesn't exist yet, route to `/mart-author`.
 
 - **Cluster-side credential gotcha (pre-empt before dispatch).** If
   `bundle.yaml`'s `fusion.password` is a placeholder vault OCID, the cluster run

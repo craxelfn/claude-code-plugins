@@ -58,6 +58,15 @@ class TestInit:
 
 
 class TestValidate:
+    def test_default_init_template_validates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        init_result = CliRunner().invoke(cli.main, ["init"])
+        assert init_result.exit_code == 0
+
+        result = CliRunner().invoke(cli.main, ["validate"])
+        assert result.exit_code == 0
+        assert "validation passed" in result.output
+
     def test_passes_for_minimal_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])

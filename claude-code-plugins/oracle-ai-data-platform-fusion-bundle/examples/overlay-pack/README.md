@@ -11,9 +11,20 @@ Copy the overlay into a customer bundle, validate it, and wire it with:
 
 ```bash
 aidp-fusion-bundle content-pack validate examples/overlay-pack
-aidp-fusion-bundle use-pack examples/overlay-pack --profile finance-default
+aidp-fusion-bundle use-pack examples/overlay-pack --profile finance-default --no-align
 aidp-fusion-bundle validate
 aidp-fusion-bundle run --mode seed --datasets supplier_spend_by_currency --layers gold --dry-run
+```
+
+`--no-align` preserves a narrow customer bundle instead of adding every silver
+and gold node from the resolved pack. After using it, add only the new mart to
+`bundle.yaml` if it is not already selected:
+
+```yaml
+gold:
+  marts:
+    - supplier_spend
+    - supplier_spend_by_currency
 ```
 
 In a real customer project, keep overlays under that project's `overlays/`
