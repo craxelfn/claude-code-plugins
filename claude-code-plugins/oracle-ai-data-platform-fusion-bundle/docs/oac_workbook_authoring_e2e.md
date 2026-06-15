@@ -91,10 +91,13 @@ Generation (step 1) needs **no OAC at all**. Only delivery (step 3) touches OAC.
 ## Step-by-step
 
 ### Step 1 — Generate the workbook JSON (offline, no OAC)
-Author a `request.json` (`compose_ootb`) and run the skill:
+Author your `request.json` under `workbooks/<name>/` **beside `bundle.yaml`**
+(the convention — mirrors `overlays/<name>/` / `profiles/`; raw output is
+gitignored, only `*.redacted.json` is committable), then run the skill:
 ```bash
 node skills/workbook-authoring/tools/regenerate-workbook.mjs \
-  --request request.json --target-version 26.07 --output workbook.json
+  --request workbooks/<name>/request.json --target-version 26.07 \
+  --output workbooks/<name>/workbook.json
 # expect: status: ok, validationStatus.valid: true, compositionCoverage: ootb_composed
 ```
 **request.json essentials** (see `tests/live/workbook_authoring_T1_offline/` for a full example):

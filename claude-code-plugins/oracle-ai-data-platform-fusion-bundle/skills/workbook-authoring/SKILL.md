@@ -135,6 +135,21 @@ Capture:
 node <WB_SKILL_ROOT>/tools/regenerate-workbook.mjs --request <request.json> [--target-version "<YY.MM>"] [--detected-target-version "<YY.MM>"] [--output <workbook.json>]
 ```
 
+> **File-location convention (where the JSONs live).** Author per workbook under
+> a `workbooks/<name>/` directory **beside `bundle.yaml`** (mirrors
+> `overlays/<name>/` and `profiles/`):
+> - `workbooks/<name>/request.json` — the input spec (`analysisRequirements`).
+> - `workbooks/<name>/workbook.json` — the generated, disk-first output.
+> - `workbooks/<name>/<name>.redacted.json` — the only variant safe to commit.
+>
+> Default `--request workbooks/<name>/request.json` and
+> `--output workbooks/<name>/workbook.json` when the caller doesn't specify
+> paths. **Do not commit the raw `workbook.json` or any `*bound*` request** —
+> they carry the OAC host / dataset UUID / session tokens; the bundle
+> `.gitignore` ignores `workbooks/**/workbook*.json` + `workbooks/**/*bound*.json`
+> (allowing `*.redacted.json`). Never write to `/tmp` (lost on reboot) or into
+> `tests/live/` (that path is for skill *evidence*, not user work).
+
 13. Build request payload to satisfy `<WB_SKILL_ROOT>/<TARGET_VERSION>/model/regenerate-workbook-contract.v1.json`.
 14. Build `adapterPayload` to satisfy `<WB_SKILL_ROOT>/<TARGET_VERSION>/model/regenerate-workbook-adapter-contract.v1.json`.
 15. For `compose_ootb`, include approved `analysisRequirements` before generation:
