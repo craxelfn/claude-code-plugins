@@ -401,6 +401,20 @@ def catalog_probe_pvo(
          "this; SOX-audit environments should policy-disable.",
 )
 @click.option(
+    "--repin-plan-hash", "repin_plan_hash",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Dev/sandbox: bypass the AIDPF-4040 plan-hash continuity gate on "
+         "incremental. When a node's plan-hash diverged because you EDITED "
+         "the SQL / profile / adapter on purpose, this repins the new hash "
+         "(records an audit row in fusion_bundle_state with "
+         "mode='plan_hash_repin') and proceeds instead of forcing a full "
+         "re-seed. Production runs MUST NOT use this; SOX-audit environments "
+         "should policy-disable. Does NOT mask a real, unintended drift — "
+         "use only when the change was deliberate.",
+)
+@click.option(
     "--strict-scope", "strict_scope", is_flag=True, default=False,
     help="Disable implicit transitive include. When set, "
          "every declared root's `dependsOn` must ALSO appear in "
@@ -415,6 +429,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
         poll_timeout_s: int,
         force_fingerprint_skip: bool,
+        repin_plan_hash: bool,
         strict_scope: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
@@ -430,6 +445,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
         force_fingerprint_skip=force_fingerprint_skip,
+        repin_plan_hash=repin_plan_hash,
         strict_scope=strict_scope,
         console=console,
     ))

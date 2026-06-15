@@ -392,6 +392,96 @@ class TestPlanHashDriftGate:
         assert result.status == "success"
 
 
+class TestRepinPlanHashBreakGlass:
+    """``--repin-plan-hash`` bypasses the AIDPF-4040 gate on a deliberate
+    plan edit (P-incr-L1 escape hatch)."""
+
+    def test_repin_false_still_blocks(self, tmp_path: pathlib.Path) -> None:
+        """Default (repin_plan_hash=False) — a diverged hash still blocks."""
+        pack = _build_pack(tmp_path)
+        spark = _fake_spark_seed_happy_path()
+        result = execute_node(
+            spark,
+            node=pack.silver["dim_thing"],
+            pack=pack,
+            profile=_profile(),
+            ctx=_ctx("incremental"),
+            paths=_paths(),
+            mode="incremental",
+            profile_hash="profile-h",
+            prior_plan_hash="stale-hash-from-prior-yaml",
+            repin_plan_hash=False,
+        )
+        assert result.status == "resume_drift_blocked"
+
+    def test_repin_true_bypasses_gate_and_proceeds(self, tmp_path: pathlib.Path) -> None:
+        """With the flag set, a diverged hash is repinned and execution
+        proceeds to success instead of blocking."""
+        pack = _build_pack(tmp_path)
+        spark = _fake_spark_seed_happy_path()
+        result = execute_node(
+            spark,
+            node=pack.silver["dim_thing"],
+            pack=pack,
+            profile=_profile(),
+            ctx=_ctx("incremental"),
+            paths=_paths(),
+            mode="incremental",
+            profile_hash="profile-h",
+            prior_plan_hash="stale-hash-from-prior-yaml",
+            repin_plan_hash=True,
+        )
+        assert result.status == "success"
+        # The success row pins the NEW (freshly-computed) plan-hash.
+        assert result.plan_hash and result.plan_hash != "stale-hash-from-prior-yaml"
+
+    def test_repin_writes_audit_row(self, tmp_path: pathlib.Path) -> None:
+        """The bypass writes a ``mode='plan_hash_repin'`` audit row to
+        fusion_bundle_state (the SOX trail)."""
+        pack = _build_pack(tmp_path)
+        spark = _fake_spark_seed_happy_path()
+        execute_node(
+            spark,
+            node=pack.silver["dim_thing"],
+            pack=pack,
+            profile=_profile(),
+            ctx=_ctx("incremental"),
+            paths=_paths(),
+            mode="incremental",
+            profile_hash="profile-h",
+            prior_plan_hash="stale-hash-from-prior-yaml",
+            repin_plan_hash=True,
+        )
+        repin_inserts = [
+            call.args[0] for call in spark.sql.call_args_list
+            if call.args and "INSERT INTO" in call.args[0]
+            and "'plan_hash_repin'" in call.args[0]
+        ]
+        assert len(repin_inserts) == 1, "expected exactly one plan_hash_repin audit row"
+
+    def test_repin_does_not_fire_when_hashes_match(self, tmp_path: pathlib.Path) -> None:
+        """If the prior hash already matches (no drift), repin is a no-op —
+        no audit row, normal success."""
+        pack = _build_pack(tmp_path)
+        spark = _fake_spark_seed_happy_path()
+        first = execute_node(
+            spark, node=pack.silver["dim_thing"], pack=pack, profile=_profile(),
+            ctx=_ctx("seed"), paths=_paths(), mode="seed", profile_hash="profile-h",
+        )
+        spark2 = _fake_spark_seed_happy_path()
+        execute_node(
+            spark2, node=pack.silver["dim_thing"], pack=pack, profile=_profile(),
+            ctx=_ctx("incremental"), paths=_paths(), mode="incremental",
+            profile_hash="profile-h", prior_plan_hash=first.plan_hash,
+            repin_plan_hash=True,
+        )
+        repin_inserts = [
+            call.args[0] for call in spark2.sql.call_args_list
+            if call.args and "'plan_hash_repin'" in call.args[0]
+        ]
+        assert repin_inserts == []
+
+
 # ---------------------------------------------------------------------------
 # Materialised-schema assertion (Step 11 sub-step 8)
 # ---------------------------------------------------------------------------

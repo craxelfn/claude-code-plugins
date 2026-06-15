@@ -355,38 +355,37 @@ varied prefixes; use core-exact / semantic matching.
 
 ---
 
-### P-incr-L1 — row-grain MERGE nodes still trip AIDPF-4040 on incremental-after-seed
+## Resolved limits
 
-**What**: the §11.9 plan-hash is computed over the **per-mode rendered SQL**.
+### P-incr-L1 — row-grain MERGE nodes tripped AIDPF-4040 on incremental-after-seed (RESOLVED 2026-06-15)
+
+**Was**: the §11.9 plan-hash was computed over the **per-mode rendered SQL**.
 For a row-grain MERGE node (silver dims, `gl_balance`), `{{ watermark_predicate }}`
 renders to `1=1` on **seed** but `<col> > :watermark_<source>` on **incremental**
 — *different SQL text* — so the node's seed-pinned plan-hash and its first
-incremental's plan-hash differ on the SQL body, tripping **AIDPF-4040** even
-though the plan shape is unchanged.
+incremental's plan-hash differed on the SQL body, tripping **AIDPF-4040** even
+though the plan shape was unchanged. Replace-strategy marts were unaffected (no
+watermark predicate; their seed↔incremental SQL is identical — TC33 green).
 
-**Scope**: **replace-strategy** marts (`ap_aging`, `supplier_spend`,
-`dim_calendar`, and replace overlay marts like `ar_invoice_summary`) are
-**unaffected** — their SQL is mode-independent (no watermark predicate), so the
-2026-06-15 param-exclusion fix (drop `run_id` / `watermark_*` *values* from the
-hash, `_build_hash_input`) makes their seed↔incremental hash match.
-Live-verified green: TC33 (`ar_invoice_summary` seed→incremental, 49 rows, no
-4040). Only **MERGE** nodes carry the residual SQL-text divergence.
+**Fix** (Approach 3 — mode-normalized hash): `sql_renderer.render_node_sql` now
+computes `hash_input` from a SECOND render pass (`for_hash=True`) where
+`{{ watermark_predicate }}` is forced to its canonical `1=1` form regardless of
+mode and writes no `watermark_*` param. The **executable** SQL still renders
+mode-correctly (`col > :watermark_<source>` on incremental). Because the
+watermark column/source are mixed into the plan-hash independently (dedicated
+fields in `compute_content_pack_plan_hash`), normalizing the predicate *text*
+away is **lossless** — a genuine SQL/profile/variation/watermark-column edit
+still shifts the hash. Unit-proven: a MERGE node's seed and incremental renders
+now hash equal; template/profile/watermark-column edits still differ
+(`tests/unit/test_sql_renderer.py::TestHashDeterminism`,
+`tests/unit/test_plan_hash_phase2.py`).
 
-**Where it bites**: the first `--mode incremental` of any MERGE node after its
-seed. Pure replace-mart pipelines (the AR overlay) are fully incremental-green.
+Also shipped: a hidden `--repin-plan-hash` break-glass flag that repins the new
+plan-hash (audit row `mode='plan_hash_repin'`) and proceeds instead of blocking,
+for *deliberate* plan edits where a full re-seed isn't wanted.
 
-**Fix direction (not yet done)**: compute the plan-hash over a **mode-normalized**
-SQL — hash the template (watermark token unrendered) or substitute a stable
-placeholder for the watermark predicate — so seed and incremental of the same
-node produce one hash. Bigger change to `sql_renderer` / `plan_hash` than the
-param-exclusion; deferred until a MERGE-node incremental is actually needed live.
-
-**Status**: **open** (2026-06-15). Param-exclusion shipped + live-verified for
-replace marts (TC33); MERGE-node mode-normalization is the remaining piece.
-
----
-
-## Resolved limits
+**Live evidence**: TC34 (`gl_balance` seed→incremental→incremental — delta
+counts, no 4040, MERGE not replace). _Pending dev-cluster run._
 
 ### AIDPF-1040 — overlay packs could never be seeded (chain_roots not staged) (RESOLVED 2026-06-15)
 

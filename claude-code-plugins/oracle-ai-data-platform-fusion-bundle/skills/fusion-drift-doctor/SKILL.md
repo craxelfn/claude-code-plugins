@@ -68,20 +68,24 @@ diagnoses and hands off; it never edits packs/profiles or runs the pipeline.
    - **`missing_literal` / AIDPF-4070 (type change)** → **investigate**: a
      declared literal column vanished or changed type — a pack/source mismatch a
      human resolves (no mechanical fix).
-   - **AIDPF-4040** → identify *which* of three causes before recommending a fix
-     (a re-seed only helps the first):
+   - **AIDPF-4040** → identify *which* of two causes before recommending a fix.
+     (Row-grain MERGE nodes increment cleanly after a seed as of 2026-06-15 —
+     the plan-hash is mode-normalized, `LIMITS.md` P-incr-L1 resolved — so the
+     watermark predicate rendering `1=1` (seed) vs `<col> > :watermark_src`
+     (incremental) no longer false-trips 4040. A 4040 today means a *real*
+     plan-shape change, not the mode you ran.)
      1. **Genuine plan-shape change** (you edited the node SQL / `outputSchema` /
-        variation pick / tenant profile since the seed) → re-run `run --mode seed`
-        to re-pin the plan-hash, or revert the edit. This is the normal case.
-     2. **Row-grain MERGE node, first incremental after a seed** → this is a
-        **known plugin limit** (`LIMITS.md` P-incr-L1), *not* a tenant problem:
-        the watermark predicate renders differently on seed (`1=1`) vs incremental
-        (`<col> > :watermark_src`), so the plan-hash diverges on the SQL body even
-        with no edit. Re-seeding does **not** clear it. Replace-strategy marts
-        (`ap_aging`, `supplier_spend`, `dim_calendar`, replace overlay marts) are
-        unaffected — their incremental is live-green (TC33). Tell the operator
-        this is a pending fix (mode-normalized plan-hash), not their config.
-     3. **Stale pin from a pre-2026-06-15 build** → before the `_build_hash_input`
+        variation pick / tenant profile / watermark column since the seed) → if
+        the edit was **unintended**, revert it. If **intended**, either re-pin
+        with a **scoped** re-seed of just that node's layer: `run --mode seed
+        --datasets <node> --layers <layer>` (runs over existing bronze/silver —
+        does NOT re-extract bronze or touch other marts), **or** pass the hidden
+        `run --mode incremental --repin-plan-hash` to repin the new hash and
+        proceed *without* a full rebuild (writes a `mode='plan_hash_repin'` audit
+        row to `fusion_bundle_state` — dev/sandbox only, never in SOX/production).
+        `--repin-plan-hash` is the cheap path when you know the change was
+        deliberate and want a true delta-MERGE on the very next run.
+     2. **Stale pin from a pre-2026-06-15 build** → before the `_build_hash_input`
         param-exclusion fix, the hash baked in the per-run `run_id`, so 4040 fired
         on *every* content-pack incremental and re-seeding never helped. If the
         cluster wheel predates the fix, rebuild/redeploy, then re-seed once.

@@ -502,6 +502,86 @@ class TestHashDeterminism:
         assert r_a.params["watermark_erp_thing"] != r_b.params["watermark_erp_thing"]
         assert compute_rendered_sql_hash(r_a) == compute_rendered_sql_hash(r_b)
 
+    # ------ Mode-normalization (P-incr-L1 / Approach 3) -------------------
+
+    def test_merge_node_seed_and_incremental_hash_equal(self, tmp_path: pathlib.Path) -> None:
+        """P-incr-L1: a MERGE node's seed and (cursor-populated) incremental
+        renders must produce the SAME plan-hash, even though their EXECUTABLE
+        SQL differs on the watermark predicate (``1=1`` vs ``col > :wm``).
+
+        This is the core of the fix: the hash is computed from a mode-normalized
+        render (watermark predicate forced to ``1=1``), so the AIDPF-4040
+        continuity gate doesn't false-positive on the first incremental after a
+        seed. Pre-fix this asserted ``!=`` (the reviewer's ``hashes_equal=False``
+        probe)."""
+        sql_template = (
+            "SELECT * FROM {{ catalog }}.{{ bronze_schema }}.erp_thing "
+            "WHERE {{ watermark_predicate }}"
+        )
+        pack = _build_pack(tmp_path, with_variants=False, sql_template=sql_template)
+        node = pack.silver["dim_thing"]
+
+        r_seed = render_node_sql(node, pack, _profile(), _default_ctx(mode="seed"))
+        r_inc = render_node_sql(
+            node, pack, _profile(),
+            _default_ctx(mode="incremental",
+                         prior_watermark={"erp_thing": "2026-06-01T00:00:00"}),
+        )
+
+        # Executable SQL is mode-correct (NOT normalized).
+        assert "1=1" in r_seed.sql
+        assert "_extract_ts > :watermark_erp_thing" in r_inc.sql
+        # ...but the plan-hash is identical across modes.
+        assert compute_rendered_sql_hash(r_seed) == compute_rendered_sql_hash(r_inc)
+
+    def test_first_incremental_no_cursor_hash_equals_seed(self, tmp_path: pathlib.Path) -> None:
+        """A first incremental with no prior cursor renders ``1=1`` in BOTH the
+        executable and hash passes — its hash must equal the seed's too."""
+        sql_template = "SELECT * FROM t WHERE {{ watermark_predicate }}"
+        pack = _build_pack(tmp_path, with_variants=False, sql_template=sql_template)
+        node = pack.silver["dim_thing"]
+        r_seed = render_node_sql(node, pack, _profile(), _default_ctx(mode="seed"))
+        r_inc = render_node_sql(
+            node, pack, _profile(),
+            _default_ctx(mode="incremental", prior_watermark={}),
+        )
+        assert compute_rendered_sql_hash(r_seed) == compute_rendered_sql_hash(r_inc)
+
+    def test_sql_body_edit_still_shifts_hash_across_modes(self, tmp_path: pathlib.Path) -> None:
+        """Detection preserved: a genuine SQL-template body edit must shift the
+        hash even with mode-normalization in place (the non-watermark SQL stays
+        inlined in the hash input)."""
+        base = "SELECT a FROM t WHERE {{ watermark_predicate }}"
+        edited = "SELECT a, b FROM t WHERE {{ watermark_predicate }}"
+        pack_a = _build_pack(tmp_path / "a", with_variants=False, sql_template=base)
+        pack_b = _build_pack(tmp_path / "b", with_variants=False, sql_template=edited)
+        # seed-vs-seed and incr-vs-incr both differ.
+        r_a = render_node_sql(pack_a.silver["dim_thing"], pack_a, _profile(),
+                              _default_ctx(mode="incremental",
+                                           prior_watermark={"erp_thing": "2026-06-01T00:00:00"}))
+        r_b = render_node_sql(pack_b.silver["dim_thing"], pack_b, _profile(),
+                              _default_ctx(mode="incremental",
+                                           prior_watermark={"erp_thing": "2026-06-01T00:00:00"}))
+        assert compute_rendered_sql_hash(r_a) != compute_rendered_sql_hash(r_b)
+
+    def test_snapshot_date_is_mode_invariant(self, tmp_path: pathlib.Path) -> None:
+        """``{{ snapshot_date }}`` is per-PROFILE, not per-mode: it renders
+        identically (and hashes identically) in seed and incremental. Guards the
+        token-audit claim that watermark_predicate is the ONLY per-mode token."""
+        sql_template = (
+            "SELECT * FROM t WHERE d <= {{ snapshot_date }} "
+            "AND {{ watermark_predicate }}"
+        )
+        pack = _build_pack(tmp_path, with_variants=False, sql_template=sql_template)
+        node = pack.silver["dim_thing"]
+        r_seed = render_node_sql(node, pack, _profile(), _default_ctx(mode="seed"))
+        r_inc = render_node_sql(
+            node, pack, _profile(),
+            _default_ctx(mode="incremental",
+                         prior_watermark={"erp_thing": "2026-06-01T00:00:00"}),
+        )
+        assert compute_rendered_sql_hash(r_seed) == compute_rendered_sql_hash(r_inc)
+
 
 # ---------------------------------------------------------------------------
 # Disallowed param value types

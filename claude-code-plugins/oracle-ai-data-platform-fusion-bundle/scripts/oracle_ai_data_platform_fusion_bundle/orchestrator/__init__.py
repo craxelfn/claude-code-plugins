@@ -295,6 +295,11 @@ def run(
     tenant_profile: "Any | None" = None,
     # Runtime drift gate bypass (dev/sandbox; hidden flag).
     force_fingerprint_skip: bool = False,
+    # Plan-hash continuity gate bypass (dev/sandbox; hidden flag).
+    # When True, a diverged AIDPF-4040 plan-hash on an incremental is
+    # repinned (audit row + proceed) instead of blocking. For deliberate
+    # SQL/profile/adapter edits; production/SOX runs MUST NOT use it.
+    repin_plan_hash: bool = False,
     # Opt-out of implicit-transitive-include in the plan
     # resolver. When True, declared roots must include every transitive
     # dep explicitly; missing deps raise AIDPF-1042.
@@ -374,6 +379,7 @@ def run(
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
             force_fingerprint_skip=force_fingerprint_skip,
+            repin_plan_hash=repin_plan_hash,
             strict_scope=strict_scope,
         )
 
@@ -403,6 +409,7 @@ def _dispatch_content_pack_run(
     resolved_pack: "Any | None",
     tenant_profile: "Any | None",
     force_fingerprint_skip: bool,
+    repin_plan_hash: bool = False,
     dry_run: bool = False,
     strict_scope: bool = False,
 ) -> RunSummary:
@@ -581,6 +588,7 @@ def _dispatch_content_pack_run(
         resolved_pack=resolved_pack,
         tenant_profile=tenant_profile,
         force_fingerprint_skip=force_fingerprint_skip,
+        repin_plan_hash=repin_plan_hash,
         shared_run_id=shared_run_id,
         enable_bronze_readiness_gate=False,
         shared_resume_context=resume_context,
@@ -967,6 +975,10 @@ def _run_content_pack_backend(
     resolved_pack: "Any | None",
     tenant_profile: "Any | None",
     force_fingerprint_skip: bool = False,
+    # Plan-hash continuity gate bypass (hidden --repin-plan-hash).
+    # Threaded into each cp_execute_node call so a diverged AIDPF-4040
+    # incremental is repinned (audit + proceed) instead of blocked.
+    repin_plan_hash: bool = False,
     # Shared run_id contract. When the top-level
     # dispatcher (the caller) already minted a run_id (because bronze
     # + content-pack must share one), pass it in and the content-pack
@@ -1457,6 +1469,7 @@ def _run_content_pack_backend(
             mode=mode,  # type: ignore[arg-type]
             profile_hash=profile_hash,
             prior_plan_hash=prior_plan_hash,
+            repin_plan_hash=repin_plan_hash,
         )
         node_duration = (_dt.now(_tz.utc) - node_started).total_seconds()
         status: str = "success" if result.status == "success" else "failed"
