@@ -87,7 +87,7 @@ class TestCreateDataFrameWithAllNoneColumns:
     def test_content_pack_single_source_success_row_builds_via_explicit_schema(self, spark) -> None:
         """The same row dict that the dispatcher produces — every
         nullable column None — must build a DataFrame without raising."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )
@@ -142,7 +142,7 @@ class TestCreateDataFrameWithAllNoneColumns:
         """The cascade-skip diagnostic row has even more None columns —
         every cursor field, every hash, row_count, plan_hash, etc. Must
         still build a DataFrame without raising."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )
@@ -180,7 +180,7 @@ class TestCreateDataFrameWithAllNoneColumns:
     def test_multi_source_batch_builds_atomically(self, spark) -> None:
         """The atomic-batch contract: primary + N lookup rows all build
         in a single DataFrame via createDataFrame."""
-        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_content_pack import (
+        from oracle_ai_data_platform_fusion_bundle.orchestrator.state_phase2 import (
             _build_state_row_schema,
             _normalise_row_for_schema,
         )

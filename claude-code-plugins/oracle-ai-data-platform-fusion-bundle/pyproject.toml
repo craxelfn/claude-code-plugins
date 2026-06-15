@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "oracle-ai-data-platform-fusion-bundle"
 version = "0.1.0a0"
-description = "Productized Fusion ERP/HCM/SCM → Oracle AI Data Platform pipeline with curated BICC extracts, medallion bronze/silver/gold in Delta, conformed dimensions, gold marts, and Oracle Analytics Cloud workbooks installable via OAC REST API."
+description = "Productized Fusion ERP/HCM/SCM → Oracle AI Data Platform pipeline with curated BICC extracts, medallion bronze/silver/gold in Delta, conformed dimensions, gold marts, and MCP-native Oracle Analytics Cloud workbook authoring."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

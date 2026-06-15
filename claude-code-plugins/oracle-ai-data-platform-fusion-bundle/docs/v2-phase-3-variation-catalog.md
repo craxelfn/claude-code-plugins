@@ -5,6 +5,10 @@ date: 2026-06-05
 updated: 2026-06-06 (round-1 rework — widen gold projections to v1 parity)
 ---
 
+> Historical report - not part of the current workflow. For current setup and
+> operator guidance, use [project_setup.md](project_setup.md) and
+> [../workflow.md](../workflow.md).
+
 # Variation-point catalog
 
 This document audits every tenant-variation knob the five v1 silver/gold

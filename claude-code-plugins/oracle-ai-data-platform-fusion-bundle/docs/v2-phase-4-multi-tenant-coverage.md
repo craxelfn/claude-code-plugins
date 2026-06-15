@@ -1,5 +1,9 @@
 # Phase 4 multi-tenant coverage
 
+> Historical report - not part of the current workflow. For current setup and
+> operator guidance, use [project_setup.md](project_setup.md) and
+> [../workflow.md](../workflow.md).
+
 `tests/parity/test_dual_runner_profiles.py` runs the dual-runner harness
 across two profiles. This document records the cross-profile diff (which
 rows the cancelled-status semantic filters; how `snapshot_date` shifts

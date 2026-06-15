@@ -1,5 +1,9 @@
 # Phase 4 ship-ready report — dual-runner parity gate
 
+> Historical report - not part of the current workflow. For current setup and
+> operator guidance, use [project_setup.md](project_setup.md) and
+> [../workflow.md](../workflow.md).
+
 Phase 5 reads this document when deciding whether to flip the default
 ``--execution-backend`` to ``content-pack``. One row per PLAN §15 Phase 4
 exit-criteria item; each row carries STATUS / EVIDENCE / BLOCKS_PHASE_5.

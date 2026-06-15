@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "oracle-ai-data-platform-fusion-bundle",
-      "description": "Productized Fusion → AIDP pipeline: curated BICC extracts, medallion bronze/silver/gold, conformed dimensions, gold marts, and OAC workbooks installable via OAC REST API. End-user consumption via OAC MCP Preview in Claude/Cline/Copilot.",
+      "description": "Productized Fusion → AIDP pipeline: curated BICC extracts, medallion bronze/silver/gold, conformed dimensions, gold marts, and MCP-native OAC workbook authoring. Legacy .bar OAC REST install remains available for snapshot deployments.",
       "version": "0.1.0-alpha",
       "source": "./",
       "category": "data",

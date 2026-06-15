@@ -86,8 +86,9 @@ pip install -e .
 pip install -e '.[test]'
 make test
 
-# 2. Scaffold a bundle in your repo
-mkdir my-fusion-lake && cd my-fusion-lake
+# 2. Create a customer bundle from the Phase 9 starter template
+mkdir my-fusion-lake
+cd my-fusion-lake
 aidp-fusion-bundle init
 
 # 3. Set up operator OAC MCP before OAC phases, then restart/reconnect Claude Code
@@ -220,42 +221,24 @@ Both signals show up in the orchestrator stdout under the same `[step]` line for
 ## Architecture
 
 ```
-                                                  ┌──────────────────────────────┐
-                                                  │   AIDP cluster (`tpcds`)     │
-                                                  │   Spark Thrift JDBC endpoint │
-                                                  │   schema=fusion_catalog.gold │
-                                                  └──────────────┬───────────────┘
-                                                                 │ JDBC
-                                                                 ▼
-┌─────────────────────────────────┐    REST API    ┌──────────────────────────────┐
-│ aidp-fusion-bundle dashboard    │───────────────▶│       Oracle Analytics       │
-│  install --target oac           │  (1) GET       │       Cloud (OAC)            │
-│                                 │      /catalog  │                              │
-│  - GET  /catalog?type=conns     │      ?search=* │  - data source: aidp_fusion  │
-│         &search=<name> (precheck│  (2) POST      │    (created via UI once;     │
-│         — skip POST if exists)  │      /snapshot │    bundle reuses on re-run)  │
-│  - POST /snapshots (.bar)       │      register  │  - workbooks: cfo_dashboard, │
-│  - POST /system/.../restore     │  (3) POST      │    ar_aging, ap_aging, ...   │
-│  - GET  /workRequests/{id}      │      /restore  │                              │
-└─────────────────────────────────┘                └──────────────┬───────────────┘
-                                                                 │ Logical SQL
-                                                                 ▼
-                                                  ┌──────────────────────────────┐
-                                                  │   OAC MCP Server (Preview)   │
-                                                  │   - discover_data            │
-                                                  │   - describe_data            │
-                                                  │   - execute_logical_sql      │
-                                                  └──────────────┬───────────────┘
-                                                                 │ MCP (stdio)
-                                                                 ▼
-                                                  ┌──────────────────────────────┐
-                                                  │  End-user AI client          │
-                                                  │  (Claude / Cline / Copilot)  │
-                                                  │  "what's our AR aging?"      │
-                                                  └──────────────────────────────┘
+Fusion BICC PVOs
+  -> AIDP bronze/silver/gold content-pack pipeline
+  -> OAC AIDP connection + OAC dataset (created manually in OAC UI)
+  -> OAC workbook JSON authored by workbook-authoring
+  -> OAC MCP save_catalog_content
+  -> end-user OAC MCP chat in Claude / Cline / Copilot
 ```
 
-The bundle authors content in OAC (workbooks), captures it as a Custom snapshot (`.bar`) excluding per-customer secrets, ships the `.bar` as a release artifact, and installs via four documented public REST calls. End users consume via OAC MCP. AIDP serves the data via JDBC throughout.
+The current dashboard path is MCP-native. `oac-dataset-advisor` grounds the
+dataset recommendation in the live AIDP gold catalog; the user creates the OAC
+AIDP connection and dataset in the OAC UI; `workbook-authoring` binds workbook
+JSON to the dataset XSA reference and saves it via OAC MCP when
+`save_catalog_content` is available.
+
+The legacy `.bar` snapshot deployment remains available for packaged workbook
+rollouts through documented OAC REST endpoints. See
+[docs/oac_rest_api_setup.md](docs/oac_rest_api_setup.md) when that path is
+explicitly needed.
 
 ---
 
@@ -280,8 +263,8 @@ Run `aidp-fusion-bundle catalog probe --pod <url>` to reconcile placeholders aga
 
 ## Use cases
 
-1. **New AIDP customer onboarding** *(Phase 2 🚧)* — `bundle.yaml` with `examples/full_finance.yaml`, run orchestrator, walk away, return to a populated bronze + silver + gold + OAC workbooks.
-2. **CFO demo in 30 minutes** *(0.1.0a ⚠ partial — gold marts stubbed)* — clone repo → `bootstrap` → `run --mode seed` → `dashboard install --target oac` → open OAC workbook → optionally chat via OAC MCP.
+1. **New AIDP customer onboarding** — create a customer bundle, run bootstrap + seed, create the OAC AIDP connection/dataset, then author the workbook via OAC MCP.
+2. **CFO demo path** — clone repo → set up OAC MCP → `bootstrap` → `run --mode seed` → `oac-dataset-advisor` → create the OAC dataset → `workbook-authoring` → open OAC workbook → optionally hand off end-user MCP chat.
 3. **Custom GenAI agents grounded on Fusion data** *(0.1.0a ✅)* — `ai_generate("which suppliers had >$1M Q1 spend?")` against the bundle's curated gold marts via OCI Generative AI.
 4. **Fusion-side of the SAP-modernization pattern** *(Phase 2 🚧)* — Fusion data lands here; SAP data via parallel pipeline; both unified in AIDP gold layer.
 5. **Build cross-source data products** *(Phase 2 🚧)* — combine Fusion + Salesforce/Workday/S3/Postgres via the same `aidataplatform` connector family.
@@ -297,11 +280,11 @@ Run `aidp-fusion-bundle catalog probe --pod <url>` to reconcile placeholders aga
 
 ## References
 
-- **Plan**: [`oracle-ai-data-platform-fusion-bundle.md`](../../../../../.claude/plans/oracle-ai-data-platform-fusion-bundle.md)
-- **Sibling plugin** (single-PVO connector skill): [`oracle-ai-data-platform-workbench-spark-connectors`](../oracle-ai-data-platform-workbench-spark-connectors/)
+- **Plan**: `oracle-ai-data-platform-fusion-bundle.md` in the private planning workspace.
+- **Sibling plugin** (single-PVO connector skill): `oracle-ai-data-platform-workbench-spark-connectors`.
 - **Official Oracle BICC blog**: https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc
 - **Ateam saas-batch blog**: https://www.ateam-oracle.com/how-to-extract-fusion-data-using-oracle-ai-data-platform
-- **Official sample notebook**: [`Read_Only_Ingestion_Connectors.ipynb`](../../../data-engineering/ingestion/Read_Only_Ingestion_Connectors.ipynb)
+- **Official sample notebook**: `Read_Only_Ingestion_Connectors.ipynb` from the Oracle AIDP samples repository.
 - **OAC MCP Preview**: https://docs.oracle.com/en/cloud/paas/analytics-cloud/acsdv/access-oracle-analytics-cloud-mcp-server-preview.html
 - **OAC MCP Server announcement**: https://blogs.oracle.com/analytics/oracle-analytics-cloud-mcp-server-bridging-enterprise-analytics-and-ai
 - **Modernize SAP with AIDP + Fusion**: https://docs.oracle.com/en/solutions/modernize-sap-aidp-fusion/

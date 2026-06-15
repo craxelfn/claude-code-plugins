@@ -29,6 +29,8 @@ older reports, ADRs, and tests can be interpreted without guessing.
 
 | Code | Area | Status | Meaning | Usual action |
 |---|---|---|---|---|
+| `AIDPF-1001` | Bundle config | Historical | Planned code for `bundle.yaml` schema version newer than the engine. | Upgrade the plugin/engine or downgrade/migrate the bundle schema. |
+| `AIDPF-1010` | Bundle config | Historical | Planned code for an unresolved required environment variable. | Set the env var or replace it with a supported secret reference. |
 | `AIDPF-1020` | Bootstrap / diagnostics | Active | Operator identity cannot be resolved. | Set `--operator`, `AIDP_OPERATOR`, or run from a shell where `USER` is set. |
 | `AIDPF-1030` | Bundle config | Active | `contentPack.profile` is missing. | Add the profile name under `contentPack.profile` in `bundle.yaml`. |
 | `AIDPF-1031` | Bundle config | Active | `bundle.yaml` has no `contentPack` block. | Add a `contentPack` block; Phase 9 uses the content-pack path only. |
@@ -82,9 +84,14 @@ older reports, ADRs, and tests can be interpreted without guessing.
 | `AIDPF-2080` | Pack validation | Warn-only | Bronze extract PVO is not in the curated catalog. | Verify it is an intentional custom PVO; the live drift gate catches real typos. |
 | `AIDPF-2081` | Bundle validation | Active | Bundle dataset id does not resolve in any pack layer. | Fix the bundle dataset id or add the node to the pack. |
 | `AIDPF-2092` | Bronze runtime | Active | Bronze cursor exists but target table/state is inconsistent. | Repair the bronze target/state alignment before rerunning incremental extraction. |
+| `AIDPF-3010` | Source preflight | Historical | Planned code for BICC PVO schema mismatch. | Run a metadata probe and update the pack/profile to match the live PVO. |
+| `AIDPF-3020` | Custom extractors | Historical | Planned code for custom extractor load failure or invalid returned schema. | Check the extractor import path, signature, and required audit columns. |
+| `AIDPF-4001` | Tenant drift | Historical | Planned code for tenant fingerprint change. | Confirm the tenant change and refresh bootstrap/profile evidence. |
+| `AIDPF-4020` | Runtime preflight | Historical | Planned code for dropped target preflight failure. | Reseed or recreate the missing target. |
 | `AIDPF-4030` | Strategy execution | Active | Strategy is not supported by the current content-pack runner. | Change the node strategy or implement support. |
 | `AIDPF-4031` | Strategy execution | Active | Target identifier failed the allowlist. | Use a valid three-part target identifier. |
 | `AIDPF-4040` | Resume / incremental | Active | Plan-hash drift detected on resume or incremental continuity check. | Confirm the plan change; rerun seed or use the documented repin path only when intentional. |
+| `AIDPF-4050` | Runtime locking | Historical | Planned code for cross-run lock held by another active run. | Wait for the holder to finish, or break the lock only after proving the holder is dead. |
 | `AIDPF-4060` | State commit | Active | State-row hard commit failed. | Fix the Delta/state-table write failure before retrying. |
 | `AIDPF-4061` | State commit | Active | Output watermark regressed. | Investigate source/order changes; do not advance state until monotonicity is restored. |
 | `AIDPF-4070` | Runtime schema | Active | Materialized target schema does not match `node.outputSchema`. | Fix SQL casts/aliases or update the declared output schema. |
@@ -96,10 +103,14 @@ older reports, ADRs, and tests can be interpreted without guessing.
 | `AIDPF-5011` | SQL renderer | Active | `{{ profile.<key> }}` resolved to a disallowed value type. | Use scalar profile values supported by the renderer. |
 | `AIDPF-5013` | SQL renderer | Active | `profile.snapshotDate` is present but not an ISO-8601 date. | Use `YYYY-MM-DD` or leave the value absent/empty for `CURRENT_DATE()`. |
 | `AIDPF-5014` | Builtin dispatch | Active | Builtin node `implementation.callable` is not in the registry. | Use a registered builtin callable id. |
+| `AIDPF-6001` | Quality tests | Historical | Planned code for `reconcile_to` quality test failure. | Review source-vs-target aggregation and fix the reconciliation gap. |
+| `AIDPF-6020` | Quality tests | Historical | Planned code for custom quality test load failure or invalid return shape. | Check the quality test import path, signature, and result contract. |
 | `AIDPF-7001` | Dashboard validation | Active | Dashboard requires an undeclared/missing table or node. | Fix `requires.tables` / `requires.columns` to match pack gold nodes. |
+| `AIDPF-7002` | Dashboard delivery | Historical | Planned code for `.bar` content referencing a column not provided by gold. | Re-author the workbook/snapshot against current gold or extend gold to provide the column. |
 | `AIDPF-7003` | Dashboard validation | Active | Dashboard requirement type does not match the referenced pack object. | Fix dashboard metadata so table/column requirements match the pack. |
 | `AIDPF-7004` | Dashboard validation | Active | Dashboard pack compatibility check failed. | Align `requires.pack.id`, `minVersion`, or `maxVersion` with the active pack. |
 | `AIDPF-7005` | Dashboard validation | Active | `security.allowedColumns` contains columns not listed in `requires.columns`. | Make allowed columns a subset of required columns. |
+| `AIDPF-8001` | Dashboard security | Historical | Planned code for high-PII column in dashboard validation queries. | Remove the high-PII column or change the dashboard contract. |
 | `AIDPF-8002` | Dashboard security | Active | Dashboard exposes `pii: high` columns in requirements or allowed columns. | Remove high-PII columns or redesign the dashboard security model. |
 | `AIDPF-8010` | Quality tests | Active | Quality test failed. | Inspect the failed quality rule and correct data or node logic. |
 | `AIDPF-8011` | Quality tests | Active | Quality test is deferred or unsupported. | Implement the quality rule or accept the deferred status intentionally. |

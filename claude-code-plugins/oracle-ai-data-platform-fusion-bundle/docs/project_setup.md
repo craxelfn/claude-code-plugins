@@ -4,6 +4,10 @@ Use this guide when starting from a fresh checkout or preparing a new customer
 bundle. After setup is complete, continue with the operator workflow in
 [../workflow.md](../workflow.md).
 
+Scaffolded templates live under [../examples/](../examples/). For a first
+customer project, `aidp-fusion-bundle init` writes the current
+[../examples/minimal-bundle/](../examples/minimal-bundle/) starter.
+
 ## What You Are Setting Up
 
 There are two working directories involved:
@@ -71,7 +75,8 @@ For REST job dispatch details, including AIDP credential-store setup, see
 
 ## Create A Customer Bundle
 
-Create the customer project outside the plugin checkout:
+Create the customer project outside the plugin checkout. From an empty customer
+project directory, run the current Phase 9 scaffold:
 
 ```bash
 mkdir my-fusion-lake
@@ -79,7 +84,7 @@ cd my-fusion-lake
 aidp-fusion-bundle init
 ```
 
-The generated bundle must use the Phase 9 content-pack shape:
+The default scaffold uses the Phase 9 content-pack shape:
 
 ```yaml
 contentPack:

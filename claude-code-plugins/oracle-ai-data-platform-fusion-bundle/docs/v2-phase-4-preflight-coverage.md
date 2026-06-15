@@ -1,5 +1,9 @@
 # Phase 4 preflight + drift-gate coverage
 
+> Historical report - not part of the current workflow. For current setup and
+> operator guidance, use [project_setup.md](project_setup.md) and
+> [../workflow.md](../workflow.md).
+
 Per-gate behaviour matrix. Recorded so Phase 5's default-flip PR can
 trace each preflight surface to a Phase 4 test + the corresponding v1
 behaviour.

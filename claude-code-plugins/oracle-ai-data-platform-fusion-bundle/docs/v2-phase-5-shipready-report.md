@@ -1,5 +1,9 @@
 # v2 Phase 5 — Ship-ready report
 
+> Historical report - not part of the current workflow. For current setup and
+> operator guidance, use [project_setup.md](project_setup.md) and
+> [../workflow.md](../workflow.md).
+
 > Live snapshot of the Phase 5 implementation state. The Phase 6
 > review reads this BEFORE accepting Phase 5 as a hard prerequisite.
 >

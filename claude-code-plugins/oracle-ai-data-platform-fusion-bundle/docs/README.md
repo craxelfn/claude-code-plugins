@@ -5,6 +5,7 @@ Start here if you are trying to use or operate the plugin:
 | Need | Document |
 |---|---|
 | Fresh checkout or customer bundle setup | [project_setup.md](project_setup.md) |
+| Copyable sample bundles and overlays | [../examples/README.md](../examples/README.md) |
 | End-to-end operator workflow | [workflow.md](../workflow.md) |
 | AIDPF code meanings and recovery hints | [aidpf-error-codes.md](aidpf-error-codes.md) |
 | OAC MCP setup for operators and end users | [oac_mcp_setup.md](oac_mcp_setup.md) |
@@ -40,3 +41,15 @@ creation, and OAC MCP does not expose a create-dataset tool.
 | Architecture decisions | [adr/](adr/) |
 | Historical phase reports | `v2-phase-*.md` |
 | Feature plans and notes | [features/](features/) |
+
+## Validation
+
+Run local documentation validation with:
+
+```bash
+make docs-check
+```
+
+This checks that user-facing relative Markdown links resolve on disk and that
+every `AIDPF-*` code referenced in the repository appears in
+[aidpf-error-codes.md](aidpf-error-codes.md).

@@ -15,6 +15,20 @@ from oracle_ai_data_platform_fusion_bundle import cli
 
 
 class TestInit:
+    def test_default_template_is_current_minimal_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli.main, ["init"])
+        assert result.exit_code == 0
+
+        bundle = (tmp_path / "bundle.yaml").read_text(encoding="utf-8")
+        config = (tmp_path / "aidp.config.yaml").read_text(encoding="utf-8")
+        assert "contentPack:" in bundle
+        assert "fusion-finance-starter" in bundle
+        assert "supplier_spend" in bundle
+        assert "project: my-fusion-lake" in config
+
     def test_writes_minimal_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
@@ -858,10 +872,17 @@ class TestStatus:
     def test_pyspark_unavailable_falls_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import sys
+
         monkeypatch.chdir(tmp_path)
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
-        # Ensure pyspark import fails — patch SparkSession import
-        # If pyspark is importable, the test path differs; we only assert exit 0 either way.
+        # Force the pyspark import to fail so `status` deterministically takes
+        # its no-pyspark fallback (print the query, exit 0) regardless of
+        # whether pyspark is installed in this environment. Setting the module
+        # entries to None makes `from pyspark.sql import SparkSession` raise
+        # ImportError, which is exactly what the fallback branch catches.
+        monkeypatch.setitem(sys.modules, "pyspark", None)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", None)
         result = CliRunner().invoke(cli.main, ["status"])
         assert result.exit_code == 0
 

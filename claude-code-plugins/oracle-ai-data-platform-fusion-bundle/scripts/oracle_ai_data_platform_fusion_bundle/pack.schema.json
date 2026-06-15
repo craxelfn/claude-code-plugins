@@ -83,7 +83,7 @@
     },
     "IncrementalImpact": {
       "additionalProperties": false,
-      "description": "Per-VP impact analysis recorded on both the overlay and the\nevidence snapshot.\n\nThe medallion-author skill populates this when drafting an overlay;\nbootstrap (feature #2) mirrors it into the per-resolution evidence\non the ``--refresh`` commit (and on initial commit when the\noverlay is skill-authored).",
+      "description": "Per-VP impact analysis recorded on both the overlay and the\nevidence snapshot.\n\nThe medallion-author skill populates this when drafting an overlay;\nbootstrap mirrors it into the per-resolution evidence on the\n``--refresh`` commit and on initial commit when the overlay is\nskill-authored.",
       "properties": {
         "affectedNodes": {
           "items": {

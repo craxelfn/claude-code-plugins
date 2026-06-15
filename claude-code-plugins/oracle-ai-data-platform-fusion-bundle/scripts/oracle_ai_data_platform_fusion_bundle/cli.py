@@ -49,8 +49,9 @@ def main(ctx: click.Context, bundle_path: Path, config_path: Path, env_name: str
 
 
 @main.command()
-@click.option("--template", type=click.Choice(["minimal", "full-finance"]), default="minimal",
-              help="Which example to scaffold (default: minimal).")
+@click.option("--template", type=click.Choice(["minimal-bundle", "minimal", "full-finance"]),
+              default="minimal-bundle",
+              help="Which example to scaffold (default: minimal-bundle).")
 @click.option("--force", is_flag=True, help="Overwrite existing bundle.yaml / aidp.config.yaml.")
 def init(template: str, force: bool) -> None:
     """Scaffold a bundle.yaml + aidp.config.yaml in the current directory."""

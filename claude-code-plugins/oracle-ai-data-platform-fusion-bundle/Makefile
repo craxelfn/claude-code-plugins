@@ -5,7 +5,7 @@
 #   make test PYTHON=.venv/bin/python
 PYTHON ?= python
 
-.PHONY: test test-all
+.PHONY: test test-all docs-check
 
 # Unit tests only (acceptance target for BACKLOG P2.4).
 # Live tests are gated by AIDP_FUSION_BUNDLE_INTEGRATION=1 and live under tests/live.
@@ -15,3 +15,6 @@ test:
 # Unit + non-live integration. Live tests still no-op without the env gate.
 test-all:
 	$(PYTHON) -m pytest tests -q
+
+docs-check:
+	$(PYTHON) scripts/docs_check.py

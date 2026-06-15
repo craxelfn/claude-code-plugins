@@ -1,23 +1,28 @@
-# Example bundles
+# Examples
 
-Three sample `bundle.yaml` files for different operator scenarios.
+Current examples focus on the Phase 9 content-pack workflow.
 
-| File | Backend | When to use |
-|---|---|---|
-| `minimal_gl_only.yaml` | v1 legacy-python | Single-pipeline smoke test — `gl_period_balances` only. |
-| `full_finance.yaml` | v1 legacy-python | Full v1 finance pipeline (suppliers, AR, AP, PO, SCM). |
-| `fusion-finance-starter.yaml` | **v2 content-pack** | Phase 3+: bundle wires `contentPack: { name: fusion-finance-starter, profile: finance-default }`, materialises silver + gold from pack SQL templates. |
+| Example | Purpose |
+|---|---|
+| [minimal-bundle/](minimal-bundle/) | Customer bundle scaffold used by `aidp-fusion-bundle init`. Builds the shipped `supplier_spend` mart and includes `bundle.yaml` plus `aidp.config.yaml`. |
+| [overlay-pack/](overlay-pack/) | Additive content-pack overlay that adds a new gold mart without changing the shipped starter pack. |
+| [fusion-finance-starter.yaml](fusion-finance-starter.yaml) | Older single-file content-pack bundle example kept for compatibility. Prefer `minimal-bundle/` for new users. |
+| [aidp.config.example.yaml](aidp.config.example.yaml) | Older standalone AIDP config example kept for compatibility. Prefer `minimal-bundle/aidp.config.yaml` for new users. |
 
-The v2 bundle reads its tenant profile from `examples/profiles/finance-default.yaml` (resolution path: `<bundle.yaml.parent>/profiles/<profile>.yaml` per PLAN §9.5.7).
+The old `minimal_gl_only.yaml` and `full_finance.yaml` examples are legacy
+fixtures from the pre-Phase-9 runner. They remain in the repository for tests
+and reference, but new projects should start from `aidp-fusion-bundle init`.
 
-## Running the v2 starter
+## Recommended New-User Path
 
+```bash
+mkdir my-fusion-lake
+cd my-fusion-lake
+aidp-fusion-bundle init
+aidp-fusion-bundle validate
+aidp-fusion-bundle dashboard mcp-setup --connector-js <path-to-oac-mcp-connect.js>
+aidp-fusion-bundle bootstrap --check-iam
+aidp-fusion-bundle run --mode seed --dry-run
 ```
-aidp-fusion-bundle run \
-  --inline \
-  --mode seed \
-  --execution-backend content-pack \
-  --bundle examples/fusion-finance-starter.yaml
-```
 
-The v1 bundles continue to work under their default backend without changes — Phase 3 adds the v2 wiring alongside, not in place of, the v1 fixtures.
+For the full setup guide, see [../docs/project_setup.md](../docs/project_setup.md).

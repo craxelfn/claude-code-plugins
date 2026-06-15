@@ -64,14 +64,16 @@ Install the CLI from this checkout:
 pip install -e .
 ```
 
-Scaffold or prepare a project:
+Create a customer project from the Phase 9 starter template:
 
 ```bash
+mkdir my-fusion-lake
+cd my-fusion-lake
 aidp-fusion-bundle init
 ```
 
-Then make sure the bundle uses the current content-pack shape. A starter bundle
-should declare:
+Make sure the bundle uses the current content-pack shape. A starter bundle
+declares:
 
 ```yaml
 contentPack:
