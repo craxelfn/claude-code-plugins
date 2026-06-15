@@ -1,12 +1,9 @@
 """Pydantic v2 models for ``bundle.yaml`` and ``aidp.config.yaml``.
 
-P1.5ε §Step 1d — ``load_bundle`` lives here too. It used to live at
-``orchestrator/runtime.py:354`` but doing three pure-schema-level operations
-(YAML parse → env-var render → Pydantic validate) on schema-level objects;
-keeping it under ``orchestrator/`` forced the dispatch package and the
-schema-level plan resolver to pull engine internals just to load a bundle.
-``orchestrator/runtime.py`` re-exports the name for back-compat — identity
-is preserved.
+The schema layer also owns ``load_bundle`` so CLI, dispatch, and dry-run code
+can parse configuration without importing orchestrator runtime internals.
+``orchestrator.runtime`` re-exports the loader for compatibility with older
+internal callers.
 """
 
 from __future__ import annotations
@@ -22,11 +19,10 @@ from .refs import render_vars
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — content-pack backend AIDPF error codes
+# Content-pack bundle AIDPF error codes
 # ---------------------------------------------------------------------------
-# Registered in PLAN §25. Surfaced via the schema layer because the
-# bundle-shape gates (missing contentPack block, unresolvable pack path)
-# are pure schema concerns.
+# Surfaced via the schema layer because bundle-shape gates such as a missing
+# ``contentPack`` block or an unresolvable pack path are pure config concerns.
 
 AIDPF_1030_PROFILE_MISSING = "AIDPF-1030"
 """`bundle.yaml`'s `contentPack.profile` field is missing when content-pack backend selected."""
@@ -48,9 +44,9 @@ AIDPF_1038_RESOLVED_ROOT_NO_PACK_YAML = "AIDPF-1038"
 
 AIDPF_1036_PACK_VALIDATION_FAILED = "AIDPF-1036"
 """Content-pack failed `validate_pack_full(...)` at run-start. The transport
-code at the CLI/run boundary; the per-error AIDPF codes from the Phase 1
-validator carry the specific problems (orphan overrides, DAG cycles,
-unresolved variation points, etc.)."""
+code at the CLI/run boundary; per-error AIDPF codes from the pack validators
+carry the specific problems (orphan overrides, DAG cycles, unresolved
+variation points, etc.)."""
 
 
 class ContentPackRootNotFoundError(Exception):
@@ -111,9 +107,9 @@ class EnvSpec(BaseModel):
     oci_profile: str | None = Field(default="DEFAULT", alias="ociProfile")
     auth: AuthSpec = AuthSpec()
 
-    # P1.5ε — dispatch coords for ``aidp-fusion-bundle run`` (no --inline).
-    # Optional on the model because validate/bootstrap/status do not need
-    # them; the dispatch layer enforces presence in preflight.
+    # Dispatch coordinates for ``aidp-fusion-bundle run``. Optional on the
+    # model because validate/bootstrap/status do not need them; dispatch
+    # preflight enforces presence when they are required.
     ai_data_platform_id: str | None = Field(default=None, alias="aiDataPlatformId")
     cluster_key: str | None = Field(default=None, alias="clusterKey")
     cluster_name: str | None = Field(default=None, alias="clusterName")
@@ -129,8 +125,8 @@ class Defaults(BaseModel):
     workspace_root: str = Field(default="Shared", alias="workspaceRoot")
 
     workspace_dir: str | None = Field(default=None, alias="workspaceDir")
-    """Server-side notebook upload root for cluster-mode bootstrap
-    (Phase 4.1 / D3). ``None`` ⇒ dispatch derives
+    """Server-side notebook upload root for cluster-mode bootstrap.
+    ``None`` ⇒ dispatch derives
     ``/Workspace/{workspace_root}/fusion-bundle-bootstrap`` at call time.
     Only consulted by ``aidp-fusion-bundle bootstrap --dispatch-mode=cluster``;
     local-mode bootstrap + the existing ``run`` dispatcher both ignore
@@ -170,7 +166,7 @@ class FusionConn(BaseModel):
     schema_overrides: dict[str, str] = Field(
         default_factory=dict, alias="schemaOverrides"
     )
-    """Per-PVO BICC offering schema overrides (P1.5α-fix19).
+    """Per-PVO BICC offering schema overrides.
 
     Wins over catalog default + auto-discovery. Key: bundle pvo id —
     matches ``DatasetSpec.id`` / the bronze ``NodeYaml.id`` (the
@@ -220,11 +216,12 @@ class DimensionsSpec(BaseModel):
     build: list[str] = Field(
         default_factory=lambda: ["dim_supplier", "dim_account", "dim_calendar", "dim_org"]
     )
-    """Default includes ``dim_supplier`` (§6 Q1 fix — was previously missing,
-    silently dropping a shipped dim from clean-checkout runs). ``dim_org`` is
-    retained as a default opt-in but doesn't ship a content-pack node today;
-    the resolver emits ``RunStep(status='deferred')`` for it instead of
-    crashing."""
+    """Default dimension build list for clean-checkout runs.
+
+    ``dim_org`` is retained as a default opt-in but does not ship a
+    content-pack node today; the resolver emits ``RunStep(status='deferred')``
+    for it instead of crashing.
+    """
 
 
 class GoldSpec(BaseModel):
@@ -240,18 +237,16 @@ class NotificationsSpec(BaseModel):
 
 
 class IncrementalConfig(BaseModel):
-    """P1.17 — knobs for ``--mode incremental`` runs.
+    """Configuration for ``--mode incremental`` runs.
 
-    Today carries only ``watermark_safety_window_seconds``; future P3.x
-    fields (e.g. per-PVO override of the bronze MERGE write strategy,
-    schema-evolution policy) attach here.
+    Today carries only ``watermark_safety_window_seconds``.
 
     ``watermark_safety_window_seconds`` is the gap subtracted from
     ``extract_started_at`` when persisting the bronze cursor. Absorbs
     AIDP-vs-Fusion clock skew so the next incremental BICC filter
     doesn't drop rows at the boundary. Default ``3600`` (1h) — wider
     than typical NTP-synced drift between OCI-hosted AIDP and Fusion
-    Cloud; matches β.1's hardcoded ``WATERMARK_SAFETY_WINDOW``.
+    Cloud; matches the runtime module's default ``WATERMARK_SAFETY_WINDOW``.
     Validated ``gt=0`` because zero would erase the buffer and a
     negative value would move the cursor INTO THE FUTURE relative to
     ``extract_started_at`` (BICC returns zero rows even when data
@@ -346,10 +341,7 @@ class OacDashboardSpec(BaseModel):
 
 
 class ContentPackSpec(BaseModel):
-    """Phase 2 — declare which content pack + tenant profile this bundle runs.
-
-    Optional on the top-level ``Bundle``; required when ``--execution-backend
-    content-pack`` is selected. v1 bundles validate without it.
+    """Declare which content pack and tenant profile this bundle runs.
 
     Three resolution shapes for the pack directory, handled by
     :func:`resolve_content_pack_root` (not by Pydantic):
@@ -360,9 +352,9 @@ class ContentPackSpec(BaseModel):
     * ``path`` relative → resolved against ``bundle.yaml``'s parent
       directory (NOT CWD — bundle-relative resolution survives `cd`).
 
-    The profile YAML always lives at ``<bundle.yaml.parent>/profiles/
-    <profile>.yaml`` (PLAN §9.5.7 — profile beside the bundle, never inside
-    the pack directory).
+    The profile YAML always lives beside the bundle at
+    ``<bundle.yaml.parent>/profiles/<profile>.yaml``; profiles do not live
+    inside the content-pack directory.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -384,7 +376,7 @@ class Bundle(BaseModel):
 
     api_version: Literal["aidp-fusion-bundle/v1"] = Field(alias="apiVersion")
     version: Literal["0.2.0"] = "0.2.0"
-    """Bundle schema version (Option L — pay now or carry un-versioned bundles forever).
+    """Bundle schema version.
 
     Default `"0.2.0"` so existing bundles continue to load implicitly. When a
     breaking schema change ships in v0.3, this Literal widens to
@@ -404,7 +396,7 @@ class Bundle(BaseModel):
     notifications: NotificationsSpec = NotificationsSpec()
     incremental: IncrementalConfig = Field(default_factory=IncrementalConfig)
     content_pack: ContentPackSpec | None = Field(default=None, alias="contentPack")
-    """Phase 2 — opt-in content-pack execution. ``None`` means v1 (legacy-python) only."""
+    """Active content-pack declaration. Current customer bundles should set it."""
 
     @model_validator(mode="after")
     def _validate_unique_dataset_ids(self) -> Self:
@@ -417,7 +409,7 @@ class Bundle(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Bundle loader (P1.5ε §Step 1d — moved from orchestrator/runtime.py:354)
+# Bundle loader
 # ---------------------------------------------------------------------------
 #
 # Lives at the schema layer because every step is a pure schema-level
@@ -546,7 +538,7 @@ def load_bundle(bundle_path: Path) -> tuple["Bundle", "TablePaths"]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — content-pack root resolution
+# Content-pack root resolution
 # ---------------------------------------------------------------------------
 
 

@@ -2,15 +2,8 @@
 
 Distinct from the Pydantic schema validation in :mod:`schema.medallion_pack`:
 these validators need access to the filesystem (SQL files), the assembled
-pack (after overlay merge), and cross-references between packs and
-dashboards.
-
-References:
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §9.1 (SQL template variables)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §9.5 (variation points)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §11.3 (strategy validation)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §12 (dashboard pack contract)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §25 (error codes)
+pack after overlay merge, and cross-references between packs and dashboards.
+Operator-facing behavior is documented in ``docs/content_pack_execution.md``.
 
 Validators implemented (one error code per failure mode):
 
@@ -32,7 +25,7 @@ from typing import Iterable
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import ResolvedPack
 from oracle_ai_data_platform_fusion_bundle.schema.dashboard_pack import DashboardYaml
 
-# Error codes (registered in PLAN §25).
+# Error codes surfaced by content-pack validation.
 AIDPF_2003_SQL_FILE_MISSING = "AIDPF-2003"
 AIDPF_2040_DAG_CYCLE = "AIDPF-2040"
 AIDPF_2041_UNRESOLVED_DEPENDENCY = "AIDPF-2041"
@@ -78,7 +71,7 @@ class ValidationReport:
 
 
 # ---------------------------------------------------------------------------
-# Allowlisted SQL template variables (PLAN §9.1)
+# Allowlisted SQL template variables.
 # ---------------------------------------------------------------------------
 
 _BASE_TEMPLATE_VARS = {
@@ -141,11 +134,11 @@ def validate_sql_paths(pack: ResolvedPack) -> list[ValidationError]:
 def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
     """Confirm every `{{ ... }}` token in pack SQL files is allowed and declared.
 
-    Allowlisted tokens (PLAN §9.1):
+    Allowlisted tokens:
         * Bare names in `_BASE_TEMPLATE_VARS`.
         * `profile.<key>` — resolved against `pack.profiles[<active>].<key>`
-          at render time. Phase 1 doesn't check the inner key chain (depth
-          can vary), only that the namespace exists in the pack.
+          at render time. This validator checks only that the namespace exists
+          in the pack because profile key depth can vary.
         * `column.<name>` — must match a declared `columnAliases.<name>`.
         * `semantic.<name>` — must match a declared `semanticVariants.<name>`.
     """
@@ -246,8 +239,8 @@ def validate_dag(pack: ResolvedPack) -> list[ValidationError]:
     #   - bronze datasets from bronze.yaml
     #   - silver nodes by id
     declared_bronze: set[str] = set()
-    # Phase 9: per-file pack.bronze is the source of truth; legacy
-    # pack.bronze_yaml retained transitionally.
+    # Per-file pack.bronze is the source of truth; legacy pack.bronze_yaml is
+    # retained for backwards compatibility.
     declared_bronze.update(pack.bronze.keys())
     for ds in pack.bronze_yaml.get("datasets", []) or []:
         if isinstance(ds, dict) and "id" in ds:
@@ -462,7 +455,7 @@ def validate_dashboard_security_and_compat(
     * **AIDPF-8002** — any column in ``requires.columns`` OR
       ``security.allowedColumns`` whose gold ``outputSchema`` declares
       ``pii: high`` is rejected. High-PII columns must not be reachable
-      via OAC dataset/RPD (PLAN §12.6).
+      via OAC dataset/RPD.
     """
     errors: list[ValidationError] = []
     where = f"dashboard/{dashboard.id}"
@@ -568,7 +561,7 @@ def validate_dashboard_security_and_compat(
                             f"`{dashboard.id}` references `{table}.{col_name}` "
                             f"which is declared `pii: high` in the gold node's "
                             f"`outputSchema`. High-PII columns must not be "
-                            f"reachable via OAC dataset/RPD (PLAN §12.6). "
+                            f"reachable via OAC dataset/RPD. "
                             f"Remove from `requires.columns` / `allowedColumns` "
                             f"or downgrade the column's pii classification."
                         ),
@@ -585,13 +578,12 @@ def validate_dashboard_security_and_compat(
 
 
 def validate_bronze_pvo_catalog(pack: ResolvedPack) -> list[ValidationError]:
-    """Phase 9: WARN when a bronze_extract node's ``pvo_id`` is not in the
-    curated ``fusion_catalog.py``.
+    """WARN when a bronze_extract node's ``pvo_id`` is not in the catalog.
 
-    WARN-only — pack loads cleanly; Phase 5's BICC drift gate
-    (``AIDPF-2072``) catches typo'd PVOs at extract-preflight time.
-    Preserves the customer-extension story: customers author overlay
-    pack YAMLs for new PVOs without a plugin release.
+    WARN-only: pack loads cleanly; the BICC drift gate (``AIDPF-2072``)
+    catches typo'd PVOs at extract-preflight time. This preserves the customer
+    extension story: customers can author overlay-pack YAMLs for new PVOs
+    without a plugin release.
 
     Missing ``pvo_id`` entirely produces NO WARN — there is nothing to
     cross-reference.
@@ -618,7 +610,7 @@ def validate_bronze_pvo_catalog(pack: ResolvedPack) -> list[ValidationError]:
                     f"{AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG}: bronze "
                     f"node `bronze/{node_id}` references pvo_id "
                     f"{pvo_id!r} which is not in the curated fusion_catalog. "
-                    f"Pack loads cleanly; Phase 5's BICC drift gate "
+                    f"Pack loads cleanly; the BICC drift gate "
                     f"(AIDPF-2072) catches typos at extract-preflight time. "
                     f"Customer overlay packs commonly hit this WARN."
                 ),

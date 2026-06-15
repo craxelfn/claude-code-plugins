@@ -66,11 +66,18 @@ Before a real bootstrap or seed, confirm these exist:
 | Fusion BICC | Fusion user with BICC privileges. |
 | Fusion BICC | External Storage profile configured in the BICC console. |
 | AIDP | AI Data Platform OCID, workspace, and cluster. |
-| AIDP | Credential-store entry for the Fusion BICC password, usually loaded as `FUSION_BICC_PASSWORD`. |
+| AIDP | Credential-store entry for the Fusion BICC password. Default name: `fusion_bicc_password`; default key: `password`. |
 | OAC | OAC instance where the AIDP connection, dataset, and workbook will live. |
 | OAC | User for operator MCP setup; use least privilege, especially because OAC MCP v1.4 exposes write/delete/ACL tools. |
 
-For REST job dispatch details, including AIDP credential-store setup, see
+Create the AIDP credential-store entry before the first bootstrap or REST
+dispatch. The cluster notebook reads it with
+`aidputils.secrets.get(name=<biccSecretName>, key=<biccSecretKey>)`; by default
+that means name `fusion_bicc_password` and key `password`. If you change
+`biccSecretName` or `biccSecretKey` in `aidp.config.yaml`, the AIDP credential
+store must use the same values.
+
+For more REST job dispatch details, including AIDP credential-store setup, see
 [rest_dispatch_setup.md](rest_dispatch_setup.md).
 
 ## Create A Customer Bundle
@@ -100,6 +107,11 @@ aidp-fusion-bundle init-config \
   --workspace "<workspace-name>" \
   --cluster "<cluster-name>"
 ```
+
+If you do not know where to get the AIDP/Data Lake OCID, workspace name, or
+cluster name, use the `/aidp-fusion-config` skill instead of guessing. It guides
+the setup from human-friendly AIDP values and writes the resolved
+`aiDataPlatformId`, `workspaceKey`, and `clusterKey` into `aidp.config.yaml`.
 
 Then validate:
 
@@ -228,7 +240,9 @@ Common drift and failure codes are documented in
 - `bundle.yaml` has a `contentPack` block.
 - `aidp.config.yaml` resolves the AIDP workspace and cluster.
 - Fusion BICC user and External Storage profile exist.
-- AIDP credential-store entry for the Fusion BICC password exists.
+- AIDP credential-store entry for the Fusion BICC password exists
+  (`fusion_bicc_password` / key `password`, unless overridden in
+  `aidp.config.yaml`).
 - OAC MCP connector is staged with `dashboard mcp-setup`.
 - Claude Code has been restarted or reconnected and `oac-mcp-server` is live.
 - `bootstrap --check-iam` completes.

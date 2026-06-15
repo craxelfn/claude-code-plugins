@@ -7,21 +7,22 @@ resolvers that raise ``MissingDependencyError``. Both modules import
 ``errors.py`` and neither imports the other transitively.
 
 All user-facing config / pre-dispatch errors inherit from
-``OrchestratorConfigError`` so the §4.5 CLI exit-2 path catches them all via
-a single marker — adding a new error class never edits the CLI's except clause.
+``OrchestratorConfigError`` so the CLI exit-2 path catches them all via a
+single marker. Adding a new error class should not require another CLI
+``except`` clause.
 
-P1.5ε §Step 1a — Cross-boundary classes (``OrchestratorConfigError``,
-``BundleLoadError``, ``BundleVersionMismatchError``, ``MissingDependencyError``)
-moved to :mod:`oracle_ai_data_platform_fusion_bundle.schema.errors` so the
-schema-level loader / plan resolver / dispatch package can raise + catch them
-without pulling the orchestrator engine into ``sys.modules``. The names are
-re-exported here for back-compat — identity is preserved
+Cross-boundary classes (``OrchestratorConfigError``, ``BundleLoadError``,
+``BundleVersionMismatchError``, ``MissingDependencyError``) live in
+:mod:`oracle_ai_data_platform_fusion_bundle.schema.errors` so schema-level
+loading, plan resolution, and dispatch code can raise and catch them without
+importing the orchestrator engine. The names are re-exported here for
+backwards compatibility; identity is preserved
 (``orchestrator.errors.BundleLoadError is schema.errors.BundleLoadError``).
 """
 
 from __future__ import annotations
 
-from ..schema.errors import (  # re-export — see module docstring
+from ..schema.errors import (  # re-exported; see module docstring
     BundleLoadError,
     BundleVersionMismatchError,
     MissingDependencyError,
@@ -30,7 +31,7 @@ from ..schema.errors import (  # re-export — see module docstring
 
 
 class OrchestratorRuntimeError(Exception):
-    """Base class for failures DURING orchestrator dispatch (P1.5β.1).
+    """Base class for failures DURING orchestrator dispatch.
 
     Distinct from :class:`OrchestratorConfigError`, which signals problems
     gating the run BEFORE dispatch (bundle load, identifier validation,
@@ -38,12 +39,12 @@ class OrchestratorRuntimeError(Exception):
     raised by per-step execution paths and are caught by the
     ``_execute_node`` outer try/except → ``RunStep.failed`` → cascade.
 
-    Subclasses (as of P1.5β.1):
+    Current subclasses:
       - WatermarkMonotonicityError — captured bronze cursor regressed
         below the prior-success row's persisted cursor
       - MultipleUpstreamWatermarkError — resolver hit a spec with
         ``len(depends_on_bronze) >= 2`` and no per-upstream policy
-        is shipped yet (P1.17's decision)
+        is shipped yet
 
     Inherits directly from ``Exception``, NOT from
     ``OrchestratorConfigError``: the CLI exit-2 catch is for
@@ -96,7 +97,7 @@ class WatermarkMonotonicityError(OrchestratorRuntimeError):
 class MultipleUpstreamWatermarkError(OrchestratorRuntimeError):
     """A silver/gold spec has more than one upstream bronze
     dependency, and the per-upstream watermark policy hasn't been
-    decided yet (P1.17 picks one).
+    decided yet.
 
     No shipped silver dim or gold mart hits this today; the resolver
     raises eagerly so any future registry entry with
@@ -106,10 +107,10 @@ class MultipleUpstreamWatermarkError(OrchestratorRuntimeError):
 
 
 class UnsupportedModeError(OrchestratorConfigError, ValueError):
-    """Mode value not in ``_VALID_MODES`` (§4.4c). Multi-inherits ``ValueError``
+    """Mode value not in ``_VALID_MODES``. Multi-inherits ``ValueError``
     so legacy callers that ``except ValueError:`` still work. Carries the
     retired-alias hint (``"full"`` → ``"seed"``) in the message so operators
-    see the remediation without grepping the decision doc.
+    see the remediation directly.
     """
 
 
@@ -123,8 +124,8 @@ class PrerequisiteError(OrchestratorConfigError):
 class CredentialResolutionError(OrchestratorConfigError):
     """``bundle.fusion.password`` could not be resolved — missing env var,
     inaccessible vault OCID, OCI SDK auth/network/ServiceError. Surfaced
-    at exit-2 via the §4.4 step-3.5 preflight, NOT as a per-step ``failed``
-    row at first bronze dispatch (§4.9 + B5).
+    at exit-2 by credential preflight, NOT as a per-step ``failed`` row at
+    first bronze dispatch.
     """
 
 
@@ -132,7 +133,7 @@ class DiscoveryProbeError(OrchestratorConfigError):
     """The ``/biacm/rest/meta/datastores`` probe itself failed — HTTP 5xx,
     auth, network. Used by ``orchestrator/discovery.py`` so preflight can
     decide whether to surface this directly OR fall back to the original
-    schema-not-found classification (P1.5α-fix19).
+    schema-not-found classification.
 
     DISTINCT from :class:`BronzeSchemaProbeError` (which is the
     ``inferSchema``-on-a-PVO failure). Different remediation:
@@ -216,8 +217,8 @@ class IncrementalCursorMissingError(OrchestratorConfigError):
     """One or more silver/gold datasets lack a prior ``last_watermark`` in
     ``fusion_bundle_state`` and cannot run in ``--mode incremental``.
 
-    Raised by ``_preflight_incremental_cursors`` (P1.17 B4b) at run-level,
-    AFTER ``ensure_state_table`` and BEFORE the dispatch loop. Single
+    Raised by ``_preflight_incremental_cursors`` at run-level, after
+    ``ensure_state_table`` and before the dispatch loop. Single
     consolidated error lists every affected dataset so the operator sees
     the full remediation list at once instead of fix-rerun-fix-rerun.
 
@@ -250,7 +251,7 @@ class IncrementalCursorMissingError(OrchestratorConfigError):
             f"the orchestrator logs for the marker `watermark_read_soft_failed` "
             f"— a transient metastore failure may have prevented the cursor "
             f"read. Re-running incremental usually clears it; if the WARN "
-            f"persists, escalate per LIMITS.md L6."
+            f"persists, escalate per LIMITS.md."
         )
 
 
@@ -260,9 +261,9 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
     on disk — running ``--mode incremental`` would silently lose
     history below the prior cursor.
 
-    Raised by ``_preflight_incremental_cursors`` (P1.17c) at run-level,
-    AFTER the cursor-presence check passes and BEFORE the dispatch
-    loop. Single consolidated error lists every affected
+    Raised by ``_preflight_incremental_cursors`` at run-level, after the
+    cursor-presence check passes and before the dispatch loop. Single
+    consolidated error lists every affected
     ``(dataset_id, layer, target_table)`` so the operator sees the
     full remediation list at once.
 
@@ -270,11 +271,11 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
     (recovery, schema reset, accidental ``DROP TABLE`` via Spark SQL
     outside the orchestrator) without clearing the matching state
     row. The next incremental run would (1) auto-create the empty
-    target via ``CREATE TABLE IF NOT EXISTS`` (per B6c), (2) MERGE
-    only the delta slice (BICC filter / silver-gold source predicate
-    excludes everything older than the still-non-NULL prior cursor),
-    (3) lose every row whose lineage timestamp is below the cursor —
-    permanently, without any "failed" status in state.
+    target via ``CREATE TABLE IF NOT EXISTS``, (2) MERGE only the delta slice
+    (BICC filter / silver-gold source predicate excludes everything older
+    than the still-non-NULL prior cursor), and (3) lose every row whose
+    lineage timestamp is below the cursor permanently, without any "failed"
+    status in state.
 
     The check covers bronze, silver, and gold; honors the same
     skip-list as the cursor check (deferred nodes, ``dim_calendar``,
@@ -288,8 +289,7 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
     ``_run_inline`` exit-2 catch fires it cleanly — no traceback, no
     partial dispatch, no half-materialized state.
 
-    See LIMITS.md §P1.17-L5 (resolved by P1.17c) for the full
-    failure-mode write-up + the historical interim mitigation.
+    See LIMITS.md for the failure-mode write-up and recovery sequence.
     """
 
     def __init__(self, *, missing: list[tuple[str, str, str]]) -> None:
@@ -308,8 +308,8 @@ class IncrementalTargetMissingError(OrchestratorConfigError):
             f"fusion_bundle_state WHERE dataset_id = '<X>' AND layer = "
             f"'<Y>'`, then re-run `aidp-fusion-bundle run --mode seed "
             f"--datasets <X>` to recreate the target. Only then is "
-            f"--mode incremental safe to resume. See LIMITS.md "
-            f"§P1.17-L5 for the full sequence."
+            f"--mode incremental safe to resume. See LIMITS.md for "
+            f"the full recovery sequence."
         )
 
 
@@ -317,7 +317,7 @@ class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
     """One or more columns shared between source and target Delta tables
     have incompatible data types — incremental MERGE cannot proceed.
 
-    Raised by ``_ensure_target_schema_for_merge`` (P1.17d) when its
+    Raised by ``_ensure_target_schema_for_merge`` when its
     DESCRIBE-TABLE-vs-source-schema comparison finds at least one
     column whose ``simpleString()`` data type differs between source
     (current run's DataFrame) and target (existing Delta table).
@@ -327,7 +327,7 @@ class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
     decimal(12,2)`` is widening with rounding caveats; ``string → int``
     is destructive (Spark casts NULL-on-failure, silently truncating
     every existing row). Only the operator knows which case applies,
-    so P1.17d raises rather than guessing.
+    so the gate raises rather than guessing.
 
     Remediation choices:
       (a) Manually ``ALTER TABLE <target> ALTER COLUMN <col> TYPE
@@ -345,21 +345,20 @@ class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
 
     CLI exit-code surface depends on WHERE this exception is raised:
 
-      - **Raised inside per-node dispatch** (the documented P1.17d
-        path — ``_ensure_target_schema_for_merge`` runs during a
+      - **Raised inside per-node dispatch** when
+        ``_ensure_target_schema_for_merge`` runs during a
         builder's silver/gold ``build()`` or during the bronze
         renderer's pre-MERGE reconcile): caught by ``_execute_node``'s
         per-step try/except, recorded as a ``RunStep(status='failed',
         error_message=<full conflict list>)``, and the orchestrator's
-        strict-abort cascade (P1.5α-fix3 / fix4) then cascade-skips
-        all remaining steps in the same run. ``commands/run.py``
+        strict-abort cascade then skips all remaining steps in the same run.
+        ``commands/run.py``
         returns **exit code 1** for the resulting "any failed step"
         run summary. The full conflict list is durably captured in
         ``fusion_bundle_state.error_message`` for audit.
 
       - **Raised before** ``orchestrator.run()`` **returns** (i.e.,
-        from a pre-dispatch helper invoked at run-level — none of
-        P1.17d's current call sites do this, but hypothetical future
+        from a pre-dispatch helper invoked at run-level; hypothetical future
         callers that invoke the helper from preflight would qualify):
         propagates uncaught up to ``commands/run.py``'s ``except
         OrchestratorConfigError`` catch, which yields **exit code 2**.
@@ -368,12 +367,9 @@ class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
         by ``_preflight_incremental_cursors`` before any node
         dispatch).
 
-    For P1.17d's documented integration sites, the exit code is **1**.
-    Do not assume exit 2 without verifying the call site is
-    pre-dispatch.
-
-    See LIMITS.md §P1.17-L6 (resolved by P1.17d) for the full
-    failure-mode write-up.
+    For the current integration sites, the exit code is **1**. Do not assume
+    exit 2 without verifying the call site is pre-dispatch. See LIMITS.md for
+    the failure-mode write-up.
     """
 
     def __init__(
@@ -395,7 +391,7 @@ class SchemaEvolutionTypeConflictError(OrchestratorConfigError):
             f"TYPE <new_type> manually if the change is widening + safe; "
             f"(b) DROP TABLE {target} + re-seed if destructive or "
             f"cleanest; (c) revert the source-side projection if the "
-            f"type change was unintended. See LIMITS.md §P1.17-L6."
+            f"type change was unintended. See LIMITS.md."
         )
 
 
@@ -403,22 +399,19 @@ class MultipleNaturalKeyError(OrchestratorConfigError):
     """A spec's natural_key was overridden in a way that conflicts with
     the catalog's natural_key for the same upstream PVO.
 
-    Defensive — no shipped customer override path triggers this today;
-    introduced under P1.17 for forward-compat with a hypothetical
-    bundle.yaml customer override that names a different natural key
-    than the catalog. If exercised, message names the dataset_id and
-    both candidate keys so the operator can reconcile.
+    Defensive: no shipped customer override path triggers this today. If
+    exercised, the message names the dataset_id and both candidate keys so the
+    operator can reconcile.
     """
 
 
 class BronzeSchemaProbeError(OrchestratorConfigError):
     """At least one bronze PVO's BICC schema/PVO-name probe failed before
-    any data write. Surfaced at exit-2 via the §4.4 step-5.6 preflight, NOT
-    as per-step ``failed`` rows at first bronze dispatch. Catches:
+    any data write. Surfaced at exit-2 by preflight, NOT as per-step
+    ``failed`` rows at first bronze dispatch. Catches:
 
     - ``DATA_ACCESS_LAYER_0031: Schema X not found`` — catalog declares a
-      BICC offering schema that doesn't exist on this tenant (P1.5α-fix17
-      origin story: ``schema="SCM"`` on saasfademo1).
+      BICC offering schema that does not exist on this tenant.
     - PVO renamed / removed since the catalog was confirmed.
     - BICC server unreachable / credential rejected at the BICC reader layer.
 
@@ -444,7 +437,7 @@ class StateReadFailedError(OrchestratorConfigError):
     path, etc. We cannot determine whether a prior cursor exists, so
     preflight refuses to run ``--mode incremental``.
 
-    Why preflight needs a strict variant (P1.17c):
+    Why preflight needs a strict variant:
         :func:`oracle_ai_data_platform_fusion_bundle.orchestrator.state.read_last_watermark`
         intentionally soft-fails (logs ``watermark_read_soft_failed``
         WARN + returns ``None``) so a transient metastore flake during
@@ -512,7 +505,7 @@ __all__ = [
     "IncrementalCursorMissingError",
     "IncrementalTargetMissingError",
     "StateReadFailedError",
-    # P1.17d — schema evolution under MERGE
+    # Schema evolution under MERGE
     "SchemaEvolutionTypeConflictError",
     "MultipleNaturalKeyError",
     # Resume failure modes
