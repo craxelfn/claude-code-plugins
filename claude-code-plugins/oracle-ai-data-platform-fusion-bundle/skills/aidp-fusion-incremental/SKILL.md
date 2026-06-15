@@ -57,6 +57,13 @@ gets a clear next step instead of a deep cluster error:
   changed since it was seeded, the run fails with **AIDPF-4040 plan-hash drift**.
   → **re-seed** that node (`run --mode seed`) to re-pin the plan-hash (or revert
   the change). Incremental requires plan continuity with the seed that pinned it.
+  **Caveat (known limit, `LIMITS.md` P-incr-L1):** a row-grain **MERGE** node
+  (silver dims, `gl_balance`) can trip AIDPF-4040 on its *first* incremental
+  after a seed even with no edit — its watermark predicate renders differently
+  per mode, so re-seeding won't clear it. **Replace-strategy marts**
+  (`ap_aging`, `supplier_spend`, `dim_calendar`, replace overlay marts) are
+  unaffected — live-green end-to-end (TC33). On a MERGE-node 4040 with no edit,
+  hand to **`/fusion-drift-doctor`** rather than looping re-seeds.
 - **Fusion-PVO / bronze drift?** Incremental fires the drift gates — `AIDPF-2072`
   (live PVO column renamed/removed vs the pinned snapshot), `AIDPF-4070/4071`
   (source-schema), `AIDPF-2012` (bronze-table fingerprint). On any of these →

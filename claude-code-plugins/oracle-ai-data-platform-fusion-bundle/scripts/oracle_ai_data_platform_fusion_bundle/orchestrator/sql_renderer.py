@@ -732,7 +732,19 @@ def _build_hash_input(sql: str, params: Mapping[str, Any]) -> str:
     their type tag so ``1`` (int) and ``"1"`` (str) hash differently.
     """
     canonical_sql = re.sub(r"\s+", " ", sql).strip()
-    sorted_params = sorted(params.items())
+    # Exclude PER-RUN param VALUES from the plan-hash. ``run_id`` (run identity)
+    # and ``watermark_<source>`` (the cursor, which advances every run) are not
+    # part of the plan *shape* — the §11.9 hash is meant to catch SQL-template /
+    # outputSchema / variation-point / schema-fingerprint changes, NOT run
+    # identity. Including them made the hash run-dependent, so the AIDPF-4040
+    # continuity gate fired on every incremental after a seed (the run_id and
+    # cursor always differ). The marker (``:run_id`` / ``:watermark_*``) still
+    # appears in ``canonical_sql``, so a template change is still caught.
+    plan_params = {
+        k: v for k, v in params.items()
+        if k != "run_id" and not k.startswith("watermark_")
+    }
+    sorted_params = sorted(plan_params.items())
     params_repr = "|".join(f"{k}:{type(v).__name__}:{v!r}" for k, v in sorted_params)
     return f"SQL:{canonical_sql}\nPARAMS:{params_repr}"
 

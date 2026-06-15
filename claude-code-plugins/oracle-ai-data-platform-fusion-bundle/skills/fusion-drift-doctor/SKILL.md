@@ -26,7 +26,7 @@ diagnoses and hands off; it never edits packs/profiles or runs the pipeline.
 | **AIDPF-4071** | A declared `outputSchema` column is **missing** from the live PVO. | classify (same as 2072) |
 | **AIDPF-4070** | A live PVO column's **type changed** vs declared. | **investigate** (type change — pack/profile fix by a human) |
 | **AIDPF-2012** | Bronze **table** fingerprint drifted vs the pinned profile fingerprint. | confirm the change is legit → `bootstrap --refresh` to re-pin |
-| **AIDPF-4040** | **Plan-hash drift** — the YAML/SQL/profile changed since the last seed. | **re-seed** (`run --mode seed`) to re-pin, or revert the change |
+| **AIDPF-4040** | **Plan-hash drift** — the node's plan-hash differs from the seed-pinned one. | classify the *cause* (below) — **re-seed only fixes a genuine plan-shape change** |
 
 > Note the distinction: **PVO source drift (2072/4070/4071)** is detected by a
 > metadata-only BICC probe of the live PVO — it catches a renamed source column
@@ -68,8 +68,23 @@ diagnoses and hands off; it never edits packs/profiles or runs the pipeline.
    - **`missing_literal` / AIDPF-4070 (type change)** → **investigate**: a
      declared literal column vanished or changed type — a pack/source mismatch a
      human resolves (no mechanical fix).
-   - **AIDPF-4040** → re-run `run --mode seed` (the SQL/YAML/profile changed
-     since the last seed; re-seed re-pins the plan-hash), or revert the change.
+   - **AIDPF-4040** → identify *which* of three causes before recommending a fix
+     (a re-seed only helps the first):
+     1. **Genuine plan-shape change** (you edited the node SQL / `outputSchema` /
+        variation pick / tenant profile since the seed) → re-run `run --mode seed`
+        to re-pin the plan-hash, or revert the edit. This is the normal case.
+     2. **Row-grain MERGE node, first incremental after a seed** → this is a
+        **known plugin limit** (`LIMITS.md` P-incr-L1), *not* a tenant problem:
+        the watermark predicate renders differently on seed (`1=1`) vs incremental
+        (`<col> > :watermark_src`), so the plan-hash diverges on the SQL body even
+        with no edit. Re-seeding does **not** clear it. Replace-strategy marts
+        (`ap_aging`, `supplier_spend`, `dim_calendar`, replace overlay marts) are
+        unaffected — their incremental is live-green (TC33). Tell the operator
+        this is a pending fix (mode-normalized plan-hash), not their config.
+     3. **Stale pin from a pre-2026-06-15 build** → before the `_build_hash_input`
+        param-exclusion fix, the hash baked in the per-run `run_id`, so 4040 fired
+        on *every* content-pack incremental and re-seeding never helped. If the
+        cluster wheel predates the fix, rebuild/redeploy, then re-seed once.
    - **AIDPF-2012** → after confirming the bronze change is intended,
      `bootstrap --refresh` re-pins the fingerprint (break-glass
      `--force-fingerprint-skip` only for dev).

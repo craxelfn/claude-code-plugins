@@ -462,6 +462,46 @@ class TestHashDeterminism:
         r_b = render_node_sql(pack.silver["dim_thing"], pack, b_profile, _default_ctx())
         assert compute_rendered_sql_hash(r_a) != compute_rendered_sql_hash(r_b)
 
+    def test_run_id_value_does_not_shift_hash(self, tmp_path: pathlib.Path) -> None:
+        """REGRESSION (AIDPF-4040): the per-run ``run_id`` param VALUE must not
+        enter the plan-hash. The §11.9 hash is a plan-*shape* fingerprint;
+        ``run_id`` is run identity, not plan shape. Before the fix it leaked in,
+        so the continuity gate fired on every incremental-after-seed (the run_id
+        always differs). The ``:run_id`` marker still appears in the SQL, so a
+        template change is still caught."""
+        sql_template = "SELECT '{{ run_id_literal }}' AS run_id FROM {{ catalog }}.t"
+        pack = _build_pack(tmp_path, with_variants=False, sql_template=sql_template)
+        r_a = render_node_sql(
+            pack.silver["dim_thing"], pack, _profile(),
+            _default_ctx(run_id="run-2026-06-06-001"),
+        )
+        r_b = render_node_sql(
+            pack.silver["dim_thing"], pack, _profile(),
+            _default_ctx(run_id="run-2026-06-15-999"),
+        )
+        # Different run_ids -> identical plan-hash (the value is excluded).
+        assert r_a.params["run_id"] != r_b.params["run_id"]
+        assert compute_rendered_sql_hash(r_a) == compute_rendered_sql_hash(r_b)
+
+    def test_watermark_cursor_value_does_not_shift_hash(self, tmp_path: pathlib.Path) -> None:
+        """REGRESSION (AIDPF-4040): the per-run ``watermark_<source>`` cursor
+        VALUE advances every run; it must not enter the plan-hash or no
+        incremental run could ever match the prior run's hash."""
+        sql_template = "SELECT * FROM t WHERE {{ watermark_predicate }}"
+        pack = _build_pack(tmp_path, with_variants=False, sql_template=sql_template)
+        r_a = render_node_sql(
+            pack.silver["dim_thing"], pack, _profile(),
+            _default_ctx(mode="incremental",
+                         prior_watermark={"erp_thing": "2026-06-01T00:00:00"}),
+        )
+        r_b = render_node_sql(
+            pack.silver["dim_thing"], pack, _profile(),
+            _default_ctx(mode="incremental",
+                         prior_watermark={"erp_thing": "2026-06-14T23:59:59"}),
+        )
+        assert r_a.params["watermark_erp_thing"] != r_b.params["watermark_erp_thing"]
+        assert compute_rendered_sql_hash(r_a) == compute_rendered_sql_hash(r_b)
+
 
 # ---------------------------------------------------------------------------
 # Disallowed param value types

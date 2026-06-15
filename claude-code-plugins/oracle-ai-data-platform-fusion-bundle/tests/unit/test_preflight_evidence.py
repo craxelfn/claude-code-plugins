@@ -720,7 +720,7 @@ class TestPhase3dDriftBranchPopulation:
         payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
         assert payload["schemaDrift"]["datasetDeltas"] == []
         assert any(
-            "Phase 3d snapshot absent" in r.getMessage()
+            "Pinned schema snapshot absent" in r.getMessage()
             for r in caplog.records
         )
 
@@ -792,7 +792,7 @@ class TestPhase3dDriftBranchPopulation:
         payload = json.loads(outcome.diagnostic_path.read_text(encoding="utf-8"))
         assert payload["schemaDrift"]["datasetDeltas"] == []
         assert any(
-            "Phase 3d snapshot unparseable" in r.getMessage()
+            "Pinned schema snapshot unparseable" in r.getMessage()
             for r in caplog.records
         )
 
