@@ -1,162 +1,159 @@
-# `oracle-ai-data-platform-fusion-bundle` — working principles
+# CLAUDE.md - Customer Bundle Guidance
 
-> These are the load-bearing principles for working on this plugin. They sit on top of (not instead of) the workspace-level `/Users/oussamalakrafi/Workspace/CLAUDE.md` AIDP rules. The mechanical PR checklist lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Use this file when Claude Code is operating inside a customer bundle created
+for `oracle-ai-data-platform-fusion-bundle`.
+
+This is customer/operator guidance, not plugin-maintainer guidance. Treat the
+current directory as a customer project unless the user explicitly asks to work
+on the plugin source code.
 
 ## Mission
 
-The fusion-bundle plugin must run on **any Fusion ERP/HCM/SCM tenant**, not just the `saasfademo1` demo pod. Hardcoded tenant-specific assumptions are bugs. The plugin's value proposition is that a customer can clone the repo, point it at *their* Fusion + AIDP + OAC, and have bronze + silver + gold materialize without editing Python.
+Help the user turn a Fusion analytics request into a live AIDP and OAC
+experience:
 
-## v2 content-pack architecture (Phase 9 — single execution path)
+```text
+Fusion BICC PVOs
+  -> AIDP bronze/silver/gold content-pack pipeline
+  -> OAC AIDP connection and dataset
+  -> OAC workbook
+  -> optional OAC MCP chat
+```
 
-The plugin runs on the v2 content-pack architecture. Bronze, silver,
-and gold all dispatch through `sql_runner.execute_node` via per-file
-YAMLs under `content_packs/<pack-id>/{bronze,silver,gold}/<id>.yaml`.
+Prefer the conversational route first. Use `aidp-fusion-autopilot` as the
+front door when the user asks for a dashboard, mart, workbook, pipeline run, or
+status check.
 
-- **Bronze** ships as `implementation.type: bronze_extract` per-file
-  YAMLs (Phase 9). The `orchestrator.builtins.bronze_extract_adapter`
-  runs the P1.17 algorithm against the pack-declared PVO descriptor
-  (datastore, biccSchema, schemaOverride, incrementalCapable,
-  naturalKey, watermark).
-- **Silver / gold** ship as SQL templates with YAML metadata. The
-  starter pack's five silver/gold marts (`dim_supplier`, `dim_account`,
-  `gl_balance`, `supplier_spend`, `ap_aging`) all carry
-  `implementation.type: sql`. `dim_calendar` is the one true builtin
-  (ADR-0011) — parameter-driven date-math that can't be expressed in
-  SQL alone — and dispatches through
-  `orchestrator/builtins/dim_calendar_adapter.py`.
-- **One dispatcher**: `_phase5_top_level_dispatch` loads the bundle,
-  resumes any prior run, fires the AIDPF-2072 PVO drift gate, then
-  delegates to `_run_content_pack_backend`. No scope-split, no
-  recursive bronze call, no legacy-python fallback at the CLI layer.
-- **D-1 implicit transitive include**: declaring a high-level node
-  (`supplier_spend`) auto-pulls bronze + silver deps. `--strict-scope`
-  opts out (AIDPF-1042 on missing deps).
+## Local Project Files
 
-**For the architectural story** see
-[ADR-0021](docs/adr/0021-pack-as-registry.md) (pack-as-registry) and
-ADR-0022 once it merges (full v1 deletion + bronze as content-pack).
+Expected customer files:
 
-## v1 + v2 coexistence — historical (deleted in Phase 9)
+| Path | Purpose |
+|---|---|
+| `bundle.yaml` | Customer Fusion, AIDP schema, content-pack, scope, and dashboard policy. |
+| `aidp.config.yaml` | AIDP workspace, cluster, region, and credential-store settings. |
+| `profiles/<profile>.yaml` | Bootstrap-resolved tenant variation. Written by bootstrap. |
+| `overlays/<name>/` | Customer medallion extensions or mart overrides. |
+| `.aidp/diagnostics/` | Failure diagnostics, including `AIDPF-*` artifacts. |
 
-Phase 9 deleted every v1 silver/gold module
-(`dimensions/dim_supplier.py`, `dimensions/dim_account.py`,
-`transforms/gold/*.py`), the `python_legacy` adapter, the
-`--execution-backend` CLI flag, the parity harness, and ~270 lines of
-v1 main-loop body in `orchestrator/__init__.py`. The
-`orchestrator.run()` function still accepts an `execution_backend`
-kwarg for backwards-compat with programmatic callers, but only
-`"content-pack"` is reachable; passing `"legacy-python"` raises
-`OrchestratorConfigError`.
+Do not edit the shipped starter content pack inside the plugin installation.
+Customer medallion changes belong in `overlays/<name>/`.
 
-**Phase 9 follow-up (2026-06-10)** further deleted the transitional
-registry (`orchestrator/registry.py` — the four Spec dataclasses +
-`BRONZE_EXTRACTS` / `SILVER_DIMS` / `GOLD_MARTS` maps + the
-spec-typed resolvers) and `schema/registry_metadata.py`. The dead
-`_execute_node` body in `orchestrator/__init__.py`, the six
-spec-typed `RunStep.{success,failed,skipped_cascade,skipped_aborted,
-deferred,resumed_skip}` factory methods, and the v1 plan-hash
-entrypoints (`hash_resolved_plan`, `serialize_plan_snapshot`,
-`build_current_diagnostics`, `_node_tuple`, `_canonical_payload`)
-went with them. The four `sql_runner._build_target_identifier` call
-sites all pass `paths` now (the keyword is required, no fallback);
-identifier validation fires centrally on every call.
+## Normal Workflow
 
-The historical pre-Phase-9 dual-layer description follows for archive
-context only — none of the v1 modules it references exist in the tree
-anymore.
+Follow the current workflow, not old phase reports:
 
-- ~~**v1 runtime (active today)**: hardcoded silver/gold Python modules under `scripts/.../dimensions/dim_*.py` and `scripts/.../transforms/gold/*.py`. Drive every shipped `--mode seed` and `--mode incremental` run. Frozen as **reference implementations** during the migration; new functionality does NOT land here.~~ DELETED in Phase 9. Only `dimensions/dim_calendar.py` survives (ADR-0011).
-- **v2 content packs (shipped Phase 1, runner shipped Phase 2, starter SQL templates shipped Phase 3, bootstrap variation resolver shipped Phase 3a, Tier-2 overlay-author skill shipped Phase 3b, runtime drift gate shipped Phase 3c, pinned bronze-schema snapshot + per-dataset drift diff shipped Phase 3d, dual-runner parity gate shipped Phase 4)**: `scripts/.../content_packs/fusion-finance-starter/` declares silver / gold nodes as YAML + SQL templates under `silver/*.sql` and `gold/*.sql`. As of Phase 3, the five starter-pack silver/gold nodes (`dim_supplier`, `dim_account`, `gl_balance`, `supplier_spend`, `ap_aging`) carry `implementation.type: sql`; `dim_calendar` stays `implementation.type: builtin` per ADR-0011 and dispatches through `orchestrator/builtins/dim_calendar_adapter.py`. As of Phase 3a, `aidp-fusion-bundle bootstrap` resolves the pack's `columnAliases` / `semanticVariants` against the live bronze schema and writes `profiles/<tenant>.yaml` + `evidence/<tenant>/<ISO-ts>.yaml` + `bronzeSchemaFingerprint` (Tier-1). As of Phase 3b, the `medallion-author` Claude Code plugin skill at `skills/medallion-author/` provides Tier-2 recovery when mechanical resolution fails — operators invoke `/medallion-author` to draft a content-pack overlay extending the starter pack's candidate list with their tenant's observed columns. The skill writes ONLY to `<bundle.yaml.parent>/overlays/<overlay-name>/`; bootstrap remains the only writer to `profiles/` and `evidence/` per §9.5.7 #6. Skill-authored commits record `mechanism: skill_proposed` per §9.5.9 and thread `provenance.skillVersion` + `incrementalImpact` into the evidence snapshot. As of Phase 3c, `aidp-fusion-bundle run --execution-backend content-pack --mode incremental` runs a **bronze-schema fingerprint drift gate** BEFORE any state-table write — divergent fingerprint emits `AIDPF-2012` to `.aidp/diagnostics/<run_id>/AIDPF-2012.json`, exits 14, and recommends `bootstrap --refresh`. A hidden `--force-fingerprint-skip` break-glass knob writes an audit row to `fusion_bundle_state` (`mode='fingerprint_skip'`). Legacy profiles without a pinned fingerprint warn-and-proceed (`P3c-L1`). As of Phase 3d, `bootstrap` also writes a pinned per-dataset bronze-schema snapshot to `profiles/<tenant>.schema-snapshot.yaml` (same instant `bronzeSchemaFingerprint` is computed) — runtime preflight reads it on drift and populates `SchemaDriftFailure.datasetDeltas` with per-dataset `addedColumns` / `removedColumns` / `typeChangedColumns`. Snapshot absent / unparseable / desynced → empty `datasetDeltas` + one-time WARN (graceful degrade); `bootstrap --refresh` back-fills the snapshot atomically inside the no-drift branch (profile + evidence untouched). REST dispatch stages the snapshot alongside the profile YAML so cluster-side preflight resolves the same path the laptop does. Closes `P3c-L2`. Schema layer (`schema/medallion_pack.py`, `schema/dashboard_pack.py`) and loader/validators (`orchestrator/content_pack*.py`) load these without changing default runtime behaviour. The v1 modules under `dimensions/dim_*.py` and `transforms/gold/*.py` remain in place as **frozen reference implementations** through Phase 9. As of Phase 4, `tests/parity/test_dual_runner_e2e.py` + `tests/parity/test_dual_runner_profiles.py` + `tests/unit/test_v2_preflight_gates.py` drive both backends through `orchestrator.run` end-to-end on the starter pack + multi-tenant fixtures, asserting the **three-tier state-row contract** (Tier A semantic / Tier B watermark cross-shape / Tier C v2-only fields), §11.9 atomic-commit invariant on hard cursor commit failure (Step 7a), and §11.10 primary/lookup cursor policy on `gl_balance`. `docs/v2-phase-4-shipready-report.md` records what Phase 5 must inherit before flipping the default backend; live A/B evidence on `saasfademo1` is captured by the parametrized operator-runnable dispatcher at `tests/live/dispatch_v2_seed.py`. Default backend STILL stays `legacy-python` until Phase 5 reviews the ship-ready report and merges the default-flip PR; opt-in via `--execution-backend content-pack`.
+1. Confirm `bundle.yaml` and `aidp.config.yaml` exist.
+2. If AIDP coordinates are missing, use `/aidp-fusion-config` or run
+   `aidp-fusion-bundle init-config`.
+3. Confirm the Fusion BICC password is stored in the AIDP credential store.
+   The default credential name is `fusion_bicc_password` and the default key is
+   `password`.
+4. Set up operator OAC MCP early with `aidp-fusion-bundle dashboard mcp-setup`
+   or `aidp-fusion-bundle dashboard mcp-token`, then ask the user to restart or
+   reconnect Claude Code.
+5. Run `aidp-fusion-bundle validate`.
+6. Run `aidp-fusion-bundle bootstrap --check-iam`.
+7. Preview seed with `aidp-fusion-bundle run --mode seed --dry-run`.
+8. Run seed only after the user confirms the target is safe:
+   `aidp-fusion-bundle run --mode seed`.
+9. Use `/oac-dataset-advisor` against the live AIDP catalog.
+10. If a needed mart is missing, use `/mart-author` to create an overlay.
+11. Have the user create the OAC AIDP connection and dataset manually in OAC.
+12. Use `/workbook-authoring` to save or update the workbook through OAC MCP.
 
-**Where new work goes:**
+Use `workflow.md` and `docs/project_setup.md` from the plugin checkout when the
+user needs the full reference.
 
-- **New silver / gold nodes** → content pack YAML + SQL in `content_packs/<pack-id>/`. Never a new `dim_*.py` or `gold_*.py` module. The architectural test `tests/architectural/test_no_new_legacy_modules.py` enforces this; new entries to the legacy allowlist require a documented reason on the PR (see PLAN §15 Phase 0 step 9).
-- **New tenant variation** → `columnAliases` / `semanticVariants` in `pack.yaml`, resolved at `bootstrap` per ADR-0014. Not a runtime probe in a Python module.
-- **New error code** → register in PLAN §25 first, then reference the constant from `medallion_pack.py` / validators.
-- **v1 maintenance fixes are no longer applicable** — `dimensions/dim_supplier.py`, `dimensions/dim_account.py`, every `transforms/gold/*.py` mart, and `extractors/bicc.py`'s wrapper logic were deleted in Phase 9. The BICC integration (`extract_pvo`) lives on inside `orchestrator/builtins/bronze_extract_adapter.py`. All new (and existing) work happens against the content pack.
+## Evidence Rules
 
-Architectural authority for v2: [`dev/PLAN_plugin_engine_medallion_content_packs.md`](dev/PLAN_plugin_engine_medallion_content_packs.md) (gitignored working doc).
+- Do not claim an AIDP table exists from content-pack YAML alone. Query the
+  live AIDP catalog or use `aidp-fusion-status`.
+- Do not claim an OAC dataset or workbook exists when OAC MCP is disconnected.
+  Fix MCP connectivity first.
+- Do not infer the right OAC dataset from a dashboard request without checking
+  the live gold layer.
+- Do not invent OCIDs, workspace keys, cluster keys, schema names, dataset
+  names, or workbook paths.
+- If a command reports an `AIDPF-*` code, use `docs/aidpf-error-codes.md` from
+  the plugin checkout before proposing recovery.
 
-## What varies per tenant — and where it lives
+## OAC Manual Boundary
 
-v2 splits tenant variability across **three** declarative surfaces (not the two v1 had).
+The user must create these OAC objects manually today:
 
-### Static policy → `bundle.yaml`
+- The OAC AIDP connection, usually from JSON generated by
+  `aidp-fusion-bundle dashboard install --target oac --print-only`.
+- The OAC dataset over the advised AIDP gold table or tables.
 
-Connectivity + AIDP catalog identity. Customer declares once, never probed.
+Reason:
 
-- Fusion service URL, BICC storage, credentials (vault refs).
-- 3-part target names — `aidp.catalog`, `aidp.bronzeSchema`, `aidp.silverSchema`, `aidp.goldSchema`.
-- Active content pack + active profile reference.
-- Enabled dashboard list.
-- Runtime settings (`watermarkSafetyWindowSeconds`, retry policy).
+- OAC public REST does not reliably accept first-time AIDP `idljdbc` connection
+  creation.
+- OAC MCP can search, describe, query, save, export, and manage catalog
+  content, but it does not expose a create-dataset tool.
 
-### Tenant customisation knobs → `profiles/<tenant>.yaml`
+After the dataset exists, resume autopilot or workbook authoring. Use OAC MCP
+to find and describe the dataset before generating workbook JSON.
 
-Authored at `bootstrap` (interactively, with skill assist when needed); frozen for subsequent runs. Captures customer-specific values the pack expects.
+## Mart And Overlay Rules
 
-- Calendar settings (start/end dates, fiscal start month, FY naming).
-- COA semantic-segment map (when the customer's COA differs from Fusion-conventional segment1/2/3).
-- Resolved variation points (the column-alias and semantic-variant choices `bootstrap` picked for this tenant).
-- Bronze schema fingerprint pinned at bootstrap (drives the §11.6 drift gate).
+Use an overlay when the shipped gold layer does not satisfy the request.
 
-### Variation points (pack-declared candidates, bootstrap-resolved)
+Allowed overlay changes:
 
-Things the pack doesn't know upfront but enumerates likely candidates for. Resolved once at `bootstrap`, frozen into the tenant profile. **Superseding the v1 runtime detection contract** (`KNOWN_*_ALIASES` priority lists in Python modules) — see ADR-0014.
+- Add a new gold mart.
+- Override shipped mart SQL while preserving the mart contract.
+- Add tenant-specific column aliases or semantic variants through
+  `/medallion-author`.
 
-- **`columnAliases`** — same logical column, different physical names. `invoice_currency_code` candidates: `ApInvoicesInvoiceCurrencyCode` / `ApInvoicesCurrencyCode`.
-- **`semanticVariants`** — same logical concept, different SQL shape. `cancelled_status` candidates: `cancelled_date` (`ApInvoicesCancelledDate IS NULL`) / `cancelled_flag` (`COALESCE(...CancelledFlag, 'N') != 'Y'`).
-- Auto-resolved when exactly one candidate matches the tenant. Operator chooses when multiple match. **Skill drafts an overlay** when zero match (tier-2 escalation per §9.5.5).
-- SQL templates reference them as `{{ column.<name> }}` / `{{ semantic.<name> }}`. The renderer substitutes the frozen profile value; **no LLM call happens during `--mode seed` or `--mode incremental`**.
+Do not change grain, natural key, target table, or output schema of a shipped
+mart in place. Create a new mart id instead.
 
-**Add knobs evidence-driven, not preemptively.** A candidate ships when a real tenant has hit the variant, or a published Oracle source documents it. Don't speculate. See PLAN §13.3.2 evidence-discipline rules.
+Wire overlays with:
 
-## Architecture: the CLI is the contract
+```bash
+aidp-fusion-bundle content-pack validate overlays/<name>
+aidp-fusion-bundle use-pack overlays/<name> --profile <profile>
+aidp-fusion-bundle validate
+```
 
-`aidp-fusion-bundle run --mode seed` must materialize bronze + silver + gold end-to-end. `aidp-fusion-bundle bootstrap` resolves tenant variation. If a customer has to open a notebook and call `build()` by hand, the architecture has drifted from the README.
+Use `--no-align` for narrow bundles or one-mart overrides:
 
-- **The CLI is self-contained.** No LLM is invoked during seed / incremental — per ADR-0017. Skill help is customer-initiated via Claude Code, reading diagnostic artefacts the CLI writes on failure.
-- **The orchestrator owns state.** Watermarks, `fusion_bundle_state`, run-IDs are the orchestrator's responsibility. v1 modules read Spark in, write Spark out, accept paths + kwargs. v2 SQL templates render through the content-pack renderer with declared variables only. A node implementation that touches `fusion_bundle_state` directly is a layering violation.
-- **v1 module shape (legacy):** each `dim_*.py` / gold module exposes `build_<mart>_sql(...) → str` for unit testing without Spark, plus `build(spark, ...) → DataFrame` that executes it.
-- **v2 node shape (active):** YAML metadata + SQL file (or `type: builtin` callable). Loaded by `orchestrator/content_pack.py::load_pack`. Validated by `orchestrator/content_pack_validators.py`.
+```bash
+aidp-fusion-bundle use-pack overlays/<name> --profile <profile> --no-align
+```
 
-## Medallion correctness invariants
+Then seed only the needed node when possible:
 
-These apply to **both** v1 modules and v2 SQL templates — they're SOX/finance invariants, not implementation details.
+```bash
+aidp-fusion-bundle run --mode seed --datasets <mart_id> --layers gold
+```
 
-- **Refresh strategy per node**, declared explicitly:
-  - **Row-grain nodes** (silver dims excl. `dim_calendar`, gold `gl_balance`) use `strategy: merge` with `MERGE INTO target USING (<source> WHERE <lineage_col> > <layer-local watermark>) AS src ON target.<natural_key> <=> src.<natural_key> WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *` — NULL-safe `<=>` on composite keys (LIMITS.md P1.17-L8).
-  - **Incremental-exempt marts** (`supplier_spend`, `ap_aging`, `dim_calendar`) use `strategy: replace` — `CREATE OR REPLACE TABLE` every cycle regardless of mode. `supplier_spend` because its grain mixes mutable `approval_status` (partial-MERGE leaves PENDING + APPROVED dupes on status flip; correct aggregate-MERGE ships as `aggregate_merge` post-v0.3 per PLAN §10.8). `ap_aging` because `CURRENT_DATE()`-anchored bucket assignments would freeze daily under MERGE. `dim_calendar` because it's parameter-driven (ADR-0011 — stays as `builtin`).
-  - **Bronze layer** always MERGEs under incremental on the bronze natural key — safety-window overlap re-extracted each cycle dedupes, never replaces.
-  - v2 declares all of this in node YAML (`refresh.{seed,incremental}.strategy`); v1 hardcodes it inside `build()`. The strategy taxonomy is enumerated in PLAN §10 and validated in PLAN §11.3 (R1–R13) — every node's choice has a documented reason.
-- **Surrogate keys are deterministic — `xxhash64(natural_key)`, never `monotonically_increasing_id()`.** Non-deterministic surrogates break incrementality and Type-2 SCD. Wired on `dim_supplier.supplier_key` and `dim_account.account_key`.
-- **`COALESCE(amount, 0)` around every arithmetic operation on Fusion amount columns.** Fusion legitimately emits NULL for absent period components, opening balances on new accounts, sparse dim attributes. Without `COALESCE`, a single NULL nullifies the entire expression (NULL propagation). Live-validated: ~20% of `gl_period_balances` sample rows hit at least one NULL component (2026-05-09).
-- **Currency-in-grain is mandatory for any amount aggregate.** Cross-currency rollup is the consumer's responsibility, never the mart's. Hard-fail the build if currency col is missing — no single-currency-summed marts on a multi-currency tenant.
-- **Prefer one financially-correct SQL shape (single LEFT JOIN, fact preserved) over runtime path-selection.** Runtime decisions belong in data-quality gates (real-vs-proxy), not join topology. The round-6 audit killed the `id_populated_pct >= 0.5` picker for exactly this reason.
-- **Audit columns are non-negotiable.** Bronze: `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`. Silver: `bronze_extract_ts`, `bronze_source_pvo`, `silver_built_at`, `silver_run_id`. Gold: `gold_built_at`, `gold_run_id`. SOX trail — the `<layer>_run_id` columns join silver/gold rows to `fusion_bundle_state.run_id`, so a row in `gold.ap_aging` can be traced to the exact orchestrator run that produced it. v1 modules accept `run_id: str | None = None` kwarg; v2 templates use `{{ run_id_literal }}` and the renderer escapes the value.
-- **PII classification is mandatory** on every v2 `outputSchema.columns` entry (`pii: high | medium | low | none`). Missing → `AIDPF-2030`. High-PII columns must not appear in dashboard `requires.columns` / `security.allowedColumns` (§12.6 OAC MCP exposure).
+## Safety Rules
 
-## Testing discipline
+- Never store Fusion or OAC passwords in committed files.
+- Use the AIDP credential store for the Fusion BICC password.
+- Use a least-privilege OAC user for MCP. OAC MCP write/delete/ACL tools run
+  with the connecting user's grants.
+- Do not run a destructive seed without explicit user confirmation.
+- Do not expose high-PII columns in dashboard datasets or workbook visuals.
+- Do not bypass drift gates outside local development.
+- Keep customer changes in overlays and profiles, not in installed plugin
+  package files.
 
-- **Live evidence is required for any plugin-portability claim.** Unit tests verify SQL shape; only a live run against a real tenant's BICC extract verifies the SQL actually works. A new mart isn't done when `pytest` passes — it's done when there's a `tests/live/TC<N>_<mart>_results.md` showing real numbers from a real pod.
-- **Live evidence on at least one non-`saasfademo1` tenant before any "plugin-portable" claim ships.** Verifying on the demo pod proves it works on the demo pod, not that it's portable. Tracked as P3.7 / P3.9.
-- **The empty-source case is part of the contract.** Every dim and mart produces a sensible empty result (zero rows, correct schema, audit columns populated) when bronze is empty. Don't crash, don't silently relabel — `ap_aging`'s "empty population → real mode" decision is the template.
-- **v2 architectural tests are mandatory** — `tests/architectural/test_no_new_legacy_modules.py` runs on every PR. Adding a new `dim_*.py` / `gold_*.py` module without an allowlist entry fails CI.
-- **Pack-version drift tests** — `test_pack_schema_json_matches_models` catches divergence between the Pydantic source of truth and the exported `pack.schema.json` artefact. Regenerate via the docstring's snippet.
+## Useful Commands
 
-## Fusion specifics — non-obvious
+```bash
+aidp-fusion-bundle validate
+aidp-fusion-bundle bootstrap --check-iam
+aidp-fusion-bundle run --mode seed --dry-run
+aidp-fusion-bundle run --mode seed
+aidp-fusion-bundle run --mode incremental
+aidp-fusion-bundle status
+aidp-fusion-bundle content-pack validate overlays/<name>
+aidp-fusion-bundle use-pack overlays/<name> --profile <profile> --no-align
+```
 
-- **PVO names use the full AM-hierarchy from live BICC.** `FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO`, not pdf1's abbreviated `FscmTopModelAM.SupplierExtractPVO`. `catalog probe` is the source of truth; the curated catalog in [`schema/fusion_catalog.py`](scripts/oracle_ai_data_platform_fusion_bundle/schema/fusion_catalog.py) reflects live confirmation.
-- **Bronze column conventions are inconsistent across PVOs.** `SupplierExtractPVO` uses UPPERCASE no prefix (`SEGMENT1`, `VENDORID`). `InvoiceHeaderExtractPVO` uses PascalCase with `ApInvoices` prefix (`ApInvoicesVendorId`). `BalanceExtractPVO` uses PascalCase with `Balance` prefix. v2 absorbs this through `columnAliases` resolved at bootstrap; v1 modules document the convention in their docstring. Don't assume uniformity.
-- **OAC's REST validator does not bless AIDP's `idljdbc` connectionType.** Customer creates the OAC connection via the UI once (using the 6-key JSON from `--print-only`); subsequent `dashboard install` runs reuse via precheck. Documented in [`docs/oac_rest_api_setup.md`](docs/oac_rest_api_setup.md). Don't try to bypass with REST.
-- **OAC `.bar` files are opaque binary content** — never parsed by the plugin (PLAN §12.3). The dashboard pack YAML carries the gold contract; OAC catches drift between `.bar` and YAML at import time.
-
-## Cross-references
-
-- v2 plan (gitignored working doc): [`dev/PLAN_plugin_engine_medallion_content_packs.md`](dev/PLAN_plugin_engine_medallion_content_packs.md)
-- v1 backlog (v1 maintenance items): [`BACKLOG.md`](BACKLOG.md)
-- v1 status snapshot: [`STATUS.md`](STATUS.md)
-- Live evidence trail: [`tests/live/`](tests/live/)
-- Limit registry (known L1/L2 caveats): [`LIMITS.md`](LIMITS.md)
-- Plugin reference set: `/Users/oussamalakrafi/Workspace/Claude-Context/claude-code-plugins-ahmed/07-fusion-bundle-plugin.md`
-- Workspace-level AIDP rules: `/Users/oussamalakrafi/Workspace/CLAUDE.md`
+When unsure, prefer read-only status and validation commands before changing
+pipeline state.
