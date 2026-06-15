@@ -1,6 +1,6 @@
 ---
 name: aidp-fusion-autopilot
-description: "End-to-end conductor for the Fusion -> AIDP -> OAC dashboard journey. Takes one high-level goal ('I want a supplier-spend vs GL-balance dashboard from Fusion') and drives the whole chain — configure -> bootstrap -> seed -> advise dataset -> author mart if needed -> create OAC dataset -> author workbook -> set up MCP chat — by detecting current state and delegating each phase to the right sibling skill/command. Auto-advances on clean steps; pauses for real decisions (destructive seed, variation freeze, OAC dataset creation, ambiguous intent, gaps). Use when the user states a dashboard/analytics goal and wants it driven start-to-finish, says 'set up Fusion analytics end to end', 'autopilot this', or 'take me from nothing to a dashboard'. NOT for a single known step (call that skill directly)."
+description: "End-to-end conductor for the Fusion -> AIDP -> OAC dashboard journey. Takes one high-level goal ('I want a supplier-spend vs GL-balance dashboard from Fusion') and drives the whole chain — configure -> bootstrap -> seed -> advise dataset -> author mart if needed -> create OAC dataset -> author workbook -> set up MCP chat — by detecting current state and delegating each phase to the right sibling skill/command. Auto-advances on clean steps; pauses for real decisions (destructive seed, variation freeze, OAC dataset creation, ambiguous intent, gaps). Use when the user states a dashboard/analytics goal and wants it driven start-to-finish, OR on first run after installing the plugin — 'I just installed this, what now', 'get me started', 'set me up', 'set up Fusion analytics from scratch / end to end', 'autopilot this', 'take me from nothing to a dashboard'. This is the front door for a fresh install (Phase 1 scaffolds the bundle). NOT for a single known step (call that skill directly)."
 allowed-tools: Read, Bash, Glob, Grep, mcp__oac-mcp-server__oracle_analytics-search_catalog, mcp__oac-mcp-server__oracle_analytics-find_matching_datasources, mcp__oac-mcp-server__oracle_analytics-describe_data
 ---
 
@@ -42,7 +42,7 @@ seven skills to invoke, or in what order.
 
 | # | Phase | Done when (detect) | Drive with | PAUSE before if |
 |---|---|---|---|---|
-| 1 | **Config** | `bundle.yaml` + `aidp.config.yaml` exist; coords non-placeholder | `init` (CLI) → `/aidp-fusion-config` for coords | missing `fusion:` connectivity (human-only) |
+| 1 | **Config** | `bundle.yaml` + `aidp.config.yaml` exist; coords non-placeholder | `aidp-fusion-bundle init` (scaffold if absent — fresh install) → `/aidp-fusion-config` for coords | missing `fusion:` connectivity (human-only) |
 | 2 | **Bootstrap** | `profiles/<tenant>.yaml` present + fingerprint pinned | `aidp-fusion-bundle bootstrap` | multi-match variation needs a human pick (never `--non-interactive`); surface frozen picks |
 | 3 | **Seed** | live gold has the needed tables (probe) | `/aidp-fusion-seed` | always confirm the destructive guard's CONFIRM outcome |
 | 4 | **Advise** | — (always run for the goal) | `/oac-dataset-advisor` | — |
@@ -50,6 +50,15 @@ seven skills to invoke, or in what order.
 | 6 | **OAC dataset** | a dataset over the recommended table(s) exists (OAC MCP) | advisor's recommendation | **always** — dataset creation is an OAC UI action today (MCP can't create datasets); hand the exact spec to the user |
 | 7 | **Workbook** | a workbook on that dataset exists/renders | `/workbook-authoring` | confirm overwrite if replacing an existing workbook |
 | 8 | **MCP chat** | `.mcp.json` wired + connector staged | `aidp-fusion-bundle dashboard mcp-setup` (basic auth, works in Claude Code) | confirm the OAC user is **least-privilege** (v1.4 exposes write/delete/ACL tools) |
+
+## First run (fresh install)
+If `bundle.yaml` / `aidp.config.yaml` don't exist yet (brand-new install), Phase
+1 starts from zero: run **`aidp-fusion-bundle init`** to scaffold them, then
+`/aidp-fusion-config` to resolve the AIDP coords from names. Capture the user's
+goal first (even a rough one) so the rest of the journey has a target; if they
+have no goal yet, scaffold + configure and stop there with "what dashboard do
+you want?". Don't ask for OCIDs by hand — that's what `init` + `/aidp-fusion-config`
+are for.
 
 ## The loop
 1. **Capture the goal** — restate the dashboard the user wants (metrics,
