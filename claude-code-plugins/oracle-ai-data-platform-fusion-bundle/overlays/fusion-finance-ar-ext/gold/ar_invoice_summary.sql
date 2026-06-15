@@ -7,7 +7,6 @@ WITH ar AS (
     t._extract_ts                                               AS bronze_extract_ts
   FROM {{ catalog }}.{{ bronze_schema }}.ar_invoices t
   WHERE t.RaCustomerTrxInvoiceCurrencyCode IS NOT NULL
-    AND {{ watermark_predicate }}
 )
 SELECT
   ar.currency_code                                              AS currency_code,

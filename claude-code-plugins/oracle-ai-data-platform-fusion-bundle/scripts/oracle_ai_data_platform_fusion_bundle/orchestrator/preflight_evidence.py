@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..commands.bronze_probe import describe_bronze
+from ..commands.bronze_probe import BronzeProbeFailure, describe_bronze
 from ..schema.bronze_fingerprint import ColumnInfo, compute_bronze_fingerprint
 from ..schema.bronze_schema_snapshot import (
     BronzeSchemaSnapshotSchemaError,
@@ -164,13 +164,39 @@ def check_bronze_fingerprint_drift(
     # Even under --force-fingerprint-skip we run the probe so the
     # outcome carries a real `current_fingerprint` for the audit row.
     dataset_ids = _bronze_dataset_ids(pack)
-    observed = describe_bronze(
-        spark,
-        catalog=bundle.aidp.catalog,
-        bronze_schema=bundle.aidp.bronze_schema,
-        dataset_ids=dataset_ids,
-    )
-    current_fingerprint = compute_bronze_fingerprint(observed=observed)
+    # Map id -> physical target table (pack permits id != target, e.g.
+    # gl_journal_lines -> gl_journal_headers); DESCRIBE the target, key by id.
+    table_names = {
+        nid: pack.bronze[nid].target
+        for nid in dataset_ids
+        if nid in getattr(pack, "bronze", {}) and getattr(pack.bronze[nid], "target", None)
+    }
+    try:
+        observed = describe_bronze(
+            spark,
+            catalog=bundle.aidp.catalog,
+            bronze_schema=bundle.aidp.bronze_schema,
+            dataset_ids=dataset_ids,
+            table_names=table_names,
+        )
+        current_fingerprint = compute_bronze_fingerprint(observed=observed)
+    except BronzeProbeFailure as exc:
+        # A declared bronze table is unreachable (e.g. a dataset whose extract
+        # failed, so its table was never materialised). Under the break-glass
+        # flag the operator has accepted skipping the drift gate — don't let a
+        # broken probe abort the run; proceed with no current fingerprint.
+        if force_skip:
+            logger.warning(
+                "Bronze fingerprint probe failed (%s); --force-fingerprint-skip "
+                "set, proceeding without a current fingerprint.", exc,
+            )
+            return PreflightOutcome(
+                kind="skip_force_flag",
+                prior_fingerprint=prior_fingerprint,
+                current_fingerprint=None,
+                summary=f"--force-fingerprint-skip bypassed comparison (probe failed: {exc})",
+            )
+        raise
 
     # ─── Skip: --force-fingerprint-skip ────────────────────────────
     if force_skip:

@@ -1187,6 +1187,12 @@ def _acquire_probe_result(
     dataset_ids = _bronze_dataset_ids(pack)
     catalog = bundle.aidp.catalog
     bronze_schema = bundle.aidp.bronze_schema
+    # id -> physical target table (pack permits id != target).
+    table_names = {
+        nid: pack.bronze[nid].target
+        for nid in dataset_ids
+        if nid in getattr(pack, "bronze", {}) and getattr(pack.bronze[nid], "target", None)
+    }
 
     spark = _resolve_spark(options)
     try:
@@ -1195,6 +1201,7 @@ def _acquire_probe_result(
             catalog=catalog,
             bronze_schema=bronze_schema,
             dataset_ids=dataset_ids,
+            table_names=table_names,
         )
     finally:
         _close_spark_if_owned(spark, options)

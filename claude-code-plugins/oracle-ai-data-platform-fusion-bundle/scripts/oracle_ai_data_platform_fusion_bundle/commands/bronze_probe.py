@@ -68,6 +68,7 @@ def describe_bronze(
     catalog: str,
     bronze_schema: str,
     dataset_ids: list[str],
+    table_names: "dict[str, str] | None" = None,
 ) -> dict[str, list[ColumnInfo]]:
     """Run ``DESCRIBE TABLE`` against each bronze dataset and return the
     parsed column metadata.
@@ -96,15 +97,24 @@ def describe_bronze(
             Wraps the underlying Spark exception with the dataset id so
             the operator knows which bronze table was unreachable.
     """
+    # The physical bronze table is the node's ``target``, which the pack
+    # contract permits to differ from the dataset ``id`` (e.g. node
+    # ``gl_journal_lines`` targets table ``gl_journal_headers``). Callers pass
+    # ``table_names`` (id -> target); absent an entry we fall back to the id
+    # (id == target for most nodes), preserving existing callers' behaviour.
+    table_names = table_names or {}
+
     # Fail-closed identifier validation BEFORE any Spark call.
     _validate_identifier(catalog, field="aidp.catalog")
     _validate_identifier(bronze_schema, field="aidp.bronzeSchema")
     for dataset_id in dataset_ids:
         _validate_identifier(dataset_id, field="bronze.dataset.id")
+        _validate_identifier(table_names.get(dataset_id, dataset_id), field="bronze.dataset.target")
 
     out: dict[str, list[ColumnInfo]] = {}
     for dataset_id in dataset_ids:
-        fully_qualified = f"{catalog}.{bronze_schema}.{dataset_id}"
+        table = table_names.get(dataset_id, dataset_id)
+        fully_qualified = f"{catalog}.{bronze_schema}.{table}"
         try:
             rows = spark.sql(f"DESCRIBE TABLE {fully_qualified}").collect()
         except Exception as exc:  # noqa: BLE001 — Spark raises a variety of types
@@ -113,7 +123,7 @@ def describe_bronze(
                 fully_qualified=fully_qualified,
                 cause=exc,
             ) from exc
-        out[dataset_id] = _parse_describe_rows(rows)
+        out[dataset_id] = _parse_describe_rows(rows)  # keyed by id, not target
     return out
 
 

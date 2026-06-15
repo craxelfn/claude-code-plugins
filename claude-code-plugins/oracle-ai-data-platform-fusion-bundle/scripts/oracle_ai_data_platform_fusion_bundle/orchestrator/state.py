@@ -688,11 +688,16 @@ def write_fingerprint_skip_row(
         return f"'{escaped}'"
 
     # Truncated fingerprints — 24 chars is enough to disambiguate
-    # in audit queries without bloating the column.
+    # in audit queries without bloating the column. ``current`` may be
+    # None when --force-fingerprint-skip bypassed a failed probe (e.g. a
+    # bronze table unreachable); render it as "unprobed" rather than crash.
+    def _short(fp: "str | None") -> str:
+        return f"{fp[:24]}..." if fp else "unprobed"
+
     skip_reason = (
         f"--force-fingerprint-skip; "
-        f"prior={prior_fingerprint[:24]}... "
-        f"current={current_fingerprint[:24]}..."
+        f"prior={_short(prior_fingerprint)} "
+        f"current={_short(current_fingerprint)}"
     )
 
     spark.sql(
