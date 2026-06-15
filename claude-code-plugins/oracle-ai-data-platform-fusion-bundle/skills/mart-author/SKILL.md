@@ -135,12 +135,47 @@ Fix until clean — schema + content validators cover PII-missing (AIDPF-2030),
 dependency/SQL integrity, and the no-new-legacy-module rule. (New error codes,
 if any, register in PLAN §25 first.)
 
-### 7 — Hand off (do not seed here)
-Tell the operator to:
-1. **Seed the new node** — `aidp-fusion-bundle run --mode seed --datasets <new-id>`
-   (or `/aidp-fusion-seed`); D-1 auto-pulls any new bronze dep.
-2. **Re-run `oac-dataset-advisor`** — which now sees the new **live** table and
+### 7 — Wire the bundle for the client, then hand off to seed (do not seed here)
+An overlay isn't seeded until the bundle points at it. **Do this wiring FOR the
+client** — apply the edits with `Edit`/`Write`, show the diff, and confirm
+before saving; don't just print instructions. (This exact recipe is
+live-proven — `ar_invoice_summary` materialized 49 rows on saasfademo1,
+2026-06-15.)
+
+1. **Point `bundle.yaml` at the overlay** (and only at real pack nodes) — edit it:
+   ```yaml
+   contentPack:
+     name: <overlay-id>
+     path: overlays/<name>
+     profile: <tenant>
+   ```
+   Also ensure `dimensions.build` / `gold.marts` list **only nodes the pack
+   actually has** (incl. the new one) — stale v1 entries like `dim_org` /
+   `po_backlog` make the content-pack plan resolver fail.
+2. **Profile present** — confirm `profiles/<tenant>.yaml` exists (else run
+   `bootstrap`, or reuse an existing one).
+3. **Normalize credentials/config so the client's seed won't fail cluster-side**
+   (the two gotchas this skill must pre-empt):
+   - if `bundle.yaml`'s `fusion.password` is a **placeholder vault OCID**, fix
+     it to `fusion.password: ${FUSION_BICC_PASSWORD}` — the cluster notebook
+     loads that from the AIDP credential store (`biccSecretName`); a placeholder
+     vault ref fails with `CredentialResolutionError`;
+   - any other `${ENV}` ref in `bundle.yaml` must resolve **both** client-side
+     (preflight `load_bundle`) and cluster-side — literalize tenant values or
+     ensure the env var is set in both places;
+   - if `aidp.config.yaml` coords are missing/placeholder, route to
+     `/aidp-fusion-config` (don't make the client hand-copy OCIDs).
+4. **Then hand to the seed step** — `/aidp-fusion-seed` (or
+   `aidp-fusion-bundle run --mode seed --datasets <new-id> --layers gold`).
+   `--layers gold` lets the bronze-readiness gate verify the existing bronze
+   dep instead of re-extracting it from BICC (the plan still lists the bronze
+   dep; it is read, not rebuilt).
+5. **Re-run `oac-dataset-advisor`** — it now sees the new **live** table and
    recommends the OAC dataset; then `workbook-authoring` builds the viz.
+
+> **Overlay-on-installed-base requires plugin ≥ the `chain_roots` staging fix**
+> (`content_pack_staging.py`): before it, seeding any overlay raised
+> `AIDPF-1040` because inherited base-pack nodes weren't staged. See LIMITS.md.
 
 ---
 

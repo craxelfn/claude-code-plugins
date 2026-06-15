@@ -81,3 +81,9 @@ tests/fixtures/**/.aidp/
 
 # local tenant coords (real OCIDs/keys) — never commit
 aidp.config.yaml
+
+# local tenant bundle (real pod URL / user / contentPack) — never commit
+bundle.yaml
+
+# local tenant profiles (bootstrap-pinned fingerprints) — never commit
+profiles/

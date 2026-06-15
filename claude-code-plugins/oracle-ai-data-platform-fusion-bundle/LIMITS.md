@@ -13,6 +13,22 @@
 
 ## Active limits
 
+### L-overlay-seed — seeding an overlay needs explicit bundle wiring (no one-command path)
+Discovered 2026-06-15 wiring the first live overlay seed (`ar_invoice_summary`
+on saasfademo1 — succeeded, 49 rows). An overlay authored under
+`overlays/<name>/` is **not** seedable until the operator hand-wires three
+things; there is no `aidp-fusion-bundle use-pack` command yet:
+1. `bundle.yaml` `contentPack: {name, path: overlays/<name>, profile}`;
+2. `bundle.yaml` `dimensions.build` / `gold.marts` must list **only** real pack
+   nodes (stale v1 entries like `dim_org`/`po_backlog` fail the plan resolver);
+3. `fusion.password: ${FUSION_BICC_PASSWORD}` (credential-store env) — a
+   placeholder vault OCID fails cluster-side with `CredentialResolutionError`;
+   and every `${ENV}` ref must resolve both client-side and cluster-side.
+**Mitigation today:** `mart-author` step 7 + `aidp-fusion-seed` ladder perform
+this wiring for the client. **Proper fix (tracked):** an `init` template that
+defaults `fusion.password` to the env form, and a `use-pack`/`wire-overlay` CLI
+verb so the skills call one command instead of editing YAML.
+
 ### L1 — PVO schema drift across Fusion releases requires patch releases
 
 **What it is**: Gold marts and silver dims hardcode column names sourced from a one-time live probe of each Fusion BICC PVO (e.g. `CodeCombinationCodeCombinationId`, `BalanceCodeCombinationId`). When Oracle renames columns or changes value domains across Fusion releases, the bundle requires a patch release that updates affected SQL builders. There is no architecture that eliminates this — see "Why we can't fix this" below.
@@ -335,6 +351,22 @@ varied prefixes; use core-exact / semantic matching.
 ---
 
 ## Resolved limits
+
+### AIDPF-1040 — overlay packs could never be seeded (chain_roots not staged) (RESOLVED 2026-06-15)
+
+`content_pack_staging._resolve_chain_roots` read a `chain_roots` attribute that
+`load_full_chain` never populated, so it fell back to the overlay's own root
+only. Any overlay extending another pack (e.g. the installed
+`fusion-finance-starter`) raised `AIDPF-1040` at staging because the inherited
+base-pack node files weren't in `chain_roots` — i.e. **no overlay could be
+seeded at all**, even though `content-pack validate` passed (validate doesn't
+stage). `root_for()` knew each node's origin root; `chain_roots` didn't.
+**Fix:** `_resolve_chain_roots` now derives the roots from the distinct
+`source_roots` values (base-first, matching the `entry_layer_index =
+len(chain_roots) - 1` contract) when `chain_roots` is absent. Live-proven: the
+`fusion-finance-ar-ext` overlay seeded `gold.ar_invoice_summary` (49 rows) on
+saasfademo1, 2026-06-15. Follow-up: add a regression test for overlay-on-
+installed-base staging.
 
 ### AIDPF-1032 — `--resume` rejected on content-pack backend (RESOLVED 2026-06-08 by Phase 5 Step 9b)
 

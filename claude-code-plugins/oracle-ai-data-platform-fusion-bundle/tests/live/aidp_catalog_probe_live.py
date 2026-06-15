@@ -92,10 +92,12 @@ def main(argv: list[str] | None = None) -> int:
                             log=lambda stage, **kw: print(f"[{stage}] {kw}", file=sys.stderr))
     client.verify_cluster_active(ns.cluster_key)
 
-    path = f"/Workspace/{ns.workspace_root}/aidp-fusion-catalog-probe.ipynb"
+    # Unique suffix (pid) so repeat probes don't 409 on a pre-existing job/notebook.
+    uid = f"{os.getpid()}"
+    path = f"/Workspace/{ns.workspace_root}/aidp_fusion_catalog_probe_{ns.schema}_{uid}.ipynb"
     client.upload_notebook(path, _notebook(ns.catalog, ns.schema))
     job = client.create_notebook_job(
-        name="aidp_fusion_catalog_probe", description="oac-dataset-advisor live evidence",
+        name=f"aidp_fusion_catalog_probe_{uid}", description="oac-dataset-advisor live evidence",
         notebook_path=path, cluster_key=ns.cluster_key, cluster_name=ns.cluster_name,
         task_key="probe",
     )

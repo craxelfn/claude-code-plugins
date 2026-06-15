@@ -221,6 +221,20 @@ def _resolve_chain_roots(resolved_pack: "ResolvedPack") -> tuple[Path, ...]:
     chain_roots = getattr(resolved_pack, "chain_roots", None)
     if chain_roots:
         return tuple(chain_roots)
+    # No explicit chain_roots: derive from per-node source_roots so an
+    # overlay's inherited base-pack nodes are staged too. Without this an
+    # overlay falls back to its own root only and every inherited node raises
+    # AIDPF-1040 at staging — i.e. no overlay (e.g. one extending the installed
+    # fusion-finance-starter) could be seeded. merge_overlay seeds
+    # source_roots base-first, so dict-insertion order is base -> overlay,
+    # which matches the entry_layer_index = len(chain_roots) - 1 contract.
+    source_roots = getattr(resolved_pack, "source_roots", None)
+    if source_roots:
+        ordered: dict[Path, None] = {}
+        for r in source_roots.values():
+            ordered.setdefault(r, None)
+        if ordered:
+            return tuple(ordered)
     return (resolved_pack.root,)
 
 

@@ -137,6 +137,23 @@ cluster_state, config_placeholders[], validate_ok, details{}}`. Act on
   cluster start action); if `unprobed`, the coords/auth could not reach the
   plane — fix config first. Do not dispatch against a non-ACTIVE cluster.
 
+- **Requested node lives in an overlay not wired into `contentPack`** (e.g. a
+  mart `mart-author` just authored under `overlays/<name>/`). The orchestrator
+  only knows nodes in the **active** `contentPack`, so a node not in it parses
+  as unknown. Wire the bundle for the client (mirror `mart-author` step 7):
+  point `bundle.yaml`'s `contentPack` at the overlay (`name`/`path`/`profile`),
+  ensure `dimensions.build` / `gold.marts` list only real pack nodes (incl. the
+  new one), then re-run. If the overlay doesn't exist yet, route to
+  `/mart-author`.
+
+- **Cluster-side credential gotcha (pre-empt before dispatch).** If
+  `bundle.yaml`'s `fusion.password` is a placeholder vault OCID, the cluster run
+  fails with `CredentialResolutionError`. Set `fusion.password:
+  ${FUSION_BICC_PASSWORD}` (loaded cluster-side from the AIDP credential store
+  via `biccSecretName`), and make sure every `${ENV}` ref in `bundle.yaml`
+  resolves **both** client-side (preflight `load_bundle`) and cluster-side
+  (literalize tenant values, or set the env var in both places).
+
 **Dispatch mode**: default **cluster REST** (no `--inline`). Switch to
 `--inline` only when the environment is clearly an AIDP notebook session
 (Spark + checkpointer + vault present) or the user explicitly asks. When in
