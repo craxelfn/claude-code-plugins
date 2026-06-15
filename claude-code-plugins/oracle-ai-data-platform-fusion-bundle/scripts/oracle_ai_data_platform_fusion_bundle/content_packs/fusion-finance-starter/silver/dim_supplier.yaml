@@ -23,8 +23,7 @@ refresh:
       - supplier_number
     reason: |
       Row-grain silver dim. xxhash64 surrogate ensures determinism under
-      MERGE per PLAN §11 invariant. Single bronze source; role: primary
-      defaults apply per §11.10.
+      MERGE. Single bronze source; role: primary defaults apply.
 
 requiredColumns:
   erp_suppliers:

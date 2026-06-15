@@ -77,7 +77,7 @@ def _refresh_for(layer: str, grain: list, is_aggregate: bool) -> dict:
             "seed": {"strategy": "replace"},
             "incremental": {"strategy": "replace"},
             "reason": "Aggregate grain — partial MERGE leaves stale rows on status/key flips; "
-                      "replace each cycle (PLAN §10.8 aggregate-merge is post-v0.3).",
+                      "replace each cycle.",
         }
     # Row-grain node (silver dim / row-grain gold): merge on the natural key.
     return {
@@ -85,7 +85,7 @@ def _refresh_for(layer: str, grain: list, is_aggregate: bool) -> dict:
         "incremental": {
             "strategy": "merge",
             "naturalKey": list(grain),
-            "reason": "Row-grain node — NULL-safe MERGE on the natural key (LIMITS P1.17-L8).",
+            "reason": "Row-grain node — NULL-safe MERGE on the natural key.",
         },
     }
 

@@ -54,7 +54,7 @@
     },
     "ColumnAlias": {
       "additionalProperties": false,
-      "description": "Same logical column, different physical names across tenants.\n\nPLAN \u00a79.5.1. Bootstrap walks ``candidates`` in priority order and pins\nthe first that exists on the tenant.",
+      "description": "Same logical column, different physical names across tenants.\n\nBootstrap walks ``candidates`` in priority order and pins the first that\nexists on the tenant.",
       "properties": {
         "appliesTo": {
           "title": "Appliesto",
@@ -141,7 +141,7 @@
     },
     "OverrideEntry": {
       "additionalProperties": true,
-      "description": "Per-node override declared by an overlay pack.\n\nPLAN \u00a78.7 merge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it.\n\nUnknown keys default to scalar-replace per \u00a78.7.",
+      "description": "Per-node override declared by an overlay pack.\n\nMerge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``extendColumns: true`` -- the overlay extends the base node's\n  ``outputSchema.columns`` rather than replacing it.\n\nUnknown keys default to scalar replace.",
       "properties": {
         "profile": {
           "anyOf": [
@@ -283,7 +283,7 @@
     },
     "PackProvenance": {
       "additionalProperties": true,
-      "description": "Optional provenance block stamped by the medallion-author skill (ADR-0019).\n\nSkill-authored packs (overlays, in particular) record the skill version,\nmodel identity, generation timestamp, and reason. Hand-authored packs may\nomit this block entirely.\n\nPhase 3b extends the schema with skill-specific fields\n(``skill_id``, ``diagnostic_run_id``, ``proposals``,\n``incremental_impact``). **Every new field declares an explicit\ncamelCase ``Field(alias=...)``** so overlay YAML's camelCase keys\nparse \u2014 round-3 plan-review finding (without aliases the bootstrap\ndetection silently never fires).",
+      "description": "Optional provenance block stamped by the medallion-author skill (ADR-0019).\n\nSkill-authored packs (overlays, in particular) record the skill version,\nmodel identity, generation timestamp, and reason. Hand-authored packs may\nomit this block entirely.\n\nSkill-specific fields use explicit camelCase ``Field(alias=...)`` values\nso overlay YAML keys parse consistently and bootstrap can detect\nskill-authored proposals.",
       "properties": {
         "diagnosticRunId": {
           "anyOf": [
@@ -457,7 +457,7 @@
     },
     "RunIdColumnDefaults": {
       "additionalProperties": false,
-      "description": "Audit column names per medallion layer (per PLAN \u00a78.1).",
+      "description": "Audit column names per medallion layer.",
       "properties": {
         "bronze": {
           "default": "_run_id",
@@ -480,7 +480,7 @@
     },
     "SemanticVariant": {
       "additionalProperties": false,
-      "description": "Same logical concept, different SQL **shape** across tenants (PLAN \u00a79.5.1).",
+      "description": "Same logical concept, different SQL shape across tenants.",
       "properties": {
         "appliesTo": {
           "title": "Appliesto",
@@ -509,7 +509,7 @@
     },
     "SemanticVariantCandidate": {
       "additionalProperties": false,
-      "description": "One semantic-shape candidate (PLAN \u00a79.5.1 / \u00a79.5.2).",
+      "description": "One semantic-shape candidate.",
       "properties": {
         "detect": {
           "$ref": "#/$defs/SemanticVariantDetect"
@@ -548,7 +548,7 @@
     },
     "SkillProposalRecord": {
       "additionalProperties": false,
-      "description": "One per-VP proposal the medallion-author skill captured at\noverlay-draft time (Phase 3b).\n\nBootstrap reads ``candidate_added`` to detect AutoResolved-on-skill-\nproposed-candidate at commit time (Phase 3b round-2 finding \u2014\ninitial-onboarding flow must record ``mechanism: skill_proposed``\nwhen the walker AutoResolves on a candidate the skill added).",
+      "description": "One per-VP proposal the medallion-author skill captured at\noverlay-draft time.\n\nBootstrap reads ``candidate_added`` to detect AutoResolved-on-skill-\nproposed-candidate at commit time. The initial-onboarding flow must\nrecord ``mechanism: skill_proposed`` when the walker AutoResolves on a\ncandidate the skill added.",
       "properties": {
         "candidateAdded": {
           "title": "Candidateadded",
@@ -587,7 +587,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Top-level schema for ``pack.yaml``.\n\nNode definitions live in separate per-node YAML files under\n``silver/`` and ``gold/`` and are validated by :class:`NodeYaml`\n(Step 3 of v2-phase-1-content-pack-schema -- not yet implemented).\n``PackYaml`` covers pack identity, compatibility, defaults, profile\ndefaults, variation-point declarations, overlay coordination, and\nprovenance.",
+  "description": "Top-level schema for ``pack.yaml``.\n\nNode definitions live in separate per-node YAML files under\n``silver/`` and ``gold/`` and are validated by :class:`NodeYaml`\nwhen the content pack is loaded.\n``PackYaml`` covers pack identity, compatibility, defaults, profile\ndefaults, variation-point declarations, overlay coordination, and\nprovenance.",
   "properties": {
     "columnAliases": {
       "additionalProperties": {

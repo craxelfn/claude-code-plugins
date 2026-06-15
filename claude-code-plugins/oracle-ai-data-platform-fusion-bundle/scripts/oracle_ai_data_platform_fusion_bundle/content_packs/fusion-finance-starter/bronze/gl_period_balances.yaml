@@ -7,7 +7,8 @@ implementation:
   biccSchema: Financial
   schemaOverride: null
   # gl_period_balances revises retroactively; LastUpdateDate doesn't track
-  # meaningful change events monotonically — payload-diff-gated MERGE per P1.17e.
+  # meaningful change events monotonically; payload-diff-gated MERGE handles
+  # unchanged rows.
   incrementalCapable: false
   auditColumnsMode: bronze_v1
 target: gl_period_balances

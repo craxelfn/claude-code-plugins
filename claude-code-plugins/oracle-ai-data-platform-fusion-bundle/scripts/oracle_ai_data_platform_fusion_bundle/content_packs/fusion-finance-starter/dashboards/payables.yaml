@@ -2,8 +2,7 @@ id: payables
 title: Payables Dashboard
 version: 0.1.0
 description: |
-  AP-focused operational dashboard. Phase 1 ships the YAML contract
-  only; matching .bar lands in Phase 6.
+  AP-focused operational dashboard delivered through the OAC snapshot flow.
 
 delivery:
   type: oac-snapshot
