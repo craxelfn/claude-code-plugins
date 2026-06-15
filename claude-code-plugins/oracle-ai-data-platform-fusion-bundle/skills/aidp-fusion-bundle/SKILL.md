@@ -38,6 +38,13 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
 
 ## Quickstart
 
+> **Just want it driven end-to-end?** State your goal to
+> [`aidp-fusion-autopilot`](../aidp-fusion-autopilot/SKILL.md) — e.g. *"build a
+> supplier-spend vs GL-balance dashboard from Fusion"* — and it conducts the
+> whole chain (configure → bootstrap → seed → advise → author → dataset →
+> workbook → MCP chat), pausing only for real decisions. The manual quickstart
+> below is the step-by-step path the autopilot automates.
+
 1. **Install the CLI** on your laptop:
    ```bash
    pip install -e /path/to/oracle-ai-data-platform-fusion-bundle
