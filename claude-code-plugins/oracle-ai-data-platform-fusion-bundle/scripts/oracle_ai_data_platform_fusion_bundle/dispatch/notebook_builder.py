@@ -111,6 +111,7 @@ def _build_run_cell(
     layers: list[str] | None,
     execution_backend: str = "legacy-python",
     force_fingerprint_skip: bool = False,
+    repin_plan_hash: bool = False,
     resume_run_id: str | None = None,
     # Phase 9 — ``--strict-scope`` opt-out of D-1
     # implicit-transitive-include. Emitted as ``strict_scope=...`` in
@@ -147,6 +148,7 @@ def _build_run_cell(
         f"        dry_run=False,\n"
         f"        resume_run_id={resume_run_id!r},\n"
         f"        force_fingerprint_skip={force_fingerprint_skip!r},\n"
+        f"        repin_plan_hash={repin_plan_hash!r},\n"
         f"        strict_scope={strict_scope!r},\n"
         f"{backend_kwargs}"
         f"    )\n"
@@ -366,6 +368,10 @@ def build_notebook(
     # Phase 3c — splices into the orchestrator.run kwargs in the run
     # cell so the cluster-side gate honours the break-glass intent.
     force_fingerprint_skip: bool = False,
+    # P-incr-L1 — splices ``repin_plan_hash=...`` into the run-cell
+    # orchestrator.run call so the cluster-side AIDPF-4040 gate honours
+    # --repin-plan-hash.
+    repin_plan_hash: bool = False,
     # Phase 3d — when provided, the bootstrap cell materialises the
     # pinned bronze-schema snapshot at the cluster-side resolved path
     # so preflight can populate `datasetDeltas` on drift. ``None``
@@ -456,6 +462,7 @@ def build_notebook(
                 mode=mode, datasets=datasets, layers=layers,
                 execution_backend=execution_backend,
                 force_fingerprint_skip=force_fingerprint_skip,
+                repin_plan_hash=repin_plan_hash,
                 resume_run_id=resume_run_id,
                 strict_scope=strict_scope,
             )

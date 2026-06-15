@@ -40,6 +40,7 @@ References:
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -47,7 +48,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from . import plan_hash as plan_hash_module
+from . import state as state_module
 from . import state_phase2
+
+logger = logging.getLogger(__name__)
 from .node_preflight import preflight_node
 from .quality_runner import run_quality_tests
 from .sql_renderer import (
@@ -169,6 +173,7 @@ def execute_node(
     profile_hash: str,
     prior_plan_hash: str | None = None,
     target_override: str | None = None,
+    repin_plan_hash: bool = False,
 ) -> NodeExecutionResult:
     """Execute one content-pack node end-to-end.
 
@@ -192,6 +197,12 @@ def execute_node(
         target_override: fully-qualified target identifier override.
             When ``None``, the executor uses ``<catalog>.<silver|gold_schema>.<node.target>``
             from ``ctx``.
+        repin_plan_hash: hidden break-glass (``--repin-plan-hash``). When
+            True and the AIDPF-4040 continuity gate would fire, the gate is
+            bypassed, a ``mode='plan_hash_repin'`` audit row is written, and
+            execution proceeds — re-pinning the new plan-hash. For deliberate
+            SQL/profile/adapter edits where a full re-seed isn't wanted.
+            Production/SOX runs MUST NOT use this.
 
     Returns:
         :class:`NodeExecutionResult` describing the outcome. The caller
@@ -216,6 +227,7 @@ def execute_node(
             profile_hash=profile_hash,
             prior_plan_hash=prior_plan_hash,
             target_override=target_override,
+            repin_plan_hash=repin_plan_hash,
         )
     if impl_type == "bronze_extract":
         # Content-pack-driven bronze follows the builtin lifecycle, but
@@ -233,6 +245,7 @@ def execute_node(
             profile_hash=profile_hash,
             prior_plan_hash=prior_plan_hash,
             target_override=target_override,
+            repin_plan_hash=repin_plan_hash,
         )
     if impl_type != "sql":
         # Defensive — the loader's discriminated union already rejects
@@ -284,21 +297,14 @@ def execute_node(
     )
 
     # ----- Step 5: plan-hash drift gate (incremental only) -----------
-    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
-        message = (
-            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
-            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
-            f"Re-run with --mode seed (or revert the YAML / SQL / profile change)."
-        )
-        _safe_write_resume_drift_row(
-            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
-            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
-        )
-        return NodeExecutionResult(
-            status="resume_drift_blocked",
-            error_message=message,
-            plan_hash=expected_plan_hash,
-        )
+    drift_result = _resume_drift_or_repin(
+        spark, paths, node=node, ctx=ctx, profile=profile, mode=mode,
+        expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        repin_plan_hash=repin_plan_hash,
+        revert_hint="revert the YAML / SQL / profile change",
+    )
+    if drift_result is not None:
+        return drift_result
 
     # ----- Step 6: dispatch by strategy, reusing RenderedSql ----------
     target = target_override or _build_target_identifier(node, ctx, paths)
@@ -812,6 +818,82 @@ def _safe_write_schema_drift_row(
     )
 
 
+def _safe_write_plan_hash_repin_row(
+    spark, paths, *, node, ctx, expected_plan_hash, prior_plan_hash,
+) -> None:
+    """Best-effort ``--repin-plan-hash`` audit row (mode='plan_hash_repin').
+
+    Like the other soft writers, MUST NOT raise — losing the audit row only
+    loses the SOX trail, not the bypass semantics (the node's success row,
+    written next, pins the new plan-hash regardless).
+    """
+    try:
+        state_module.write_plan_hash_repin_row(
+            spark, paths,
+            run_id=ctx.run_id,
+            dataset_id=node.id,
+            layer=node.layer,
+            expected_plan_hash=expected_plan_hash,
+            prior_plan_hash=prior_plan_hash,
+        )
+    except Exception:  # noqa: BLE001 — audit write is best-effort
+        return
+
+
+def _resume_drift_or_repin(
+    spark, paths, *, node, ctx, profile, mode, expected_plan_hash,
+    prior_plan_hash, repin_plan_hash, revert_hint,
+) -> "NodeExecutionResult | None":
+    """Apply the AIDPF-4040 continuity gate with the --repin-plan-hash hatch.
+
+    Returns a ``resume_drift_blocked`` :class:`NodeExecutionResult` to
+    short-circuit on, or ``None`` to proceed with execution.
+
+    When the gate would fire (incremental + diverged prior hash):
+
+    * ``repin_plan_hash=True`` — operator break-glass: write a
+      ``mode='plan_hash_repin'`` audit row, WARN, and return ``None`` so
+      execution proceeds and re-pins the new hash.
+    * otherwise — write the drift row and return the blocked result.
+
+    ``revert_hint`` tailors the per-site remediation text (SQL/profile edit
+    vs adapter-version bump).
+    """
+    if not (mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash):
+        return None
+
+    if repin_plan_hash:
+        logger.warning(
+            "%s bypassed by --repin-plan-hash on node %r — plan-hash repinned "
+            "from %s... to %s... (audit row mode='plan_hash_repin'). This "
+            "asserts the plan edit was deliberate; production/SOX runs MUST NOT "
+            "use this flag.",
+            AIDPF_4040_PLAN_HASH_DRIFT, node.id,
+            prior_plan_hash[:16], expected_plan_hash[:16],
+        )
+        _safe_write_plan_hash_repin_row(
+            spark, paths, node=node, ctx=ctx,
+            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        )
+        return None
+
+    message = (
+        f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
+        f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
+        f"Re-run with --mode seed (or {revert_hint}), or pass --repin-plan-hash "
+        f"if the change was deliberate."
+    )
+    _safe_write_resume_drift_row(
+        spark, paths, node=node, ctx=ctx, message=message, profile=profile,
+        expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+    )
+    return NodeExecutionResult(
+        status="resume_drift_blocked",
+        error_message=message,
+        plan_hash=expected_plan_hash,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Builtin dispatch
 # ---------------------------------------------------------------------------
@@ -881,6 +963,7 @@ def _execute_builtin_node(
     profile_hash: str,
     prior_plan_hash: str | None,
     target_override: str | None,
+    repin_plan_hash: bool = False,
 ) -> NodeExecutionResult:
     """Execute a ``type: builtin`` node via the registry.
 
@@ -936,21 +1019,14 @@ def _execute_builtin_node(
     )
 
     # ----- Step 5: plan-hash drift gate (incremental only) ----------
-    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
-        message = (
-            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
-            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
-            f"Re-run with --mode seed (or revert the YAML / adapter version change)."
-        )
-        _safe_write_resume_drift_row(
-            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
-            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
-        )
-        return NodeExecutionResult(
-            status="resume_drift_blocked",
-            error_message=message,
-            plan_hash=expected_plan_hash,
-        )
+    drift_result = _resume_drift_or_repin(
+        spark, paths, node=node, ctx=ctx, profile=profile, mode=mode,
+        expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        repin_plan_hash=repin_plan_hash,
+        revert_hint="revert the YAML / adapter version change",
+    )
+    if drift_result is not None:
+        return drift_result
 
     # ----- Step 6: invoke the adapter --------------------------------
     target = target_override or _build_target_identifier(node, ctx, paths)
@@ -1219,6 +1295,7 @@ def _execute_bronze_extract_node(
     profile_hash: str,
     prior_plan_hash: str | None,
     target_override: str | None,
+    repin_plan_hash: bool = False,
 ) -> NodeExecutionResult:
     """Execute a ``type: bronze_extract`` node via the bronze adapter.
 
@@ -1278,21 +1355,14 @@ def _execute_bronze_extract_node(
     )
 
     # ----- Step 5: plan-hash drift gate (incremental only) ----------
-    if mode == "incremental" and prior_plan_hash and prior_plan_hash != expected_plan_hash:
-        message = (
-            f"{AIDPF_4040_PLAN_HASH_DRIFT}: plan-hash drift on resume — "
-            f"expected={expected_plan_hash[:16]}... prior={prior_plan_hash[:16]}... "
-            f"Re-run with --mode seed (or revert the YAML / adapter version change)."
-        )
-        _safe_write_resume_drift_row(
-            spark, paths, node=node, ctx=ctx, message=message, profile=profile,
-            expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
-        )
-        return NodeExecutionResult(
-            status="resume_drift_blocked",
-            error_message=message,
-            plan_hash=expected_plan_hash,
-        )
+    drift_result = _resume_drift_or_repin(
+        spark, paths, node=node, ctx=ctx, profile=profile, mode=mode,
+        expected_plan_hash=expected_plan_hash, prior_plan_hash=prior_plan_hash,
+        repin_plan_hash=repin_plan_hash,
+        revert_hint="revert the YAML / adapter version change",
+    )
+    if drift_result is not None:
+        return drift_result
 
     # ----- Step 6: invoke the bronze adapter --------------------------
     # Phase 9 review fix: pass `paths` so the bronze branch of

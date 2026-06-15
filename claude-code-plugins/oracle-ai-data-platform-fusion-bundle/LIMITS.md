@@ -13,6 +13,27 @@
 
 ## Active limits
 
+### L-overlay-seed — seeding an overlay needs explicit bundle wiring (no one-command path)
+Discovered 2026-06-15 wiring the first live overlay seed (`ar_invoice_summary`
+on saasfademo1 — succeeded, 49 rows). An overlay authored under
+`overlays/<name>/` is **not** seedable until the operator hand-wires three
+things; there is no `aidp-fusion-bundle use-pack` command yet:
+1. `bundle.yaml` `contentPack: {name, path: overlays/<name>, profile}`;
+2. `bundle.yaml` `dimensions.build` / `gold.marts` must list **only** real pack
+   nodes (stale v1 entries like `dim_org`/`po_backlog` fail the plan resolver);
+3. `fusion.password: ${FUSION_BICC_PASSWORD}` (credential-store env) — a
+   placeholder vault OCID fails cluster-side with `CredentialResolutionError`;
+   and every `${ENV}` ref must resolve both client-side and cluster-side.
+**Mostly resolved 2026-06-15:** the `aidp-fusion-bundle use-pack <pack>
+--profile <tenant>` verb now does the whole wiring in one command (sets
+`contentPack`, aligns `dimensions`/`marts` to the resolved pack, normalizes a
+placeholder-vault `fusion.password` to `${FUSION_BICC_PASSWORD}`; comment-
+preserving), and the `init` example templates now default `fusion.password` to
+the env form. `mart-author` step 7 + the `aidp-fusion-seed` ladder call
+`use-pack`. **Residual:** `use-pack` only handles the bundle wiring — missing
+`aidp.config.yaml` coords still route to `/aidp-fusion-config`, and a missing
+profile still needs `bootstrap`.
+
 ### L1 — PVO schema drift across Fusion releases requires patch releases
 
 **What it is**: Gold marts and silver dims hardcode column names sourced from a one-time live probe of each Fusion BICC PVO (e.g. `CodeCombinationCodeCombinationId`, `BalanceCodeCombinationId`). When Oracle renames columns or changes value domains across Fusion releases, the bundle requires a patch release that updates affected SQL builders. There is no architecture that eliminates this — see "Why we can't fix this" below.
@@ -335,6 +356,52 @@ varied prefixes; use core-exact / semantic matching.
 ---
 
 ## Resolved limits
+
+### P-incr-L1 — row-grain MERGE nodes tripped AIDPF-4040 on incremental-after-seed (RESOLVED 2026-06-15)
+
+**Was**: the §11.9 plan-hash was computed over the **per-mode rendered SQL**.
+For a row-grain MERGE node (silver dims, `gl_balance`), `{{ watermark_predicate }}`
+renders to `1=1` on **seed** but `<col> > :watermark_<source>` on **incremental**
+— *different SQL text* — so the node's seed-pinned plan-hash and its first
+incremental's plan-hash differed on the SQL body, tripping **AIDPF-4040** even
+though the plan shape was unchanged. Replace-strategy marts were unaffected (no
+watermark predicate; their seed↔incremental SQL is identical — TC33 green).
+
+**Fix** (Approach 3 — mode-normalized hash): `sql_renderer.render_node_sql` now
+computes `hash_input` from a SECOND render pass (`for_hash=True`) where
+`{{ watermark_predicate }}` is forced to its canonical `1=1` form regardless of
+mode and writes no `watermark_*` param. The **executable** SQL still renders
+mode-correctly (`col > :watermark_<source>` on incremental). Because the
+watermark column/source are mixed into the plan-hash independently (dedicated
+fields in `compute_content_pack_plan_hash`), normalizing the predicate *text*
+away is **lossless** — a genuine SQL/profile/variation/watermark-column edit
+still shifts the hash. Unit-proven: a MERGE node's seed and incremental renders
+now hash equal; template/profile/watermark-column edits still differ
+(`tests/unit/test_sql_renderer.py::TestHashDeterminism`,
+`tests/unit/test_plan_hash_phase2.py`).
+
+Also shipped: a hidden `--repin-plan-hash` break-glass flag that repins the new
+plan-hash (audit row `mode='plan_hash_repin'`) and proceeds instead of blocking,
+for *deliberate* plan edits where a full re-seed isn't wanted.
+
+**Live evidence**: TC34 (`gl_balance` seed→incremental→incremental — delta
+counts, no 4040, MERGE not replace). _Pending dev-cluster run._
+
+### AIDPF-1040 — overlay packs could never be seeded (chain_roots not staged) (RESOLVED 2026-06-15)
+
+`content_pack_staging._resolve_chain_roots` read a `chain_roots` attribute that
+`load_full_chain` never populated, so it fell back to the overlay's own root
+only. Any overlay extending another pack (e.g. the installed
+`fusion-finance-starter`) raised `AIDPF-1040` at staging because the inherited
+base-pack node files weren't in `chain_roots` — i.e. **no overlay could be
+seeded at all**, even though `content-pack validate` passed (validate doesn't
+stage). `root_for()` knew each node's origin root; `chain_roots` didn't.
+**Fix:** `_resolve_chain_roots` now derives the roots from the distinct
+`source_roots` values (base-first, matching the `entry_layer_index =
+len(chain_roots) - 1` contract) when `chain_roots` is absent. Live-proven: the
+`fusion-finance-ar-ext` overlay seeded `gold.ar_invoice_summary` (49 rows) on
+saasfademo1, 2026-06-15. Follow-up: add a regression test for overlay-on-
+installed-base staging.
 
 ### AIDPF-1032 — `--resume` rejected on content-pack backend (RESOLVED 2026-06-08 by Phase 5 Step 9b)
 

@@ -27,9 +27,9 @@ import sys
 import time
 from pathlib import Path
 
-# Sibling skill imports.
-_SKILLS_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_SKILLS_DIR / "aidp-rest"))
+# aidp-rest now ships under the repo-root skills/ dir (skill reorg).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT / "skills" / "aidp-rest"))
 from client import AidpRestClient, AidpRestError  # noqa: E402
 
 # Reuse wheel build + bundle template from dispatch.py.

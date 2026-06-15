@@ -1,7 +1,7 @@
 """Regression tests for the aidp-rest skill's REST primitives (PR #4 review fix).
 
 The skill sits outside the plugin's installed package (under
-``.claude/skills/aidp-rest/``), so import via sys.path manipulation. Tests
+``skills/aidp-rest/``), so import via sys.path manipulation. Tests
 here pin the public contract that downstream skills (fusion-tc26-run,
 future fusion-medallion-doctor, etc.) depend on.
 
@@ -21,7 +21,7 @@ import pytest
 
 # The skill lives outside the standard package layout; import via sys.path.
 _SKILL_DIR = (Path(__file__).resolve().parents[2]
-              / ".claude" / "skills" / "aidp-rest")
+              / "skills" / "aidp-rest")
 sys.path.insert(0, str(_SKILL_DIR))
 from client import AidpRestClient, AidpRestError  # noqa: E402
 

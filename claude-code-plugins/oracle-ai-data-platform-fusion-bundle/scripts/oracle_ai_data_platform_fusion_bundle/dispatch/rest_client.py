@@ -1,11 +1,11 @@
 """AidpRestClient — typed primitives for the AIDP control-plane REST surface.
 
 P1.5ε §Step 2 — canonical location. Reusable across plugin and skills.
-``.claude/skills/aidp-rest/client.py`` is a path-resolving re-export shim
+``skills/aidp-rest/client.py`` is a path-resolving re-export shim
 that imports from here.
 
 Empirically-confirmed REST shapes baked in. See
-``.claude/skills/aidp-rest/SKILL.md`` for the receipts and
+``skills/aidp-rest/SKILL.md`` for the receipts and
 ``dev/RESEARCH_aidp_rest_api_probe_results.md`` for the full probe log.
 """
 from __future__ import annotations

@@ -73,7 +73,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
-sys.path.insert(0, str(REPO / ".claude/skills/aidp-rest"))
+sys.path.insert(0, str(REPO / "skills/aidp-rest"))
 sys.path.insert(0, str(REPO / ".claude/skills/fusion-tc26-run"))
 
 # The aidp-rest client and the tc26 build_wheel helper are shipped

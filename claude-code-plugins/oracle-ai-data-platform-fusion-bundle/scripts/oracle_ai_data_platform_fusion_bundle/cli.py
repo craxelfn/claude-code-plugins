@@ -58,6 +58,87 @@ def init(template: str, force: bool) -> None:
     sys.exit(init_impl(template=template, force=force, console=console))
 
 
+@main.command("init-config")
+@click.option("--aidp-id", "aidp_id", required=True,
+              help="AIDP / DataLake OCID (the one root id — copy once from the AIDP console URL).")
+@click.option("--workspace", "workspace_name", required=True,
+              help="Workspace DISPLAY NAME (resolved to workspaceKey via the AIDP REST API).")
+@click.option("--cluster", "cluster_name", required=True,
+              help="Cluster DISPLAY NAME (resolved to clusterKey + live state).")
+@click.option("--region", default="us-ashburn-1", show_default=True, help="OCI region key.")
+@click.option("--oci-profile", "oci_profile", default="DEFAULT", show_default=True,
+              help="~/.oci/config profile used to sign the discovery calls.")
+@click.option("--project", default=None,
+              help="Project name for aidp.config.yaml (default: read from bundle.yaml, else 'fusion-bundle').")
+@click.option("--catalog", default=None,
+              help="Catalog name — NOT written here (it lives in bundle.yaml aidp.catalog); "
+                   "pass it only to get a reminder of where to set it.")
+@click.option("--bicc-secret-name", "bicc_secret_name", default="fusion_bicc_password",
+              show_default=True, help="AIDP credential-store entry name for the BICC password.")
+@click.option("--force", is_flag=True, help="Overwrite the env block if it already exists.")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Resolve names → keys and print the resulting config; write nothing.")
+@click.pass_context
+def init_config(
+    ctx: click.Context,
+    aidp_id: str,
+    workspace_name: str,
+    cluster_name: str,
+    region: str,
+    oci_profile: str,
+    project: str | None,
+    catalog: str | None,
+    bicc_secret_name: str,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Resolve workspace/cluster NAMES into keys and write aidp.config.yaml.
+
+    Saves the operator from hand-copying workspaceKey / clusterKey: give the
+    AIDP/DataLake OCID once plus the workspace + cluster display names, and the
+    command resolves the rest via the AIDP REST API (OCI-signed) and writes the
+    named environment block into aidp.config.yaml.
+    """
+    from .commands.init_config import init_config as init_config_impl
+    sys.exit(init_config_impl(
+        config_path=ctx.obj["config_path"],
+        env_name=ctx.obj["env_name"],
+        aidp_id=aidp_id,
+        workspace_name=workspace_name,
+        cluster_name=cluster_name,
+        region=region,
+        oci_profile=oci_profile,
+        project=project,
+        catalog=catalog,
+        bicc_secret_name=bicc_secret_name,
+        bundle_path=ctx.obj["bundle_path"],
+        force=force,
+        dry_run=dry_run,
+        console=console,
+    ))
+
+
+@main.command("use-pack")
+@click.argument("pack")
+@click.option("--profile", required=True, help="Tenant profile name (contentPack.profile).")
+@click.option("--align/--no-align", default=True, show_default=True,
+              help="Align dimensions.build / gold.marts to the resolved pack's nodes.")
+@click.option("--fix-credentials/--no-fix-credentials", default=True, show_default=True,
+              help="Rewrite a placeholder-vault fusion.password to ${FUSION_BICC_PASSWORD}.")
+@click.pass_context
+def use_pack(ctx: click.Context, pack: str, profile: str, align: bool, fix_credentials: bool) -> None:
+    """Wire bundle.yaml to a content pack / overlay (contentPack + marts + creds) in one step."""
+    from .commands.use_pack import use_pack as use_pack_impl
+    sys.exit(use_pack_impl(
+        bundle_path=ctx.obj["bundle_path"],
+        pack_spec=pack,
+        profile=profile,
+        align=align,
+        fix_credentials=fix_credentials,
+        console=console,
+    ))
+
+
 @main.command()
 @click.pass_context
 def validate(ctx: click.Context) -> None:
@@ -320,6 +401,20 @@ def catalog_probe_pvo(
          "this; SOX-audit environments should policy-disable.",
 )
 @click.option(
+    "--repin-plan-hash", "repin_plan_hash",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Dev/sandbox: bypass the AIDPF-4040 plan-hash continuity gate on "
+         "incremental. When a node's plan-hash diverged because you EDITED "
+         "the SQL / profile / adapter on purpose, this repins the new hash "
+         "(records an audit row in fusion_bundle_state with "
+         "mode='plan_hash_repin') and proceeds instead of forcing a full "
+         "re-seed. Production runs MUST NOT use this; SOX-audit environments "
+         "should policy-disable. Does NOT mask a real, unintended drift — "
+         "use only when the change was deliberate.",
+)
+@click.option(
     "--strict-scope", "strict_scope", is_flag=True, default=False,
     help="Disable implicit transitive include. When set, "
          "every declared root's `dependsOn` must ALSO appear in "
@@ -334,6 +429,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         inline: bool, resume_run_id: str | None, dry_run: bool,
         poll_timeout_s: int,
         force_fingerprint_skip: bool,
+        repin_plan_hash: bool,
         strict_scope: bool) -> None:
     """Invoke the orchestrator: extract -> bronze -> silver -> gold."""
     from .commands.run import run as run_impl
@@ -349,6 +445,7 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
         dry_run=dry_run,
         poll_timeout_s=poll_timeout_s,
         force_fingerprint_skip=force_fingerprint_skip,
+        repin_plan_hash=repin_plan_hash,
         strict_scope=strict_scope,
         console=console,
     ))
@@ -683,26 +780,237 @@ def dashboard_uninstall(
 @click.option("--oac-mcp-connect-js", required=True, type=click.Path(exists=True, path_type=Path),
               help="Local path to oac-mcp-connect.js (extract from oac-mcp-connect.zip — get from OAC Profile -> MCP Connect tab).")
 def dashboard_mcp_config(oac_url: str, oac_mcp_connect_js: Path) -> None:
-    """Print the JSON snippet to add to claude_desktop_config.json (or Claude Code / Cline / Copilot)."""
+    """Print the MCP server JSON for Claude Code (project .mcp.json) / Claude Desktop / Cline / Copilot."""
     import json
+    # The connector takes the OAC URL as a POSITIONAL argument and reads no env vars
+    # (verified against oac-mcp-connect 1.4: `grep process.env` is empty, `--help` shows `<url>`).
+    # An `env: {OAC_INSTANCE_URL: ...}` block does NOT work — the connector ignores it.
     snippet = {
         "mcpServers": {
             "oac-mcp-server": {
                 "command": "node",
-                "args": [str(oac_mcp_connect_js.resolve())],
-                "env": {
-                    "OAC_INSTANCE_URL": oac_url
-                }
+                "args": [str(oac_mcp_connect_js.resolve()), oac_url],
             }
         }
     }
-    console.print("[bold]Paste into your AI client's MCP config:[/bold]\n")
+    console.print("[bold]MCP server config (browser auth):[/bold]\n")
     console.print(json.dumps(snippet, indent=2))
     console.print(
-        "\n[dim]Note: this is a starter template; the canonical JSON is the one OAC's "
-        "Profile -> MCP Connect tab generates. See:[/dim]\n"
-        "  https://docs.oracle.com/en/cloud/paas/analytics-cloud/acsdv/add-oracle-analytics-cloud-mcp-server-your-ai-client-preview.html"
+        "\n[dim]Where to put it:[/dim]\n"
+        "  • Claude Code (project-scoped): merge under [bold]mcpServers[/bold] in [bold].mcp.json[/bold] at your repo root\n"
+        "    (the bundle ships one driven by ${OAC_URL} / ${OAC_MCP_CONNECT_PATH} — just set those env vars instead).\n"
+        "  • Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json\n"
+        "  • Cline / Copilot: their respective MCP settings file.\n"
+        "[dim]For token auth, append the token-file path as a third arg. Canonical JSON: OAC Profile -> MCP Connect tab.[/dim]"
     )
+
+
+@dashboard.command("mcp-token")
+@click.option("--oac-url", required=True, help="OAC instance URL (base, e.g. https://oac.example.com).")
+@click.option("--import-from", "import_from", default=None,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Place an existing OAC-downloaded tokens.json (Profile -> Access Tokens) as the "
+                   "connector token file. No OAuth client needed. Mutually exclusive with minting.")
+@click.option("--idcs-url", default=None,
+              help="IDCS stripe URL. Required when minting (omit only with --import-from).")
+@click.option("--client-id", default=None,
+              help="IDCS confidential-app client_id. Required when minting.")
+@click.option("--client-secret", default=None,
+              help="IDCS confidential-app client_secret, or ${vault:OCID}. Required when minting.")
+@click.option("--oauth-scope", default=None, help="Override the auto-derived OAC scope.")
+@click.option("--flow", type=click.Choice(["auth_code", "device"]), default="auth_code",
+              show_default=True, help="OAuth flow for minting: auth_code (browser) or device (headless).")
+@click.option("--prompt-login", is_flag=True, help="Force IDCS to reprompt for credentials.")
+@click.option("--token-file", default=None, type=click.Path(dir_okay=False, path_type=Path),
+              help="Where to write the connector token file (default: ~/.oac-connect/token.json).")
+@click.option("--mcp-json", default=Path(".mcp.json"), type=click.Path(dir_okay=False, path_type=Path),
+              show_default=True, help="Path to the .mcp.json to wire the token file into.")
+@click.option("--no-wire", is_flag=True, help="Write the token file only; don't touch .mcp.json.")
+def dashboard_mcp_token(
+    oac_url: str,
+    import_from: Path | None,
+    idcs_url: str | None,
+    client_id: str | None,
+    client_secret: str | None,
+    oauth_scope: str | None,
+    flow: str,
+    prompt_login: bool,
+    token_file: Path | None,
+    mcp_json: Path,
+    no_wire: bool,
+) -> None:
+    """Produce a token file the OAC MCP connector can use non-interactively, and wire .mcp.json.
+
+    The connector falls back to interactive browser auth otherwise, which cannot
+    complete inside the Claude Code MCP client (elicitation unsupported) — see
+    tests/live/TC32. This command seeds a Bearer token so tool calls authenticate
+    silently.
+
+    Two modes:
+      * --import-from <tokens.json>: reuse an OAC Profile -> Access Tokens download
+        (already connector-format). No OAuth client needed.
+      * mint (default): run the IDCS Auth-Code+PKCE/device flow (needs --idcs-url +
+        --client-id + --client-secret); a refresh token persists for silent reuse.
+    """
+    from .oac.mcp_token import (
+        DEFAULT_CONNECTOR_TOKEN_FILE,
+        import_connector_token,
+        mint_connector_token,
+        wire_mcp_json_file,
+    )
+    from .utils import vault
+
+    out_path = token_file or DEFAULT_CONNECTOR_TOKEN_FILE
+
+    try:
+        if import_from is not None:
+            written, payload = import_connector_token(import_from, token_file=out_path)
+        else:
+            missing = [n for n, v in
+                       (("--idcs-url", idcs_url), ("--client-id", client_id),
+                        ("--client-secret", client_secret)) if not v]
+            if missing:
+                console.print(
+                    f"[red]minting requires {', '.join(missing)}[/red] "
+                    f"(or use --import-from to reuse an OAC token download)."
+                )
+                sys.exit(2)
+            written, payload = mint_connector_token(
+                oac_url=oac_url,
+                idcs_url=idcs_url,  # type: ignore[arg-type]
+                client_id=client_id,  # type: ignore[arg-type]
+                client_secret=vault.resolve(client_secret),  # type: ignore[arg-type]
+                token_file=out_path,
+                scope=oauth_scope,
+                flow=flow,
+                prompt_login=prompt_login,
+            )
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        console.print(f"[red]mcp-token failed:[/red] {exc}")
+        sys.exit(1)
+
+    # Mask the token in all output — never echo the secret.
+    tok = str(payload.get("accessToken", ""))
+    masked = (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else "<short>"
+    console.print(
+        f"[green]Wrote connector token file:[/green] {written} "
+        f"(accessToken={masked}, expiresIn={payload.get('expiresIn')}s, "
+        f"refreshToken={'present' if payload.get('refreshToken') else 'none'})"
+    )
+
+    if no_wire:
+        console.print(
+            f"[dim]Skipped .mcp.json wiring (--no-wire). To wire manually, add "
+            f'"{written}" as the 3rd connector arg in {mcp_json}.[/dim]'
+        )
+        return
+    if not mcp_json.exists():
+        console.print(f"[yellow].mcp.json not found at {mcp_json}; skipping wiring.[/yellow]")
+        return
+    try:
+        wire_mcp_json_file(mcp_json, token_file=str(written))
+    except (KeyError, ValueError) as exc:
+        console.print(f"[yellow]Could not wire {mcp_json}: {exc}[/yellow]")
+        return
+    console.print(
+        f"[green]Wired[/green] {mcp_json} → connector now uses the token file. "
+        f"[dim]Restart Claude Code to pick it up.[/dim]"
+    )
+
+
+@dashboard.command("mcp-setup")
+@click.option("--oac-url", default=None,
+              help="OAC base URL (default: $OAC_URL).")
+@click.option("--user", "user", default=None,
+              help="OAC basic-auth username (default: $OAC_ADMIN_USER).")
+@click.option("--password", "password", default=None,
+              help="OAC basic-auth password, or ${vault:OCID} (default: $OAC_ADMIN_PASSWORD).")
+@click.option("--connector-js", default=None,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Path to the downloaded oac-mcp-connect.js to stage. Omit if one is "
+                   "already staged at ~/.oac-connect/oac-mcp-connect.js.")
+@click.option("--mcp-json", default=Path(".mcp.json"), type=click.Path(dir_okay=False, path_type=Path),
+              show_default=True, help="Path to the .mcp.json to wire (credential-free).")
+@click.option("--no-headless", is_flag=True,
+              help="Allow the connector to fall back to browser auth (NOT for terminal clients).")
+@click.option("--no-wire", is_flag=True, help="Write the config file + stage the connector only; don't touch .mcp.json.")
+def dashboard_mcp_setup(
+    oac_url: str | None,
+    user: str | None,
+    password: str | None,
+    connector_js: Path | None,
+    mcp_json: Path,
+    no_headless: bool,
+    no_wire: bool,
+) -> None:
+    """Configure the OAC MCP connector for non-interactive **basic auth** (works in Claude Code).
+
+    On non-IDCS instances, issued tokens are rejected and the connector's only other
+    auth is interactive browser login — which terminal MCP clients can't drive
+    (elicitation unsupported). Basic auth supplies credentials up front, so it never
+    elicits. This command:
+
+      1. writes a 0600 connector config at ~/.oac-connect/oac_mcp_connect_config.json
+         (URL + basicAuth + headless) — the connector auto-discovers it;
+      2. stages the connector to ~/.oac-connect/oac-mcp-connect.js (stable path);
+      3. wires a credential-free .mcp.json (single connector arg — URL and creds stay
+         in the 0600 config, never in the committed repo).
+
+    Credentials are read from --user/--password (or $OAC_ADMIN_USER/$OAC_ADMIN_PASSWORD)
+    and never echoed. Scope the OAC user to least privilege — v1.4 exposes catalog
+    write/delete/ACL tools governed by that user's grants.
+    """
+    import os as _os
+
+    from .oac.mcp_token import DEFAULT_CONNECTOR_CONFIG_FILE, setup_basic_auth
+    from .utils import vault
+
+    oac_url = oac_url or _os.environ.get("OAC_URL")
+    user = user or _os.environ.get("OAC_ADMIN_USER")
+    password = password or _os.environ.get("OAC_ADMIN_PASSWORD")
+
+    missing = [n for n, v in (("--oac-url/$OAC_URL", oac_url),
+                              ("--user/$OAC_ADMIN_USER", user),
+                              ("--password/$OAC_ADMIN_PASSWORD", password)) if not v]
+    if missing:
+        console.print(f"[red]mcp-setup requires {', '.join(missing)}[/red]")
+        sys.exit(2)
+
+    try:
+        summary = setup_basic_auth(
+            oac_url=oac_url,  # type: ignore[arg-type]
+            user=user,  # type: ignore[arg-type]
+            password=vault.resolve(password),  # type: ignore[arg-type]
+            connector_js=connector_js,
+            mcp_json=None if no_wire else mcp_json,
+            headless=not no_headless,
+        )
+    except FileNotFoundError as exc:
+        console.print(
+            f"[red]mcp-setup failed:[/red] {exc}\n"
+            "[dim]Pass --connector-js <path to downloaded oac-mcp-connect.js> the first time.[/dim]"
+        )
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        console.print(f"[red]mcp-setup failed:[/red] {exc}")
+        sys.exit(1)
+
+    console.print(
+        f"[green]Wrote connector config:[/green] {summary['config_file']} "
+        f"(url={summary['oac_url']}, user={summary['user']}, basicAuth=present, 0600)"
+    )
+    console.print(f"[green]Staged connector:[/green] {summary['connector']}")
+    if summary["mcp_json"]:
+        console.print(
+            f"[green]Wired[/green] {summary['mcp_json']} → "
+            f'"{summary["connector_arg"]}" (no URL/creds in .mcp.json). '
+            f"[dim]Restart/reconnect Claude Code to pick it up.[/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]Skipped .mcp.json (--no-wire). Point the {DEFAULT_CONNECTOR_CONFIG_FILE.name} "
+            f"connector at it with a single arg: {summary['connector_arg']}[/dim]"
+        )
 
 
 if __name__ == "__main__":

@@ -108,6 +108,10 @@ def dispatch_via_rest(
     # into the generated notebook's orchestrator.run(...) call so the
     # cluster-side gate honours the operator's break-glass intent.
     force_fingerprint_skip: bool = False,
+    # P-incr-L1 — passthrough only; dispatch never inspects it. Threaded
+    # into the generated notebook's orchestrator.run(...) call so the
+    # cluster-side AIDPF-4040 gate honours --repin-plan-hash.
+    repin_plan_hash: bool = False,
     # Phase 3d — passthrough only. When provided, the cluster-side
     # bootstrap cell materialises the snapshot to the resolved
     # profiles/<tenant>.schema-snapshot.yaml path so preflight can
@@ -274,6 +278,7 @@ def dispatch_via_rest(
         pack_files=pack_files,
         pack_manifest=pack_manifest,
         force_fingerprint_skip=force_fingerprint_skip,
+        repin_plan_hash=repin_plan_hash,
         schema_snapshot_yaml=schema_snapshot_yaml,
         # Phase 9 — emit ``strict_scope=...`` in the generated
         # orchestrator.run() call so the cluster honors the operator's

@@ -78,3 +78,12 @@ TC_*_runner.py
 # `bundle_path.resolve().parent / ".aidp" / "diagnostics"` in the
 # gate helpers; the fixture-side writes are transient noise.
 tests/fixtures/**/.aidp/
+
+# local tenant coords (real OCIDs/keys) — never commit
+aidp.config.yaml
+
+# local tenant bundle (real pod URL / user / contentPack) — never commit
+bundle.yaml
+
+# local tenant profiles (bootstrap-pinned fingerprints) — never commit
+profiles/

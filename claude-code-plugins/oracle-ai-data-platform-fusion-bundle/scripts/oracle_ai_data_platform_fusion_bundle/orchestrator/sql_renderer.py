@@ -285,7 +285,36 @@ def render_node_sql(
     rendered = _TOKEN_RE.sub(replace, template_text)
     _check_post_render(rendered)
 
-    hash_input = _build_hash_input(rendered, params)
+    # ----- Hash-normalized render pass (Approach 3) -------------------
+    # The §11.9 plan-hash must be MODE-INDEPENDENT: a MERGE node seeded then
+    # run --mode incremental must produce the SAME plan-hash, or the
+    # AIDPF-4040 continuity gate fires a false positive (P-incr-L1). The
+    # only per-mode-varying token is {{ watermark_predicate }} (1=1 on seed,
+    # `<col> > :watermark_<source>` on incremental). We compute hash_input
+    # from a SECOND render pass where that token is forced to its canonical
+    # `1=1` form (for_hash=True) and writes NO watermark_* param — so the
+    # hash is identical across modes. Every OTHER token renders identically
+    # in both passes, so a genuine template / profile / variation edit still
+    # shifts the hash. Watermark column/source changes are caught
+    # independently via dedicated fields in compute_content_pack_plan_hash,
+    # so normalizing the predicate text away is lossless.
+    hash_params: dict[str, Any] = {}
+
+    def replace_for_hash(match: re.Match[str]) -> str:
+        token = match.group(1).strip()
+        return _substitute_token(
+            token=token,
+            node=node,
+            ctx=ctx,
+            profile=profile,
+            primary_source=primary_source,
+            pack_variants=pack_variants,
+            params=hash_params,
+            for_hash=True,
+        )
+
+    hash_rendered = _TOKEN_RE.sub(replace_for_hash, template_text)
+    hash_input = _build_hash_input(hash_rendered, hash_params)
     return RenderedSql(sql=rendered, params=params, hash_input=hash_input)
 
 
@@ -336,11 +365,18 @@ def _substitute_token(
     primary_source: str | None,
     pack_variants: dict[str, "Any"],
     params: dict[str, Any],
+    for_hash: bool = False,
 ) -> str:
     """Dispatch a single ``{{ token }}`` to its substitution handler.
 
     Returns the string to splice into the rendered SQL. Mutates ``params``
     in place for parameter-marker substitutions.
+
+    When ``for_hash`` is True this is the plan-hash normalization pass:
+    ``{{ watermark_predicate }}`` is forced to its canonical ``1=1`` form
+    (and writes no ``watermark_*`` param) so seed and incremental renders of
+    the same node hash identically (Approach 3 / P-incr-L1). Every other
+    token renders identically to the executable pass.
     """
     # 1. Simple identifier substitutions from RunContext.
     if token == "catalog":
@@ -358,7 +394,9 @@ def _substitute_token(
         return ":run_id"
 
     if token == "watermark_predicate":
-        return _render_watermark_predicate(node, ctx, primary_source, params)
+        return _render_watermark_predicate(
+            node, ctx, primary_source, params, for_hash=for_hash
+        )
 
     if token == "snapshot_date":
         return _render_snapshot_date(profile, params)
@@ -408,6 +446,8 @@ def _render_watermark_predicate(
     ctx: RunContext,
     primary_source: str | None,
     params: dict[str, Any],
+    *,
+    for_hash: bool = False,
 ) -> str:
     """Render the ``{{ watermark_predicate }}`` token.
 
@@ -419,7 +459,18 @@ def _render_watermark_predicate(
     flows through a parameter marker. Multi-source nodes emit the predicate
     for the primary source only (PLAN §11.10 primary/lookup contract — the
     primary is what advances the cursor).
+
+    When ``for_hash`` is True (the plan-hash normalization pass), the
+    predicate is forced to the canonical ``1=1`` form regardless of mode and
+    writes NO ``watermark_*`` param — so a node's seed and incremental
+    renders hash identically (Approach 3 / P-incr-L1). The watermark
+    column/source are still mixed into the plan-hash via dedicated fields in
+    ``compute_content_pack_plan_hash``, so this normalization loses no
+    drift-detection power.
     """
+    if for_hash:
+        return "1=1"
+
     if ctx.mode == "seed":
         # Seed mode: no watermark filter. Always-true predicate keeps the
         # template single-shape across modes.
@@ -732,7 +783,19 @@ def _build_hash_input(sql: str, params: Mapping[str, Any]) -> str:
     their type tag so ``1`` (int) and ``"1"`` (str) hash differently.
     """
     canonical_sql = re.sub(r"\s+", " ", sql).strip()
-    sorted_params = sorted(params.items())
+    # Exclude PER-RUN param VALUES from the plan-hash. ``run_id`` (run identity)
+    # and ``watermark_<source>`` (the cursor, which advances every run) are not
+    # part of the plan *shape* — the §11.9 hash is meant to catch SQL-template /
+    # outputSchema / variation-point / schema-fingerprint changes, NOT run
+    # identity. Including them made the hash run-dependent, so the AIDPF-4040
+    # continuity gate fired on every incremental after a seed (the run_id and
+    # cursor always differ). The marker (``:run_id`` / ``:watermark_*``) still
+    # appears in ``canonical_sql``, so a template change is still caught.
+    plan_params = {
+        k: v for k, v in params.items()
+        if k != "run_id" and not k.startswith("watermark_")
+    }
+    sorted_params = sorted(plan_params.items())
     params_repr = "|".join(f"{k}:{type(v).__name__}:{v!r}" for k, v in sorted_params)
     return f"SQL:{canonical_sql}\nPARAMS:{params_repr}"
 

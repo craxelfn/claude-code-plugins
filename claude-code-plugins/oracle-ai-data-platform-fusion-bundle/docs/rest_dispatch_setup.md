@@ -189,7 +189,7 @@ For now: the AIDP console's Job Runs tab carries the same executed-notebook view
 - Plan: `docs/features/p1.5e-cli-rest-dispatch/plan.md`
 - Post-ship UX bundle (`--poll-timeout`, diagnose-on-timeout, credential preflight): `docs/features/p1.5e-postship-dispatch-ux/plan.md`
 - Skill: `.claude/skills/fusion-tc26-run/` — the empirical-probe harness this CLI productizes
-- REST contract: `.claude/skills/aidp-rest/SKILL.md` — the gotchas baked into `AidpRestClient`
+- REST contract: `skills/aidp-rest/SKILL.md` — the gotchas baked into `AidpRestClient`
 - Auth mode (`vault` deferred): tracked as `P1.5ε-fix6`
 - BICC credential preflight: **shipped** as `P1.5ε-fix1` (2026-06-03)
 - REST-dispatch `--resume`: **shipped** as `P1.5ε-fix5` (2026-06-03) — live evidence in `tests/live/TC29b_resume_via_rest.md`

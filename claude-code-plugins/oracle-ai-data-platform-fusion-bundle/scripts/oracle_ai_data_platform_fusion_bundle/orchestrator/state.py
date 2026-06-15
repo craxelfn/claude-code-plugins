@@ -688,11 +688,16 @@ def write_fingerprint_skip_row(
         return f"'{escaped}'"
 
     # Truncated fingerprints — 24 chars is enough to disambiguate
-    # in audit queries without bloating the column.
+    # in audit queries without bloating the column. ``current`` may be
+    # None when --force-fingerprint-skip bypassed a failed probe (e.g. a
+    # bronze table unreachable); render it as "unprobed" rather than crash.
+    def _short(fp: "str | None") -> str:
+        return f"{fp[:24]}..." if fp else "unprobed"
+
     skip_reason = (
         f"--force-fingerprint-skip; "
-        f"prior={prior_fingerprint[:24]}... "
-        f"current={current_fingerprint[:24]}..."
+        f"prior={_short(prior_fingerprint)} "
+        f"current={_short(current_fingerprint)}"
     )
 
     spark.sql(
@@ -714,6 +719,91 @@ def write_fingerprint_skip_row(
            {_q(skip_reason)},
            CAST(0.0 AS DOUBLE),
            CAST(NULL AS STRING),
+           CAST(NULL AS STRING))
+        """
+    )
+
+
+def write_plan_hash_repin_row(
+    spark: "SparkSession",
+    paths: TablePaths,
+    *,
+    run_id: str,
+    dataset_id: str,
+    layer: str,
+    expected_plan_hash: str,
+    prior_plan_hash: str,
+) -> None:
+    """Append a ``--repin-plan-hash`` audit row to ``fusion_bundle_state``.
+
+    Mirrors :func:`write_fingerprint_skip_row`: a raw INSERT that bypasses
+    the :class:`RunStep` ``mode``/``status`` Literal narrowing (which would
+    reject ``"plan_hash_repin"``). Written when the operator passes the
+    hidden ``--repin-plan-hash`` break-glass flag and the AIDPF-4040
+    continuity gate would otherwise have blocked an incremental — the
+    operator asserts the plan edit was deliberate, so the gate is bypassed
+    and this row records the bypass for the SOX trail.
+
+    The node's own success row (written immediately after, by the normal
+    execution path) pins the NEW ``expected_plan_hash``, so subsequent
+    incrementals compare clean against it.
+
+    Row carries:
+
+    * ``dataset_id`` — the node the operator repinned (NOT a sentinel, so
+      audit queries attribute the bypass to a specific node).
+    * ``layer`` — the node's layer.
+    * ``mode = "plan_hash_repin"`` — distinguishes from ``seed`` /
+      ``incremental`` rows in audit queries.
+    * ``status = "success"`` — DB accepts any string; the audit signal
+      lives in ``skip_reason``. "success" keeps the row from being
+      mistaken for a failure.
+    * ``skip_reason`` — encodes the bypass + truncated prior/expected
+      plan hashes.
+
+    Args:
+        spark: active Spark session.
+        paths: bundle's ``TablePaths``.
+        run_id: the run_id this bypass fired under.
+        dataset_id: the node whose plan-hash was repinned.
+        layer: the node's layer.
+        expected_plan_hash: the freshly-computed (new) plan-hash now pinned.
+        prior_plan_hash: the prior successful row's plan-hash that diverged.
+    """
+    table_path = _state_table_path(paths)
+
+    def _q(s: str) -> str:
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+
+    def _short(h: "str | None") -> str:
+        return f"{h[:24]}..." if h else "unknown"
+
+    skip_reason = (
+        f"--repin-plan-hash; "
+        f"prior={_short(prior_plan_hash)} "
+        f"expected={_short(expected_plan_hash)}"
+    )
+
+    spark.sql(
+        f"""
+        INSERT INTO {table_path}
+          (run_id, dataset_id, layer, mode, last_watermark, last_run_at,
+           status, row_count, error_message, skip_reason, duration_seconds,
+           plan_hash, plan_snapshot)
+        VALUES
+          ({_q(run_id)},
+           {_q(dataset_id)},
+           {_q(layer)},
+           'plan_hash_repin',
+           CAST(NULL AS TIMESTAMP),
+           current_timestamp(),
+           'success',
+           CAST(0 AS BIGINT),
+           CAST(NULL AS STRING),
+           {_q(skip_reason)},
+           CAST(0.0 AS DOUBLE),
+           {_q(expected_plan_hash)},
            CAST(NULL AS STRING))
         """
     )

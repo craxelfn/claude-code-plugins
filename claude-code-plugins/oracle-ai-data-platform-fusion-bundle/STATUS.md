@@ -19,6 +19,7 @@
 > **Version**: 0.1.0-alpha (Phase 2 in progress toward 0.2.0)
 > **Verdict**: **Phase 2 mid-flight.** Dim layer 3/4 shipped + 1 deferred (P1.6 blocked by L2). Gold layer 3/5 shipped (`supplier_spend`, `gl_balance`, `ap_aging`). Tests 268 → **306** all pass (38 P1.5b plumbing tests). Limit registry at [`LIMITS.md`](LIMITS.md).
 >
+> **Recent (2026-06-15)** — **Conversational dashboard skill family + A-to-Z autopilot, live-validated.** Shipped `aidp-fusion-autopilot` (front-door orchestrator), `oac-dataset-advisor` (intent → OAC dataset, grounded in the **live** AIDP catalog — never pack YAMLs), `mart-author` (additive new-mart authoring as content-pack overlays, Fusion-PVO-sourced, never touches living delta), and `aidp-fusion-status` (read-only health: `fusion_bundle_state` × live tables). New CLI verb `use-pack` wires a bundle to an overlay in one command; `init` templates default `fusion.password` to the credential-store env form. **Plugin fix:** `content_pack_staging` now derives `chain_roots` from `source_roots` — before this **no overlay could be seeded** (AIDPF-1040). **Live evidence (saasfademo1 / `fusion_bundle_dev` cluster):** the `fusion-finance-ar-ext` overlay seeded `gold.ar_invoice_summary` (49 rows) end-to-end; OAC workbooks created via the OAC MCP `save_catalog_content` write tool (`gold_balance_2viz`); advisor + status proven against the real lake. Dashboard authoring is now MCP-native (advisor → workbook-authoring); `.bar` `dashboard install` is the legacy alternative.
 > **Recent (2026-05-11)** — P1.5b catalog/schema plumbing shipped. New `config/paths.py` (`TablePaths` frozen dataclass + `DEFAULT_PATHS` singleton + `from_bundle()` classmethod with strict SQL-identifier validation). Every shipped mart/dim accepts `paths: TablePaths | None` on `build()`; `commands/run.py status()` now reads `aidp.bronzeSchema` instead of hardcoding `'bronze'`. `ap_aging.build()` resolves `gold_table` AFTER the auto-router resolves `due_date_mode` (critical ordering invariant locked by F + G build()-level fake-Spark tests). Backwards-compat byte-perfect — module-level `Final[str]` constants derive from `DEFAULT_PATHS` so their string values are unchanged.
 > **Recent (2026-05-10)** — P1.9 `gold.ap_aging` shipped + live (TC24, 132 rows × 12 currencies, $-126K credits preserved across 5 currencies). Plugin-portable design: `due_date_mode='auto'` with 80% coverage gate, mode-aware `max_days_*` column name, schema-variant knobs for the Fusion AP column dialects observed across tenants.
 > **Recent (2026-05-09)** — P1.8 `gold.gl_balance` shipped + live (TC23, 10.18M rows). BOOTSTRAP extended with Step 7 + step-shape probe; NULL-propagation regression caught + fixed in same session via COALESCE.
@@ -173,9 +174,18 @@ Evidence files: 5 markdown results files + 16 screenshots + 5 reference SQL quer
          │                                                        ▼
          │                                         ┌──────────────────────────────┐
          │                                         │   OAC MCP Server (Preview)   │
-         │                                         │   - discoverData             │
-         │                                         │   - describeData             │
-         │                                         │   - executeLogicalSQL        │
+         │                                         │   - discover_data            │
+         │                                         │   - describe_data            │
+         │                                         │   - execute_logical_sql      │
+         │                                         │   - find_matching_datasources│
+         │                                         │   - search_catalog           │
+         │                                         │   - create_catalog_folder    │
+         │                                         │   - copy_catalog_item        │
+         │                                         │   - move_catalog_item        │
+         │                                         │   - delete_catalog_item      │
+         │                                         │   - save_catalog_content     │
+         │                                         │   - update_catalog_acl       │
+         │                                         │   - export_workbook          │
          │                                         └──────────────┬───────────────┘
          │                                                        │ MCP (stdio)
          │                                                        ▼

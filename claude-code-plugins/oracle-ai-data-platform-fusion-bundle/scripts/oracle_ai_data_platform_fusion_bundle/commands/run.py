@@ -43,6 +43,7 @@ def run(
     dry_run: bool = False,
     poll_timeout_s: int = 3600,
     force_fingerprint_skip: bool = False,
+    repin_plan_hash: bool = False,
     strict_scope: bool = False,
     console: Console | None = None,
 ) -> int:
@@ -106,6 +107,7 @@ def run(
             bundle_path, mode, dataset_filter, layer_filter,
             resume_run_id, dry_run, console,
             force_fingerprint_skip=force_fingerprint_skip,
+            repin_plan_hash=repin_plan_hash,
             strict_scope=strict_scope,
         )
     # REST-dispatch resume threads `resume_run_id` into the
@@ -123,6 +125,7 @@ def run(
         bundle_path, config_path, env_name, dataset_filter, layer_filter, mode,
         dry_run, poll_timeout_s, console,
         force_fingerprint_skip=force_fingerprint_skip,
+        repin_plan_hash=repin_plan_hash,
         resume_run_id=resume_run_id,
         strict_scope=strict_scope,
     )
@@ -138,6 +141,7 @@ def _run_inline(
     console: Console,
     *,
     force_fingerprint_skip: bool = False,
+    repin_plan_hash: bool = False,
     strict_scope: bool = False,
 ) -> int:
     """Run the orchestrator in-process.
@@ -255,6 +259,7 @@ def _run_inline(
             resolved_pack=resolved_pack,
             tenant_profile=tenant_profile,
             force_fingerprint_skip=force_fingerprint_skip,
+            repin_plan_hash=repin_plan_hash,
             strict_scope=strict_scope,
         )
     except SchemaDriftDetectedError as exc:
@@ -291,6 +296,7 @@ def _run_via_aidp_dispatch(
     console: Console,
     *,
     force_fingerprint_skip: bool = False,
+    repin_plan_hash: bool = False,
     resume_run_id: str | None = None,
     strict_scope: bool = False,
 ) -> int:
@@ -432,6 +438,7 @@ def _run_via_aidp_dispatch(
             pack_files=pack_files,
             pack_manifest=pack_manifest,
             force_fingerprint_skip=force_fingerprint_skip,
+            repin_plan_hash=repin_plan_hash,
             schema_snapshot_yaml=schema_snapshot_yaml,
             # Phase 9 — pack threaded through so dispatch's dry-run path
             # can call schema.plan_resolver without crossing §4.3.

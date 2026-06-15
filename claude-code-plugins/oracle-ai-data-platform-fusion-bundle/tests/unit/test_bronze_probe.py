@@ -110,3 +110,34 @@ class TestProbe:
         assert excinfo.value.dataset_id == "erp_suppliers"
         assert "erp_suppliers" in str(excinfo.value)
         assert isinstance(excinfo.value.cause, RuntimeError)
+
+
+def test_describe_uses_target_table_keyed_by_id():
+    """Regression: a node whose id != target (e.g. gl_journal_lines targets
+    gl_journal_headers) must DESCRIBE the TARGET table but key the result by the
+    dataset id. Before the fix the probe DESCRIBE'd the id and raised
+    TABLE_OR_VIEW_NOT_FOUND, blocking every incremental run on such a tenant."""
+    spark = _mock_spark({"gl_journal_headers": [_row("JournalHeaderId", "bigint")]})
+    out = describe_bronze(
+        spark,
+        catalog="fusion_catalog",
+        bronze_schema="bronze",
+        dataset_ids=["gl_journal_lines"],
+        table_names={"gl_journal_lines": "gl_journal_headers"},
+    )
+    # Keyed by id, populated from the target table's DESCRIBE.
+    assert list(out.keys()) == ["gl_journal_lines"]
+    assert out["gl_journal_lines"] == [ColumnInfo(name="JournalHeaderId", type="bigint")]
+    # It described the TARGET, not the id.
+    assert any("gl_journal_headers" in c.args[0] for c in spark.sql.call_args_list)
+    assert not any(".gl_journal_lines" in c.args[0] for c in spark.sql.call_args_list)
+
+
+def test_describe_backward_compat_table_defaults_to_id():
+    """No table_names -> table == id (every node where id == target)."""
+    spark = _mock_spark({"ap_invoices": [_row("ApInvoicesVendorId", "bigint")]})
+    out = describe_bronze(
+        spark, catalog="fusion_catalog", bronze_schema="bronze",
+        dataset_ids=["ap_invoices"],
+    )
+    assert out["ap_invoices"] == [ColumnInfo(name="ApInvoicesVendorId", type="bigint")]
