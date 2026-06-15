@@ -239,8 +239,8 @@ Remediation:    overlays/<overlay-name>/remediation.md (Option D)
 
 Next steps:
   1. Review the overlay + remediation.md.
-  2. Wire the overlay into the pack chain (set
-     bundle.yaml contentPack.path to the overlay dir).
+  2. Wire the overlay into the pack chain:
+       aidp-fusion-bundle use-pack overlays/<overlay-name> --profile <tenant>
   3. Re-run bootstrap (NO --resolutions flag needed — the
      extended candidate list AutoResolves):
        aidp-fusion-bundle bootstrap --operator "$USER"
@@ -260,14 +260,16 @@ Remediation:    overlays/<overlay-name>/remediation.md (Option D)
 
 Next steps:
   1. Review the overlay + resolutions.json + remediation.md.
-  2. Commit the resolution:
+  2. Wire the overlay into the pack chain:
+       aidp-fusion-bundle use-pack overlays/<overlay-name> --profile <tenant>
+  3. Commit the resolution:
        aidp-fusion-bundle bootstrap --refresh \
          --operator "$USER" \
          --resolutions overlays/<overlay-name>/resolutions.json
-  3. Apply Option D remediation per remediation.md:
+  4. Apply Option D remediation per remediation.md:
        aidp-fusion-bundle run --mode seed \
          --datasets <silver/gold-node-ids>
-  4. Resume scheduled `aidp-fusion-bundle run --mode incremental`.
+  5. Resume scheduled `aidp-fusion-bundle run --mode incremental`.
 ```
 
 ### 8. Provenance trail

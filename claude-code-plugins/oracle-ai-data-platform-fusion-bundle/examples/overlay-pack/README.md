@@ -4,11 +4,15 @@ This is a minimal additive overlay for the shipped `fusion-finance-starter`
 content pack. It adds one new gold mart, `supplier_spend_by_currency`, without
 modifying the starter pack.
 
-Copy the overlay into a customer bundle and wire it with:
+For the full authoring and override workflow, see
+[../../docs/mart_overlay_authoring.md](../../docs/mart_overlay_authoring.md).
+
+Copy the overlay into a customer bundle, validate it, and wire it with:
 
 ```bash
-aidp-fusion-bundle use-pack examples/overlay-pack --profile finance-default
 aidp-fusion-bundle content-pack validate examples/overlay-pack
+aidp-fusion-bundle use-pack examples/overlay-pack --profile finance-default
+aidp-fusion-bundle validate
 aidp-fusion-bundle run --mode seed --datasets supplier_spend_by_currency --layers gold --dry-run
 ```
 

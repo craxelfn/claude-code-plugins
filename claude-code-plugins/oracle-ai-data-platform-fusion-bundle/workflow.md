@@ -239,11 +239,15 @@ additive change:
 - Add new bronze only when the raw field is not extracted yet.
 - Write only content-pack overlay YAML/SQL under `overlays/<name>/`.
 
-After authoring, wire the overlay:
+For user-facing examples, including how to override shipped mart SQL, see
+[docs/mart_overlay_authoring.md](docs/mart_overlay_authoring.md).
+
+After authoring, validate and wire the overlay:
 
 ```bash
-aidp-fusion-bundle use-pack overlays/<name> --profile <profile>
 aidp-fusion-bundle content-pack validate overlays/<name>
+aidp-fusion-bundle use-pack overlays/<name> --profile <profile>
+aidp-fusion-bundle validate
 ```
 
 Then seed the new node and re-run the advisor against the live catalog.

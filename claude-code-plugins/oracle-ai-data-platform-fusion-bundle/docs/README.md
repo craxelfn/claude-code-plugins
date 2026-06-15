@@ -6,6 +6,7 @@ Start here if you are trying to use or operate the plugin:
 |---|---|
 | Fresh checkout or customer bundle setup | [project_setup.md](project_setup.md) |
 | Copyable sample bundles and overlays | [../examples/README.md](../examples/README.md) |
+| Add or customize marts with overlays | [mart_overlay_authoring.md](mart_overlay_authoring.md) |
 | End-to-end operator workflow | [workflow.md](../workflow.md) |
 | AIDPF code meanings and recovery hints | [aidpf-error-codes.md](aidpf-error-codes.md) |
 | OAC MCP setup for operators and end users | [oac_mcp_setup.md](oac_mcp_setup.md) |
