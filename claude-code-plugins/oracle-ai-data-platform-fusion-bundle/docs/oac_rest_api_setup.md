@@ -1,5 +1,11 @@
 # OAC REST API setup — automating `dashboard install`
 
+This is the **legacy `.bar` snapshot deployment path**. The preferred current
+dashboard workflow is MCP-native: `oac-dataset-advisor` recommends the OAC
+dataset, the user creates the AIDP connection and dataset in OAC UI, and
+`workbook-authoring` saves workbook JSON via OAC MCP. See
+[../workflow.md](../workflow.md) for that flow.
+
 The bundle's `aidp-fusion-bundle dashboard install --target oac` command is built on **only Oracle-documented public REST endpoints** (audit done 2026-05-01 against [openapi.json](https://docs.oracle.com/en/cloud/paas/analytics-cloud/acapi/openapi.json) — see TC10h-2/h-3/h-4 in `tests/live/TC10_oac_integration_results.md`):
 
 ```
@@ -15,7 +21,8 @@ The bundle ships:
 - The 6-key AIDP connection JSON template (auto-generated)
 - A `bundle-vN.bar` file as a release artifact (workbook content)
 
-Customers upload the `.bar` to their own OCI Object Storage bucket once. The bundle then runs the four REST calls above to install everything.
+Customers upload the `.bar` to their own OCI Object Storage bucket once. The
+bundle then runs the four REST calls above to install the snapshot content.
 
 ## Realistic deployment flow (live-validated TC10h-4, 2026-05-03)
 
@@ -25,6 +32,11 @@ OAC's REST validator on `POST /catalog/connections` does not yet bless the AIDP 
 2. **All subsequent runs** of `dashboard install` are pure REST: the precheck (`GET /catalog?type=connections&search=<name>`) finds the existing connection and skips the `POST /catalog/connections` step entirely; snapshot register + restore + poll then deploy the `.bar`.
 
 The bundle's `--overwrite-connection` flag still triggers the POST and would hit the validator gap; use `--print-only` + UI re-upload if you need to recreate the connection.
+
+The same first-connection limitation is why the current MCP-native workflow also
+asks the user to create the AIDP connection manually in OAC UI. After the
+connection exists, OAC REST and MCP flows can reuse OAC-governed catalog
+objects by name or dataset reference.
 
 ---
 
