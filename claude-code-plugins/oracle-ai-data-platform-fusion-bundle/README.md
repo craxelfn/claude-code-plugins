@@ -4,7 +4,11 @@
 >
 > Same pattern shown in the official Oracle blog [Bring Fusion Data into AIDP Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc), productized.
 
-**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (`oacai.cealinfra.com` for TC10/b/c/d/h/h-2; disposable OAC1 for TC10h-3/h-4 — see [tests/live/](tests/live/) for full evidence trail). **207 unit tests passing.** **`dashboard install` validated end-to-end on OAC1 (TC10h-4, 2026-05-03)**: precheck → snapshot REGISTER → RESTORE → workRequest poll, all four documented OAC REST calls green in a single command. OAC integration uses **only Oracle-documented public REST endpoints** (snapshot-based workbook delivery; the audit rejected per-workbook `.dva` imports as UI-only). CLI commands wired: `init`, `validate`, `bootstrap`, `catalog list/probe`, `run`, `status`, `dashboard install/validate/uninstall`, `dashboard mcp-config`.
+**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (see [tests/live/](tests/live/)). Single content-pack execution path (Phase 9). **1360 unit + 12 architectural + 5 integration tests pass, plus the conversational skill family's own unit suites.** **Live-validated 2026-06-15** on the `fusion_bundle_dev` cluster: a `mart-author` overlay seeded `gold.ar_invoice_summary` (49 rows) end-to-end, and OAC workbooks were created via the OAC MCP `save_catalog_content` write tool.
+
+CLI commands wired: `init`, `init-config`, `use-pack`, `validate`, `bootstrap`, `catalog list/probe/probe-pvo`, `run`, `status`, `content-pack list/info/validate`, `dashboard install/validate/uninstall`, `dashboard mcp-config/mcp-token/mcp-setup`.
+
+**Dashboard authoring is now MCP-native**: `oac-dataset-advisor` (intent → dataset, grounded in the live AIDP catalog) → `workbook-authoring` (generates schema-valid workbook JSON, writes via OAC MCP). The `.bar` `dashboard install` REST flow still ships as a legacy alternative.
 
 **Positioning**: This bundle is **additive to and complementary with** Oracle's managed Fusion data offerings. It productizes Option 1 of the BICC blog's three-option architecture (BICC into AIDP for "Custom AI and ML, raw data access, data engineering"). Never positioned as a replacement for FDI, OAC, OTBI, BIP, or Data Transforms — different jobs, same Oracle ecosystem.
 
@@ -37,7 +41,35 @@
 
 ---
 
+## Conversational skills (A-to-Z)
+
+The plugin ships a family of Claude Code skills that drive the journey
+conversationally — so a customer can go from a goal to live dashboards without
+hand-running the CLI. The orchestrator routes through the rest:
+
+| Skill | Role |
+|---|---|
+| **`aidp-fusion-autopilot`** | **Front door.** State a goal ("build a supplier-spend vs GL-balance dashboard"); it detects current state and drives the whole chain, pausing only for real decisions. |
+| `aidp-fusion-config` | Resolve `aidp.config.yaml` coords from human-friendly names (no hand-copied OCIDs). |
+| `aidp-fusion-seed` | Natural-language → guarded `run --mode seed` (intent parse, precondition ladder, **fail-closed** destructive guard). |
+| `aidp-fusion-status` | Read-only pipeline health — reconciles `fusion_bundle_state` with the **live** catalog (HEALTHY / STALE / FAILED / DEFERRED / UNTRACKED …). |
+| `oac-dataset-advisor` | Dashboard intent → which OAC dataset to create, grounded in the **live AIDP gold layer** (never pack YAMLs). |
+| `mart-author` | When the gold layer can't serve a request, author a new mart additively (content-pack YAML+SQL overlay), inspecting the Fusion PVO source — never touching living delta. Wires the bundle via `use-pack`. |
+| `medallion-author` | Tier-2 overlay for tenant variation (column aliases / semantic variants). |
+| `workbook-authoring` | Generate schema-valid OAC workbook JSON and write it via OAC MCP. |
+
+`aidp-fusion-bundle` remains the discovery/reference skill (positioning, gotchas,
+when-NOT-to-use). The CLI stays the contract; skills are guarded wrappers around it.
+
+---
+
 ## Quickstart
+
+> **Conversational path:** state your goal to **`aidp-fusion-autopilot`** and it
+> runs the steps below for you, pausing only for real decisions. The manual CLI
+> quickstart here is what the autopilot automates. (The OAC steps 5–7 below are
+> the **legacy `.bar`** path; for new work prefer `oac-dataset-advisor` →
+> `workbook-authoring` (MCP-native), and `dashboard mcp-setup` for end-user chat.)
 
 ```bash
 # 1. Install the CLI on your laptop (development install from local source)
