@@ -19,6 +19,23 @@ Use this skill to generate full workbook JSON that is both schema-shaped and plu
 4. Server sample workbook inspection is fallback-only.
 5. Save-target mode is independent from generation mode: update requests should replace existing workbook by default.
 
+## Preflight: OAC MCP connection (fail fast)
+
+0. **Before anything else, confirm the `oac-mcp-server` tools are live** — this
+   skill reads the OAC catalog through them (discovery, `describe_data`,
+   save-validation). Probe once with a cheap `oracle_analytics-search_catalog`
+   call (or check `claude mcp list` → `oac-mcp-server ✔ Connected`).
+   - **If dead / unauthenticated:** STOP with an actionable message — do not
+     proceed into catalog resolution (it would fail deep with an opaque error,
+     or worse, read an empty result as "datasets don't exist"). Tell the user:
+     run `aidp-fusion-bundle dashboard mcp-setup` (or `mcp-token` — the
+     non-interactive path for Claude Code), then **restart/reconnect Claude
+     Code** (`/mcp` → reconnect `oac-mcp-server`) so the tools activate, then
+     re-invoke. MCP servers bind at session start; the connection cannot be
+     established mid-session. (Autopilot front-loads this as its Phase 1b.)
+   - A save-unavailable connection is fine (disk-first fallback below); a fully
+     *dead* connection is not.
+
 ## Required MCP tools and capabilities
 
 1. Mandatory:
