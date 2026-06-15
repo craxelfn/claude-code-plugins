@@ -1,12 +1,8 @@
-"""Run-level bronze readiness preflight (Phase 5 Step 2c).
+"""Run-level bronze readiness preflight.
 
-Phase 5's default backend flips to content-pack, which runs silver+gold
-against pre-seeded bronze tables. Step 2b (Option A) moved bronze
-extraction ahead of silver+gold for full-medallion runs; this module
-adds the **defense-in-depth** check: BEFORE any silver/gold node runs,
-verify the in-scope bronze tables exist AND carry every column the
-downstream pack nodes declare in ``requiredColumns`` /
-``watermark.column``.
+Before any silver/gold node runs, verify the in-scope bronze tables exist
+and carry every column the downstream pack nodes declare in
+``requiredColumns`` / ``watermark.column``.
 
 Without this, partial or schema-drifted bronze (typo'd source column,
 upstream Fusion column rename, BICC partial-success) would surface as
@@ -18,13 +14,9 @@ ALL gaps (table-missing + column-missing across every in-scope node)
 so a single ``aidp-fusion-bundle run`` invocation surfaces every
 fix-needed in one error rather than failing iteratively.
 
-References:
-
-* PLAN §15 Phase 5 Step 2c.
-* Schema source-of-truth: ``NodeYaml.required_columns: dict[bronze_id,
-  list[str]]`` (``schema/medallion_pack.py:829``).
-* Watermark column declaration: ``NodeYaml.refresh.incremental.
-  watermark.{source, column}`` (``schema/medallion_pack.py:570-578``).
+Schema source-of-truth:
+``NodeYaml.required_columns`` and
+``NodeYaml.refresh.incremental.watermark.{source, column}``.
 """
 
 from __future__ import annotations
@@ -81,8 +73,8 @@ _REMEDIATION = (
     "Step 2 (if Step 1 does not clear the gate): invoke the "
     "`/medallion-author` Claude Code skill to draft a content-pack overlay "
     "extending the candidate list with the live Fusion column names. "
-    "See docs/v2-phase-5-source-drift-followup.md for the full source-drift "
-    "workflow."
+    "See docs/workflow.md and docs/aidpf-error-codes.md for the current "
+    "source-drift workflow."
 )
 
 

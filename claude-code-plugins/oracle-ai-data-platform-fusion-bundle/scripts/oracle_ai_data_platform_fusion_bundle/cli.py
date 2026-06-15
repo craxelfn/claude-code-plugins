@@ -49,8 +49,9 @@ def main(ctx: click.Context, bundle_path: Path, config_path: Path, env_name: str
 
 
 @main.command()
-@click.option("--template", type=click.Choice(["minimal", "full-finance"]), default="minimal",
-              help="Which example to scaffold (default: minimal).")
+@click.option("--template", type=click.Choice(["minimal-bundle", "minimal", "full-finance"]),
+              default="minimal-bundle",
+              help="Which example to scaffold (default: minimal-bundle).")
 @click.option("--force", is_flag=True, help="Overwrite existing bundle.yaml / aidp.config.yaml.")
 def init(template: str, force: bool) -> None:
     """Scaffold a bundle.yaml + aidp.config.yaml in the current directory."""
@@ -156,7 +157,7 @@ def validate(ctx: click.Context) -> None:
 @click.option("--check-iam", is_flag=True, help="Also probe OCI IAM policies (requires AIDP RP credentials).")
 @click.option(
     "--refresh", is_flag=True,
-    help="Re-walk every variation point against the live bronze; resolves drift per §9.5.5 Tier-1.",
+    help="Re-walk every variation point against the live bronze; resolves pinned-profile drift.",
 )
 @click.option(
     "--operator", "operator", type=str, default=None,
@@ -341,7 +342,7 @@ def catalog_probe_pvo(
     "--mode", type=click.Choice(["seed", "incremental"]), default="seed",
     help="seed = full BICC pull + replace strategy per layer; incremental "
          "= delta-merge using prior watermarks from fusion_bundle_state "
-         "(P1.17 — bronze MERGE on natural key + payload-diff for "
+         "(bronze MERGE on natural key + payload diff for "
          "incremental_capable=False PVOs; silver/gold MERGE on the "
          "primary source's row-max watermark). The retired alias 'full' "
          "is now 'seed'."
@@ -351,8 +352,7 @@ def catalog_probe_pvo(
     "--layers", default=None,
     help="Comma-separated layer names to filter (bronze, silver, gold). "
          "Mutually compatible with --datasets — both apply. "
-         "P1.5α-fix13: previously the orchestrator accepted layers= but the "
-         "CLI didn't surface it, so --inline --layers gold errored at Click parse.",
+         "Useful for scoped runs such as --inline --layers gold.",
 )
 @click.option("--inline", is_flag=True,
               help="Run the orchestrator in-process (architectural primary — needs Spark + checkpointer + vault from an AIDP notebook session).")
@@ -365,9 +365,7 @@ def catalog_probe_pvo(
          "stored plan_snapshot when --datasets/--layers are omitted. Drift "
          "(plan shape, effective schemas, fusion pod/storage/user, AIDP target "
          "paths, plugin version) raises ResumeBundleMismatchError pre-dispatch. "
-         "Supported on both --inline and REST dispatch (P1.5ε-fix5): the "
-         "generated cluster notebook threads the run_id into the orchestrator "
-         "call so the resumed run adopts the original id end-to-end.",
+         "Supported on both --inline and REST dispatch.",
 )
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False,
@@ -384,11 +382,10 @@ def catalog_probe_pvo(
     show_default=True,
     help="Seconds to wait for the dispatched cluster job to reach a terminal "
          "status before raising DISPATCH_TIMEOUT. Default 3600 (1h) covers "
-         "cold-cache BICC extracts on slow tenants — the 1800s (30m) default "
-         "from P1.5ε was insufficient per TC29 evidence on saasfademo1. Bump "
-         "to 14400 (4h) for first-time seed runs against especially slow "
-         "Fusion pods. Below 60s rejected at parse — anything that short is "
-         "operator error. Only meaningful for REST dispatch (no --inline).",
+         "cold-cache BICC extracts on slow tenants. Bump to 14400 (4h) for "
+         "first-time seed runs against especially slow Fusion pods. Below 60s "
+         "is rejected at parse time. Only meaningful for REST dispatch "
+         "(no --inline).",
 )
 @click.option(
     "--force-fingerprint-skip", "force_fingerprint_skip",
@@ -456,12 +453,11 @@ def run(ctx: click.Context, mode: str, datasets: str | None, layers: str | None,
 @click.option("--to", "to_version", required=True, help="Target schema version (e.g. 0.2.0).")
 @click.pass_context
 def migrate_bundle(ctx: click.Context, from_version: str, to_version: str) -> None:
-    """Migrate bundle.yaml from one schema version to another (Option L, §4.4d).
+    """Migrate bundle.yaml from one schema version to another.
 
-    Scaffolded in P1.5α — today only v0.2.0 exists, so any non-no-op
-    invocation exits 2 with a "no migration path" message. The verb is
-    here so when v0.3 ships with a breaking schema change, callers
-    don't have to update their scripts.
+    Today only v0.2.0 exists, so any non-no-op invocation exits 2 with a
+    "no migration path" message. The verb is present so future breaking schema
+    changes can ship without making callers update their scripts.
     """
     from .commands.migrate_bundle import migrate_bundle as migrate_impl
     sys.exit(migrate_impl(
@@ -611,7 +607,7 @@ def dashboard_install(
 ) -> None:
     """Register AIDP JDBC connection in OAC + restore the workbook snapshot via REST.
 
-    Architecture (TC10h-2 refactor, 2026-05-01) — Oracle-documented endpoints only:
+    Architecture — Oracle-documented endpoints only:
       1. POST /catalog/connections                       (creates AIDP connection)
       2. POST /snapshots                                 (registers customer-uploaded .bar)
       3. POST /system/actions/restoreSnapshot            (async restore)
@@ -842,9 +838,8 @@ def dashboard_mcp_token(
     """Produce a token file the OAC MCP connector can use non-interactively, and wire .mcp.json.
 
     The connector falls back to interactive browser auth otherwise, which cannot
-    complete inside the Claude Code MCP client (elicitation unsupported) — see
-    tests/live/TC32. This command seeds a Bearer token so tool calls authenticate
-    silently.
+    complete inside the Claude Code MCP client (elicitation unsupported). This
+    command seeds a Bearer token so tool calls authenticate silently.
 
     Two modes:
       * --import-from <tokens.json>: reuse an OAC Profile -> Access Tokens download

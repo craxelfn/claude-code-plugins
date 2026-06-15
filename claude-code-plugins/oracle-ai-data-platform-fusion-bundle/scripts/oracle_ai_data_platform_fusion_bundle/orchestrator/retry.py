@@ -1,18 +1,10 @@
-"""Transient-exception classification + retry-with-backoff helper (P1.5α-fix20).
+"""Transient-exception classification + retry-with-backoff helper.
 
 Wraps per-step dispatch in ``_execute_node`` so transient infrastructure hiccups
 (OCI Object Storage 5xx, Spark executor loss, BICC connection reset) don't burn
 a full pipeline run. Permanent errors (schema-not-found, auth denied, Delta
 merge failures) skip retry entirely and fail fast — matches the cascade-vs-abort
 contract by NOT masking real bugs.
-
-Surfaced live by TC26 full happy-path (2026-05-21, run_id=da298a83): gl_coa
-saveAsTable hit a transient ``Py4JJavaError`` at the Delta write under load
-(11 parallel BICC pulls churning ~14M rows + the 11M-row gl_period_balances
-write at the same time). Standalone diagnostic re-ran the same call and it
-succeeded with 63,464 rows — confirming the failure was transient, not a code
-bug. Without retry, the orchestrator cascade-aborted 11 downstream nodes and
-the operator had to re-run a 25-minute pipeline from scratch.
 
 Scope: this is Tier 1+2 of the layered fault-tolerance design. Tier 3 (resume
 from checkpoint via ``--resume <run_id>``) ships in ``orchestrator/resume.py``
@@ -69,7 +61,7 @@ TRANSIENT_PATTERNS: tuple[str, ...] = (
 # can import them as the contract corpus — pinning behavior against a
 # private symbol would couple the test to implementation choices.
 PERMANENT_PATTERNS: tuple[str, ...] = (
-    # BICC catalog / schema bugs (P1.5α-fix17 origin)
+    # BICC catalog / schema bugs.
     "DATA_ACCESS_LAYER_0031",   # Schema X not found
     "DATA_ACCESS_LAYER_0032",   # PVO not found (inferred variant)
     # Auth / authorization
@@ -79,7 +71,7 @@ PERMANENT_PATTERNS: tuple[str, ...] = (
     "NotAuthorizedOrNotFound",
     "authentication failed",
     # Delta correctness errors (schema, constraint, protocol)
-    "DELTA_FAILED_TO_MERGE_FIELDS",  # P1.5α-fix16 origin
+    "DELTA_FAILED_TO_MERGE_FIELDS",
     "DELTA_INVARIANT_VIOLATED",
     "NOT NULL constraint",
     "AnalysisException",        # Spark SQL / Catalog errors are not transient

@@ -200,7 +200,7 @@ def from_observed(
     # Strip bronze audit columns BEFORE building the snapshot — same
     # axis as `compute_bronze_fingerprint`. The snapshot represents the
     # BICC PVO contract (compared against live BICC at runtime by the
-    # Phase 5 drift gate); audit columns are appended post-extract by
+    # AIDPF-2072 drift gate); audit columns are appended post-extract by
     # the bronze adapter and are NOT part of that contract. Without
     # this strip, `DESCRIBE TABLE`-sourced `observed` dicts (the
     # bootstrap path) leak audit names into the snapshot YAML and

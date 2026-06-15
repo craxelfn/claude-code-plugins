@@ -79,7 +79,7 @@ aidp-fusion-bundle run --inline --mode incremental \
 # Resume a failed run by run_id (Phase 5 P1.5ε-fix5 + Step 9b —
 # AIDPF-1032 resolved).
 aidp-fusion-bundle run --inline --mode incremental \
-  --resume-run-id 2026-06-09T14:22:00Z-7a3f
+  --resume 2026-06-09T14:22:00Z-7a3f
 ```
 
 The same commands work without `--inline` — they dispatch the
@@ -164,7 +164,7 @@ reconstructs `ResolvedPack` + `TenantProfile` via
 `materialize_staged_pack` + `load_full_chain` and calls
 `orchestrator.run(...)`.
 
-The CLI threads `--strict-scope`, `--resume-run-id`, and
+The CLI threads `--strict-scope`, `--resume`, and
 `--force-fingerprint-skip` through to the generated
 `orchestrator.run(...)` call (Phase 9 round-5 review fix wired
 these end-to-end + added regression tests for the CLI → dispatch
@@ -172,39 +172,9 @@ these end-to-end + added regression tests for the CLI → dispatch
 
 ## Error codes
 
-| Code | Meaning |
-|---|---|
-| `AIDPF-1030` | `contentPack.profile` missing |
-| `AIDPF-1031` | `bundle.yaml` has no `contentPack` block |
-| `AIDPF-1033` | Profile YAML not found at resolved path |
-| `AIDPF-1034` | `--datasets` references node id not in pack |
-| `AIDPF-1037` | Installed content pack `<name>` not found |
-| `AIDPF-1038` | Resolved pack root has no `pack.yaml` |
-| `AIDPF-1039` | Pack SQL path escapes pack root (traversal rejected) |
-| `AIDPF-1040` | Staging source root not in `chain_roots` (programmer error) |
-| `AIDPF-1042` | `--strict-scope`: transitive dep not in effective roots |
-| `AIDPF-1043` | `--datasets` includes id outside bundle scope |
-| `AIDPF-1045` | `--layers` filter removed every declared root |
-| `AIDPF-1050` | Tenant profile YAML schema validation failed |
-| `AIDPF-1051` | Unsupported tenant profile `schemaVersion` |
-| `AIDPF-2012` | Bronze schema fingerprint diverged from pinned profile |
-| `AIDPF-2080` | Bundle declares custom PVO not in curated catalog (WARN-only) |
-| `AIDPF-2081` | Bundle dataset id does not resolve in any pack layer |
-| `AIDPF-4030` | Strategy not supported in this release |
-| `AIDPF-4031` | Target identifier failed allowlist |
-| `AIDPF-4040` | Plan-hash drift on resume |
-| `AIDPF-4060` | State-row hard commit failure |
-| `AIDPF-4061` | `output_watermark` regression (defensive) |
-| `AIDPF-4070` | Materialised target schema does not match `node.outputSchema` |
-| `AIDPF-5001` | Identifier allowlist violation |
-| `AIDPF-5002` | Unknown template token |
-| `AIDPF-5003` | Unresolved variation point |
-| `AIDPF-5010` | Post-render check rejected SQL |
-| `AIDPF-5011` | Disallowed parameter value type for `{{ profile.<key> }}` |
-| `AIDPF-5013` | `profile.snapshotDate` present but not ISO-8601 date |
-| `AIDPF-5014` | `type: builtin` node's `implementation.callable` not in registry |
-| `AIDPF-8010` | Quality test failed |
-| `AIDPF-8011` | Quality test deferred |
+The complete operator-facing code table lives in
+[aidpf-error-codes.md](aidpf-error-codes.md). This execution guide keeps only
+the behavior details for how those codes are reached during content-pack runs.
 
 Reserved exit code: `14` (`EXIT_CODE_SCHEMA_DRIFT`) — `AIDPF-2012`
 raised on the active run.

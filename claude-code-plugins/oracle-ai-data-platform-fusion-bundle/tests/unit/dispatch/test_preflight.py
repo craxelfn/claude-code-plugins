@@ -140,7 +140,7 @@ class TestPhaseALocalPreflight:
         # OCI profile check must SKIP — we didn't get to construct a client.
         assert results[2].status == "SKIP"
 
-    def test_vault_auth_rejected_with_fix6_hint(
+    def test_vault_auth_rejected_with_profile_remediation(
         self, bundle_path: Path
     ) -> None:
         env = _env()
@@ -154,7 +154,8 @@ class TestPhaseALocalPreflight:
         coords = results[1]
         assert coords.status == "FAIL"
         assert "vault" in coords.detail
-        assert "fix6" in (coords.remediation or "").lower()
+        assert "auth.mode: profile" in (coords.remediation or "")
+        assert "ociProfile" in (coords.remediation or "")
 
     def test_oci_profile_not_found_fails_cleanly(
         self, bundle_path: Path

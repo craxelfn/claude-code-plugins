@@ -1,14 +1,12 @@
 """Implementation of ``aidp-fusion-bundle migrate-bundle --from X --to Y``.
 
-Scaffolded in P1.5α (Option L — schema versioning, §4.4d). Today no
-migrations are registered — the only supported version is `"0.2.0"`.
+Today no migrations are registered — the only supported version is `"0.2.0"`.
 When v0.3 ships with a breaking schema change, the migrator gains a
 real implementation here and the CLI surface stays stable.
 
 **Returns exit codes directly** — does NOT raise NotImplementedError
-(Blocker-2 fix). The §4.5 exit-2 path in `commands/run.py::_run_inline`
-catches NotImplementedError, but this is a separate top-level CLI
-verb and must produce its own exit codes.
+because this is a separate top-level CLI verb and must produce its own exit
+codes.
 """
 
 from __future__ import annotations

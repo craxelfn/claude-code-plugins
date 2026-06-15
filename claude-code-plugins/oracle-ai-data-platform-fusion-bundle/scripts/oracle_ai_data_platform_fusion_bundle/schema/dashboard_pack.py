@@ -5,15 +5,9 @@ snapshot. The YAML declares the gold-table dependencies, PII rules, and
 validation queries the dashboard needs; the `.bar` is the opaque OAC content
 that gets uploaded at install time.
 
-References:
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §12 (dashboard pack contract)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §12.6 (OAC MCP — PII enforcement)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §23 (security/PII)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §25 (error codes)
-
-The engine never parses `.bar` files (§12.3). The dashboard YAML's
-`requires.columns` block is a hand-authored declaration; OAC catches any
-drift between `.bar` and YAML at import time (§12.4 layer 3).
+The engine never parses `.bar` files. The dashboard YAML's `requires.columns`
+block is a hand-authored declaration; OAC catches any drift between `.bar` and
+YAML at import time.
 
 Error codes raised here:
 

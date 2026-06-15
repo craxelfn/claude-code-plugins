@@ -1,7 +1,7 @@
-"""Bootstrap variation-phase probe dispatcher (Phase 4.1 / D3).
+"""Bootstrap variation-phase probe dispatcher.
 
 `aidp-fusion-bundle bootstrap --dispatch-mode=cluster` (the default in
-Phase 4.1) routes the bronze-schema probe + walker through this module
+cluster mode) routes the bronze-schema probe + walker through this module
 instead of the laptop's in-process Spark session. The cluster path:
 
 1. Build the plugin wheel locally (cached).
@@ -234,7 +234,7 @@ def _build_probe_cell(*, tenant: str) -> str:
 
     The try/except is INSIDE this cell — Jupyter cell N exceptions are
     not catchable by cell N+1 (the failure-cell-wraps-step-2 design was
-    rejected for that reason; see plan.md Step 5 rationale).
+    rejected for that reason).
     """
     return (
         f"import base64, json, traceback\n"
@@ -364,7 +364,7 @@ def _build_notebook(
     return {
         "cells": [
             _markdown_cell(
-                "# Bootstrap variation probe (Phase 4.1)\n"
+                "# Bootstrap variation probe\n"
                 "Cluster-side bronze schema probe + walker dispatched "
                 "from `aidp-fusion-bundle bootstrap`."
             ),

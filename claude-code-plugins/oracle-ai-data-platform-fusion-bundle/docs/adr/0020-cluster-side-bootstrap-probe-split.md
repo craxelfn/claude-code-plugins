@@ -24,8 +24,8 @@ requires the AIDP cluster's multi-catalog setup. Even if the laptop
 configured `spark.sql.catalog.fusion_catalog = …` locally, the
 bronze tables physically live in the AIDP cluster's storage —
 laptop has no network access to them. Phase 4 live evidence
-([`docs/v2-phase-4-live-defects.md §D3`](../v2-phase-4-live-defects.md))
-caught this on the first fresh-tenant bootstrap.
+(`docs/v2-phase-4-live-defects.md` §D3, historical working note not retained in
+this repository) caught this on the first fresh-tenant bootstrap.
 
 The variation phase has two responsibilities mixed in one process:
 
@@ -146,10 +146,11 @@ to make every decision.
 
 ## References
 
-- [`docs/v2-phase-4-live-defects.md`](../v2-phase-4-live-defects.md)
-  §D3 — root-cause analysis + interim workaround.
-- [`docs/features/v2-phase-4.1-cluster-bootstrap-dispatcher/plan.md`](../features/v2-phase-4.1-cluster-bootstrap-dispatcher/plan.md)
-  — full implementation plan + locked decisions table.
+- `docs/v2-phase-4-live-defects.md` §D3 — historical root-cause analysis +
+  interim workaround; not retained in this repository.
+- `docs/features/v2-phase-4.1-cluster-bootstrap-dispatcher/plan.md` —
+  historical implementation plan + locked decisions table; not retained in
+  this repository.
 - PLAN §15 Phase 4 deferred follow-ups — entry for the Phase 4.2
   consolidation that this ADR enables.
 - PLAN §25 — `AIDPF-2047` / `AIDPF-2048` / `AIDPF-2049` rows.

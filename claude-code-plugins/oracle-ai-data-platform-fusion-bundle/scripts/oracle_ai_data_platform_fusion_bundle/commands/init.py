@@ -1,8 +1,7 @@
 """Implementation of ``aidp-fusion-bundle init``.
 
 Scaffolds ``bundle.yaml`` + ``aidp.config.yaml`` in the current directory by
-copying one of the bundled examples (``minimal_gl_only.yaml`` or
-``full_finance.yaml``) and the canonical ``aidp.config.example.yaml``.
+copying one of the bundled customer-project templates.
 """
 
 from __future__ import annotations
@@ -13,9 +12,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-TEMPLATES = {
-    "minimal": "minimal_gl_only.yaml",
-    "full-finance": "full_finance.yaml",
+TEMPLATES: dict[str, tuple[str, str]] = {
+    "minimal-bundle": ("minimal-bundle/bundle.yaml", "minimal-bundle/aidp.config.yaml"),
+    "minimal": ("minimal_gl_only.yaml", "aidp.config.example.yaml"),
+    "full-finance": ("full_finance.yaml", "aidp.config.example.yaml"),
 }
 
 
@@ -41,19 +41,21 @@ def init(template: str, *, force: bool, console: Console | None = None) -> int:
         return 1
 
     examples_dir = _examples_dir()
-    shutil.copy(examples_dir / TEMPLATES[template], bundle_target)
-    shutil.copy(examples_dir / "aidp.config.example.yaml", config_target)
+    bundle_source, config_source = TEMPLATES[template]
+    shutil.copy(examples_dir / bundle_source, bundle_target)
+    shutil.copy(examples_dir / config_source, config_target)
 
-    console.print(f"[green]wrote[/green] {bundle_target}  ([dim]{TEMPLATES[template]}[/dim])")
-    console.print(f"[green]wrote[/green] {config_target}  ([dim]aidp.config.example.yaml[/dim])")
+    console.print(f"[green]wrote[/green] {bundle_target}  ([dim]{bundle_source}[/dim])")
+    console.print(f"[green]wrote[/green] {config_target}  ([dim]{config_source}[/dim])")
     console.print(
         "\n[bold]Next steps:[/bold]\n"
-        "  1. Fill in [cyan]variables.team[/cyan] + ${FUSION_*} env vars + ${vault:OCID} refs\n"
-        "  2. Set workspace coords in [cyan]aidp.config.yaml[/cyan] (workspaceKey, dataLakeOcid, region)\n"
-        "  3. Set dispatch coords for laptop CLI: [cyan]aiDataPlatformId, clusterKey, clusterName[/cyan]\n"
-        "     (only needed for [cyan]aidp-fusion-bundle run[/cyan] without --inline; see docs/rest_dispatch_setup.md)\n"
-        "  4. Run [cyan]aidp-fusion-bundle validate[/cyan] to schema-check\n"
-        "  5. Run [cyan]aidp-fusion-bundle bootstrap[/cyan] to probe live prereqs\n"
+        "  1. Fill in [cyan]variables.team[/cyan] and the Fusion/OAC values in [cyan]bundle.yaml[/cyan]\n"
+        "     (${FUSION_*}, ${OAC_URL}, schemas, and dataSourceName as needed).\n"
+        "  2. Run [cyan]aidp-fusion-bundle init-config[/cyan] with the AIDP OCID plus workspace/cluster names\n"
+        "     to write [cyan]workspaceKey, aiDataPlatformId, clusterKey, clusterName[/cyan] in [cyan]aidp.config.yaml[/cyan].\n"
+        "  3. Run [cyan]aidp-fusion-bundle validate[/cyan] to schema-check the bundle.\n"
+        "  4. Run [cyan]aidp-fusion-bundle dashboard mcp-setup[/cyan] before OAC workbook phases.\n"
+        "  5. Run [cyan]aidp-fusion-bundle bootstrap[/cyan] to probe live prereqs.\n"
     )
     return 0
 

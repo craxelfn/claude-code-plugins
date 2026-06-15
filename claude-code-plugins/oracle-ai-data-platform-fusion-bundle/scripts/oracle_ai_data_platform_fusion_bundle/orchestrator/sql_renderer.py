@@ -1,7 +1,7 @@
 """SQL template renderer for the content-pack execution backend.
 
 The renderer is the **security boundary** between untrusted profile/run-id
-values and Spark SQL execution (PLAN §9.4). Profile-string values flow
+values and Spark SQL execution. Profile-string values flow
 through Spark parameter markers (``spark.sql(sql, args=rendered.params)``);
 identifier substitutions (catalog/schema/column names) flow through an
 allowlist regex (``^[A-Za-z_][A-Za-z0-9_]{0,62}$``) and are inlined as
@@ -11,7 +11,7 @@ The renderer returns a typed :class:`RenderedSql` (NOT a raw string).
 Strategy executors call ``spark.sql(rendered.sql, args=rendered.params)`` —
 never ``spark.sql(rendered.sql)`` alone, never string concatenation.
 
-Token contract (PLAN §9.1):
+Token contract:
 
 * ``{{ catalog }}`` / ``{{ bronze_schema }}`` / ``{{ silver_schema }}``
   / ``{{ gold_schema }}`` — identifier substitution from ``RunContext``.
@@ -43,12 +43,8 @@ Failure modes:
 * ``AIDPF-5011`` — profile value referenced by ``{{ profile.<key> }}``
   has a disallowed Python type (only str/int/float/bool/date/datetime).
 
-References:
-
-* PLAN §9.1 (renderer token vocabulary)
-* PLAN §9.4 (security boundary — parameter markers for untrusted values)
-* PLAN §9.5.2 (semantic-fragment grammar)
-* ADR-0017 (no LLM during seed/incremental — render is deterministic)
+Render is deterministic; no LLM or operator interaction is allowed during
+seed/incremental execution.
 """
 
 from __future__ import annotations
@@ -125,7 +121,7 @@ _TOKEN_RE = re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}")
 newlines — keeps the parser greedy-resistant on malformed templates."""
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
-"""SQL identifier allowlist per PLAN §9.4: ASCII letters / digits / underscore;
+"""SQL identifier allowlist: ASCII letters / digits / underscore;
 must start with a letter or underscore; max 63 chars (Postgres-compatible)."""
 
 _DISALLOWED_AFTER_RENDER = (
@@ -135,7 +131,7 @@ _DISALLOWED_AFTER_RENDER = (
 )
 """Substrings rejected by the post-render check (AIDPF-5010). Semicolons are
 checked separately (a trailing newline-only ``;`` is acceptable, mid-string ``;``
-is not — but the renderer enforces "no ``;`` at all" for simplicity and per §9.4)."""
+is not — but the renderer enforces "no ``;`` at all" for simplicity)."""
 
 
 # Allowed Python types for profile values flowing through parameter markers.
@@ -143,7 +139,7 @@ is not — but the renderer enforces "no ``;`` at all" for simplicity and per §
 _ALLOWED_PARAM_TYPES: tuple[type, ...] = (str, int, float, bool, date, datetime)
 
 
-# Maximum depth for ``{{ profile.<a.b.c.d> }}`` dotted lookups (PLAN: 4 levels).
+# Maximum depth for ``{{ profile.<a.b.c.d> }}`` dotted lookups.
 _PROFILE_DOTTED_MAX_DEPTH = 4
 
 
@@ -285,10 +281,10 @@ def render_node_sql(
     rendered = _TOKEN_RE.sub(replace, template_text)
     _check_post_render(rendered)
 
-    # ----- Hash-normalized render pass (Approach 3) -------------------
-    # The §11.9 plan-hash must be MODE-INDEPENDENT: a MERGE node seeded then
-    # run --mode incremental must produce the SAME plan-hash, or the
-    # AIDPF-4040 continuity gate fires a false positive (P-incr-L1). The
+    # ----- Hash-normalized render pass -------------------------------
+    # The plan-hash must be mode-independent: a MERGE node seeded then
+    # run --mode incremental must produce the same plan-hash, or the
+    # AIDPF-4040 continuity gate fires a false positive. The
     # only per-mode-varying token is {{ watermark_predicate }} (1=1 on seed,
     # `<col> > :watermark_<source>` on incremental). We compute hash_input
     # from a SECOND render pass where that token is forced to its canonical
@@ -457,14 +453,13 @@ def _render_watermark_predicate(
     On incremental runs, emits ``<watermark_column> > :watermark_<source>``
     where the column is identifier-checked and the prior watermark value
     flows through a parameter marker. Multi-source nodes emit the predicate
-    for the primary source only (PLAN §11.10 primary/lookup contract — the
-    primary is what advances the cursor).
+    for the primary source only; the primary is what advances the cursor.
 
     When ``for_hash`` is True (the plan-hash normalization pass), the
     predicate is forced to the canonical ``1=1`` form regardless of mode and
     writes NO ``watermark_*`` param — so a node's seed and incremental
-    renders hash identically (Approach 3 / P-incr-L1). The watermark
-    column/source are still mixed into the plan-hash via dedicated fields in
+    renders hash identically. The watermark column/source are still mixed
+    into the plan-hash via dedicated fields in
     ``compute_content_pack_plan_hash``, so this normalization loses no
     drift-detection power.
     """
@@ -709,7 +704,7 @@ def _render_semantic_lookup(
 
 
 def _check_semantic_fragment_grammar(fragment: str, *, variant_name: str) -> None:
-    """Enforce the semantic-fragment grammar (PLAN §9.5.2).
+    """Enforce the semantic-fragment grammar.
 
     Forbids comment markers, semicolons, and SQL keywords that smell like
     subqueries (``SELECT``, ``UNION``, etc.). Allows column refs +
@@ -751,8 +746,8 @@ def _check_semantic_fragment_grammar(fragment: str, *, variant_name: str) -> Non
 def _check_post_render(rendered: str) -> None:
     """Reject rendered SQL containing comment markers or semicolons.
 
-    PLAN §9.4 — a rendered SQL string must be exactly one statement with
-    no inline comments. Trailing whitespace is tolerated.
+    A rendered SQL string must be exactly one statement with no inline
+    comments. Trailing whitespace is tolerated.
     """
     for marker in _DISALLOWED_AFTER_RENDER:
         if marker in rendered:
@@ -785,8 +780,8 @@ def _build_hash_input(sql: str, params: Mapping[str, Any]) -> str:
     canonical_sql = re.sub(r"\s+", " ", sql).strip()
     # Exclude PER-RUN param VALUES from the plan-hash. ``run_id`` (run identity)
     # and ``watermark_<source>`` (the cursor, which advances every run) are not
-    # part of the plan *shape* — the §11.9 hash is meant to catch SQL-template /
-    # outputSchema / variation-point / schema-fingerprint changes, NOT run
+    # part of the plan shape; the hash is meant to catch SQL-template /
+    # outputSchema / variation-point / schema-fingerprint changes, not run
     # identity. Including them made the hash run-dependent, so the AIDPF-4040
     # continuity gate fired on every incremental after a seed (the run_id and
     # cursor always differ). The marker (``:run_id`` / ``:watermark_*``) still
@@ -836,7 +831,7 @@ def _resolve_primary_source(node: NodeYaml, ctx: RunContext) -> str | None:
 
     Used for the watermark predicate's source-suffixed parameter marker
     and the semantic-fragment ``{table}`` substitution. Multi-source nodes
-    follow PLAN §11.10 — exactly one primary source per node.
+    follow the multi-source contract: exactly one primary source per node.
     """
     inc = node.refresh.incremental
     if inc is not None and inc.watermark is not None:

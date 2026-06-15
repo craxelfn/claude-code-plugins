@@ -3,15 +3,15 @@
 Wraps Oracle's documented public ``/api/20210901/...`` endpoints used by the
 bundle's ``dashboard install`` / ``dashboard uninstall`` flow.
 
-## Endpoint inventory (all from the canonical openapi.json, 2026-05-01)
+## Endpoint inventory
 
 Connection lifecycle (per-object, stable):
 
   * ``POST   /api/20210901/catalog/connections``
       Register the AIDP JDBC connection. The body schema is documented as
       ``type: object`` (server-side schema is open), so the AIDP-specific
-      ``connectionType: "idljdbc"`` payload — captured from the OAC UI's
-      network traffic (TC10h, 2026-05-01) — works at the wire layer.
+      ``connectionType: "idljdbc"`` payload — derived from the OAC UI's
+      network traffic — works at the wire layer.
       Note: AIDP is NOT in Oracle's 11 published connectionType samples;
       the body shape is reverse-engineered, not Oracle-blessed. See
       ``project_oac_aidp_rest_create_connection_payload.md``.
@@ -39,7 +39,7 @@ deploying workbook content programmatically):
   * ``GET    /api/20210901/workRequests/{id}``
       Poll until status is SUCCEEDED / FAILED / CANCELED.
 
-## Removed in TC10h-2 refactor (2026-05-01)
+## Unsupported public workbook endpoints
 
   * ``import_workbook`` — endpoint ``/catalog/workbooks/imports`` is NOT
     in Oracle's openapi.json (UI-only, no API stability guarantee).
@@ -197,8 +197,8 @@ class OacRestClient:
         generic ``/catalog`` browse with ``type=connections`` filter (NOT
         ``/catalog/connections`` which is POST-only).
 
-        Important behavior verified live on OAC 20210901 (TC10h-3, 2026-05-03):
-        when ``search`` is omitted, the response is a single-element TypeInfo
+        Important behavior: when ``search`` is omitted, the response is a
+        single-element TypeInfo
         header (e.g. ``[{"type": "connections"}]``) instead of the actual
         connection list. The ``search`` parameter is **required** to retrieve
         items. Passing ``"*"`` returns all items the caller can see; passing

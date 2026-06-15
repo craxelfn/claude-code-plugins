@@ -1,16 +1,14 @@
-"""Fast-fail preflight checks for laptop-CLI REST dispatch (P1.5ε §Step 5).
+"""Fast-fail preflight checks for laptop-CLI REST dispatch.
 
-Split into two phases so the REST client is never constructed against a
-malformed config:
+Split into local and remote checks so the REST client is never constructed
+against a malformed config:
 
-- :func:`run_local_preflight` (Phase A) — bundle.yaml schema, dispatch-coord
+- :func:`run_local_preflight` — bundle.yaml schema, dispatch-coordinate
   presence, OCI profile load + session-token validation. No HTTP. Runs first
   and must return PASS for every check before the client is built.
-- :func:`run_remote_preflight` (Phase B) — AIDP control plane reachability,
-  cluster state (with optional auto-start), BICC credential-store presence
-  (P1.5ε-fix1 — added 2026-06-03 once the endpoint shape was empirically
-  confirmed against ``playground``; see ``dev/RESEARCH_aidp_rest_api_probe_results.md``
-  §11). Requires a constructed :class:`AidpRestClient`.
+- :func:`run_remote_preflight` — AIDP control-plane reachability, BICC
+  credential-store presence, and cluster state with optional auto-start.
+  Requires a constructed :class:`AidpRestClient`.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ class PreflightResult:
 
 
 # ---------------------------------------------------------------------------
-# Phase A — local checks (no REST client, no HTTP)
+# Local checks (no REST client, no HTTP)
 # ---------------------------------------------------------------------------
 
 
@@ -86,16 +84,20 @@ def _check_dispatch_coords(env: EnvSpec, env_name: str) -> PreflightResult:
                 "aidp.config.yaml; see examples/aidp.config.example.yaml"
             ),
         )
-    # P1.5ε scope guard — vault auth mode is rejected in this PR; tracked as
-    # follow-up P1.5ε-fix6 (cloud-side signers).
+    # REST dispatch currently signs control-plane calls with an OCI profile.
+    # Vault/resource-principal signing is intentionally rejected until the
+    # dispatcher has a cloud-side signer implementation.
     if env.auth.mode == "vault":
         return PreflightResult(
             name="aidp.config.yaml dispatch coords",
             status="FAIL",
-            detail=f"environments.{env_name}.auth.mode='vault' is not supported in P1.5ε",
+            detail=(
+                f"environments.{env_name}.auth.mode='vault' is not supported "
+                "for REST dispatch"
+            ),
             remediation=(
-                "set auth.mode: profile + populate ociProfile, OR wait for "
-                "P1.5ε-fix6 (vault / resource-principal signer support)"
+                "set auth.mode: profile and populate ociProfile; use an OCI "
+                "profile or session token for dispatch"
             ),
         )
     return PreflightResult(
@@ -108,7 +110,7 @@ def _check_dispatch_coords(env: EnvSpec, env_name: str) -> PreflightResult:
 def _check_oci_profile_and_session(env: EnvSpec) -> PreflightResult:
     profile_name = env.oci_profile or "DEFAULT"
 
-    # 3a — config-file probe (does NOT prove a session token is valid).
+    # Config-file probe; this does not prove a session token is valid.
     try:
         cfg = oci.config.from_file(profile_name=profile_name)
     except oci.exceptions.ConfigFileNotFound as e:
@@ -136,11 +138,11 @@ def _check_oci_profile_and_session(env: EnvSpec) -> PreflightResult:
             remediation="check ~/.oci/config — required fields missing or malformed",
         )
 
-    # 3b — session-token validation (session-token profiles only).
+    # Session-token validation for session-token profiles only.
     token_file = cfg.get("security_token_file")
     if not token_file:
-        # API-key profile — signature is end-to-end verified by the AIDP
-        # plane in Phase B check 4. Nothing to validate locally.
+        # API-key profile: signature is verified by the AIDP control-plane
+        # probe. Nothing to validate locally.
         return PreflightResult(
             name="OCI profile",
             status="PASS",
@@ -157,8 +159,8 @@ def _check_oci_profile_and_session(env: EnvSpec) -> PreflightResult:
         )
     except FileNotFoundError:
         # oci CLI not on PATH. For a session-token profile this is a hard
-        # FAIL — we can't validate the token and Phase B would misclassify
-        # an expired session as "AIDP plane unreachable".
+        # FAIL because the remote checks would otherwise misclassify an
+        # expired session as "AIDP plane unreachable".
         return PreflightResult(
             name="OCI profile",
             status="FAIL",
@@ -249,7 +251,7 @@ def run_local_preflight(
 
 
 # ---------------------------------------------------------------------------
-# Phase B — remote checks (require a constructed client)
+# Remote checks (require a constructed client)
 # ---------------------------------------------------------------------------
 
 
@@ -257,7 +259,7 @@ def _check_aidp_control_plane(
     client: AidpRestClient,
 ) -> tuple[PreflightResult, list]:
     """Probe ``list_clusters`` to confirm the AIDP plane is reachable.
-    Returns ``(result, clusters_or_empty)`` so check 5 can reuse the list."""
+    Returns ``(result, clusters_or_empty)`` so later checks can reuse the list."""
     try:
         clusters = client.list_clusters()
     except AidpRestError as e:
@@ -358,19 +360,18 @@ def _check_bicc_credential(
     secret_name: str,
     secret_key: str,
 ) -> PreflightResult:
-    """P1.5ε-fix1 — Phase B check 6.
+    """Confirm the AIDP credential entry exists before dispatch.
 
-    The cluster-side notebook's creds-cell at
+    The cluster-side notebook's credentials cell at
     ``notebook_builder._build_creds_cell`` unconditionally calls
     ``aidputils.secrets.get(name=env.bicc_secret_name, key=env.bicc_secret_key)``
-    BEFORE writing the bundle or importing the orchestrator. A missing
-    credential entry surfaces mid-notebook ~4 min into dispatch (wheel
-    build + upload + job submit + cluster ramp). This check fast-fails
-    the same condition in ~300ms.
+    before writing the bundle or importing the orchestrator. A missing
+    credential entry would otherwise surface mid-notebook after wheel build,
+    upload, job submit, and cluster ramp. This check fast-fails the same
+    condition before compute is started.
 
-    Per §Technical Decisions row 5: **always check, regardless of
-    bundle.fusion.password shape**. The notebook's secret fetch is
-    independent of how the password is referenced.
+    Always check, regardless of ``bundle.fusion.password`` shape. The
+    notebook's secret fetch is independent of how the password is referenced.
 
     ``secret_key`` is used ONLY for the operator-facing remediation
     hint so they can register the entry with the right key the notebook
@@ -380,8 +381,7 @@ def _check_bicc_credential(
     AIDP UI default also matches, but for `biccSecretKey: custom_key`
     the remediation must say `custom_key` or the operator creates the
     entry with the wrong key and the next preflight runs PASS while
-    the cluster-side notebook still fails mid-flight. (Reviewer-driven —
-    fix1 originally hardcoded "key 'password'" in the remediation.)
+    the cluster-side notebook still fails mid-flight.
     """
     try:
         exists = client.check_credential_exists(secret_name)
@@ -427,25 +427,19 @@ def run_remote_preflight(
     auto_start_cluster: bool = True,
     log: Callable[[str], None] = lambda msg: None,
 ) -> list[PreflightResult]:
-    """Run Phase-B checks that require an AIDP control-plane round-trip.
+    """Run checks that require an AIDP control-plane round-trip.
 
     Order (cheapest-first; cluster check moved to LAST because it can
     auto-start a STOPPED cluster + block in ``wait_cluster_active`` for
-    up to 10 min — reviewer-driven correction: blocking on a 5-min cold
-    start before the ~300ms credential check would negate fix1's
-    fast-fail promise when the operator has both a stopped cluster AND
-    a missing credential):
+    up to 10 min):
 
-      4. AIDP control plane reachable (``list_clusters`` probe) — ~300ms
-      5. BICC credential entry exists in AIDP credential store
-         (P1.5ε-fix1) — ~300ms
-      6. Cluster state ACTIVE (or auto-start if STOPPED) — can take
-         ~5 min; SKIPped when check 5 FAILed (no point starting compute
-         the dispatch could never use)
+      1. AIDP control plane reachable (``list_clusters`` probe) — ~300ms
+      2. BICC credential entry exists in AIDP credential store — ~300ms
+      3. Cluster state ACTIVE (or auto-start if STOPPED) — can take
+         ~5 min; skipped when the credential check failed
 
-    Check 5 runs even when check 4 (control plane) FAILed → SKIP both
-    5 + 6. Check 6 SKIPs when check 5 FAILs (avoid paying cluster
-    startup for a dispatch that's guaranteed to fail).
+    The credential check runs before the cluster check to avoid paying cluster
+    startup for a dispatch that is guaranteed to fail.
     """
     results: list[PreflightResult] = []
     plane_result, clusters = _check_aidp_control_plane(client)
@@ -467,9 +461,8 @@ def run_remote_preflight(
         )
         return results
 
-    # Check 5 — credential preflight runs BEFORE cluster check 6 so a
-    # missing credential fast-fails without paying ~5 min of cluster
-    # cold-start cost.
+    # Credential preflight runs before the cluster check so a missing
+    # credential fast-fails without paying cluster cold-start cost.
     credential_result = _check_bicc_credential(
         client, env.bicc_secret_name, env.bicc_secret_key
     )
@@ -487,7 +480,7 @@ def run_remote_preflight(
         )
         return results
 
-    assert env.cluster_key is not None  # Phase A coords check guarantees this
+    assert env.cluster_key is not None  # Local coords check guarantees this.
     results.append(
         _check_cluster_state(
             client,

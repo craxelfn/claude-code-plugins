@@ -6,11 +6,11 @@ live in the same Python process. Under the REST-dispatch surface
 the orchestrator emits a JSON marker that the dispatch package deserializes
 back into a ``RunSummary`` for the same renderer to format.
 
-The dispatch package cannot import ``orchestrator/*`` (per §4.3 of the plan)
-because that pulls extractors, dimensions, transforms, and the full registry
-into ``sys.modules``. So the dataclass definitions live here, in the neutral
-``schema/`` namespace; ``orchestrator/runtime.py`` re-exports them for
-back-compat so every existing in-package import path keeps working.
+The dispatch package cannot import ``orchestrator/*`` because that pulls
+extractors, dimensions, transforms, and the full registry into ``sys.modules``.
+So the dataclass definitions live here, in the neutral ``schema/`` namespace;
+``orchestrator/runtime.py`` re-exports them for back-compat so every existing
+in-package import path keeps working.
 
 Identity is preserved:
 ``orchestrator.runtime.RunStep is schema.run_summary.RunStep``
@@ -68,7 +68,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
-# PlanNode — neutral DTO for dry-run plan rendering (P1.5ε §4.3a)
+# PlanNode — neutral DTO for dry-run plan rendering
 # ---------------------------------------------------------------------------
 # Used by the dispatch package's dry-run path to package up plan rows without
 # importing the engine. Carries ``dataset_id`` + ``layer`` directly; the
@@ -182,7 +182,7 @@ class RunStep:
 
     def to_marker_dict(self) -> dict:
         """Serialize to the marker-payload shape. Used by the run-cell that
-        the dispatch package's notebook builder generates (P1.5ε §4.3a)."""
+        the dispatch package's notebook builder generates."""
         return {
             "run_id": self.run_id,
             "dataset_id": self.dataset_id,

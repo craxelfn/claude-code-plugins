@@ -26,13 +26,11 @@ This module also houses public wrappers and composition helpers:
   the node's natural key + source SQL + an optional payload-diff
   predicate.
 
-References
-----------
-* PLAN §10.2 (MERGE strategy SQL shape)
-* PLAN §11 (medallion correctness invariants — NULL-safe joins, payload
-  diff, target schema reconciliation)
-* LIMITS.md P1.17-L7 (payload diff rationale)
-* LIMITS.md P1.17-L8 (NULL-safe join rationale)
+Maintainer notes
+----------------
+MERGE rendering must preserve NULL-safe natural-key joins, payload-diff-gated
+updates, and target schema reconciliation. These are runtime correctness
+requirements, not formatting preferences.
 """
 
 from __future__ import annotations
@@ -135,7 +133,7 @@ def compose_merge_sql(
 ) -> str:
     """Assemble the full ``MERGE INTO`` statement for the content-pack ``merge`` strategy.
 
-    Shape (PLAN §10.2):
+    Shape:
 
     ::
 
@@ -146,8 +144,7 @@ def compose_merge_sql(
         WHEN NOT MATCHED THEN INSERT *
 
     The optional payload-diff predicate gates updates so unchanged rows
-    don't rewrite their audit columns each cycle (the P1.17e
-    optimisation, generalised for v2). Supply ``None`` to disable.
+    don't rewrite their audit columns each cycle. Supply ``None`` to disable.
 
     Args:
         target: fully-qualified target table identifier (already
@@ -167,8 +164,7 @@ def compose_merge_sql(
 
     Returns:
         The full MERGE INTO statement as a single string (no trailing
-        semicolon — per PLAN §9.4 the rendered SQL is a single
-        statement without terminator).
+        semicolon; the rendered SQL is a single statement without terminator).
 
     Raises:
         ValueError: ``natural_key`` is empty.
@@ -176,7 +172,7 @@ def compose_merge_sql(
     if not natural_key:
         raise ValueError(
             "compose_merge_sql: natural_key is empty. The MERGE strategy "
-            "REQUIRES a natural key per PLAN §11.3 R1 / AIDPF-2020."
+            "requires a natural key (AIDPF-2020)."
         )
 
     on_predicate = build_natural_key_join_sql(

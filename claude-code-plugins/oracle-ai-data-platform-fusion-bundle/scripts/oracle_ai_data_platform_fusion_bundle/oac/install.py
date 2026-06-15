@@ -1,13 +1,13 @@
 """Implementation of ``aidp-fusion-bundle dashboard install --target oac``.
 
-Architecture (TC10h-2 refactor, 2026-05-01) — strictly Oracle-documented endpoints.
+Architecture — strictly Oracle-documented endpoints.
 
 The bundle ships content via two documented public APIs:
 
 1. **Connection** — ``POST /api/20210901/catalog/connections``
    Documented endpoint. The body schema is open (``type: object``); the
-   AIDP-specific ``connectionType: "idljdbc"`` payload is reverse-engineered
-   from the OAC UI's create-connection traffic (TC10h, 2026-05-01).
+   AIDP-specific ``connectionType: "idljdbc"`` payload is derived from the
+   OAC UI's create-connection traffic.
    Per-customer secrets (PEM, fingerprint, OCIDs) are sent here.
 
 2. **Workbook content** — Snapshot register + restore (the only public path)

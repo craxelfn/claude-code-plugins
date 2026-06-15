@@ -19,12 +19,6 @@ The two-model split exists because the cluster cell catches its own
 exceptions and emits a single marker line either way (Jupyter cell N
 exceptions cannot be caught by cell N+1). The envelope discriminates
 the laptop-side branching.
-
-References:
-
-* Plan §D3 / Phase 4.1, plan.md Step 2.
-* Cluster notebook contract: plan.md Step 5 cell #3.
-* Laptop-side unwrap + validation: plan.md Step 4 step 5.
 """
 
 from __future__ import annotations
@@ -234,8 +228,8 @@ class ClusterProbeEnvelope(BaseModel):
     unwraps via :meth:`model_validate` and branches on ``ok``.
 
     Why two models, not one: the cluster cell catches its own exceptions
-    and emits a single marker line either way — see plan.md Step 5
-    cell #3 rationale. The envelope is the laptop's branching seam.
+    and emits a single marker line either way. The envelope is the laptop's
+    branching seam.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)

@@ -1,4 +1,4 @@
-"""Content-pack file staging for REST dispatch (Phase 2 Step 12c).
+"""Content-pack file staging for REST dispatch.
 
 The cluster has no access to the customer's local filesystem. A
 ``contentPack.path: ../../content_packs/foo`` relative path is
@@ -22,11 +22,8 @@ This module provides the two helpers that bracket the round trip:
 The two helpers MUST be designed for cluster-side importability — pure
 stdlib + this package's own modules; no Spark dependency.
 
-References
-----------
-* PLAN §12c — REST notebook stages content pack
-* Step 12c.bis — load_full_chain promoted from CLI-private to
-  orchestrator-owned + the explicit ``base_resolver`` kwarg
+Error codes:
+
 * AIDPF-1039 — path-traversal rejection during staging
 * AIDPF-1040 — provenance inconsistency guardrail
 """
@@ -73,7 +70,7 @@ def stage_pack_files(
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Walk a merged ResolvedPack and produce stageable file primitives.
 
-    Two-pass collection (PLAN §12c block):
+    Two-pass collection:
 
     1. **YAML manifests (glob)**: for each layer in ``chain_roots``, read
        ``pack.yaml``, ``bronze.yaml`` (if present), ``silver/*.yaml``,
@@ -91,8 +88,8 @@ def stage_pack_files(
     Args:
         resolved_pack: the merged ``ResolvedPack`` from
             :func:`load_full_chain`. Must have ``chain_roots`` populated
-            (Phase 2 adds this; non-overlay packs get a single-element
-            tuple containing the pack root).
+            (non-overlay packs get a single-element tuple containing the
+            pack root).
 
     Returns:
         A 2-tuple:
@@ -209,13 +206,11 @@ def _no_op_resolver(ref):  # pragma: no cover — only hit on degenerate empty m
 
 
 def _resolve_chain_roots(resolved_pack: "ResolvedPack") -> tuple[Path, ...]:
-    """Return ``chain_roots`` if present (Phase 2), else fall back to
+    """Return ``chain_roots`` if present, else fall back to
     a single-element tuple from ``resolved_pack.root``.
 
-    Phase 2's ResolvedPack carries ``chain_roots`` for full overlay-chain
-    provenance. For backward compatibility (and to keep the staging
-    contract working against packs loaded before the chain_roots field
-    was introduced), we fall back to just ``resolved_pack.root`` when
+    ResolvedPack carries ``chain_roots`` for full overlay-chain provenance.
+    For backward compatibility, fall back to just ``resolved_pack.root`` when
     the attribute is absent or empty.
     """
     chain_roots = getattr(resolved_pack, "chain_roots", None)
@@ -249,12 +244,9 @@ def _stage_yaml_manifests(
         if path.exists():
             files_by_relpath[f"{layer_subdir}/{relname}"] = path.read_text(encoding="utf-8")
 
-    # Phase 9 moved bronze to per-file ``bronze/<id>.yaml`` nodes; the
-    # legacy monolithic ``bronze.yaml`` (staged above) no longer exists
-    # in starter packs. ``bronze`` MUST be globbed here or the cluster
-    # reconstructs an empty ``pack.bronze`` and every content-pack
-    # dispatch fails AIDPF-1045 (LayerFilterEmptiedPlanError) — local
-    # ``load_full_chain`` reads the dir, but staging never shipped it.
+    # Bronze nodes may be per-file ``bronze/<id>.yaml`` entries. ``bronze``
+    # must be globbed here or the cluster reconstructs an empty pack.bronze
+    # while local ``load_full_chain`` succeeds.
     for subdir in ("bronze", "silver", "gold", "dashboards"):
         d = layer_root / subdir
         if not d.exists():
@@ -272,9 +264,8 @@ def _stage_sql_templates(
     """Stage SQL templates driven by the merged ResolvedPack.
 
     For each node, resolve the source root via ``pack.root_for(qid)``
-    (Phase 1 per-node provenance — handles ``overrides.<node>.sql``
-    correctly) and stage the SQL under the corresponding ``__layer_N__/``
-    subdir.
+    and stage the SQL under the corresponding ``__layer_N__/`` subdir. This
+    preserves per-node provenance for overlay SQL overrides.
     """
     all_nodes = {}
     for node_id, node in resolved_pack.silver.items():
@@ -309,8 +300,7 @@ def _stage_sql_templates(
         sql_abs_path = (source_root / sql_relpath_str).resolve()
         if not sql_abs_path.exists():
             # Don't stage what doesn't exist; downstream loader will
-            # error clearly. (Phase 1 validators catch this case at
-            # static validation time.)
+            # error clearly.
             continue
 
         stage_key = f"__layer_{layer_index}__/{sql_relpath_str}"

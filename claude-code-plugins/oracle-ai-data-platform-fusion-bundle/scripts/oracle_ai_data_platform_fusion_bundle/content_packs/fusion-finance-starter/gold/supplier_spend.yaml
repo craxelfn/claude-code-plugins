@@ -21,10 +21,9 @@ refresh:
     reason: |
       Aggregate grain mixes mutable `approval_status`. Row-level merge
       leaves stale (PENDING) aggregate rows on a status flip. The
-      correctness-preserving incremental pattern is `aggregate_merge`
-      (§10.8), deferred to post-v0.3 pending live-tenant evidence that
-      `replace` hits a wall-clock or cost ceiling. Until then, `replace`
-      is the safe default. See ADR-0012.
+      correctness-preserving incremental pattern is an aggregate-aware merge,
+      deferred until `replace` hits a wall-clock or cost ceiling. Until then,
+      `replace` is the safe default.
 
 # Output schema matches v1 build_supplier_spend_sql
 # (transforms/gold/supplier_spend.py:125-167) — 14 columns including

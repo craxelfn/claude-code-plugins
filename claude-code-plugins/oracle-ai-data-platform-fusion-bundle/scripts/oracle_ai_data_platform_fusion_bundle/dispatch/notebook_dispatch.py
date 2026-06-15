@@ -1,13 +1,10 @@
-"""Neutral end-to-end notebook dispatch helper (Phase 4.1 / D3).
+"""Neutral end-to-end notebook dispatch helper.
 
 Wraps :class:`AidpRestClient`'s primitives into one orchestrator-free
 end-to-end call: ``upload_notebook`` → ``create_notebook_job`` →
 ``submit_run`` → ``poll_run`` → ``resolve_task_run_key`` →
-``fetch_output`` → ``parse_marker``. The bootstrap cluster-side
-dispatcher (``commands/cluster_bootstrap_probe.py``) consumes this
-helper, and a Phase 4.2 follow-up will rewire ``dispatch/__init__.py``'s
-run dispatcher to use it too — closing the duplication between this
-module and ``tests/live/dispatch_v2_seed.py::_parse_b64_marker``.
+``fetch_output`` → ``parse_marker``. The bootstrap cluster-side dispatcher
+(``commands/cluster_bootstrap_probe.py``) consumes this helper.
 
 **Architectural boundary**: MUST NOT import from
 ``oracle_ai_data_platform_fusion_bundle.orchestrator`` or any submodule
@@ -93,9 +90,8 @@ def dispatch_notebook_and_fetch_marker(
         marker_begin / marker_end: stdout delimiters the cluster cell
             uses to bracket the marker payload.
         marker_b64: ``True`` ⇒ the delimited payload is base64-encoded
-            JSON (Phase 4.1 cluster-probe convention — survives AIDP's
-            Jupyter output corruption). ``False`` ⇒ raw JSON between
-            delimiters (legacy run-dispatch convention).
+            JSON (survives AIDP's Jupyter output corruption). ``False`` ⇒
+            raw JSON between delimiters.
         description: optional job-description override; defaults to
             ``"aidp-fusion-bundle dispatch ({job_name})"``.
         poll_timeout_s: laptop-side patience budget for ``poll_run``.

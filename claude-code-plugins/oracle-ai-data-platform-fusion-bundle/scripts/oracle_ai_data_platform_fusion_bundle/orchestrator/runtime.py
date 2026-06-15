@@ -45,14 +45,14 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Mode validation (§4.4c) + helpers
+# Mode validation helpers
 # ---------------------------------------------------------------------------
 
 _VALID_MODES: Final[frozenset[str]] = frozenset({"seed", "incremental"})
 
 
 # ---------------------------------------------------------------------------
-# P1.5β.1 — watermark safety window
+# Watermark safety window
 # ---------------------------------------------------------------------------
 #
 # The bronze closure captures the orchestrator wall clock immediately
@@ -60,14 +60,12 @@ _VALID_MODES: Final[frozenset[str]] = frozenset({"seed", "incremental"})
 # state-table cursor as ``extract_started_at - WATERMARK_SAFETY_WINDOW``.
 # The overlap absorbs AIDP-vs-Fusion clock skew — the next incremental
 # run's BICC filter is evaluated against Fusion's clock, not AIDP's,
-# and the next run re-extracts the overlap. P1.17's MERGE-by-natural-key
-# write strategy dedupes the re-extracted rows.
+# and the next run re-extracts the overlap. MERGE-by-natural-key write
+# strategies dedupe the re-extracted rows.
 #
-# β.1 uses a **hardcoded module-level constant** (no ``bundle.yaml`` knob,
-# no env override). P1.17 keeps the constant as the **default** but adds
-# a per-tenant override via ``bundle.incremental.watermark_safety_window_seconds``;
-# :func:`_resolve_safety_window` reads the bundle field and falls back
-# to this module-level default when the bundle hasn't declared one.
+# :func:`_resolve_safety_window` reads
+# ``bundle.incremental.watermark_safety_window_seconds`` and falls back to this
+# module-level default when the bundle has not declared an override.
 #
 # Industry-standard CDC pattern (Debezium / Kafka Connect / Airbyte all
 # use safety-windowed cursors for cross-system incremental extraction).
@@ -98,7 +96,7 @@ def _new_run_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# RunStep + RunSummary moved to schema/run_summary.py (P1.5ε §Step 1b)
+# RunStep + RunSummary compatibility re-exports
 # ---------------------------------------------------------------------------
 # Re-exported here so every existing in-package import path keeps working;
 # identity is preserved (orchestrator.runtime.RunStep is
@@ -116,7 +114,7 @@ from ..schema.run_summary import (  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
-# ExternalDep + _preflight_external_deps (§4.7 layer/dataset filter contract)
+# ExternalDep + _preflight_external_deps
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +163,7 @@ def _preflight_external_deps(
 
 
 # ---------------------------------------------------------------------------
-# Bronze audit-column enrichment (§3.5)
+# Bronze audit-column enrichment
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +175,7 @@ BRONZE_AUDIT_COLUMNS: frozenset[str] = frozenset({
 })
 """Canonical name set for the four bronze audit columns added by
 ``enrich_bronze_audit_cols``. Single source of truth — consumed by the
-P1.17e bronze MERGE payload-diff predicate generator
+bronze MERGE payload-diff predicate generator
 (``orchestrator/__init__.py::_payload_diff_predicate_sql``) to exclude
 audit columns from the ``IS DISTINCT FROM`` clause, and by this
 module's enrichment assertion. Order is irrelevant (set semantics);
@@ -202,29 +200,19 @@ def enrich_bronze_audit_cols(
 
     The canonical name set is :data:`BRONZE_AUDIT_COLUMNS` (see module
     constant above); this function's ``withColumn`` chain materializes
-    those four names + values. The constant exists so the P1.17e
-    payload-diff predicate generator can exclude audit columns by
-    symbolic reference rather than a duplicated hardcoded list.
+    those four names + values. The constant lets the payload-diff predicate
+    generator exclude audit columns by symbolic reference rather than a
+    duplicated hardcoded list.
 
-    ``extract_ts`` (P1.5β.1) is the caller-supplied orchestrator wall
-    clock captured immediately before the BICC extract — stamped as
-    the literal ``_extract_ts`` audit column on every row. Replaces
-    the Phase α ``F.current_timestamp()`` self-stamp, which evaluated
-    at Spark action time (strictly LATER than the extract instant the
-    audit column claims to record). The orchestrator already needs
-    this value to compute the state-table cursor
-    (``extract_started_at - WATERMARK_SAFETY_WINDOW``), so passing it
-    through here keeps the audit column and the cursor strictly
-    consistent: ``_extract_ts == extract_started_at`` and
-    ``last_watermark == extract_started_at - WATERMARK_SAFETY_WINDOW``,
-    with a known gap of exactly one window.
+    ``extract_ts`` is the caller-supplied orchestrator wall clock captured
+    immediately before the BICC extract and stamped as the literal
+    ``_extract_ts`` audit column on every row. Passing it through keeps the
+    audit column and state-table cursor consistent:
+    ``_extract_ts == extract_started_at`` and
+    ``last_watermark == extract_started_at - WATERMARK_SAFETY_WINDOW``.
 
-    Distinct from ``watermark`` — that kwarg controls the
-    ``_watermark_used`` audit column (records the watermark INPUT
-    consumed by the extract). In β.1 the dispatch site passes
-    ``watermark=None`` since the ``NotImplementedError`` gate stays
-    and the BICC call doesn't consume a watermark; that audit
-    column is wired in P1.17.
+    ``watermark`` is distinct from ``extract_ts``; it records the watermark
+    input consumed by the extract in ``_watermark_used``.
     """
     from pyspark.sql import functions as F
 
@@ -249,28 +237,27 @@ def enrich_bronze_audit_cols(
 
 
 # ---------------------------------------------------------------------------
-# Credential resolution (§4.9 + B5)
+# Credential resolution
 # ---------------------------------------------------------------------------
 
 _VAULT_SIGIL = re.compile(r"^\$\{vault:(?P<ocid>[A-Za-z0-9._\-]+)\}$")
 _ENV_SIGIL   = re.compile(r"^\$\{env:(?P<var>[A-Z_][A-Z0-9_]*)\}$")
 
-# Module-level flag for R3 — flipped by _resolve_password on first
-# literal-path hit. Reset to False at module import; tests MUST reset
-# between cases via the autouse fixture in tests/unit/conftest.py.
+# Module-level flag flipped by _resolve_password on first literal-path hit.
+# Reset to False at module import; tests reset it between cases via the
+# autouse fixture in tests/unit/conftest.py.
 _LITERAL_WARN_EMITTED: bool = False
 
 
 def _resolve_password(value: str) -> SecretStr:
     """Resolve a bundle.fusion.password value to a SecretStr.
 
-    Accepts (in α):
+    Accepted forms:
       - ``${vault:OCID}`` → fetched via ``aidputils.secrets.get(ocid)``
       - ``${env:VAR}`` → ``os.environ[VAR]``
-      - literal string → wrapped as-is (WARN-once-per-run; rejected
-        entirely in P2.23).
+      - literal string → wrapped as-is with a warn-once-per-run message
 
-    Failure-mode wrapping (B5):
+    Failure-mode wrapping:
       - ``${env:X}`` missing → ``CredentialResolutionError`` naming X
       - ``${vault:OCID}`` inaccessible → ``CredentialResolutionError``
         naming the OCID + the underlying SDK message
@@ -300,12 +287,13 @@ def _resolve_password(value: str) -> SecretStr:
                 f"is not set. Export it before running, or switch the "
                 f"password to a ${{vault:OCID}} reference."
             ) from e
-    # Dev-phase: accept literal but warn ONCE per run (R3).
+    # Literal passwords are supported for backwards compatibility but warned
+    # once per run.
     global _LITERAL_WARN_EMITTED
     if not _LITERAL_WARN_EMITTED:
         logger.warning(
-            "fusion.password is a literal; will be rejected by P2.23. "
-            "Migrate to ${vault:OCID} or ${env:VAR}. (This warning "
+            "fusion.password is a literal; use ${vault:OCID} or ${env:VAR} "
+            "for production runs. (This warning "
             "fires once per run regardless of how many times "
             "_resolve_password is called.)"
         )
@@ -314,14 +302,13 @@ def _resolve_password(value: str) -> SecretStr:
 
 
 # ---------------------------------------------------------------------------
-# Env-var rendering + load_bundle (§4.4a + §4.4b)
+# Env-var rendering + load_bundle
 # ---------------------------------------------------------------------------
 
 
-# P1.5ε §Step 1d — ``load_bundle`` and its ``_render_env_vars`` helper
-# moved to ``schema/bundle.py``. Re-exported here so existing in-package
-# imports (orchestrator/__init__.py, commands/*.py, ~15 unit-test files)
-# keep working unchanged. Identity is preserved.
+# ``load_bundle`` and ``_render_env_vars`` live in ``schema/bundle.py``.
+# Re-exported here so existing in-package imports keep working unchanged.
+# Identity is preserved.
 from ..schema.bundle import (  # noqa: E402, F401
     _render_env_vars,
     load_bundle,
@@ -330,7 +317,7 @@ from ..schema.bundle import (  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
-# State-write wrapper (§4.7 — soft, log + continue)
+# State-write wrapper
 # ---------------------------------------------------------------------------
 
 

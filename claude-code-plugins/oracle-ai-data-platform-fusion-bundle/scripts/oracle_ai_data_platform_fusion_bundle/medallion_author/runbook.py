@@ -1,4 +1,4 @@
-"""Remediation runbook drafter (Phase 3b).
+"""Remediation runbook drafter.
 
 * **Option A — No action**: emit a `remediation.md` explaining the
   rename-only rationale.
@@ -14,10 +14,8 @@
 
 The drafter NEVER executes the remediation — emits files only.
 
-Phase 9 follow-up: the legacy-backend branch + the ``--execution-backend``
-flag (and ``Backend`` literal + ``UnmappedLegacyNodeError``) were deleted
-along with the v1 dispatcher. Only one execution path ships; the drafter
-emits the unflagged CLI invocation.
+Only one execution path ships; the drafter emits the unflagged CLI
+invocation.
 """
 
 from __future__ import annotations

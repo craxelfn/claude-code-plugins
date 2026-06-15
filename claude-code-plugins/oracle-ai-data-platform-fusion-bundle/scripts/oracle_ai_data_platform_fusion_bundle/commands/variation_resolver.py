@@ -1,10 +1,9 @@
-"""Pure-Python variation-point candidate walker (PLAN §9.5.4 step 2).
+"""Pure-Python variation-point candidate walker.
 
 This module holds the *algorithm* — what to do with a candidate list
 and an observed-column set. It does NOT touch Spark. The Spark probe
-lives in :mod:`bronze_probe`; bootstrap (Step 8) composes the two by
-probing once into a dict and feeding the dict's per-dataset column set
-to the walker.
+lives in :mod:`bronze_probe`; bootstrap composes the two by probing once into
+a dict and feeding the dict's per-dataset column set to the walker.
 
 Separating the algorithm from the probe keeps the walker mock-free
 unit-testable (every case below is a pure-function input/output pair).

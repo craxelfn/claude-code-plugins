@@ -90,7 +90,7 @@ def _natural_key_join_sql(
 
     Uses Spark's NULL-safe equality operator ``<=>`` instead of ``=`` so
     composite keys with NULL components (e.g. ``gl_period_balances`` on
-    ``BalanceTranslatedFlag`` — see LIMITS.md P1.17-L8) still match
+    ``BalanceTranslatedFlag``) still match
     NULL-vs-NULL rows. The operator is identical to ``=`` for non-NULL
     values; the NULL-safety is the only behavioral difference.
 
@@ -125,7 +125,7 @@ def _payload_diff_predicate_sql(
     target_alias: str = "target",
     src_alias: str = "src",
 ) -> str | None:
-    """Build the P1.17e payload-diff predicate for a bronze MERGE's WHEN MATCHED clause.
+    """Build the payload-diff predicate for a bronze MERGE's WHEN MATCHED clause.
 
     Bronze incremental MERGE under V1 used unconditional
     ``WHEN MATCHED THEN UPDATE SET *``, which rewrites every matched row's
@@ -134,7 +134,7 @@ def _payload_diff_predicate_sql(
     ``ap_aging_periods``), the rewritten ``_extract_ts`` propagates downstream:
     silver/gold's ``WHERE bronze_extract_ts > <prior_silver_watermark>`` source
     predicate matches every row, forcing silver/gold MERGE to run unconditionally
-    even when nothing materially changed. See LIMITS.md §P1.17-L7.
+    even when nothing materially changed.
 
     This helper builds the predicate that gates the UPDATE: an OR-joined
     ``IS DISTINCT FROM`` clause across every non-audit DATA column. When no
@@ -145,7 +145,7 @@ def _payload_diff_predicate_sql(
     Why ``IS DISTINCT FROM`` instead of ``<>``: Spark's ``<>`` is NULL-unsafe
     (``NULL <> NULL`` → NULL, treated as false in a WHEN clause). Bronze data
     often carries NULLs in optional columns (e.g., ``gl_period_balances``'s
-    ``BalanceTranslatedFlag`` per LIMITS.md §P1.17-L8). ``IS DISTINCT FROM``
+    ``BalanceTranslatedFlag``). ``IS DISTINCT FROM``
     is the NULL-safe inequality: ``NULL IS DISTINCT FROM NULL`` → false;
     ``NULL IS DISTINCT FROM 1`` → true. Mirrors the NULL-safe ``<=>`` used
     in :func:`_natural_key_join_sql` — the two helpers have a coherent
@@ -218,8 +218,8 @@ def _effective_bundle_scope(bundle: "Any") -> set[str]:
     """Compute the cross-layer scope the resolver should treat as roots.
 
     ``bundle.datasets[]`` is the operator's high-level
-    intent list. It can reference bronze / silver / gold ids (D-1
-    auto-pulls transitive deps). Two legacy bundle fields —
+    intent list. It can reference bronze / silver / gold ids; implicit
+    transitive include pulls dependencies. Two legacy bundle fields —
     ``bundle.dimensions.build`` and ``bundle.gold.marts`` — pre-date the
     cross-layer ``datasets[]`` contract; when the YAML actually carries
     those blocks they fold into the scope so old bundles keep working.
@@ -243,7 +243,7 @@ def _effective_bundle_scope(bundle: "Any") -> set[str]:
     as ``bundle_scope=`` and:
       * Uses it as the implicit root set when no CLI ``--datasets``
         filter is given (so a no-filter run executes only declared
-        roots + D-1 deps, NOT every pack node).
+        roots plus transitive dependencies, NOT every pack node).
       * Validates CLI ``--datasets`` is a subset of it; ids outside
         the scope raise ``AIDPF-1043 CLI_DATASET_OUTSIDE_BUNDLE_SCOPE``.
     """
@@ -352,17 +352,16 @@ def run(
             partially-migrated write path).
         ResumeBundleMismatchError: stored vs current plan hash diverge.
     """
-    # 0. Mode validation (§4.4c) — runs BEFORE any I/O.
+    # Mode validation runs BEFORE any I/O.
     if mode not in _VALID_MODES:
         raise UnsupportedModeError(
             f"mode={mode!r} is not supported. Valid modes: "
             f"{sorted(_VALID_MODES)}. "
             f"(The retired alias 'full' is now called 'seed'.)"
         )
-    # P1.17 — the β.1 NotImplementedError gate is gone. `mode="incremental"`
-    # now dispatches the bronze MERGE + silver/gold MERGE pipeline; the
-    # write-strategy / state-contract pieces shipped together to keep the
-    # destructive-write blast radius contained.
+    # Incremental mode dispatches the bronze MERGE + silver/gold MERGE
+    # pipeline. Write strategy and state contract are validated together to
+    # keep the destructive-write blast radius contained.
 
     # Single execution path is content-pack. `execution_backend` is
     # retained for backwards compatibility with programmatic callers,
@@ -689,8 +688,8 @@ def _run_fusion_pvo_drift_gate(
           the double-probe is wasteful but correct, and lifting the
           preflight result down into the legacy path would require a
           new ``_skip_preflight`` kwarg layered through ``run()``.
-          TODO(phase-6): factor the preflight to a single dispatcher-
-          owned probe and skip the legacy re-run.
+          TODO: factor the preflight to a single dispatcher-owned probe and
+          skip the duplicate run.
         * A snapshot YAML that's absent OR unparseable degrades the
           gate to missing-column / renamed-column detection only —
           matches the contract in ``fusion_pvo_drift.py``.
@@ -713,9 +712,8 @@ def _run_fusion_pvo_drift_gate(
 
     bundle_inst, paths = load_bundle(bundle_path)
 
-    # Phase 9 — enumerate bronze ids from the resolved pack. Honors both
-    # per-file pack.bronze (Phase 9 contract) and the legacy single-file
-    # pack.bronze_yaml fallback.
+    # Enumerate bronze ids from the resolved pack. Honors both per-file
+    # pack.bronze and the legacy single-file pack.bronze_yaml fallback.
     bronze_node_ids = set(resolved_pack.bronze.keys()) if resolved_pack else set()
     if resolved_pack is not None:
         legacy_bronze = getattr(resolved_pack, "bronze_yaml", None) or {}
@@ -748,8 +746,8 @@ def _run_fusion_pvo_drift_gate(
     for ds_id, struct_type in live_pvo_schemas.items():
         live_pvo_columns[ds_id] = _struct_type_to_columns_map(struct_type)
 
-    # Load the pinned snapshot. Absent / unparseable → degraded mode
-    # (None). Matches the Phase 3d graceful-degrade contract.
+    # Load the pinned snapshot. Absent / unparseable means degraded mode
+    # (None), which limits drift diagnostics to what can be inferred live.
     schema_snapshot = None
     profile_name = (
         bundle_inst.content_pack.profile if bundle_inst.content_pack else None
@@ -788,7 +786,7 @@ def _run_fusion_pvo_drift_gate(
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 Step 9b — resume helpers (dispatcher-side narrowing + skip emission)
+# Resume helpers (dispatcher-side narrowing + skip emission)
 # ---------------------------------------------------------------------------
 
 
@@ -871,7 +869,7 @@ def _build_content_pack_dry_run_plan(
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — pack-driven node discovery
+# Pack-driven node discovery
 # ---------------------------------------------------------------------------
 
 
@@ -890,7 +888,7 @@ def _resolve_node_from_pack(
     layer: str,
     node_id: str,
 ) -> "Any":  # NodeYaml
-    """Look up a content-pack node by ``(layer, node_id)`` — Phase 5.
+    """Look up a content-pack node by ``(layer, node_id)``.
 
     The orchestrator's per-node dispatch loop (
     :func:`_run_content_pack_backend`) walks ``resolve_content_pack_plan``'s
@@ -949,8 +947,8 @@ def _is_mart_only_run(layers: "list[str] | None") -> bool:
     *pre-existing* bronze tables.
 
     Drives off the operator's REQUESTED layers, not the resolved plan:
-    the D-1 transitive include always pulls a mart's bronze deps into the
-    plan (for lineage), but a mart-only run must NOT *execute* (re-seed)
+    implicit transitive include always pulls a mart's bronze deps into the
+    plan for lineage, but a mart-only run must NOT *execute* or re-seed
     them. For such runs the orchestrator skips bronze nodes and the
     pre-extraction PVO gate, and instead fires the readiness gate to
     validate the LANDED bronze tables before any mart runs.
@@ -1048,7 +1046,7 @@ def _run_content_pack_backend(
     #      gate already enforce the resume contract).
     #   2. Falling through to the normal per-node dispatch — nodes whose
     #      latest state row is already ``success`` for this run_id are
-    #      idempotent in the §11.9 atomic-commit model; non-success nodes
+    #      idempotent in the atomic-commit model; non-success nodes
     #      retry through the same dispatcher path.
     # No bespoke "resume planner" is needed because the content-pack
     # backend's per-node atomicity (each ``execute_node`` is a full
@@ -1846,19 +1844,19 @@ __all__ = [
     "PrerequisiteError",
     "CredentialResolutionError",
     "BronzeSchemaProbeError",
-    # P1.17 — new config errors
+    # Incremental config errors
     "IncrementalCursorMissingError",
     "MultipleNaturalKeyError",
-    # P1.17c — dropped-target preflight + strict state read
+    # Dropped-target preflight + strict state read
     "IncrementalTargetMissingError",
     "StateReadFailedError",
-    # P1.5β.1 runtime errors
+    # Runtime errors
     "OrchestratorRuntimeError",
     "WatermarkMonotonicityError",
     "MultipleUpstreamWatermarkError",
-    # P1.17e — bronze MERGE payload-diff predicate
+    # Bronze MERGE payload-diff predicate
     "BRONZE_AUDIT_COLUMNS",
-    # P1.17d — schema evolution under MERGE
+    # Schema evolution under MERGE
     "SchemaEvolutionTypeConflictError",
     "SchemaReconcileResult",
 ]

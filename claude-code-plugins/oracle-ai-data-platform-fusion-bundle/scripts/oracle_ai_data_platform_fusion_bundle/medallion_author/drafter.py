@@ -5,7 +5,7 @@ Emits:
 * ``overlays/<overlay-name>/pack.yaml`` — content-pack overlay with
   ``extends:`` pointing at the starter pack and ``columnAliases`` /
   ``semanticVariants`` extended with operator-approved candidates.
-  Full provenance block stamped per the Phase 3b contract.
+  Full provenance block stamped for audit.
 * ``overlays/<overlay-name>/resolutions.json`` — **conditional**;
   only emitted when MultiMatch picks or refresh-AutoResolved-change
   picks need scripted operator approval at commit time. Initial
@@ -15,10 +15,9 @@ Emits:
   audit trail (model id, reasoning per proposal, cost estimates,
   operator decisions).
 
-Per PLAN §9.5.6 #1 MAY-NOT, the drafter NEVER emits SQL templates —
-``validate_overlay`` rejects any overlay that introduces a node or
-override block. Per §9.5.7 #6 ("bootstrap is the only writer"),
-``write_overlay`` confines all I/O to ``<workdir>/overlays/<overlay-name>/``.
+The drafter NEVER emits SQL templates. ``validate_overlay`` rejects any
+overlay that introduces a node or override block, and ``write_overlay``
+confines all I/O to ``<workdir>/overlays/<overlay-name>/``.
 """
 
 from __future__ import annotations
@@ -107,9 +106,7 @@ class OverlayDraft:
 
 
 class OverlayValidationError(ValueError):
-    """Raised when a drafted overlay fails the §9.5.6 MAY-NOT checks
-    (e.g. tries to add a SQL template, hardcodes a column, missing
-    provenance)."""
+    """Raised when a drafted overlay violates skill-authored overlay rules."""
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +132,7 @@ def draft_overlay(
     candidate list — overlay's ``columnAliases.<vp>.candidates`` is
     ``[<base candidates...>, <new candidate>]``. Validated via
     :func:`validate_overlay` before return; raises
-    :class:`OverlayValidationError` on any §9.5.6 MAY-NOT.
+    :class:`OverlayValidationError` on any overlay-rule violation.
     """
     validate_path_segment(overlay_name, field="overlay.name")
     validate_path_segment(diagnostic_run_id, field="overlay.diagnosticRunId")
@@ -229,7 +226,7 @@ def draft_overlay(
 
 
 def validate_overlay(draft: OverlayDraft) -> None:
-    """Enforce the §9.5.6 MAY-NOTs.
+    """Enforce skill-authored overlay restrictions.
 
     * Overlay MUST NOT introduce any silver/gold node definitions
       (skill never authors SQL templates).
@@ -241,8 +238,8 @@ def validate_overlay(draft: OverlayDraft) -> None:
     pack = draft.pack_yaml
     if pack.overrides:
         raise OverlayValidationError(
-            "Skill-authored overlay declared `overrides` — §9.5.6 #1 "
-            "MAY-NOT forbids skill-authored SQL templates."
+            "Skill-authored overlay declared `overrides`; skill-authored "
+            "SQL templates are forbidden."
         )
     if pack.provenance is None:
         raise OverlayValidationError("Overlay missing `provenance` block.")

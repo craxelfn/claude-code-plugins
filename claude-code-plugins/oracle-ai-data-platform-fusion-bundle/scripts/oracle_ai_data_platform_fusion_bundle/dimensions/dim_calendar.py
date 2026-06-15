@@ -4,7 +4,7 @@ Unlike :mod:`.dim_supplier`, this dim has **no bronze source** — every column
 is derived from a date sequence. Generates Gregorian + Fiscal calendars for
 the configured range; default 2020-01-01 → 2030-12-31 (4,018 days).
 
-Required by `gold.gl_balance` (P1.8) and `gold.po_backlog` (P1.11).
+Required by `gold.gl_balance` and `gold.po_backlog`.
 
 Design notes
 ------------
@@ -46,7 +46,7 @@ DEFAULT_FISCAL_START_MONTH: Final[int] = 1   # calendar year = fiscal year
 
 
 def _run_id_audit_sql(run_id: str | None) -> str:
-    """SQL fragment for the silver_run_id audit column (§3.5a, B3)."""
+    """SQL fragment for the silver_run_id audit column."""
     if run_id is None:
         return "NULL"
     escaped = run_id.replace("'", "''")
@@ -154,9 +154,8 @@ def build(
 
     ``paths`` (defaults to ``DEFAULT_PATHS``) resolves the silver table
     identifier from the tenant's ``bundle.yaml.aidp.*`` config. Explicit
-    ``silver_table=`` wins over ``paths``. ``run_id`` (§3.5a B3) threads
-    the orchestrator's run identifier into the ``silver_run_id`` audit
-    column.
+    ``silver_table=`` wins over ``paths``. ``run_id`` threads the
+    orchestrator's run identifier into the ``silver_run_id`` audit column.
     """
     if paths is None:
         paths = DEFAULT_PATHS

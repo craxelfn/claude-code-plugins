@@ -1,4 +1,4 @@
-"""Shared config-loading helpers for the CLI commands (P1.5ε §Step 7a).
+"""Shared config-loading helpers for the CLI commands.
 
 Today's ``commands/validate.py`` has a private ``_load_config`` that
 accumulates errors into a shared list — that shape works for ``validate``

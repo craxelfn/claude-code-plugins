@@ -6,10 +6,10 @@ imports from this package via thin re-export shims (sibling pattern to
 tests live here so the package is pip-installable + testable without
 Claude Code.
 
-The skill is **operator-initiated** per PLAN §9.5.4.1 / ADR-0017 — the
-engine has zero LLM dependency at runtime. This package contains pure
-Python that reads feature #2's diagnostic artifacts, reasons over the
-observed bronze schema, and drafts overlay YAML for operator review.
+The skill is **operator-initiated**; the engine has zero LLM dependency at
+runtime. This package contains pure Python that reads diagnostic artifacts,
+reasons over the observed bronze schema, and drafts overlay YAML for operator
+review.
 
 Public surface:
 
@@ -27,9 +27,9 @@ Public surface:
   :class:`runbook.OptionDeferredError`.
 * :mod:`knowledge_base` — loader for ``known-deltas.yaml``.
 
-Skill version is loose-coupled per PLAN §9.5.8 — bumped on every
-``known-deltas.yaml`` addition, recorded in evidence-snapshot
-provenance, but NOT a plan-hash input.
+Skill version is loose-coupled with runtime execution: bumped on every
+``known-deltas.yaml`` addition, recorded in evidence-snapshot provenance, but
+NOT a plan-hash input.
 """
 
 from __future__ import annotations

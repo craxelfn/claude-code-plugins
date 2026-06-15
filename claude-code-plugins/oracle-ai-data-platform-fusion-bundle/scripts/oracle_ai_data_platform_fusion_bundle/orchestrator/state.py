@@ -12,7 +12,7 @@ Two-layer failure semantics:
     which logs WARN and continues on per-step failures (transient flakes
     shouldn't kill a long medallion run).
 
-``read_last_watermark`` (P1.5β.1) returns the most-recent ``status='success'``
+``read_last_watermark`` returns the most-recent ``status='success'``
 row's ``last_watermark`` for a given ``(dataset_id, layer)`` pair, ordered
 by ``last_run_at DESC, last_watermark DESC NULLS LAST LIMIT 1``. Read is
 SOFT: an underlying Spark/metastore exception returns ``None`` and emits
@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 # ``read_last_watermark`` soft-fails (Spark/metastore exception swallowed
 # → ``None`` return). Part of the public audit-signal contract — operator
 # alerting / log shippers key off this exact string. Do NOT rename
-# without coordinating with LIMITS.md F6 + D5c's regression test.
+# without coordinating with the documented watermark-read regression tests.
 WATERMARK_READ_SOFT_FAILED_MARKER: Literal[
     "watermark_read_soft_failed"
 ] = "watermark_read_soft_failed"
@@ -200,18 +200,17 @@ def _ensure_target_table_exists(
     """Idempotent ``CREATE TABLE IF NOT EXISTS`` for a Delta target whose
     schema is supplied by the source DataFrame.
 
-    P1.17 B6c — used pre-MERGE for fresh-tenant bronze writes (the bronze
-    MERGE against a non-existent target raises ``TABLE_OR_VIEW_NOT_FOUND``
-    on the first incremental run for a tenant where seed never created
-    that bronze table). On existing tables this is a no-op.
+    Used pre-MERGE for fresh-tenant bronze writes. A bronze MERGE against a
+    non-existent target raises ``TABLE_OR_VIEW_NOT_FOUND`` on the first
+    incremental run when seed never created that bronze table. On existing
+    tables this is a no-op.
 
     ``schema`` is a Spark ``StructType`` from the source DataFrame; columns
     are emitted in the SAME order, each with the ``simpleString()`` form
     of its data type.
 
-    Safety net moved up the call stack (P1.17c). This helper still ships
-    only the simple "create if missing" path — the dropped-target silent-
-    corruption guard now lives in
+    This helper only owns the simple "create if missing" path. The
+    dropped-target silent-corruption guard lives in
     :func:`oracle_ai_data_platform_fusion_bundle.orchestrator.preflight._preflight_incremental_cursors`
     as ``IncrementalTargetMissingError``. Run-level preflight blocks the
     unsafe operator-dropped-target sequence (target missing AND prior
@@ -246,7 +245,7 @@ def _build_add_columns_ddl(table_path: str, missing: list[tuple[str, str]]) -> s
 
 
 # ---------------------------------------------------------------------------
-# P1.17d — schema evolution under MERGE
+# Schema evolution under MERGE
 # ---------------------------------------------------------------------------
 
 
@@ -259,9 +258,9 @@ def _existing_state_columns_with_types(
     Mirrors :func:`_existing_state_columns` but preserves the
     ``DESCRIBE TABLE`` result row order and pairs each name with its
     Spark-normalized ``simpleString()`` data type. Used by
-    :func:`_ensure_target_schema_for_merge` (P1.17d) to detect
-    type-conflicts and to compute the target's physical column order
-    for explicit-column-list MERGE generation.
+    :func:`_ensure_target_schema_for_merge` to detect type-conflicts and to
+    compute the target's physical column order for explicit-column-list MERGE
+    generation.
 
     Same defensive row-shape fallback as the names-only variant:
     tries ``row["col_name"]`` first, falls back to ``row[0]`` /
@@ -288,9 +287,9 @@ def _existing_state_columns_with_types(
 
 @dataclass(frozen=True)
 class SchemaReconcileResult:
-    """Outcome of :func:`_ensure_target_schema_for_merge` — P1.17d.
+    """Outcome of :func:`_ensure_target_schema_for_merge`.
 
-    Result states (cf. plan.md §B1):
+    Result states:
       - **No drift**: ``source_only_columns`` and ``target_only_columns``
         both empty. Caller proceeds with V1 ``UPDATE SET *`` / ``INSERT *``
         MERGE shape.
@@ -310,7 +309,7 @@ class SchemaReconcileResult:
     "Cold start" (target missing) is NOT a returned result either —
     it's a precondition violation that raises explicit ``RuntimeError``
     (caller must invoke ``_ensure_target_table_exists`` first, or rely
-    on P1.17c's incremental preflight for silver/gold). Explicit
+    on incremental preflight for silver/gold). Explicit
     ``if not ...: raise`` survives ``python -O`` (asserts would not).
     """
 
@@ -335,7 +334,7 @@ def _ensure_target_schema_for_merge(
     source_schema_struct: "StructType",
 ) -> SchemaReconcileResult:
     """Reconcile target Delta-table schema with source DataFrame's schema
-    before an incremental MERGE — P1.17d.
+    before an incremental MERGE.
 
     Resolves the four schema-drift modes documented in
     :class:`SchemaReconcileResult`. The helper composes three existing
@@ -353,7 +352,7 @@ def _ensure_target_schema_for_merge(
     Callers satisfy this differently per layer:
       - Bronze (orchestrator dispatch): ``_do_bronze`` invokes
         :func:`_ensure_target_table_exists` immediately before.
-      - Silver/gold (orchestrator dispatch): P1.17c's
+      - Silver/gold (orchestrator dispatch):
         :func:`_preflight_incremental_cursors` certifies target
         existence at run-level before any node dispatch.
       - Silver/gold (standalone notebook use): caller's responsibility;
@@ -399,7 +398,7 @@ def _ensure_target_schema_for_merge(
         raise RuntimeError(
             f"target {target!r} must exist before reconciliation; "
             f"call _ensure_target_table_exists first (bronze) or rely "
-            f"on the P1.17c IncrementalTargetMissingError preflight "
+            f"on the IncrementalTargetMissingError preflight "
             f"(silver/gold under orchestrator dispatch)"
         )
 
@@ -523,8 +522,8 @@ def ensure_state_table(spark: "SparkSession", paths: TablePaths) -> None:
     # earlier plugin builds. We can't write `ADD COLUMNS IF NOT
     # EXISTS (...)` — Spark SQL grammar rejects that — so introspect
     # the existing columns and ADD only the ones that are missing.
-    # ALTER is skipped entirely when both are already present (the
-    # common case for tables created at fix21+).
+    # ALTER is skipped entirely when both are already present, which is the
+    # common case for tables created with the current schema.
     existing_cols = _existing_state_columns(spark, table_path)
     missing = [
         (name, dtype) for name, dtype in _FIX21_NEW_COLUMNS
@@ -580,9 +579,9 @@ def write_state_row(
     # escaping; we use a single-quote-doubled escape consistent with
     # Delta's SQL parser.
 
-    # Live-evidence fix (2026-05-17): every NULL value needs a typed CAST
-    # because Delta's schema-merge refuses bare NULL → BIGINT/STRING
-    # promotion. Same fix as ensure_state_table's writeability probe.
+    # Every NULL value needs a typed CAST because Delta's schema-merge refuses
+    # bare NULL -> BIGINT/STRING promotion. Same approach as the state-table
+    # writeability probe.
     def _q(s: str | None) -> str:
         """Quote a string literal — None → typed CAST(NULL AS STRING)."""
         if s is None:
@@ -604,14 +603,11 @@ def write_state_row(
         # Bare `0.0` is DECIMAL(2,1); needs explicit DOUBLE cast for Delta.
         return f"CAST({d} AS DOUBLE)"
 
-    # P1.5β.1: persist ``step.last_watermark`` (the OUTPUT cursor —
-    # captured pre-extract as ``extract_started_at -
-    # WATERMARK_SAFETY_WINDOW`` for bronze, preserved on empty deltas,
-    # ``None`` for silver/gold until incremental strategies provide
-    # stable output cursors). ``watermark_used`` is the input cursor and
-    # stays in-memory only on ``RunStep``
-    # for debug/logs/__repr__, no state column carries it. See B0
-    # of the P1.5β plan.
+    # Persist ``step.last_watermark`` as the output cursor. For bronze it is
+    # captured pre-extract as ``extract_started_at - WATERMARK_SAFETY_WINDOW``;
+    # empty deltas preserve the prior cursor. ``watermark_used`` is the input
+    # cursor and stays in-memory only on ``RunStep`` for debug/logs/repr; no
+    # state column carries it.
     spark.sql(
         f"""
         INSERT INTO {table_path}
@@ -873,9 +869,8 @@ def read_last_watermark(
 
     - no ``status='success'`` row exists for the pair;
     - the most-recent success row has ``last_watermark IS NULL``
-      (e.g. a true-first-empty bronze run, or any silver/gold row
-      in β.1 — silver/gold ``last_watermark`` capture is deferred
-      to P1.17);
+      (e.g. a true-first-empty bronze run, or a successful replace-style
+      silver/gold row that does not advance a watermark);
     - the underlying Spark/metastore read raises (soft-fail: log
       WARN + return ``None``; the exception is swallowed).
 
@@ -903,14 +898,12 @@ def read_last_watermark(
     Operators monitor for the marker to detect the documented
     empty-delta + read-failure regression (LIMITS.md F6).
 
-    See also — :func:`read_last_watermark_strict`. P1.17c added a
-    strict-fail variant of this read for use in preflight gate
-    contexts where a transient metastore failure must NOT be confused
-    with "no prior cursor" (the soft return value ``None`` is
-    ambiguous between the two). Dispatch-path callers keep using
-    this soft variant — its swallow-and-continue contract is
-    load-bearing for transient-flake tolerance during a long
-    medallion run (see module docstring lines 7-13).
+    See also — :func:`read_last_watermark_strict`. The strict-fail variant is
+    for preflight gates where a transient metastore failure must NOT be
+    confused with "no prior cursor" because the soft return value ``None`` is
+    ambiguous between the two. Dispatch-path callers keep using this soft
+    variant; its swallow-and-continue contract is load-bearing for transient
+    flake tolerance during a long medallion run.
     """
     _table_path, query = _build_last_watermark_query(paths, dataset_id, layer)
     try:
@@ -934,8 +927,7 @@ def read_last_watermark_strict(
     dataset_id: str,
     layer: Literal["bronze", "silver", "gold"] = "bronze",
 ) -> "datetime | None":
-    """Strict-fail variant of :func:`read_last_watermark` for
-    preflight gates (P1.17c).
+    """Strict-fail variant of :func:`read_last_watermark` for preflight gates.
 
     Returns the same value as the soft variant on success: a
     ``datetime`` for an existing ``status='success'`` row with a
@@ -1012,12 +1004,12 @@ class ResumeContext:
     VIEW) preserve the original logical row count instead of NULL.
     Walks back past any ``resumed_skipped`` rows (those have NULL
     row_count by definition — no work done) to the actual success
-    row. **Tuple key** (P1.5β.1): matches the state table's
+    row. **Tuple key**: matches the state table's
     primary-key grain; today no shipped registry entry reuses a
     ``dataset_id`` across layers, but a future addition that did
     would silently collide under the prior ``str``-only key.
 
-    ``succeeded_last_watermarks`` (P1.5β.1): ``(dataset_id, layer)``
+    ``succeeded_last_watermarks``: ``(dataset_id, layer)``
     → most-recent ``last_watermark`` observed for that pair under
     this ``run_id``. Carry-forwarded into ``RunStep.resumed_skip``
     so a resumed-skip row preserves the original bronze run's
@@ -1096,13 +1088,10 @@ def read_resumable_state(
     # table_path components; the caller-supplied run_id is the only
     # value originating outside the trusted boundary.
     escaped_run_id = run_id.replace("'", "''")
-    # P1.5β.1: partition by (dataset_id, layer) — the state-table
-    # primary-key grain. Today no shipped registry entry reuses a
-    # ``dataset_id`` across layers; the partition fix is paired with
-    # the tuple-keyed ``succeeded_row_counts`` /
-    # ``succeeded_last_watermarks`` dicts so a future registry
-    # addition that collides ``dataset_id`` across layers doesn't
-    # silently drop the upper-layer row from the window.
+    # Partition by (dataset_id, layer), the state-table primary-key grain. The
+    # tuple-keyed ``succeeded_row_counts`` / ``succeeded_last_watermarks`` dicts
+    # prevent a future dataset_id reused across layers from silently dropping
+    # the upper-layer row from the window.
     query = f"""
         WITH ranked AS (
           SELECT
@@ -1200,9 +1189,8 @@ def read_resumable_state(
     # second small query so the existing latest-per-(dataset, layer)
     # window doesn't need to widen.
     #
-    # P1.5β.1: partition + dict key are now (dataset_id, layer) tuples
-    # matching the state-table primary-key grain. See ResumeContext
-    # docstring for rationale.
+    # Partition and dict key use (dataset_id, layer) tuples matching the
+    # state-table primary-key grain. See ResumeContext docstring for rationale.
     row_count_query = f"""
         WITH ranked AS (
           SELECT dataset_id, layer, row_count, last_run_at,
@@ -1227,12 +1215,11 @@ def read_resumable_state(
 
     # Build succeeded_last_watermarks: for each succeeded
     # (dataset_id, layer), the most-recent ``last_watermark`` (which
-    # may be NULL — e.g. silver/gold rows in β.1, or a true-first-
-    # empty bronze run). Unlike succeeded_row_counts, we DO NOT
+    # may be NULL — e.g. replace-style silver/gold rows or a true-first-empty
+    # bronze run). Unlike succeeded_row_counts, we DO NOT
     # filter out NULL ``last_watermark`` rows in the WHERE clause —
-    # a silver/gold success row with NULL watermark is the canonical
-    # case in β.1, and carrying ``None`` forward is the correct
-    # behavior. The latest terminal row per pair wins.
+    # a success row with NULL watermark is legitimate, and carrying ``None``
+    # forward is the correct behavior. The latest terminal row per pair wins.
     last_watermark_query = f"""
         WITH ranked AS (
           SELECT dataset_id, layer, last_watermark, last_run_at,

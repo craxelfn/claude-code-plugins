@@ -1,29 +1,16 @@
-"""Pydantic models for content pack YAML (pack.yaml + silver/gold node YAML).
+"""Pydantic models for content-pack YAML.
 
-This module is the schema half of the v2 content-pack contract. It defines
-the typed representation that ``aidp-fusion-bundle content-pack validate``
-parses and the engine consumes at run time.
+This module defines the typed representation of ``pack.yaml`` plus bronze,
+silver, gold, and dashboard node YAML that ``aidp-fusion-bundle content-pack
+validate`` parses and the engine consumes at run time.
 
-References:
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §8 (pack contract)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §9.5 (variation points)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §11.3 (strategy validation)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §25 (error codes)
-
-Error codes raised here are registered in PLAN §25. v0.3 codes used in this
-module's top-level models:
+Error codes raised here are documented in ``docs/aidpf-error-codes.md``. Codes
+used in this module's top-level models:
 
     * AIDPF-2002 -- pack version not SemVer-valid
 
-Node-level validation rules (R1-R13) and their codes are implemented in the
-``NodeYaml`` model and validators (Step 3 of v2-phase-1-content-pack-schema).
-
-State-table migration note (informational, not implemented here): the
-state-table additive migration for pack / profile / tenant / source-level
-cursor columns is declared by the schema (per ADR-0018, PLAN §11.9) but
-the engine's runtime path does not yet write the new columns. Phase 2 of
-the v2 migration consumes the schema; Phase 4 (parity gate) wires the
-columns through the runtime.
+Node-level validation rules and their codes are implemented in the
+``NodeYaml`` model and content-pack validators.
 """
 
 from __future__ import annotations
@@ -51,13 +38,13 @@ from pydantic import (
 # ---------------------------------------------------------------------------
 # Error code constants
 # ---------------------------------------------------------------------------
-# Centralised here so module-level validators reference symbols rather than
-# bare strings. The authoritative registry lives in PLAN §25.
+# Centralized here so module-level validators reference symbols rather than
+# bare strings. The public registry lives in docs/aidpf-error-codes.md.
 
 AIDPF_2002_INVALID_SEMVER = "AIDPF-2002"
 AIDPF_2001_ORPHAN_OVERRIDE = "AIDPF-2001"  # used by overlay merger (Step 5)
 
-# Node-level validation rule codes (PLAN §11.3 R1-R13).
+# Node-level validation rule codes.
 AIDPF_2020_MERGE_NO_NATURAL_KEY = "AIDPF-2020"      # R1
 AIDPF_2030_OUTPUT_SCHEMA_NO_PII = "AIDPF-2030"      # R12
 AIDPF_2050_MERGE_NO_WATERMARK = "AIDPF-2050"        # R2
@@ -71,10 +58,10 @@ AIDPF_2057_AGGREGATE_MERGE_DEFERRED = "AIDPF-2057"  # R9
 AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST = "AIDPF-2058"   # R10
 AIDPF_2059_SCD2_NO_TRACKED_COLUMNS = "AIDPF-2059"   # R11
 # AIDPF-2060 (python_legacy deprecated invariant) and AIDPF-2061
-# (python_legacy callable spec) were retired in Phase 9 when the
-# python_legacy implementation type was deleted.
+# (python_legacy callable spec) are retained as historical codes only; the
+# python_legacy implementation type is no longer accepted.
 
-# Phase 9 — bronze content-pack node type
+# Bronze content-pack node type.
 AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
 # WARN-only: pack YAML's implementation.pvo_id is not in the curated
 # fusion_catalog.py. Pack loads cleanly; BICC drift gate (AIDPF-2072) catches
@@ -152,7 +139,7 @@ class PackCompatibility(BaseModel):
 
 
 class RunIdColumnDefaults(BaseModel):
-    """Audit column names per medallion layer (per PLAN §8.1)."""
+    """Audit column names per medallion layer."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -180,7 +167,7 @@ class PackDefaults(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Tenant profile defaults (per PLAN §8.1)
+# Tenant profile defaults
 # ---------------------------------------------------------------------------
 
 
@@ -224,15 +211,15 @@ class PackProfileDefaults(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Variation points (PLAN §9.5)
+# Variation points
 # ---------------------------------------------------------------------------
 
 
 class ColumnAlias(BaseModel):
     """Same logical column, different physical names across tenants.
 
-    PLAN §9.5.1. Bootstrap walks ``candidates`` in priority order and pins
-    the first that exists on the tenant.
+    Bootstrap walks ``candidates`` in priority order and pins the first that
+    exists on the tenant.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -258,7 +245,7 @@ class SemanticVariantDetect(BaseModel):
 
 
 class SemanticVariantCandidate(BaseModel):
-    """One semantic-shape candidate (PLAN §9.5.1 / §9.5.2)."""
+    """One semantic-shape candidate."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -269,11 +256,11 @@ class SemanticVariantCandidate(BaseModel):
 
     fragment: str
     """SQL boolean fragment substituted into `{{ semantic.<name> }}`.
-    Must conform to the semantic-fragment grammar (PLAN §9.5.2)."""
+    Must conform to the semantic-fragment grammar."""
 
 
 class SemanticVariant(BaseModel):
-    """Same logical concept, different SQL **shape** across tenants (PLAN §9.5.1)."""
+    """Same logical concept, different SQL shape across tenants."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -322,7 +309,7 @@ class PackOverlayRef(BaseModel):
 class OverrideEntry(BaseModel):
     """Per-node override declared by an overlay pack.
 
-    PLAN §8.7 merge rules:
+    Merge rules:
 
     * ``profile:`` -- scalar replace.
     * ``sql:`` -- full-file replace; the named SQL path lives in the overlay.
@@ -330,7 +317,7 @@ class OverrideEntry(BaseModel):
     * ``extendColumns: true`` -- the overlay extends the base node's
       ``outputSchema.columns`` rather than replacing it.
 
-    Unknown keys default to scalar-replace per §8.7.
+    Unknown keys default to scalar replace.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -347,12 +334,12 @@ class OverrideEntry(BaseModel):
 
 class SkillProposalRecord(BaseModel):
     """One per-VP proposal the medallion-author skill captured at
-    overlay-draft time (Phase 3b).
+    overlay-draft time.
 
     Bootstrap reads ``candidate_added`` to detect AutoResolved-on-skill-
-    proposed-candidate at commit time (Phase 3b round-2 finding —
-    initial-onboarding flow must record ``mechanism: skill_proposed``
-    when the walker AutoResolves on a candidate the skill added).
+    proposed-candidate at commit time. The initial-onboarding flow must
+    record ``mechanism: skill_proposed`` when the walker AutoResolves on a
+    candidate the skill added.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -376,12 +363,9 @@ class PackProvenance(BaseModel):
     model identity, generation timestamp, and reason. Hand-authored packs may
     omit this block entirely.
 
-    Phase 3b extends the schema with skill-specific fields
-    (``skill_id``, ``diagnostic_run_id``, ``proposals``,
-    ``incremental_impact``). **Every new field declares an explicit
-    camelCase ``Field(alias=...)``** so overlay YAML's camelCase keys
-    parse — round-3 plan-review finding (without aliases the bootstrap
-    detection silently never fires).
+    Skill-specific fields use explicit camelCase ``Field(alias=...)`` values
+    so overlay YAML keys parse consistently and bootstrap can detect
+    skill-authored proposals.
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -393,7 +377,7 @@ class PackProvenance(BaseModel):
     reason: str | None = None
     evidence: dict[str, Any] | None = None
 
-    # --- Phase 3b extensions (additive, default-None) ---
+    # Skill-authored overlay metadata.
 
     skill_id: str | None = Field(default=None, alias="skillId")
     """Stable identifier of the skill that drafted the overlay. The
@@ -434,7 +418,7 @@ class PackYaml(BaseModel):
 
     Node definitions live in separate per-node YAML files under
     ``silver/`` and ``gold/`` and are validated by :class:`NodeYaml`
-    (Step 3 of v2-phase-1-content-pack-schema -- not yet implemented).
+    when the content pack is loaded.
     ``PackYaml`` covers pack identity, compatibility, defaults, profile
     defaults, variation-point declarations, overlay coordination, and
     provenance.
@@ -460,7 +444,7 @@ class PackYaml(BaseModel):
     # Tenant-customisation knobs
     profiles: dict[str, PackProfileDefaults] = Field(default_factory=dict)
 
-    # Variation points (§9.5)
+    # Variation points
     column_aliases: dict[str, ColumnAlias] = Field(
         default_factory=dict, alias="columnAliases"
     )
@@ -529,7 +513,7 @@ IncrementalStrategy = Literal[
     "append",
     "replace_partition",
     "custom",
-    # Deferred strategies; reject at validate time per PLAN §11.3.
+    # Deferred strategies; accepted by the type but rejected by validation.
     "aggregate_merge",
     "snapshot",
     "scd2",
@@ -550,7 +534,8 @@ class WatermarkSpec(BaseModel):
 class SourceRef(BaseModel):
     """One entry in ``dependsOn.bronze[]`` or ``dependsOn.silver[]``.
 
-    PLAN §11.10 (primary/lookup contract).
+    ``role`` declares whether the dependency is the primary watermark source
+    or a lookup source.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -607,7 +592,7 @@ class AffectedPartitionsFrom(BaseModel):
 
 
 class RefreshIncremental(BaseModel):
-    """Incremental-mode refresh strategy (PLAN §10, §11.3)."""
+    """Incremental-mode refresh strategy."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -633,7 +618,7 @@ class RefreshSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Output schema (PLAN §8.5)
+# Output schema
 # ---------------------------------------------------------------------------
 
 
@@ -648,7 +633,7 @@ class OutputSchemaColumn(BaseModel):
 
     nullable: bool = True
     pii: PiiLevel
-    """REQUIRED per PLAN §8.5. Missing → AIDPF-2030."""
+    """Required PII classification. Missing values raise AIDPF-2030."""
 
 
 class OutputSchema(BaseModel):
@@ -715,7 +700,7 @@ class QualityTestReferentialIntegrity(_QualityTestBase):
 
 
 class QualityTestCustom(_QualityTestBase):
-    """Third-party quality test (PLAN §8.6.1)."""
+    """Third-party quality test."""
 
     type: Literal["custom"] = "custom"
     implementation: str
@@ -772,7 +757,7 @@ class BuiltinImpl(BaseModel):
 
 
 class BronzeExtractImpl(BaseModel):
-    """``implementation.type: bronze_extract`` — BICC PVO extraction (Phase 9).
+    """``implementation.type: bronze_extract`` -- BICC PVO extraction.
 
     Declares a content-pack-driven bronze node. Carries everything the
     runtime needs to construct a BICC ``PvoEntry``-equivalent descriptor
@@ -788,8 +773,8 @@ class BronzeExtractImpl(BaseModel):
     2. The descriptor is passed to ``extract_pvo()`` unchanged.
     3. At pack-load time, validators cross-reference
        ``implementation.pvo_id`` against the curated catalog for a WARN
-       only — absent → ``AIDPF-2080``. Phase 5's BICC drift gate
-       (``AIDPF-2072``) catches typo'd PVOs at extract-preflight time.
+       only. The BICC drift gate (``AIDPF-2072``) catches typo'd PVOs at
+       extract-preflight time.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -814,15 +799,17 @@ class BronzeExtractImpl(BaseModel):
 
     schema_override: str | None = Field(default=None, alias="schemaOverride")
     """Optional per-tenant BICC offering schema override. Overrides
-    ``bicc_schema`` at runtime — matches today's
+    ``bicc_schema`` at runtime and matches
     ``bundle.fusion.schemaOverrides.<id>`` semantics."""
 
     incremental_capable: bool = Field(default=True, alias="incrementalCapable")
-    """P1.17 contract: PVOs whose ``LastUpdateDate`` doesn't monotonically
-    track meaningful change events (e.g. ``gl_period_balances`` whose
-    period-end snapshot revises retroactively) MUST set this to False.
+    """Whether ``LastUpdateDate`` tracks meaningful change events.
 
-    Effect on runtime (per Phase 9 decision matrix):
+    PVOs such as ``gl_period_balances`` can revise historical period-end
+    snapshots retroactively; set this to False when an incremental BICC
+    predicate would miss valid changes.
+
+    Runtime behavior:
 
     * ``mode=seed``: full BICC pull + ``replace`` strategy (independent of
       this flag).
@@ -836,8 +823,8 @@ class BronzeExtractImpl(BaseModel):
         default="bronze_v1", alias="auditColumnsMode"
     )
     """Reserved for future audit-column-shape variants. v0.3 uses the
-    P1.17 ``bronze_v1`` shape (``_extract_ts``, ``_source_pvo``,
-    ``_run_id``, ``_watermark_used``)."""
+    ``bronze_v1`` shape (``_extract_ts``, ``_source_pvo``, ``_run_id``,
+    ``_watermark_used``)."""
 
 
 NodeImplementation = Annotated[
@@ -854,9 +841,9 @@ NodeImplementation = Annotated[
 class NodeYaml(BaseModel):
     """Schema for ``silver/<name>.yaml`` and ``gold/<name>.yaml`` files.
 
-    Enforces the full v0.3 strategy validation matrix (PLAN §11.3 R1-R13).
-    Each rule violation raises a `ValueError` with a specific AIDPF code so
-    the CLI's `content-pack validate` surfaces actionable remediation.
+    Enforces the strategy validation matrix. Each rule violation raises a
+    `ValueError` with a specific AIDPF code so the CLI's
+    `content-pack validate` surfaces actionable remediation.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -880,14 +867,13 @@ class NodeYaml(BaseModel):
 
     quality: QualitySection = Field(default_factory=QualitySection)
 
-    # ----- v0.3 strategy validation matrix (PLAN §11.3 R1-R13) -----------
+    # Strategy validation matrix.
 
     @model_validator(mode="after")
     def _validate_strategy_matrix(self) -> "NodeYaml":
-        # Phase 9: bronze nodes are content-pack-driven. They permit
-        # seed=replace + incremental=merge (with watermark + naturalKey
-        # declared). The R1-R13 matrix below is silver/gold-specific —
-        # bronze has its own narrower contract checked here.
+        # Bronze nodes are content-pack-driven. They permit seed=replace plus
+        # incremental=merge when watermark and naturalKey are declared.
+        # Silver/gold nodes use the broader matrix below.
         if self.layer == "bronze":
             seed_strategy = self.refresh.seed.strategy
             if seed_strategy != "replace":
@@ -920,13 +906,13 @@ class NodeYaml(BaseModel):
 
         inc = self.refresh.incremental
         if inc is None:
-            # No incremental block declared; nothing to validate against §11.3.
+            # No incremental block declared; nothing else to validate.
             return self
 
         bronze_sources = self.depends_on.bronze
         primary_sources = [s for s in bronze_sources if s.role == "primary"]
-        # Determine "primary set" — treat single-bronze nodes with no explicit
-        # role as implicit primary (per §11.10 defaults).
+        # Determine the primary set. A single bronze source with no explicit
+        # role is treated as the implicit primary source.
         implicit_primary = (
             len(bronze_sources) == 1
             and bronze_sources[0].role is None
@@ -942,7 +928,7 @@ class NodeYaml(BaseModel):
         if s == "aggregate_merge":
             raise ValueError(
                 f"{AIDPF_2057_AGGREGATE_MERGE_DEFERRED}: strategy `aggregate_merge` "
-                "is deferred to v0.4+. Use `replace` in v0.3; see PLAN §10.8."
+                "is deferred to v0.4+. Use `replace` in v0.3."
             )
 
         # R10: snapshot itself is deferred; if declared, must have a
@@ -958,14 +944,14 @@ class NodeYaml(BaseModel):
                 raise ValueError(
                     f"{AIDPF_2058_SNAPSHOT_NO_UNIQUE_TEST}: strategy `snapshot` "
                     "(deferred) requires a `unique` quality test on "
-                    "(natural_key, snapshot_date). See PLAN §10.7."
+                    "(natural_key, snapshot_date)."
                 )
 
         # R11: scd2 itself is deferred; if declared, must have trackedColumns.
         if s == "scd2" and not inc.tracked_columns:
             raise ValueError(
                 f"{AIDPF_2059_SCD2_NO_TRACKED_COLUMNS}: strategy `scd2` "
-                "(deferred) requires `trackedColumns:`. See PLAN §10.6."
+                "(deferred) requires `trackedColumns:`."
             )
 
         # R1: merge requires naturalKey.
@@ -996,14 +982,14 @@ class NodeYaml(BaseModel):
         if s == "merge" and primary_count == 0:
             raise ValueError(
                 f"{AIDPF_2051_MERGE_ZERO_PRIMARY}: strategy `merge` requires "
-                "exactly one source marked `role: primary` (PLAN §11.10)."
+                "exactly one source marked `role: primary`."
             )
 
         # R4: merge with multiple role:primary (multi-primary deferred).
         if s == "merge" and primary_count > 1:
             raise ValueError(
                 f"{AIDPF_2052_MERGE_MULTI_PRIMARY}: strategy `merge` with multiple "
-                "`role: primary` sources is deferred to v0.4+ (PLAN §11.11). "
+                "`role: primary` sources is deferred to v0.4+. "
                 "Collapse to a single primary or switch to `replace`."
             )
 
@@ -1014,7 +1000,7 @@ class NodeYaml(BaseModel):
             raise ValueError(
                 f"{AIDPF_2054_REPLACE_PARTITION_NO_COLUMNS}: strategy "
                 "`replace_partition` requires `partitionColumns:` or "
-                "`affectedPartitionsFrom:`. See PLAN §10.4."
+                "`affectedPartitionsFrom:`."
             )
 
         # R7: replace_partition with multi-source primary.
@@ -1039,16 +1025,14 @@ class NodeYaml(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# ResolvedPack — Phase 9 (ADR-0022) moved from orchestrator/content_pack.py
+# ResolvedPack
 # ---------------------------------------------------------------------------
 #
-# The dispatch package's §4.3 import boundary forbids
-# ``schema.plan_resolver`` from importing ``orchestrator/*``. With
-# ``schema.plan_resolver::resolve_dry_run_plan`` rewritten (Phase 9) to
-# walk a ``ResolvedPack`` instead of the registry-metadata maps, the
-# dataclass must live under ``schema/`` so the boundary stays intact.
-# ``orchestrator/content_pack.py`` re-exports ``ResolvedPack`` for
-# backwards compatibility with existing consumers.
+# The dispatch package should not import ``orchestrator/*``. Keeping this
+# dataclass under ``schema/`` lets the dry-run plan resolver walk content packs
+# without crossing that import boundary. ``orchestrator/content_pack.py``
+# re-exports ``ResolvedPack`` for backwards compatibility with existing
+# consumers.
 
 
 def _canonicalise(value: Any) -> Any:
@@ -1074,13 +1058,12 @@ class ResolvedPack:
         gold: per-node-id mapping of gold nodes (parsed from ``gold/*.yaml``).
         dashboards: per-dashboard-id mapping (parsed from
             ``dashboards/*.yaml``).
-        bronze: Phase 9 — per-node-id mapping of bronze nodes (parsed
-            from ``bronze/*.yaml``). Each carries
-            ``implementation.type: bronze_extract`` (or, for migration
-            bridges, a builtin/sql variant).
-        bronze_yaml: DEPRECATED (Phase 9 transitional): legacy single-file
-            ``bronze.yaml`` declaration. Retained for backwards compatibility
-            with packs that haven't migrated to per-file ``bronze/<id>.yaml``.
+        bronze: per-node-id mapping of bronze nodes parsed from
+            ``bronze/*.yaml``. Each carries
+            ``implementation.type: bronze_extract`` or a builtin/sql variant.
+        bronze_yaml: deprecated legacy single-file ``bronze.yaml``
+            declaration. Retained for backwards compatibility with packs that
+            have not migrated to per-file ``bronze/<id>.yaml``.
         is_merged: True if this is the result of a merge_overlay call.
         chain: list of pack ids in load order (base first, overlays after).
         source_roots: per-artifact pack-root provenance.
@@ -1114,8 +1097,8 @@ class ResolvedPack:
     def compute_hash(self) -> str:
         """Stable sha256 of the pack's canonical serialised form.
 
-        Used by PLAN §11.9 plan-hash drift detection. Deterministic across
-        runs: keys sorted, no unstable ordering.
+        Used by plan-hash drift detection. Deterministic across runs: keys
+        sorted, no unstable ordering.
         """
         payload: dict[str, Any] = {
             "pack": self.pack.model_dump(mode="json", by_alias=True),

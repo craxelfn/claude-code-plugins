@@ -8,9 +8,8 @@ one place those values resolve into the 3-part identifiers Spark consumes.
 Each shipped mart / dim module accepts a ``paths: TablePaths | None``
 kwarg on its ``build()``. ``None`` → ``DEFAULT_PATHS`` (catalog=
 ``"fusion_catalog"``, bronze_schema=``"bronze"``, silver_schema=``"silver"``,
-gold_schema=``"gold"``) — identical to the pre-P1.5b behavior. A non-None
-``paths`` overrides per-table-name kwargs only when those kwargs are
-themselves left at their sentinel defaults.
+gold_schema=``"gold"``). A non-None ``paths`` overrides per-table-name kwargs
+only when those kwargs are themselves left at their sentinel defaults.
 
 SQL-injection safety
 --------------------
@@ -142,11 +141,11 @@ def _validate_identifier(field_name: str, value: Any) -> None:
             f"{field_name}={value!r} is not a valid unquoted SQL identifier — "
             "must match ^[A-Za-z_][A-Za-z0-9_]*$. Catalogs / schemas / tables "
             "with hyphens, dots, or other special characters require Unity-"
-            "Catalog-side renaming (not a P1.5b concern)."
+            "Catalog-side renaming."
         )
 
 
-#: Conventional defaults — exactly what every shipped module used pre-P1.5b.
+#: Conventional defaults for all shipped modules.
 #: Module-level constants derive from this so a single source of truth governs.
 DEFAULT_PATHS: Final[TablePaths] = TablePaths()
 

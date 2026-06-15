@@ -87,3 +87,11 @@ bundle.yaml
 
 # local tenant profiles (bootstrap-pinned fingerprints) — never commit
 profiles/
+
+# OAC workbook authoring (workbooks/<name>/) — the generated workbook JSON and
+# any *bound* request carry the OAC host / dataset UUID / session tokens. Keep
+# those raw artifacts local; commit only *.redacted.json (and your request.json
+# spec). See skills/workbook-authoring + docs/oac_workbook_authoring_e2e.md.
+workbooks/**/workbook*.json
+workbooks/**/*bound*.json
+!workbooks/**/*.redacted.json

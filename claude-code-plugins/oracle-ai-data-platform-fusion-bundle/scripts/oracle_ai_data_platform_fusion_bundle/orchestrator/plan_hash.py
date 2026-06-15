@@ -70,7 +70,7 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Content-pack plan-hash (PLAN §11.9)
+# Content-pack plan-hash
 # ---------------------------------------------------------------------------
 #
 # Mixes everything that can semantically change "what this node would
@@ -132,8 +132,8 @@ def compute_content_pack_plan_hash(
 ) -> str:
     """Assemble the content-pack plan-hash from its constituent inputs.
 
-    Per PLAN §11.9, the content-pack plan-hash includes every input that
-    can semantically change "what this node would produce":
+    The content-pack plan-hash includes every input that can semantically
+    change "what this node would produce":
 
     * Pack identity (id + version) — catches "we re-resolved to a
       different pack".
@@ -160,8 +160,7 @@ def compute_content_pack_plan_hash(
 
     Returns:
         Hex sha256 string. Comparing this against the prior successful
-        state row's ``plan_hash`` is the resume drift gate (PLAN §11.9
-        / AIDPF-4040).
+        state row's ``plan_hash`` is the AIDPF-4040 resume drift gate.
     """
     inc = node.refresh.incremental
     payload = {
@@ -182,7 +181,7 @@ def compute_content_pack_plan_hash(
         "rendered_sql_hash": rendered_sql_hash,
         "output_schema_hash": output_schema_hash,
         "profile_hash": profile_hash,
-        # Identity fingerprints (PLAN §11.6 Gate 4 inputs).
+        # Identity fingerprints.
         "tenant": profile.tenant,
         "bronze_schema_fingerprint": profile.bronze_schema_fingerprint,
     }

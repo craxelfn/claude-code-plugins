@@ -156,8 +156,8 @@ Remediation:    overlays/saasfademo1-currency-fix/remediation.md (Option D)
 
 Next steps:
   1. Review the overlay + remediation.md.
-  2. Wire the overlay into the pack chain (set
-     bundle.yaml contentPack.path to the overlay dir).
+  2. Wire the overlay into the pack chain:
+       aidp-fusion-bundle use-pack overlays/<overlay-name> --profile <tenant>
   3. Re-run bootstrap (NO --resolutions flag needed):
        aidp-fusion-bundle bootstrap --operator "$USER"
   4. Apply Option D remediation per remediation.md:

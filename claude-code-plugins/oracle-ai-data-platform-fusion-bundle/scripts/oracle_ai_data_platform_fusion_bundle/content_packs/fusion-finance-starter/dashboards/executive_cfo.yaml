@@ -3,8 +3,8 @@ title: Executive CFO Dashboard
 version: 0.1.0
 description: |
   Executive CFO overview combining GL balances, AP aging, and supplier
-  spend. Phase 1 ships the dashboard YAML contract only; the matching
-  .bar file lands in Phase 6.
+  spend. The dashboard YAML contract describes the workbook delivered
+  through the OAC snapshot flow.
 
 delivery:
   type: oac-snapshot

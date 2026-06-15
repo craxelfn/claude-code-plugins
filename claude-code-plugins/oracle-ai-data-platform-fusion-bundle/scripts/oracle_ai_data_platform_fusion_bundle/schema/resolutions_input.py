@@ -1,9 +1,9 @@
-"""Schema for the ``--resolutions <json-file>`` flag (PLAN §9.5.5 / §9.5.9).
+"""Schema for the ``--resolutions <json-file>`` flag.
 
 Bootstrap accepts a scripted-resolution file for multi-match cases so
-feature #3 (``v2-phase-3b-medallion-author-skill``) can commit overlay
-choices without driving a terminal. A careful operator can also use
-this in CI to make a deterministic re-bootstrap reproducible.
+the medallion-author skill can commit overlay choices without driving a
+terminal. A careful operator can also use this in CI to make a deterministic
+re-bootstrap reproducible.
 
 The file is JSON. Validation runs in two layers:
 
@@ -12,8 +12,7 @@ The file is JSON. Validation runs in two layers:
    rejects empty input.
 2. **Pack-aware semantic validation** — :func:`validate_against_pack`:
    checks every entry against the resolved pack's declared variation
-   points + the walker's matched-candidate set (see plan Step 8's
-   "Resolutions file schema" section for the 7 rules).
+   points + the walker's matched-candidate set.
 """
 
 from __future__ import annotations

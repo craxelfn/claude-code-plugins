@@ -6,7 +6,7 @@ implementation:
   pvo_id: FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO
   biccSchema: Financial
   schemaOverride: null
-  # gl_coa is bucket-config style — full re-extract per cycle (P1.17 contract).
+  # gl_coa is bucket-config style — full re-extract per cycle.
   incrementalCapable: false
   auditColumnsMode: bronze_v1
 target: gl_coa

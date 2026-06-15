@@ -34,9 +34,9 @@ requiredColumns:
 # Output schema mirrors the v1 module's default projection
 # (dimensions/dim_account.py with DEFAULT_SEMANTIC_SEGMENT_MAP — six
 # segments). v1 emits up to MAX_FUSION_SEGMENTS=30 positional columns
-# but the saasfademo1 demo COA only populates six. The starter pack
-# declares the six-segment subset to keep the YAML and live data
-# aligned. Tenants with deeper COAs extend via a pack overlay.
+# but starter-pack coverage declares the six-segment subset to keep the YAML
+# and common live data aligned. Tenants with deeper COAs extend via a pack
+# overlay.
 outputSchema:
   columns:
     - name: account_key

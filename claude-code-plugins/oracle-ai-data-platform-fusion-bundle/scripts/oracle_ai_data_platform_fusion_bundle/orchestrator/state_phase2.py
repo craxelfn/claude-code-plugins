@@ -1,7 +1,6 @@
 """Content-pack state-layer additions: additive migration + atomic batch write.
 
-This module sits ALONGSIDE the existing ``orchestrator/state.py`` (v1)
-and adds:
+This module sits alongside ``orchestrator/state.py`` and adds:
 
 * :data:`CONTENT_PACK_STATE_COLUMNS` — the tuple of nullable columns added
   to ``fusion_bundle_state`` for content-pack runs.
@@ -24,12 +23,6 @@ and adds:
 
 The base ``ensure_state_table`` and ``write_state_row`` continue to work
 unchanged. Content-pack callers explicitly invoke these helpers.
-
-References:
-
-* PLAN §11.9 (state migration + hard cursor commit)
-* PLAN §11.10 (multi-source primary/lookup; per-source rows)
-* PLAN §10b (corrected latest-view grain)
 """
 
 from __future__ import annotations
@@ -75,11 +68,11 @@ CONTENT_PACK_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("rendered_sql_hash", "STRING"),
     ("output_schema_hash", "STRING"),
     ("profile_hash", "STRING"),
-    # Identity fingerprints (consumed by Step 9 plan-hash + §11.6 Gate 4).
+    # Identity fingerprints.
     ("tenant_fingerprint", "STRING"),
     ("fusion_version", "STRING"),
     ("bronze_schema_fingerprint", "STRING"),
-    # Source-level cursors (multi-source primary/lookup per PLAN §11.10).
+    # Source-level cursors for primary/lookup rows.
     ("source_id", "STRING"),
     ("source_role", "STRING"),  # 'primary' | 'lookup'
     ("input_watermark_start", "TIMESTAMP"),
@@ -258,8 +251,7 @@ def _build_state_row_schema():
         StructField("plan_hash", StringType(), True),
         StructField("plan_snapshot", StringType(), True),
     ]
-    # Content-pack columns — every entry is nullable by design (PLAN §10a
-    # additive migration).
+    # Content-pack columns — every entry is nullable by design.
     for name, dtype in CONTENT_PACK_STATE_COLUMNS:
         fields.append(StructField(name, type_map[dtype], True))
 

@@ -1,14 +1,9 @@
-"""Content pack loader + overlay merger.
+"""Content pack loader and overlay merger.
 
-Reads ``pack.yaml`` files from disk (or installed package data), validates
-them against the Pydantic models in ``schema.medallion_pack``, and merges
-overlay packs with their base per the rules in PLAN §8.7.
-
-References:
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §6 (repo structure, paths)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §7.3 (path resolution)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §8.7 (pack overlays)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §25 (error codes — AIDPF-2001)
+Reads ``pack.yaml`` files from disk or installed package data, validates them
+against the Pydantic models in ``schema.medallion_pack``, and merges overlay
+packs with their base pack. Operator-facing behavior is documented in
+``docs/content_pack_execution.md`` and ``docs/mart_overlay_authoring.md``.
 
 Public API
 ----------
@@ -17,16 +12,15 @@ Public API
   per-node YAML files. Returns a :class:`ResolvedPack`.
 * :func:`resolve_overlay_chain` — walk an overlay's ``extends:`` chain to
   the root base pack, rejecting cycles.
-* :func:`merge_overlay` — apply §8.7 merge rules to combine a base pack
-  with one or more overlays.
+* :func:`merge_overlay` — apply overlay merge rules to combine a base pack with
+  one or more overlays.
 
 Each function raises a ``PackLoaderError`` subclass with the appropriate
 AIDPF code in the message; the CLI ``content-pack validate`` surfaces these
 to the operator.
 
 The pack hash (sha256 of canonical merged YAML) is computed by
-:meth:`ResolvedPack.compute_hash` and used by PLAN §11.9 plan-hash drift
-detection.
+:meth:`ResolvedPack.compute_hash` and used by the plan-hash drift gate.
 """
 
 from __future__ import annotations
@@ -52,7 +46,7 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
     _canonicalise,
 )
 
-# Error codes used by this module (registered in PLAN §25).
+# Error codes used by this module.
 AIDPF_2001 = AIDPF_2001_ORPHAN_OVERRIDE  # orphan override / extends cycle
 AIDPF_2004_EXTENDS_VERSION_MISMATCH = "AIDPF-2004"
 
@@ -65,8 +59,7 @@ AIDPF_2004_EXTENDS_VERSION_MISMATCH = "AIDPF-2004"
 class PackLoaderError(Exception):
     """Base class for content-pack load / merge errors.
 
-    Carries an AIDPF code so the CLI can surface it with a remediation
-    pointer (PLAN §25).
+    Carries an AIDPF code so the CLI can surface it with a remediation pointer.
     """
 
     code: str = "AIDPF-2000"
@@ -347,7 +340,7 @@ def resolve_overlay_chain(
 
 
 def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
-    """Merge ``overlay`` on top of ``base`` per PLAN §8.7 rules.
+    """Merge ``overlay`` on top of ``base``.
 
     Rules applied:
 

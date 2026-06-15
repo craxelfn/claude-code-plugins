@@ -1,4 +1,4 @@
-"""Neutral SQL-string helpers for MERGE rendering — P1.17d.
+"""Neutral SQL-string helpers for MERGE rendering.
 
 This module hosts the explicit-column-list MERGE clause helpers
 (``build_explicit_when_matched_clause`` / ``build_explicit_when_not_matched_clause``)
@@ -44,9 +44,9 @@ def build_explicit_when_matched_clause(
     UPDATE should touch, preserving any target-only columns by
     omission.
 
-    Composes with P1.17e's payload-diff predicate: when ``payload_diff``
-    is non-None, the AND-clause gates the UPDATE so unchanged-payload
-    rows don't propagate ``_extract_ts`` rewrites downstream.
+    When ``payload_diff`` is non-None, the AND-clause gates the UPDATE so
+    unchanged-payload rows don't propagate ``_extract_ts`` rewrites
+    downstream.
 
     Args:
         columns: The list of columns to UPDATE on a matched row.
@@ -56,7 +56,7 @@ def build_explicit_when_matched_clause(
             every column the source DataFrame carries (target-only
             columns are excluded by being absent from this list).
         payload_diff: Optional payload-diff predicate from
-            :func:`_payload_diff_predicate_sql` (P1.17e). When given,
+            :func:`_payload_diff_predicate_sql`. When given,
             the clause becomes ``WHEN MATCHED AND ({payload_diff})
             THEN UPDATE SET ...``. When ``None``, no AND-gate is
             inserted (V1 behavior for layers that don't use the

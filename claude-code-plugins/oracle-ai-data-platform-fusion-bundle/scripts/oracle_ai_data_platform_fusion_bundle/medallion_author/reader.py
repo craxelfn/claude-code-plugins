@@ -1,10 +1,10 @@
-"""Diagnostic-artifact reader (Phase 3b skill).
+"""Diagnostic-artifact reader for the medallion-author skill.
 
-Reads the artifact files feature #2's bootstrap writes under
+Reads the artifact files bootstrap writes under
 ``<workdir>/.aidp/diagnostics/<run_id>/`` and surfaces them as parsed
 Pydantic models the skill can reason over.
 
-Refuse-to-proceed gates per PLAN §9.5.8:
+Refuse-to-proceed gates:
 
 * ``AIDPF-1020.json`` present → identity gate failed; overlay drafting
   is the wrong response.
@@ -35,12 +35,9 @@ from ..schema.diagnostic_artifact import (
     VariationPointDiagnosticV1,
 )
 
-# Phase 4.1 / D3 — cluster-dispatch failures are operator-actionable,
-# not skill-recoverable. The reader recognises them by errorCode +
-# surfaces them in a dedicated field so the `/medallion-author` skill
-# can refuse with a "fix the dispatch issue and rerun bootstrap"
-# message instead of misclassifying them as malformed and offering a
-# nonsensical overlay draft.
+# Cluster-dispatch failures are operator-actionable, not skill-recoverable.
+# The reader recognises them by errorCode and surfaces them in a dedicated
+# field so the `/medallion-author` skill can refuse with a targeted message.
 _CLUSTER_DISPATCH_INFRASTRUCTURE_CODES = frozenset(
     {
         AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED,
@@ -84,32 +81,29 @@ class DiagnosticReadResult:
     when this is non-None — identity gate must be fixed first."""
 
     schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
-    """Set if ``AIDPF-2012.json`` is present. Phase 3c — drift is
-    bootstrap's domain; if a drift artifact is present without any
-    2010/2011 in the same directory, the skill refuses with a
-    "wrong recovery flow" message (operator should run
-    ``bootstrap --refresh`` first). If 2012 + 2010/2011 both
-    present, the skill surfaces both and proceeds on the
-    2010/2011 work."""
+    """Set if ``AIDPF-2012.json`` is present. Drift is bootstrap's domain; if
+    a drift artifact is present without any 2010/2011 in the same directory,
+    the skill refuses with a "wrong recovery flow" message (operator should
+    run ``bootstrap --refresh`` first). If 2012 + 2010/2011 both present, the
+    skill surfaces both and proceeds on the 2010/2011 work."""
 
     unknown_schema_paths: list[Path] = field(default_factory=list)
     """Artifact files whose ``schemaVersion`` is not in
     :data:`SUPPORTED_SCHEMA_VERSIONS`. Skill refuses to draft when
-    non-empty per §9.5.8 forward-compat rule on major versions."""
+    non-empty as a forward-compat rule on major versions."""
 
     malformed_paths: list[Path] = field(default_factory=list)
     """Artifact files that failed JSON parse or Pydantic validation.
     Surface to the operator with the path so they can inspect."""
 
     cluster_dispatch_skipped_paths: list[Path] = field(default_factory=list)
-    """Phase 4.1 / D3 — artifact files the reader recognised as
-    cluster-dispatch failures (``AIDPF-2048`` / ``AIDPF-2049``) and
-    deliberately did NOT parse into skill-actionable state. These
-    failures are operator-actionable (re-auth, fix cluster config,
-    retry) and not skill-recoverable; the skill refuses to draft when
-    this list is non-empty, with reason
-    ``cluster_dispatch_failure_not_skill_recoverable`` and a hand-off
-    to the bootstrap diagnostic.
+    """Artifact files the reader recognised as cluster-dispatch failures
+    (``AIDPF-2048`` / ``AIDPF-2049``) and deliberately did NOT parse into
+    skill-actionable state. These failures are operator-actionable (re-auth,
+    fix cluster config, retry) and not skill-recoverable; the skill refuses to
+    draft when this list is non-empty, with reason
+    ``cluster_dispatch_failure_not_skill_recoverable`` and a hand-off to the
+    bootstrap diagnostic.
 
     Distinct from ``malformed_paths`` — these files are well-formed and
     semantically valid; they're just outside the skill's scope. Keeping
@@ -133,9 +127,9 @@ class DiagnosticReadResult:
     @property
     def has_cluster_dispatch_failures(self) -> bool:
         """``True`` iff the run dir carries any ``AIDPF-2048`` or
-        ``AIDPF-2049`` artifact. Phase 4.1 / D3 — skill refuses to
-        draft when this is set; cluster-dispatch failures are
-        operator-actionable and outside the skill's scope."""
+        ``AIDPF-2049`` artifact. Skill refuses to draft when this is set;
+        cluster-dispatch failures are operator-actionable and outside the
+        skill's scope."""
         return bool(self.cluster_dispatch_skipped_paths)
 
     @property
@@ -154,8 +148,7 @@ class DiagnosticReadResult:
 
     @property
     def has_drift_only(self) -> bool:
-        """Phase 3c — drift artifact present BUT no variation-point
-        failures to act on.
+        """Drift artifact present BUT no variation-point failures to act on.
 
         Drift artifacts are produced by ``run``-time preflight; the
         recovery is ``bootstrap --refresh``, not a skill-drafted
@@ -171,10 +164,10 @@ class DiagnosticReadResult:
     def can_proceed(self) -> bool:
         """``True`` iff the skill should proceed to the propose phase.
 
-        Phase 3c addition: drift-only directories refuse (operator
-        should run ``bootstrap --refresh`` first). Drift +
-        2010/2011 in the same directory proceeds on the 2010/2011
-        work; the drift artifact is surfaced as context.
+        Drift-only directories refuse (operator should run
+        ``bootstrap --refresh`` first). Drift + 2010/2011 in the same
+        directory proceeds on the 2010/2011 work; the drift artifact is
+        surfaced as context.
         """
         return (
             (bool(self.variation_failures) or bool(self.source_column_failures))
@@ -235,9 +228,8 @@ def read_run(
             continue
 
         error_code = payload.get("errorCode")
-        # Phase 4.1 / D3 — cluster-dispatch artifacts get recognised
-        # but NOT parsed into skill state. Operator-actionable, not
-        # skill-recoverable.
+        # Cluster-dispatch artifacts get recognised but NOT parsed into skill
+        # state. Operator-actionable, not skill-recoverable.
         if error_code in _CLUSTER_DISPATCH_INFRASTRUCTURE_CODES:
             cluster_dispatch_skipped_paths.append(artifact_path)
             continue
@@ -253,9 +245,9 @@ def read_run(
                     VariationPointDiagnosticV1.model_validate(payload)
                 )
             elif error_code == AIDPF_2012_SCHEMA_DRIFT_DETECTED:
-                # Phase 3c — runtime drift artifact. Surfaced to the
-                # operator but doesn't make the skill proceed: drift
-                # recovery is `bootstrap --refresh`, not a skill draft.
+                # Runtime drift artifact. Surfaced to the operator but doesn't
+                # make the skill proceed: drift recovery is `bootstrap
+                # --refresh`, not a skill draft.
                 schema_drift_failure = SchemaDriftDiagnosticV1.model_validate(payload)
             elif error_code == AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING:
                 # A bronze node wants a column the live PVO lacks — almost

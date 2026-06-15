@@ -5,8 +5,8 @@ implementation:
   datastore: FscmTopModelAM.ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO
   pvo_id: FscmTopModelAM.ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO
   # PVO lives under ScmExtractAM in the AM-hierarchy but BICC publishes
-  # under "Financial" on saasfademo1 (P1.5α-fix18). Tenant-dependent —
-  # set bundle.fusion.schemaOverrides.po_receipts to override.
+  # under "Financial" in some tenants. Tenant-dependent; set
+  # bundle.fusion.schemaOverrides.po_receipts to override.
   biccSchema: Financial
   schemaOverride: null
   incrementalCapable: true

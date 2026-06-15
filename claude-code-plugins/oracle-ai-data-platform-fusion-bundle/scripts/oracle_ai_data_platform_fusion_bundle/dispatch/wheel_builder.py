@@ -1,4 +1,4 @@
-"""Content-hash wheel cache (P1.5ε §Step 3).
+"""Content-hash wheel cache.
 
 Iterating on a bug fix shouldn't pay the 30–60s ``python -m build`` tax on
 every ``aidp-fusion-bundle run`` invocation. The cache key is a SHA256 over
@@ -11,8 +11,8 @@ Cache layout::
     ~/.aidp/wheels/
       oracle_ai_data_platform_fusion_bundle-<hash16>.whl
 
-No automatic garbage collection — the operator nukes the directory by hand
-if it grows too large. Tracked as a P3.x polish item.
+No automatic garbage collection; the operator can remove the directory by hand
+if it grows too large.
 """
 
 from __future__ import annotations

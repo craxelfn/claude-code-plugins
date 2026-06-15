@@ -1,11 +1,10 @@
 """Terminal prompt for multi-match variation-point resolutions.
 
 A :class:`MultiMatch` walker outcome means two or more candidates exist
-on the tenant's bronze; the operator picks the right one. The §9.5.4
-algorithm requires this be an *interactive* decision (unless
-``--non-interactive`` is set, in which case the prompt auto-picks the
-first candidate deterministically and records the weakest approval
-evidence per §9.5.9).
+on the tenant's bronze; the operator picks the right one. This is an
+*interactive* decision unless ``--non-interactive`` is set, in which case the
+prompt auto-picks the first candidate deterministically and records the weakest
+approval evidence.
 
 Output goes through Rich for consistency with the rest of the CLI's
 terminal surface; input goes through stdlib ``input()`` so click's test

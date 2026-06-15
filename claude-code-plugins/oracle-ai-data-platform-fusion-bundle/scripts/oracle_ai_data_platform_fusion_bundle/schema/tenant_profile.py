@@ -8,8 +8,8 @@ for drift detection.
 
 The profile YAML lives **beside** ``bundle.yaml`` at
 ``<bundle.yaml.parent>/profiles/<name>.yaml`` — NEVER inside the pack
-directory (PLAN §9.5.7). One file per tenant; the active one is named
-in ``bundle.contentPack.profile``.
+directory. One file per tenant; the active one is named in
+``bundle.contentPack.profile``.
 
 Bootstrap-time profile *creation* performs interactive variation-point
 resolution and evidence snapshotting. At runtime, the orchestrator
@@ -18,12 +18,8 @@ loads the file and threads the resolved values into the SQL renderer.
 This layer supersedes runtime detection by pinning column-alias and
 semantic-variant choices at bootstrap time.
 
-References:
-* PLAN §9.5 (variation points)
-* PLAN §9.5.4 (bootstrap-time resolution)
-* PLAN §9.5.7 (profile lives beside bundle, not inside pack)
-* ADR-0014 (variation-point resolution replaces runtime detection)
-* ADR-0018 (filesystem profile storage; tenant evidence beside bundle)
+Variation-point choices are resolved at bootstrap, stored beside the bundle,
+and reused deterministically at runtime.
 """
 
 from __future__ import annotations
@@ -93,9 +89,8 @@ class TenantProfile(BaseModel):
     looks up ``profile.calendar.fiscal_start_month`` via Pydantic alias
     normalisation).
 
-    PLAN §11.9 includes ``profile_hash`` in the plan-hash for the
-    content-pack backend — any change to this file's contents changes
-    the hash and blocks unsafe resume.
+    ``profile_hash`` is included in the content-pack plan-hash; any change to
+    this file's contents changes the hash and blocks unsafe resume.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -147,10 +142,9 @@ class TenantProfile(BaseModel):
 def resolve_profile_path(bundle_path: Path, profile_name: str) -> Path:
     """Return the expected on-disk path for a named tenant profile.
 
-    Per PLAN §9.5.7, profiles live at
-    ``<bundle.yaml.parent>/profiles/<profile_name>.yaml`` — never inside
-    the pack directory. This helper does NOT check the file's existence;
-    callers raise ``AIDPF-1033`` if the file is missing.
+    Profiles live at ``<bundle.yaml.parent>/profiles/<profile_name>.yaml`` —
+    never inside the pack directory. This helper does NOT check the file's
+    existence; callers raise ``AIDPF-1033`` if the file is missing.
 
     Args:
         bundle_path: path to the ``bundle.yaml`` file (typically the
@@ -204,8 +198,8 @@ def load_tenant_profile_from_string(yaml_text: str, *, source: str = "<string>")
     """Load a tenant profile from a YAML string.
 
     Used by the cluster-side notebook bootstrap, which receives the
-    profile YAML as an inlined base64-encoded JSON token (see Step 12c
-    notebook builder). The cluster cannot ``read_text`` from the
+    profile YAML as an inlined base64-encoded JSON token. The cluster cannot
+    ``read_text`` from the
     customer's filesystem, so this string-shaped variant is the
     cluster-safe entry point.
 
@@ -262,7 +256,7 @@ def load_tenant_profile_from_string(yaml_text: str, *, source: str = "<string>")
 
 
 # ---------------------------------------------------------------------------
-# Profile hashing — feeds into the content-pack plan-hash (PLAN §11.9)
+# Profile hashing — feeds into the content-pack plan-hash
 # ---------------------------------------------------------------------------
 
 
@@ -271,8 +265,7 @@ def compute_profile_hash(profile: TenantProfile) -> str:
 
     Used by ``compute_content_pack_plan_hash`` so any change to the
     profile (a renamed column resolution, a new calendar start date, a
-    swapped semantic variant) changes the plan-hash and blocks unsafe
-    resume per PLAN §11.9.
+    swapped semantic variant) changes the plan-hash and blocks unsafe resume.
 
     Cosmetic changes to the YAML file (whitespace, key ordering, comments)
     do NOT change the hash because Pydantic round-trips the model and

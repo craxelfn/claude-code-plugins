@@ -1,12 +1,10 @@
 """Skill shim — re-exports AidpRestClient from the plugin source.
 
 The canonical AidpRestClient lives at
-``scripts/oracle_ai_data_platform_fusion_bundle/dispatch/rest_client.py``
-(P1.5ε §Step 2). This shim adds the plugin checkout's ``scripts/``
-directory to ``sys.path`` BEFORE importing, because skill scripts
-(``fusion-tc26-run/dispatch.py``, ``fusion-tc26-run/tc27_dispatch.py``)
-run directly from a checkout — the plugin is not pip-installed when they
-import this module.
+``scripts/oracle_ai_data_platform_fusion_bundle/dispatch/rest_client.py``.
+This shim adds the plugin checkout's ``scripts/`` directory to ``sys.path``
+BEFORE importing, because skill scripts run directly from a checkout — the
+plugin is not pip-installed when they import this module.
 
 Path resolution: ``__file__`` lives at
 ``<checkout>/skills/aidp-rest/client.py``. ``parents[2]`` is the

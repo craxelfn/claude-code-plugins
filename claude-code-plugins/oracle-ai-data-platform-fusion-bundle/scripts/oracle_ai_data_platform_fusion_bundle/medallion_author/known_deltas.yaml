@@ -2,8 +2,7 @@ schemaVersion: 1
 
 # Known Fusion-release column deltas the medallion-author skill uses
 # to rank candidate proposals. Hand-seeded for v0.1.0; grows over time
-# as new variants surface (each new entry bumps SKILL_VERSION per
-# PLAN §9.5.8).
+# as new variants surface (each new entry bumps SKILL_VERSION).
 #
 # Format (per entry):
 #

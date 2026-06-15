@@ -5,8 +5,8 @@ Catalog is **annotated**: each entry records whether the PVO is a dedicated
 ``OTBI`` reporting PVO (NOT recommended for bulk). The orchestrator refuses
 ``OTBI`` entries with a clear warning unless the user explicitly opts in.
 
-PVO names that ship with a ✅ are confirmed verbatim from the published Oracle
-material:
+PVO names marked ``confirmed=True`` are confirmed verbatim from published
+Oracle material or live catalog probes:
 - pdf1 Step 3 code block (BICC blog)
 - pdf2 p2 default values (ateam blog)
 - the official Oracle AIDP sample notebook
@@ -32,7 +32,7 @@ class PvoKind(Enum):
     """OTBI reporting PVO. NOT recommended for bulk extraction; orchestrator refuses by default."""
 
     SAAS_BATCH = "SaasBatch"
-    """saas-batch REST extractor (NOT BICC). v2 deliverable; no concrete extractor ships yet (BACKLOG P2.11) — packs cannot wire a bronze node against this kind today."""
+    """saas-batch REST extractor (NOT BICC). No concrete extractor ships yet, so packs cannot wire a bronze node against this kind today."""
 
 
 # Single-segment SQL-identifier regex — matches paths.py's _SQL_IDENTIFIER_RE.
@@ -76,7 +76,7 @@ class PvoEntry:
     """Whether ``fusion.initial.extract-date`` is meaningful for this dataset."""
 
     natural_key: "str | tuple[str, ...]" = ""
-    """Natural-key column(s) used by P1.17 bronze MERGE for upsert semantics.
+    """Natural-key column(s) used by bronze MERGE for upsert semantics.
 
     Single-column keys are stored as a bare string (e.g. ``"SEGMENT1"``);
     composite keys as a tuple of column names. The MERGE ``ON`` predicate
@@ -88,10 +88,9 @@ class PvoEntry:
     The orchestrator's bronze MERGE path raises a clear error rather than
     silently dispatching with an empty key.
 
-    Source: P1.17 A1 inventory — verified against shipped builders that
-    read the bronze table OR against live BICC catalog probes. ⚠️
-    inferred entries (e.g. ``ap_payments`` composite) must be confirmed
-    via ``catalog probe`` before the bronze MERGE is enabled for that PVO.
+    Keys are verified against shipped builders that read the bronze table or
+    against live BICC catalog probes. Inferred entries must be confirmed via
+    ``catalog probe`` before bronze MERGE is enabled for that PVO.
     """
 
     extract_columns: list[str] = field(default_factory=list)
@@ -112,59 +111,58 @@ class PvoEntry:
 
 
 # ---------------------------------------------------------------------------
-# v1 (ERP-Finance) catalog
+# ERP-Finance catalog
 # ---------------------------------------------------------------------------
 
 # Confirmed PVOs (from blogs / official sample / connector skill):
 _SUPPLIER_EXTRACT = PvoEntry(
     id="erp_suppliers",
-    # NB: pdf1 wrote `FscmTopModelAM.SupplierExtractPVO` but that's abbreviated;
-    # the live catalog requires the full AM-hierarchy. Verified against saasfademo1
-    # 2026-04-30 — returned 229 rows / 143 columns. See
-    # tests/live/TC1_TC7_results.md and feedback_pdf1_pvo_names_abbreviated.md.
+    # Public examples sometimes abbreviate the datastore; BICC requires the
+    # full AM hierarchy for this extract.
     datastore="FscmTopModelAM.PrcExtractAM.PozBiccExtractAM.SupplierExtractPVO",
     schema="Financial",
     bronze_table_name="erp_suppliers",
-    description="Supplier master — live-validated 2026-04-30 against saasfademo1 (229 rows).",
+    description="Supplier master — validated BICC ExtractPVO.",
     confirmed=True,
-    # P1.17 natural key — confirmed via dim_supplier.py:107 (`SEGMENT1 AS supplier_number`).
+    # Natural key used by dim_supplier as supplier_number.
     natural_key="SEGMENT1",
 )
 
 _PRC_EXTRACT_PO = PvoEntry(
     id="po_orders",
-    # Verified live 2026-04-30 — pdf2's bare `FscmTopModelAM.PrcExtractPO` was abbreviated;
-    # full path required.
+    # Public examples may abbreviate this name; the full AM hierarchy is
+    # required by BICC.
     datastore="FscmTopModelAM.PrcExtractAM.PoBiccExtractAM.PurchasingDocumentHeaderExtractPVO",
     schema="Financial",
     bronze_table_name="po_orders",
-    description="Purchase order headers — verified live 2026-04-30 against saasfademo1 BICC catalog.",
+    description="Purchase order headers — validated BICC ExtractPVO.",
     confirmed=True,
-    # P1.17 natural key — inferred from PurchasingDocumentHeaderExtractPVO naming
-    # convention; verify via `catalog probe` before enabling bronze MERGE.
+    # Inferred from PurchasingDocumentHeaderExtractPVO naming convention;
+    # verify via `catalog probe` before enabling bronze MERGE.
     natural_key="PoHeadersAllPoHeaderId",
 )
 
 _ITEM_EXTRACT = PvoEntry(
     id="scm_items",
-    # Verified live 2026-04-30 — pdf2's bare `ItemExtractPVO` was abbreviated; full AM-hierarchy required.
+    # Public examples may abbreviate this name; the full AM hierarchy is
+    # required by BICC.
     datastore="FscmTopModelAM.ScmExtractAM.EgpBiccExtractAM.ItemExtractPVO",
-    # NB: BICC offering schema is "Financial" on saasfademo1 (P1.5α-fix18, 2026-05-21).
-    # The PVO lives under ScmExtractAM in the AM hierarchy, but the BICC offering
-    # publishes it under "Financial" on this tenant. Other tenants may publish
-    # ScmExtractAM PVOs under a separate "SCM" offering — treat as tenant-dependent.
+    # The PVO lives under ScmExtractAM in the AM hierarchy, but some tenants
+    # publish it under the Financial offering. Use schemaOverrides when a
+    # tenant exposes it under a different offering.
     schema="Financial",
     bronze_table_name="scm_items",
-    description="Item master — verified live 2026-04-30 against saasfademo1 BICC catalog.",
+    description="Item master — validated BICC ExtractPVO.",
     confirmed=True,
     incremental_capable=True,
-    # P1.17 natural key — inferred composite (item × inventory org grain);
-    # verify via `catalog probe` before enabling bronze MERGE.
+    # Inferred composite key at item x inventory-org grain; verify via
+    # `catalog probe` before enabling bronze MERGE.
     natural_key=("EgpSystemItemsBInventoryItemId", "EgpSystemItemsBOrganizationId"),
 )
 
-# Verified live 2026-04-30 — all datastore names confirmed against /biacm/rest/meta/datastores
-# on saasfademo1 (Casey.Brown / BIAdmin role). See feedback_pdf1_pvo_names_abbreviated.md.
+# Datastore names are curated against Oracle samples and live BICC catalog
+# probes. Abbreviated names from public examples are not always accepted by
+# BICC; prefer the full AM hierarchy stored here.
 
 _GL_JOURNAL_LINES = PvoEntry(
     id="gl_journal_lines",
@@ -173,7 +171,7 @@ _GL_JOURNAL_LINES = PvoEntry(
     bronze_table_name="gl_journal_headers",
     description="GL journal headers — verified-live PVO name. (Use JournalLineExtractPVO under FinGlJrnlEntriesAM for line-level granularity.)",
     confirmed=True,
-    # P1.17 natural key — inferred (header-level grain); verify via `catalog probe`.
+    # Inferred header-level key; verify via `catalog probe`.
     natural_key="GlJeHeadersJeHeaderId",
 )
 
@@ -185,11 +183,8 @@ _GL_PERIOD_BALANCES = PvoEntry(
     description="GL period balances — verified-live PVO name (monthly snapshot).",
     incremental_capable=False,
     confirmed=True,
-    # P1.17 natural key — confirmed via TC23 (gl_balance.py module docstring
-    # lines 4-5; TC23 evidence rows 136-151). 7-column composite.
-    # BalanceTranslatedFlag is NULL on saasfademo1 — see LIMITS.md P1.17-L8
-    # for NULL-component MERGE caveat; use NULL-safe `<=>` in the bronze
-    # MERGE ON predicate for this PVO when MERGE goes live.
+    # Seven-column composite key. Some tenants contain NULL translated flags,
+    # so bronze MERGE predicates for this PVO must use NULL-safe comparison.
     natural_key=(
         "BalanceLedgerId",
         "BalanceCodeCombinationId",
@@ -209,8 +204,7 @@ _GL_COA = PvoEntry(
     description="Chart of accounts (code combinations) — verified-live PVO name. Source for dim_account.",
     incremental_capable=False,
     confirmed=True,
-    # P1.17 natural key — confirmed via dim_account.py:247 (reads
-    # `CodeCombinationCodeCombinationId AS account_id`).
+    # Natural key used by dim_account as account_id.
     natural_key="CodeCombinationCodeCombinationId",
 )
 
@@ -222,7 +216,7 @@ _AR_INVOICES = PvoEntry(
     bronze_table_name="ar_invoices",
     description="AR invoices (Fusion AR Transaction Headers) — verified-live PVO name.",
     confirmed=True,
-    # P1.17 natural key — inferred; verify via `catalog probe`.
+    # Inferred key; verify via `catalog probe`.
     natural_key="RaCustTrxAllCustomerTrxId",
 )
 
@@ -233,21 +227,20 @@ _AR_RECEIPTS = PvoEntry(
     bronze_table_name="ar_receipts",
     description="AR receipts — verified-live PVO name.",
     confirmed=True,
-    # P1.17 natural key — inferred; verify via `catalog probe`.
+    # Inferred key; verify via `catalog probe`.
     natural_key="ArCashReceiptsAllCashReceiptId",
 )
 
 _AP_INVOICES = PvoEntry(
     id="ap_invoices",
-    # Verified live 2026-04-30 (49,985 rows extracted in TC8).
+    # Validated against live BICC catalog probes.
     datastore="FscmTopModelAM.FinExtractAM.ApBiccExtractAM.InvoiceHeaderExtractPVO",
     schema="Financial",
     bronze_table_name="ap_invoices",
-    description="AP invoices — live-validated 2026-04-30 (49,985 rows from saasfademo1).",
+    description="AP invoices — validated BICC ExtractPVO.",
     confirmed=True,
-    # P1.17 natural key — inferred from ApInvoices* prefix convention
-    # (matches supplier_spend.py + ap_aging.py column reads); verify via
-    # `catalog probe`.
+    # Inferred from ApInvoices* prefix convention and shipped mart column
+    # reads; verify via `catalog probe`.
     natural_key="ApInvoicesInvoiceId",
 )
 
@@ -258,10 +251,8 @@ _AP_PAYMENTS = PvoEntry(
     bronze_table_name="ap_payments",
     description="AP payments (Payment History Distribution) — verified-live PVO name.",
     confirmed=True,
-    # P1.17 natural key — inferred composite (payment × distribution
-    # grain); ⚠️ high-risk inferred entry — verify via `catalog probe`
-    # before bronze MERGE goes live for this PVO. Until confirmed, the
-    # bronze write path stays on seed-shape regardless of mode.
+    # Inferred composite at payment x distribution grain; verify via
+    # `catalog probe` before enabling bronze MERGE for this PVO.
     natural_key=(
         "ApPayHistDistInvoicePaymentId",
         "ApPayHistDistPaymentHistDistId",
@@ -281,34 +272,33 @@ _AP_AGING_PERIODS = PvoEntry(
     description="AP aging period definitions — bucket configs only; aging gold mart computed downstream from ap_invoices + ap_payments.",
     incremental_capable=False,
     confirmed=True,
-    # P1.17 natural key — inferred; verify via `catalog probe`.
+    # Inferred key; verify via `catalog probe`.
     natural_key="AgingPeriodHeaderAgingPeriodId",
 )
 
 _PO_RECEIPTS = PvoEntry(
     id="po_receipts",
     datastore="FscmTopModelAM.ScmExtractAM.RcvBiccExtractAM.ReceivingReceiptTransactionExtractPVO",
-    # NB: BICC offering schema is "Financial" on saasfademo1 (P1.5α-fix18, 2026-05-21 —
-    # 564,752 rows / 459 cols extracted successfully). Originally declared schema="SCM"
-    # by AM-hierarchy heuristic; live TC26 surfaced DATA_ACCESS_LAYER_0031 because
-    # BICC on this tenant only publishes a "Financial" offering. Tenant-dependent.
+    # The PVO lives under ScmExtractAM in the AM hierarchy, but some tenants
+    # publish it under the Financial offering. Use schemaOverrides when a
+    # tenant exposes it under SCM.
     schema="Financial",
     bronze_table_name="po_receipts",
     description="PO receipts (Receiving Receipt Transactions) — verified-live PVO name. Lives under ScmExtractAM in the AM hierarchy; BICC offering schema is tenant-dependent (see schema field comment).",
     confirmed=True,
-    # P1.17 natural key — inferred; verify via `catalog probe`.
+    # Inferred key; verify via `catalog probe`.
     natural_key="RcvTransactionsTransactionId",
 )
 
-# v2 deliverable — uses saas-batch REST path, NOT BICC. The kind=SAAS_BATCH
-# tag marks this entry as NOT eligible for a content-pack bronze node today;
-# a concrete saas-batch extractor ships under BACKLOG P2.11.
+# Uses the saas-batch REST path, not BICC. The kind=SAAS_BATCH tag marks this
+# entry as not eligible for a content-pack bronze node until a concrete
+# saas-batch extractor ships.
 _HCM_WORKER_ASSIGNMENTS = PvoEntry(
     id="hcm_worker_assignments",
     datastore="workerAssignmentExtracts",  # confirmed in pdf2 p4 (saas-batch)
     schema="HCM",
     bronze_table_name="hcm_worker_assignments",
-    description="HCM worker assignments — saas-batch REST extractor (pdf2 p4). v2 deliverable.",
+    description="HCM worker assignments — saas-batch REST extractor.",
     kind=PvoKind.SAAS_BATCH,
     confirmed=True,
 )
@@ -317,7 +307,7 @@ _HCM_WORKER_ASSIGNMENTS = PvoEntry(
 CATALOG: Final[dict[str, PvoEntry]] = {
     e.id: e
     for e in (
-        # ✅ All confirmed against live BICC catalog 2026-04-30 (saasfademo1)
+        # Curated entries with validated datastore names.
         _SUPPLIER_EXTRACT,
         _PRC_EXTRACT_PO,
         _ITEM_EXTRACT,

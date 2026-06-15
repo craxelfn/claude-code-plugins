@@ -1,12 +1,10 @@
-"""Diagnostic artifact schema (PLAN §9.5.4.1).
+"""Diagnostic artifact schema.
 
 Bootstrap writes one file per failing concern under
 ``<workdir>/.aidp/diagnostics/<run_id>/`` when mechanical resolution
-cannot proceed. Feature #3 (``v2-phase-3b-medallion-author-skill``)
-consumes these files to draft overlays; other future tools (custom
-recovery scripts, Web UIs, alternate LLMs) can consume the same
-contract because Pydantic models + a documented schema version are
-the public surface.
+cannot proceed. ``medallion-author`` consumes these files to draft overlays;
+other tools can consume the same contract because Pydantic models plus a
+documented schema version are the public surface.
 
 Path-naming uses a per-failure discriminator so a single bootstrap run
 can produce multiple no-match artifacts without collision:
@@ -22,15 +20,13 @@ Bootstrap collects ALL failures across the walk loop before exiting
 (no early-exit on first failure); skill reads the whole directory to
 assemble full recovery context.
 
-**Out of scope**: ``AIDPF-2012`` / ``SchemaDriftFailure``. Runtime
-preflight (feature #4) is the only emitter of 2012, and it owns its
-own diagnostic-artifact model in that feature's PR. Bootstrap's
-``--refresh`` resolves drift, emitting 2010 / 2011 only when re-walk
-fails.
+Bootstrap's ``--refresh`` resolves drift, emitting 2010 / 2011 only when
+re-walk fails. Runtime preflight emits ``AIDPF-2012`` for schema drift using
+the same diagnostic directory.
 
-Schema-version forward-compatibility per PLAN §9.5.8: consumers ignore
-unknown top-level fields; a future schemaVersion=2 model adds fields
-without breaking v1 consumers.
+Schema-version forward compatibility: consumers ignore unknown top-level
+fields; a future schemaVersion=2 model can add fields without breaking v1
+consumers.
 """
 
 from __future__ import annotations
@@ -47,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
-# Error codes (PLAN §25)
+# Error codes
 # ---------------------------------------------------------------------------
 
 AIDPF_1020_OPERATOR_IDENTITY_UNRESOLVED = "AIDPF-1020"
@@ -60,7 +56,7 @@ AIDPF_2011_SEMANTIC_VARIANT_UNRESOLVED = "AIDPF-2011"
 """``required: true`` ``semanticVariants.<name>`` has no matching detect clause on the tenant's bronze."""
 
 AIDPF_2012_SCHEMA_DRIFT_DETECTED = "AIDPF-2012"
-"""Bronze schema fingerprint drift detected at runtime preflight (Phase 3c).
+"""Bronze schema fingerprint drift detected at runtime preflight.
 Live bronze fingerprint differs from the value pinned in the tenant profile;
 the run blocks until the operator runs ``aidp-fusion-bundle bootstrap --refresh``."""
 
@@ -73,19 +69,19 @@ missing column(s) + the live PVO column list (name+type). Consumed by
 present-but-wrong-type column is caught instead by AIDPF-4070 post-write."""
 
 AIDPF_2047_CLUSTER_BOOTSTRAP_PREDISPATCH = "AIDPF-2047"
-"""Phase 4.1 / D3 — cluster-mode bootstrap pre-dispatch readiness failure.
+"""Cluster-mode bootstrap pre-dispatch readiness failure.
 CLI-level only (no artifact). Sub-reason in the message: ``missing_config`` /
 ``aidp_rest_probe_failed`` / ``conflicting_flags``. Operator fixes the
 CLI / config and reruns; not a skill-recoverable condition."""
 
 AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED = "AIDPF-2048"
-"""Phase 4.1 / D3 — cluster-mode probe dispatch failed before producing
-a valid marker. Diagnostic at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json``
-carries the failed step + cause; operator-actionable (re-auth, fix
-cluster, retry); NOT consumed by ``medallion-author`` skill."""
+"""Cluster-mode probe dispatch failed before producing a valid marker.
+Diagnostic at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json`` carries
+the failed step and cause; operator-actionable (re-auth, fix cluster, retry);
+NOT consumed by ``medallion-author`` skill."""
 
 AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID = "AIDPF-2049"
-"""Phase 4.1 / D3 — cluster ran but the laptop couldn't use the marker
+"""Cluster ran but the laptop could not use the marker
 (envelope missing, cluster reported error, marker-version mismatch,
 validation failure). Diagnostic at ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2049.json``
 + companion ``cluster_stdout.log`` carries the full cluster output.
@@ -172,8 +168,8 @@ class IdentityProbeFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     probed_sources: list[str] = Field(alias="probedSources")
-    """Identity sources probed in §9.5.9 precedence order
-    (``"--operator"``, ``"AIDP_OPERATOR"``, ``"USER"``)."""
+    """Identity sources probed in precedence order:
+    ``"--operator"``, ``"AIDP_OPERATOR"``, ``"USER"``."""
 
     non_empty_sources: list[str] = Field(alias="nonEmptySources", default_factory=list)
     """Subset of ``probed_sources`` that were set to a non-empty / non-whitespace
@@ -252,17 +248,16 @@ class BronzeSourceColumnMissingV1(DiagnosticArtifactBase):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3c — schema-drift artifact (AIDPF-2012)
+# Schema-drift artifact (AIDPF-2012)
 # ---------------------------------------------------------------------------
 
 
 class ColumnTypeChange(BaseModel):
     """One observed column whose type changed since pin time.
 
-    Phase 3c v0.3 does NOT populate this — it requires a separate
-    pinned-schema snapshot file (deferred to
-    ``v2-phase-3d-pinned-schema-diff``). The model ships in v0.3 so
-    feature #3d can extend the artifact without a schemaVersion bump.
+    Populated only when a pinned schema snapshot is available. The model exists
+    in schemaVersion=1 so richer drift artifacts can be emitted without a
+    schema-version bump.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -275,10 +270,9 @@ class ColumnTypeChange(BaseModel):
 class DatasetSchemaDelta(BaseModel):
     """Per-dataset description of what changed since pin time.
 
-    All three lists are optional / default-empty in Phase 3c v0.3 —
-    only ``affectedVariationPoints`` is computable from the pinned
-    profile + live observation. ``datasetDeltas`` lands when the
-    follow-up pinned-schema-snapshot feature ships.
+    All three lists are optional/default-empty. When no pinned schema snapshot
+    is present, only ``affectedVariationPoints`` is computable from the pinned
+    profile and live observation.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -326,26 +320,23 @@ class SchemaDriftFailure(BaseModel):
     dataset_deltas: list[DatasetSchemaDelta] = Field(
         default_factory=list, alias="datasetDeltas"
     )
-    """Per-dataset column-level deltas. Empty in Phase 3c v0.3 — the
-    fingerprint hash is one-way; reconstructing per-column diff needs a
-    separate pinned-schema snapshot deferred to
-    ``v2-phase-3d-pinned-schema-diff``."""
+    """Per-dataset column-level deltas. Empty when no pinned schema snapshot is
+    available because the fingerprint hash is one-way."""
 
     affected_variation_points: list[AffectedVariationPoint] = Field(
         default_factory=list, alias="affectedVariationPoints"
     )
     """Per-pinned-VP impact. Computable from pinned profile + live
-    observation; populated unconditionally on drift. Skill (Phase 3b)
+    observation; populated unconditionally on drift. ``medallion-author``
     consumes this to decide which VPs need re-resolution."""
 
 
 class ClusterDispatchFailure(BaseModel):
-    """Phase 4.1 / D3 — payload of ``AIDPF-2048`` (cluster dispatch failed).
+    """Payload of ``AIDPF-2048`` cluster dispatch failure.
 
     Captures which step of the dispatch chain raised + the typed
     exception's cause + the cluster/workspace coords for operator
-    triage. Operator-actionable, not skill-actionable — see plan.md
-    Step 8 scope note.
+    triage. Operator-actionable, not skill-actionable.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -401,7 +392,7 @@ class ClusterDispatchDiagnosticV1(DiagnosticArtifactBase):
 
 
 class ClusterMarkerFailure(BaseModel):
-    """Phase 4.1 / D3 — payload of ``AIDPF-2049`` (cluster marker invalid)."""
+    """Payload of ``AIDPF-2049`` cluster marker invalid failure."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -469,8 +460,7 @@ class ClusterMarkerDiagnosticV1(DiagnosticArtifactBase):
 
 
 class SchemaDriftDiagnosticV1(DiagnosticArtifactBase):
-    """Diagnostic artifact for AIDPF-2012 schema-fingerprint drift
-    (Phase 3c).
+    """Diagnostic artifact for AIDPF-2012 schema-fingerprint drift.
 
     One file per drifted run at
     ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json`` — no
@@ -613,7 +603,7 @@ def write_schema_drift_diagnostic(
     run_id: str,
     artifact: SchemaDriftDiagnosticV1,
 ) -> Path:
-    """Write a Phase 3c schema-drift diagnostic artifact (AIDPF-2012).
+    """Write an AIDPF-2012 schema-drift diagnostic artifact.
 
     Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2012.json``.
     Only one ``AIDPF-2012`` artifact per run (no discriminator); drift
@@ -667,8 +657,7 @@ def write_cluster_dispatch_diagnostic(
     run_id: str,
     artifact: ClusterDispatchDiagnosticV1,
 ) -> Path:
-    """Write a Phase 4.1 cluster-dispatch diagnostic artifact
-    (``AIDPF-2048``).
+    """Write an AIDPF-2048 cluster-dispatch diagnostic artifact.
 
     Path = ``<workdir>/.aidp/diagnostics/<run_id>/AIDPF-2048.json``.
     Mutually exclusive with ``AIDPF-2049.json`` in the same run
@@ -697,8 +686,9 @@ def write_cluster_marker_diagnostic(
     *,
     stdout_full: str,
 ) -> Path:
-    """Write a Phase 4.1 cluster-marker diagnostic artifact
-    (``AIDPF-2049``) PLUS the companion ``cluster_stdout.log`` file.
+    """Write an AIDPF-2049 cluster-marker diagnostic artifact.
+
+    Also writes the companion ``cluster_stdout.log`` file.
 
     Two files written in one call so the operator inspecting
     ``AIDPF-2049.json`` always has the matching log next to it:

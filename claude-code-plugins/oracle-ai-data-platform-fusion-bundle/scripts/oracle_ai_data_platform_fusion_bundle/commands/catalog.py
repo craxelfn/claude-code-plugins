@@ -175,7 +175,7 @@ def _extract_datastore_names(body: Any) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# probe-pvo --emit-pack-yaml (Phase 9 Step 10)
+# probe-pvo --emit-pack-yaml
 # ---------------------------------------------------------------------------
 
 

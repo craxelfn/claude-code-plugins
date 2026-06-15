@@ -1,4 +1,4 @@
-"""Dispatch-layer error taxonomy (P1.5ε §Step 7 — error codes).
+"""Dispatch-layer error taxonomy.
 
 Stable ``DISPATCH_*`` codes for the operator-facing message format. Each
 class carries one ``code`` class-var; ``__str__`` renders as
@@ -54,8 +54,8 @@ class DispatchWheelBuildError(DispatchError):
 
 class DispatchClusterNotActiveError(DispatchError):
     """Cluster STOPPED with ``auto_start=False`` OR FAILED / CREATING.
-    Currently surfaced through DispatchPreflightError (Phase B check
-    5); reserved for future direct use."""
+    Currently surfaced through DispatchPreflightError; reserved for future
+    direct use."""
 
     code: ClassVar[str] = "DISPATCH_CLUSTER_NOT_ACTIVE"
 
@@ -102,13 +102,13 @@ class DispatchMarkerMissingError(DispatchError):
 
 
 class DispatchMarkerEnvelopeMissing(DispatchError):
-    """Phase 4.1 / D3 — ``parse_marker`` walked every cell + output
-    channel and never found the configured ``MARKER_BEGIN``/``MARKER_END``
-    envelope. Sibling of :class:`DispatchMarkerMissingError` but
-    carries the executed notebook + extracted stdout excerpt so the
-    caller can write the AIDPF-2049 ``cluster_stdout.log`` companion
-    (the existing class is kept for backward compat with the run
-    dispatcher, which doesn't need the payload)."""
+    """``parse_marker`` walked every cell + output channel and never found
+    the configured ``MARKER_BEGIN``/``MARKER_END`` envelope.
+
+    Sibling of :class:`DispatchMarkerMissingError` but carries the executed
+    notebook + extracted stdout excerpt so the caller can write the AIDPF-2049
+    ``cluster_stdout.log`` companion.
+    """
 
     code: ClassVar[str] = "DISPATCH_MARKER_ENVELOPE_MISSING"
 
@@ -125,10 +125,12 @@ class DispatchMarkerEnvelopeMissing(DispatchError):
 
 
 class DispatchMarkerDecodeError(DispatchError):
-    """Phase 4.1 / D3 — envelope was found but base64 / JSON decoding
-    failed. Same attributes as :class:`DispatchMarkerEnvelopeMissing`
-    — the AIDPF-2049 companion log needs the same payload regardless
-    of the precise failure mode."""
+    """Envelope was found but base64 / JSON decoding failed.
+
+    Same attributes as :class:`DispatchMarkerEnvelopeMissing`; the AIDPF-2049
+    companion log needs the same payload regardless of the precise failure
+    mode.
+    """
 
     code: ClassVar[str] = "DISPATCH_MARKER_DECODE"
 
@@ -146,11 +148,9 @@ class DispatchMarkerDecodeError(DispatchError):
 
 class DispatchMarkerDegradedError(DispatchError):
     """Marker delimiters found in the executed notebook but the body
-    failed ``json.loads`` (typically the TC27 trap — AIDP's
-    ``display_data text/plain`` capture strips JSON escapes from
-    failed-step ``repr(exc)``). ``parse_marker`` recovered a run_id via
-    regex fallback so the operator can pass ``--resume <id>`` back to
-    the same CLI without grepping the executed notebook.
+    failed ``json.loads``. ``parse_marker`` recovered a run_id via regex
+    fallback so the operator can pass ``--resume <id>`` back to the same CLI
+    without grepping the executed notebook.
 
     ``recovered_run_id`` is also surfaced in the message so it appears
     in the CLI's red error block.

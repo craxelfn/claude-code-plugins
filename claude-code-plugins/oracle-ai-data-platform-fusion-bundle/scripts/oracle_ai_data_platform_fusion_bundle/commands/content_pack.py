@@ -4,13 +4,9 @@ Wires ``aidp-fusion-bundle content-pack {validate,list,info}`` against the
 loader (orchestrator.content_pack) and validators
 (orchestrator.content_pack_validators).
 
-References:
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §14.2 (content-pack validate)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §14.3 (content-pack list)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §14.3a (content-pack info)
-    * dev/PLAN_plugin_engine_medallion_content_packs.md §14.0 (global flags: --json)
+Operator-facing behavior is documented in ``docs/content_pack_execution.md``.
 
-Exit codes per PLAN §25 convention:
+Exit codes:
     0 — success
     1 — I/O or unexpected error
     2 — validation errors found
@@ -111,14 +107,13 @@ def _make_cli_base_resolver(overlay_root: Path):
 
 
 def _load_full_chain(pack_path: Path) -> "ResolvedPack":
-    """Backwards-compat alias — delegates to the promoted Phase 2 helper.
+    """Backwards-compat alias for the orchestrator-owned loader.
 
-    Phase 2 promoted ``_load_full_chain`` (CLI-private) to
-    :func:`orchestrator.content_pack.load_full_chain` (orchestrator-owned
-    public API) so the generated REST notebook can import it without
-    crossing the dispatch import boundary. This alias preserves the
-    pre-Phase-2 import path for any internal callers and matches the
-    behaviour 1:1 — same callable shape, same default base resolver.
+    The generated REST notebook imports
+    :func:`orchestrator.content_pack.load_full_chain` without crossing the
+    dispatch import boundary. This alias preserves the older CLI-private import
+    path for internal callers and matches the behavior 1:1: same callable
+    shape, same default base resolver.
     """
     from ..orchestrator.content_pack import load_full_chain
     return load_full_chain(pack_path, base_resolver=_make_cli_base_resolver(pack_path))

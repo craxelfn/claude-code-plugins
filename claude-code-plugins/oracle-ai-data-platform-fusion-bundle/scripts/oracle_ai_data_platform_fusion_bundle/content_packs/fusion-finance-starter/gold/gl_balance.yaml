@@ -32,10 +32,9 @@ refresh:
       - actual_flag
       - translated_flag
     reason: |
-      Multi-source node (PLAN §11.10). bronze.gl_period_balances is the
-      primary (fact-side mutations); silver.dim_account is lookup (re-read
-      fresh each cycle). Dimension-only changes propagate on next fact-side
-      rerun; see §11.10 known limitation + ADR-0013.
+      Multi-source node. bronze.gl_period_balances is the primary
+      (fact-side mutations); silver.dim_account is lookup (re-read fresh each
+      cycle). Dimension-only changes propagate on the next fact-side rerun.
 
 # Output schema matches v1 build_gl_balance_sql with DEFAULT_COA_SEGMENT_MAP
 # (transforms/gold/gl_balance.py:225-271) — 24 columns including the

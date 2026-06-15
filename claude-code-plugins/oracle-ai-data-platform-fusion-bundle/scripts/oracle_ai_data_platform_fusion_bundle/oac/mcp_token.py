@@ -5,9 +5,8 @@ Problem this solves
 The OAC MCP connector (``oac-mcp-connect.js``) forwards every real tool call to
 ``<oac-url>/api/mcp``, which requires authentication. With no token it falls back
 to **interactive browser auth**, which cannot complete inside the Claude Code MCP
-client (the client reports ``elicitation=not-supported``) — the connector exits and
-the harness sees ``-32000: Connection closed``. Live-diagnosed 2026-06-13; see
-``tests/live/TC32_oac_mcp_connect_results.md``.
+client (the client reports ``elicitation=not-supported``) — the connector exits
+and the MCP client sees ``-32000: Connection closed``.
 
 The fix is to hand the connector a **token file** (its 2nd positional arg) so it
 authenticates with a Bearer token and never opens a browser. The connector expects:

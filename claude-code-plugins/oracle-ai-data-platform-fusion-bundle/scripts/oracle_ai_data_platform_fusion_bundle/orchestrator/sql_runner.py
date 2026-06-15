@@ -6,8 +6,8 @@ calls ``execute_node`` once per node;
 plan-hash drift gate → strategy dispatch → quality tests → materialised
 schema assertion → atomic state commit) and returns a typed result.
 
-Critical ordering invariant (PLAN §11.9 / Step 11)
---------------------------------------------------
+Critical ordering invariant
+---------------------------
 
 The plan-hash drift gate compares the *expected* content-pack plan-hash
 (which includes ``rendered_sql_hash``) against the last successful
@@ -30,11 +30,8 @@ been rendered with profile params. The flow is therefore:
 11. ONE atomic batch state write via ``write_state_rows_hard``.
 12. Return.
 
-References:
-
-* PLAN §11.9 (atomic cursor commit; plan-hash drift gate)
-* PLAN §11.10 (multi-source primary/lookup)
-* ADR-0017 (no LLM during seed/incremental — render is deterministic)
+Render is deterministic; no LLM or operator interaction is allowed during
+seed/incremental execution.
 """
 
 from __future__ import annotations
@@ -532,16 +529,14 @@ def _build_target_identifier(
 ) -> str:
     """Build the fully-qualified target identifier for a node.
 
-    Phase 9 routes ALL three layers through ``TablePaths.bronze`` /
-    ``.silver`` / ``.gold`` so identifier validation
+    All three layers route through ``TablePaths.bronze`` / ``.silver`` /
+    ``.gold`` so identifier validation
     (``^[A-Za-z_][A-Za-z0-9_]*$``) fires centrally — malformed
     ``node.target`` raises ``ValueError`` BEFORE any executor logic
     runs (no BICC call, no Spark write, no state-row write attempt).
 
-    Phase 9 follow-up: ``paths`` is now REQUIRED. The legacy ctx-only
-    fallback (which composed ``f"{ctx.catalog}.{schema}.{node.target}"``
-    without identifier validation) was deleted along with the v1
-    dispatcher.
+    ``paths`` is required so the runner never composes raw catalog/schema
+    strings without identifier validation.
     """
     layer = node.layer
     if layer == "bronze":
@@ -623,13 +618,11 @@ def _assemble_success_state_rows(
 ) -> list[dict[str, Any]]:
     """Assemble the full state-row list (primary + every lookup).
 
-    The full list is built in memory BEFORE the atomic batch write —
-    this is the Step 10/11 contract that makes Delta append atomicity
-    a true all-or-nothing commit.
+    The full list is built in memory BEFORE the atomic batch write, making
+    Delta append atomicity a true all-or-nothing commit.
 
     Single-source nodes produce exactly one row (primary). Multi-source
-    nodes (Phase 2 supports the §11.10 contract) produce N rows: one
-    primary + one per lookup source.
+    nodes produce N rows: one primary + one per lookup source.
     """
     now = datetime.now(timezone.utc)
     primary_source_id = _resolve_primary_source_id(node)
@@ -647,7 +640,7 @@ def _assemble_success_state_rows(
         "duration_seconds": None,
         "plan_hash": plan_hash,
         "plan_snapshot": None,
-        # Phase 2 columns.
+        # Content-pack state columns.
         "pack_id": pack.pack.id,
         "pack_version": pack.pack.version,
         "node_version": None,
@@ -694,7 +687,7 @@ def _assemble_success_state_rows(
 
 
 def _resolve_primary_source_id(node) -> str | None:
-    """Identify the primary source for a node (PLAN §11.10)."""
+    """Identify the primary source for a node."""
     inc = node.refresh.incremental
     if inc is not None and inc.watermark is not None:
         return inc.watermark.source
@@ -971,8 +964,7 @@ def _execute_builtin_node(
     (preflight → plan-hash → drift gate → execute → quality → schema
     assertion → state-row write) but skips ``render_node_sql`` (builtins
     have no SQL template) and substitutes the builtin's (callable,
-    version) for the rendered_sql_hash so the §11.9 drift gate stays
-    uniform.
+    version) for the rendered_sql_hash so the drift gate stays uniform.
     """
     _ensure_registry_populated()
 
@@ -1365,11 +1357,8 @@ def _execute_bronze_extract_node(
         return drift_result
 
     # ----- Step 6: invoke the bronze adapter --------------------------
-    # Phase 9 review fix: pass `paths` so the bronze branch of
-    # _build_target_identifier routes through TablePaths.bronze and the
-    # post-write _assert_materialized_matches_declared describes the
-    # actual bronze table (catalog.bronze.<target>), not the gold-schema
-    # fallback the legacy f-string composed.
+    # Pass `paths` so the bronze branch routes through TablePaths.bronze and
+    # post-write schema assertion describes the actual bronze table.
     target = target_override or _build_target_identifier(node, ctx, paths)
     try:
         target_df, bronze_output_watermark = _bronze_adapter.run(

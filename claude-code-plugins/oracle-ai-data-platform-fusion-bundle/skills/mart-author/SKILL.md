@@ -132,8 +132,8 @@ shipped installed `content_packs/` tree. For each `nodeSpec`:
 aidp-fusion-bundle content-pack validate <overlay>
 ```
 Fix until clean — schema + content validators cover PII-missing (AIDPF-2030),
-dependency/SQL integrity, and the no-new-legacy-module rule. (New error codes,
-if any, register in PLAN §25 first.)
+dependency/SQL integrity, and the no-new-legacy-module rule. Document new error
+codes in `docs/aidpf-error-codes.md`.
 
 ### 7 — Wire the bundle for the client (one command), then hand off to seed
 An overlay isn't seeded until the bundle points at it. **Do this FOR the
@@ -143,11 +143,23 @@ client** with the single wiring verb — don't hand-edit YAML:
 aidp-fusion-bundle use-pack overlays/<name> --profile <tenant>
 ```
 
-`use-pack` does the whole recipe in one step (live-proven — `ar_invoice_summary`
-materialized 49 rows on saasfademo1, 2026-06-15): sets
-`contentPack: {name: <overlay-id>, path: overlays/<name>, profile}`, **aligns
-`dimensions.build` / `gold.marts`** to the resolved pack's real nodes (so stale
-v1 entries like `dim_org` / `po_backlog` can't break the plan resolver), and
+Use the default aligning behavior when the client wants the bundle scope to
+match every silver/gold node in the resolved pack. For narrow customer bundles
+or a one-mart SQL override, preserve the existing scope instead:
+
+```bash
+aidp-fusion-bundle use-pack overlays/<name> --profile <tenant> --no-align
+```
+
+When using `--no-align` for a new mart, add only the authored node to
+`gold.marts` before seeding; otherwise `--datasets <new-id>` is outside the
+bundle scope and the resolver fails with `AIDPF-1043`.
+
+`use-pack` does the content-pack wiring in one step: sets
+`contentPack: {name: <overlay-id>, path: overlays/<name>, profile}`, aligns
+`dimensions.build` / `gold.marts` to the resolved pack's real nodes unless
+`--no-align` is supplied (so stale v1 entries like `dim_org` / `po_backlog`
+can't break the plan resolver in full-scope wiring), and
 **normalizes a placeholder-vault `fusion.password` to `${FUSION_BICC_PASSWORD}`**
 (the cluster loads it from the AIDP credential store; a placeholder vault ref
 fails with `CredentialResolutionError`). It's comment-preserving and validates

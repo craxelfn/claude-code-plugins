@@ -18,18 +18,11 @@ the materialised target DataFrame.
     * ``freshness``            — needs wall-clock + max age math
     * ``reconcile_to``         — cross-source aggregate diff
     * ``referential_integrity``— FK probe against parent table
-    * ``custom``               — third-party hook (PLAN §8.6.1)
+    * ``custom``               — third-party hook
 
-**Hard-cursor-commit gate (PLAN §11.9):** the caller in
-``execute_node`` MUST refuse to advance the cursor (write a success
-state row) when ``report.failures`` is non-empty. Deferred reports do
-NOT block the cursor — they're informational.
-
-References:
-
-* PLAN §8.6 (quality test taxonomy)
-* PLAN §8.6.1 (custom tests)
-* PLAN §11.9 (hard cursor commit / quality-fail no advance)
+**Hard-cursor-commit gate:** the caller in ``execute_node`` MUST refuse to
+advance the cursor (write a success state row) when ``report.failures`` is
+non-empty. Deferred reports do NOT block the cursor; they're informational.
 """
 
 from __future__ import annotations
@@ -89,8 +82,7 @@ class QualityReport:
     * ``failures`` non-empty → write a ``status='quality_failed'`` state
       row, preserve prior watermark, return failure.
     * ``failures`` empty regardless of ``deferred`` count → advance the
-      cursor (deferred tests are informational, not blocking per §11.9
-      v0.3 grading).
+      cursor (deferred tests are informational, not blocking).
     """
 
     failures: tuple[TestResult, ...] = ()
@@ -178,7 +170,7 @@ def run_quality_tests(
                         f"{test_type!r} is recognised by the v0.3 schema but "
                         f"deferred to a later release. The runner reports this "
                         f"test as 'deferred' and continues; this does NOT "
-                        f"block cursor advancement per PLAN §11.9."
+                        f"block cursor advancement."
                     ),
                 )
             )

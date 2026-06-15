@@ -24,6 +24,67 @@
       "title": "AffectedPartitionsFrom",
       "type": "object"
     },
+    "BronzeExtractImpl": {
+      "additionalProperties": false,
+      "description": "``implementation.type: bronze_extract`` -- BICC PVO extraction.\n\nDeclares a content-pack-driven bronze node. Carries everything the\nruntime needs to construct a BICC ``PvoEntry``-equivalent descriptor\nWITHOUT depending on the curated ``fusion_catalog.py`` \u2014 pack YAML is\nself-contained so customer overlay packs can declare new PVOs without\na plugin release.\n\nPVO resolution contract:\n\n1. The adapter constructs a ``PvoEntry``-equivalent descriptor directly\n   from the YAML fields (``datastore``, ``bicc_schema``, ``natural_key``\n   from ``refresh.incremental``, ``incremental_capable``).\n2. The descriptor is passed to ``extract_pvo()`` unchanged.\n3. At pack-load time, validators cross-reference\n   ``implementation.pvo_id`` against the curated catalog for a WARN\n   only. The BICC drift gate (``AIDPF-2072``) catches typo'd PVOs at\n   extract-preflight time.",
+      "properties": {
+        "auditColumnsMode": {
+          "const": "bronze_v1",
+          "default": "bronze_v1",
+          "title": "Auditcolumnsmode",
+          "type": "string"
+        },
+        "biccSchema": {
+          "title": "Biccschema",
+          "type": "string"
+        },
+        "datastore": {
+          "title": "Datastore",
+          "type": "string"
+        },
+        "incrementalCapable": {
+          "default": true,
+          "title": "Incrementalcapable",
+          "type": "boolean"
+        },
+        "pvo_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pvo Id"
+        },
+        "schemaOverride": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schemaoverride"
+        },
+        "type": {
+          "const": "bronze_extract",
+          "default": "bronze_extract",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "datastore",
+        "biccSchema"
+      ],
+      "title": "BronzeExtractImpl",
+      "type": "object"
+    },
     "BuiltinImpl": {
       "additionalProperties": false,
       "description": "`implementation.type: builtin` \u2014 engine-owned helper (e.g., `dim_calendar`, ADR-0011).",
@@ -141,44 +202,6 @@
       "title": "OutputSchemaColumn",
       "type": "object"
     },
-    "PythonLegacyImpl": {
-      "additionalProperties": false,
-      "description": "`implementation.type: python_legacy` \u2014 v1 module bridged for the migration period.\n\nPer the v2 plan, this type is permitted only during the migration window:\n\n* ``deprecated: true`` \u2014 v1 module replaced by SQL, kept for parity testing.\n* ``deprecated: false`` \u2014 v1 module still active runtime; ``migrationTarget``\n  points at the pack-relative SQL path that will replace it in Phase 3.\n\nThe discriminator validates the field is **present**. The model_validator\nbelow enforces the ``deprecated=false \u2192 migrationTarget`` invariant.",
-      "properties": {
-        "callable": {
-          "title": "Callable",
-          "type": "string"
-        },
-        "deprecated": {
-          "title": "Deprecated",
-          "type": "boolean"
-        },
-        "migrationTarget": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Migrationtarget"
-        },
-        "type": {
-          "const": "python_legacy",
-          "default": "python_legacy",
-          "title": "Type",
-          "type": "string"
-        }
-      },
-      "required": [
-        "callable",
-        "deprecated"
-      ],
-      "title": "PythonLegacyImpl",
-      "type": "object"
-    },
     "QualitySection": {
       "additionalProperties": false,
       "description": "Per-node `quality:` block.",
@@ -265,7 +288,7 @@
     },
     "QualityTestCustom": {
       "additionalProperties": false,
-      "description": "Third-party quality test (PLAN \u00a78.6.1).",
+      "description": "Third-party quality test.",
       "properties": {
         "args": {
           "additionalProperties": true,
@@ -475,7 +498,7 @@
     },
     "RefreshIncremental": {
       "additionalProperties": false,
-      "description": "Incremental-mode refresh strategy (PLAN \u00a710, \u00a711.3).",
+      "description": "Incremental-mode refresh strategy.",
       "properties": {
         "affectedPartitionsFrom": {
           "anyOf": [
@@ -602,7 +625,7 @@
     },
     "SourceRef": {
       "additionalProperties": false,
-      "description": "One entry in ``dependsOn.bronze[]`` or ``dependsOn.silver[]``.\n\nPLAN \u00a711.10 (primary/lookup contract).",
+      "description": "One entry in ``dependsOn.bronze[]`` or ``dependsOn.silver[]``.\n\n``role`` declares whether the dependency is the primary watermark source\nor a lookup source.",
       "properties": {
         "id": {
           "title": "Id",
@@ -680,7 +703,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Schema for ``silver/<name>.yaml`` and ``gold/<name>.yaml`` files.\n\nEnforces the full v0.3 strategy validation matrix (PLAN \u00a711.3 R1-R13).\nEach rule violation raises a `ValueError` with a specific AIDPF code so\nthe CLI's `content-pack validate` surfaces actionable remediation.",
+  "description": "Schema for ``silver/<name>.yaml`` and ``gold/<name>.yaml`` files.\n\nEnforces the strategy validation matrix. Each rule violation raises a\n`ValueError` with a specific AIDPF code so the CLI's\n`content-pack validate` surfaces actionable remediation.",
   "properties": {
     "dependsOn": {
       "$ref": "#/$defs/DependsOn"
@@ -692,8 +715,8 @@
     "implementation": {
       "discriminator": {
         "mapping": {
+          "bronze_extract": "#/$defs/BronzeExtractImpl",
           "builtin": "#/$defs/BuiltinImpl",
-          "python_legacy": "#/$defs/PythonLegacyImpl",
           "sql": "#/$defs/SqlImpl"
         },
         "propertyName": "type"
@@ -706,13 +729,14 @@
           "$ref": "#/$defs/BuiltinImpl"
         },
         {
-          "$ref": "#/$defs/PythonLegacyImpl"
+          "$ref": "#/$defs/BronzeExtractImpl"
         }
       ],
       "title": "Implementation"
     },
     "layer": {
       "enum": [
+        "bronze",
         "silver",
         "gold"
       ],

@@ -22,8 +22,7 @@ refresh:
       ap_aging buckets are CURRENT_DATE()-anchored. Row-level merge
       would freeze bucket assignments from the prior run; daily
       incremental refresh would go stale by one day every day.
-      Hence `replace` (PLAN §10, ADR-0012). A future `snapshot`
-      strategy (§10.7, deferred) is the right long-term fit.
+      Hence `replace`. A future snapshot strategy is the right long-term fit.
 
 # INTENTIONAL SCOPE DECISION — AP aging ships in **proxy mode only**.
 # v1's auto/real-mode behaviour (transforms/gold/ap_aging.py
@@ -37,12 +36,11 @@ refresh:
 # the renderer's static-token vocabulary cannot select between from a
 # single template.
 #
-# Tenants whose live AP data would auto-route to real mode under v1
-# will see proxy-shape output under v2. This is a documented divergence
-# (see docs/v2-phase-3-variation-catalog.md "AP aging — proxy mode only"
-# and LIMITS.md). Auto/real mode needs (a) a renderer extension
-# for two-schema variants, (b) declarative tenant-side threshold config,
-# and (c) live evidence of any tenant exceeding the v1 threshold.
+# Tenants whose live AP data would auto-route to real mode under the legacy
+# module will see proxy-shape output under the starter pack. Auto/real mode
+# needs (a) a renderer extension for two-schema variants, (b) declarative
+# tenant-side threshold config, and (c) live evidence of any tenant exceeding
+# the legacy threshold.
 #
 # Output schema below matches v1 ap_aging.py:475-505 with
 # due_date_mode='proxy' — 19 columns at v1's cents precision

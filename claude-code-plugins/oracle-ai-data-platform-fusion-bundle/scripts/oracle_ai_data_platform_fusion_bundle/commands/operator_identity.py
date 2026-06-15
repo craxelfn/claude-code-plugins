@@ -1,4 +1,4 @@
-"""Operator-identity resolution gate (PLAN §9.5.9).
+"""Operator-identity resolution gate.
 
 Every artifact bootstrap writes — profile, evidence snapshot, diagnostic —
 carries an ``approvedBy.{operator, timestamp, mechanism}`` block. The
@@ -8,12 +8,10 @@ carries an ``approvedBy.{operator, timestamp, mechanism}`` block. The
 2. The ``AIDP_OPERATOR`` environment variable.
 3. The ``USER`` environment variable (POSIX-floor fallback).
 
-If all three are unset / empty / whitespace-only, bootstrap MUST refuse
-to write any artifact and raise ``AIDPF-1020`` per §9.5.9. The §9.5.9
-schema explicitly acknowledges this floor is "trivially spoofable" —
-SOX-strict environments layer their own controls (IAM-gated deployment
-pipelines + PR review on ``profiles/``). The recording is one input to
-a broader audit trail, not a cryptographic identity.
+If all three are unset / empty / whitespace-only, bootstrap MUST refuse to
+write any artifact and raise ``AIDPF-1020``. This floor is intentionally not a
+cryptographic identity; SOX-strict environments layer their own controls
+(IAM-gated deployment pipelines + PR review on ``profiles/``).
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ class OperatorIdentityUnresolved(Exception):
 
 
 def resolve_operator(cli_flag: str | None) -> str:
-    """Resolve operator identity using the §9.5.9 precedence chain.
+    """Resolve operator identity using the configured precedence chain.
 
     Args:
         cli_flag: value of ``--operator``; ``None`` when the flag was

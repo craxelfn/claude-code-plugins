@@ -5,8 +5,7 @@ records the :mod:`reasoner` consults when scoring candidates.
 
 The KB is hand-seeded at v0.1.0 with three documented variants
 (cancelled-status alternates, currency-code casing, COA segment depth).
-Each new entry bumps :data:`medallion_author.SKILL_VERSION` per
-PLAN §9.5.8.
+Each new entry bumps :data:`medallion_author.SKILL_VERSION`.
 """
 
 from __future__ import annotations

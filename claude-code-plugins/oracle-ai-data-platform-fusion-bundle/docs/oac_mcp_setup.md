@@ -1,8 +1,16 @@
-# OAC MCP setup — chat with your Fusion data from Claude Desktop / Cline / Copilot
+# OAC MCP setup — operator workbook authoring and end-user chat
 
-After the bundle's `dashboard install --target oac` lands the AIDP JDBC connection in your OAC instance, end users can connect their AI client to OAC's MCP server and ask natural-language questions against the gold marts (e.g. `gold.supplier_spend`).
+OAC MCP is used in two different moments of the bundle workflow:
 
-This doc walks an end user through the **one-time MCP setup** on their machine. It takes ~5 minutes per user.
+- **Operator setup**: `aidp-fusion-autopilot` and `workbook-authoring` need OAC
+  MCP early so they can search catalog content, describe datasets, and save
+  workbooks with `save_catalog_content`.
+- **End-user setup**: after a dataset or workbook exists, analysts can connect
+  Claude Desktop, Claude Code, Cline, or Copilot to OAC MCP and ask governed
+  questions against OAC-visible datasets.
+
+This doc walks through the one-time MCP setup on a workstation. It takes about
+5 minutes per user.
 
 ---
 
@@ -11,7 +19,7 @@ This doc walks an end user through the **one-time MCP setup** on their machine. 
 | | |
 |---|---|
 | OAC version | November 2025 release or later (the OAC MCP Server is in preview from that release) |
-| OAC entitlement | Your user must be able to log into the OAC home page and have at least *Discover* access on the imported Fusion workbook(s) |
+| OAC entitlement | Your user must be able to log into the OAC home page and have at least *Discover* access on the target dataset/workbook. Workbook authoring also needs catalog write access for `save_catalog_content`. |
 | AI client | One of: Claude Desktop, Claude Code, Cline (VS Code extension), GitHub Copilot |
 | Local | Node.js 18+ on your laptop |
 
@@ -133,7 +141,8 @@ If those three appear, MCP is connected.
 
 ## Step 5 — First grounded question against the bundle's gold mart
 
-Once `aidp-fusion-bundle dashboard install --target oac` has imported the workbooks (or the user has manually authored a workbook against `aidp_fusion_jdbc.fusion_catalog.gold.supplier_spend`), ask:
+Once the OAC dataset exists over the AIDP gold mart, or a workbook has been
+authored against that dataset, ask:
 
 > *"Which vendors had over $100M in invoice spend? Show vendor_id, total_invoice_amount, and invoice_count, ordered by spend descending."*
 
@@ -155,12 +164,16 @@ OAC MCP (Preview, Nov 2025) is intentionally narrow:
 
 | Can | Cannot (preview) / governed-by-user-grants (v1.4) |
 |---|---|
-| List/describe datasets, subject areas, columns, measures | Create or modify workbooks — *v1.4: possible via `save_catalog_content` / `create_catalog_folder` if the user is granted it* |
-| Run governed Logical SQL queries | Register data sources (use OAC REST API for that — see `oac/rest/`) |
+| List/describe datasets, subject areas, columns, measures | Create OAC AIDP connections or datasets; do those in the OAC UI |
+| Run governed Logical SQL queries | Register data sources; use OAC UI for first AIDP connection creation |
 | Manage catalog items (v1.4: copy/move/delete/ACL) — **only if the OAuth user has those grants** | Run arbitrary SQL DDL (no schema changes, no inserts) |
-| Auth runs as the **end user** — governance preserved | Run arbitrary SQL DDL (no schema changes, no inserts) |
+| Auth runs as the **end user** — governance preserved | Bypass OAC grants, row security, or column permissions |
 
-For write operations (registering new connections, importing workbooks), the bundle's `dashboard install --target oac` uses **OAC REST API**, not MCP. See [oac_rest_api_setup.md](oac_rest_api_setup.md) (separate doc).
+Workbook authoring uses MCP `save_catalog_content` when that tool is available
+and the OAC user has grants. MCP does **not** create the AIDP connection or OAC
+dataset; those remain manual OAC UI steps in the current workflow. The legacy
+`.bar` snapshot install path uses OAC REST API and is documented separately in
+[oac_rest_api_setup.md](oac_rest_api_setup.md).
 
 ---
 

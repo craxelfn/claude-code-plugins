@@ -1,4 +1,4 @@
-"""Content-pack adapter for the ``dim_calendar`` v1 builtin (Phase 3 Step 3).
+"""Content-pack adapter for the ``dim_calendar`` builtin.
 
 The v1 builtin
 (:func:`oracle_ai_data_platform_fusion_bundle.dimensions.dim_calendar.build`)
@@ -21,8 +21,7 @@ require the runner to know how to read the calendar block from the
 profile — which would leak v1-builtin knowledge into the generic
 dispatcher. With an adapter:
 
-* The v1 module signature stays untouched (it's frozen reference code
-  per CLAUDE.md "v1 + v2 coexistence" until Phase 9).
+* The existing module signature stays untouched.
 * The dispatcher only knows the uniform adapter shape.
 * New builtins (if any) add their own adapter without changing
   ``sql_runner``.
@@ -57,8 +56,8 @@ if TYPE_CHECKING:  # pragma: no cover
 
 VERSION: str = "1.0.0"
 """Adapter version constant. Flows into the content-pack plan-hash
-substitute for builtin nodes — bumping this triggers the §11.9 drift
-gate, matching the contract that a SQL-template edit triggers."""
+substitute for builtin nodes — bumping this triggers the same drift gate
+as a SQL-template edit."""
 
 
 def _read_calendar_setting(
