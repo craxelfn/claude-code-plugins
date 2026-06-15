@@ -88,6 +88,19 @@ Summarize the per-step table (dataset / layer / status / row_count / duration) +
 `run_id`. On a gate failure, name the AIDPF code and route to the doctor / seed
 per step 3 — point at the diagnostic at `.aidp/diagnostics/<run_id>/`.
 
+### 6 — Hand off the next step (on success)
+An incremental refreshes the **data** in the gold tables; it does not touch OAC.
+Close the loop based on whether a dashboard already exists:
+
+- **Dashboard already built** (the common day-2 case): the OAC dataset/workbook
+  sits *live over* these tables, so the new rows are already visible — tell the
+  user to **reopen / refresh the workbook** to see the delta. No re-author, no
+  new dataset.
+- **No dashboard yet**: point them forward exactly like seed step 6 —
+  **`/oac-dataset-advisor`** (recommend the dataset for their question) → create
+  it in the OAC UI → **`/workbook-authoring`**, or **`/aidp-fusion-autopilot`**
+  to drive it. Don't auto-invoke; offer.
+
 ## Refresh-strategy reminder (don't be surprised)
 - **Row-grain** nodes (silver dims, `gl_balance`) MERGE on the natural key — a
   delta, not a rebuild.

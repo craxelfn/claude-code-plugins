@@ -96,11 +96,38 @@ have no goal yet, scaffold + configure and stop there with "what dashboard do
 you want?". Don't ask for OCIDs by hand — that's what `init` + `/aidp-fusion-config`
 are for.
 
+## Returning user (re-entry fast-path — don't redo built work)
+
+The loop is **state-first**, so a returning user with a specific goal is just a
+journey that starts mid-way. Concretely, for *"autopilot — I want a dashboard of
+dim_supplier"*:
+
+1. **Map the goal to its table(s)** via `/oac-dataset-advisor` (it resolves
+   *"supplier"* → the gold/dim table(s) that answer it).
+2. **Detect that entity's state**, in order, and **jump to the first gap**:
+   - **No live gold table** for it → start at **Phase 3 (seed)** (Bootstrap first
+     if no profile).
+   - **Seeded, but no OAC dataset** over it → **Phase 6** (hand the dataset spec
+     for the OAC UI).
+   - **Dataset exists, no workbook** → skip straight to **Phase 7
+     (`/workbook-authoring`)** — this is the common "already built upstream, just
+     need the dashboard" case.
+   - **Workbook already exists** → report it + its `viewUrl`; offer to
+     **refresh/open** it or author a *new* one. Don't silently re-author.
+3. Phase 1b (OAC MCP connect) still gates anything that reads OAC — probe it
+   before the dataset/workbook detection, since that detection *uses* the MCP
+   tools (a dead connection ≠ "nothing exists").
+
+So the answer to "if supplier already exists, go to workbook authoring; if not,
+seed first" is the loop's normal behavior — this section just makes the entity-
+scoped routing explicit.
+
 ## The loop
 1. **Capture the goal** — restate the dashboard the user wants (metrics,
    dimensions, grain). Keep it; every phase serves it.
 2. **Assess state** — run the cheap detectors (below) to find the **first
-   incomplete phase**. Report the full journey status (✓ done / ▶ next / ⏸ pause).
+   incomplete phase** *for the goal's entity* (see re-entry fast-path above).
+   Report the full journey status (✓ done / ▶ next / ⏸ pause).
 3. **Drive that phase** via its skill/command.
 4. **On clean success → advance** to the next phase and repeat. **On a pause
    gate → stop, present the decision, wait** for the user.

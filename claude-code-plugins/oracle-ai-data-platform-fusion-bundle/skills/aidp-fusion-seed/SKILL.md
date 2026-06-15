@@ -258,6 +258,26 @@ point the user at the diagnostic artifact the CLI wrote at
 `.aidp/diagnostics/<run_id>/` (e.g. the `AIDPF-*.json` for gate failures) and
 read it back to explain the AIDPF code + remediation.
 
+### 6 — Hand off the next step (on success)
+
+A successful seed materializes the tables but does **not** build a dashboard.
+Close the loop by pointing the user at what comes next — name the **gold**
+table(s) just seeded (those are the dashboard-facing ones):
+
+> Seeded `gold.<table>` (N rows). To turn this into a dashboard:
+> 1. **`/oac-dataset-advisor`** — tell it your dashboard question (e.g. *"supplier
+>    spend by currency"*); it inspects the **live gold you just seeded** and
+>    recommends the exact dataset (tables, columns, join key).
+> 2. Create that dataset in the **OAC UI** (dataset creation is an OAC action —
+>    the MCP server has no create-dataset tool).
+> 3. **`/workbook-authoring`** to generate the workbook on it.
+>
+> Or run **`/aidp-fusion-autopilot`** with your goal to drive all of the above
+> end-to-end (it detects what's already seeded and skips ahead).
+
+Keep it to the tables actually seeded this run; don't advertise marts the scope
+didn't build. This is advice, not an auto-invocation — let the user choose.
+
 ---
 
 ## Skill family
