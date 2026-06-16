@@ -43,12 +43,12 @@ seven skills to invoke, or in what order.
 | # | Step | Done when (detect) | Drive with | PAUSE before if |
 |---|---|---|---|---|
 | 1 | **Config** | `bundle.yaml` + `aidp.config.yaml` exist; coords non-placeholder | `aidp-fusion-bundle init` (scaffold if absent — fresh install) → `/aidp-fusion-config` for coords | missing `fusion:` connectivity (human-only) |
-| **1b** | **OAC MCP connect** (front-loaded prerequisite — see §below) | `oac-mcp-server` tools answer a live `search_catalog` ping | `aidp-fusion-bundle dashboard mcp-setup` / `mcp-token`, then **restart/reconnect Claude Code** | **always when dead** — staging the connector/token needs a Claude Code restart before its tools work; PAUSE for the restart, then resume here |
+| **1b** | **OAC MCP connect** (front-loaded prerequisite — see §below) | `oac-mcp-server` tools answer a live `search_catalog` ping | `aidp-fusion-bundle dashboard mcp-setup`, then **restart/reconnect Claude Code** | **always when dead** — staging the connector needs a Claude Code restart before its tools work; write the resume checkpoint, then PAUSE for the restart |
 | 2 | **Bootstrap** | `profiles/<tenant>.yaml` present + fingerprint pinned | `/aidp-fusion-bootstrap` | multi-match variation needs a human pick (never `--non-interactive`); surface frozen picks |
 | 3 | **Seed** | live gold has the needed tables (probe) | `/aidp-fusion-seed` | always confirm the destructive guard's CONFIRM outcome |
 | 4 | **Advise** | — (always run for the goal) | `/oac-dataset-advisor` | — |
 | 5 | **Author mart** (only on advisor GAP) | the gap node exists live after seed | `/mart-author` → `use-pack` → back to Step 3 | confirm the authored change before seeding it |
-| 6 | **OAC dataset** | a dataset over the recommended table(s) exists (OAC MCP) | advisor's recommendation | **always** — dataset creation is an OAC UI action today (MCP can't create datasets); hand the exact spec to the user |
+| 6 | **OAC dataset** | a dataset over the recommended table(s) exists (OAC MCP) | `/oac-dataset-setup` | **always** — dataset creation is an OAC UI action today (MCP can't create datasets); hand the exact spec to the user |
 | 7 | **Workbook** | a workbook on that dataset exists/renders | `/workbook-authoring` | confirm overwrite if replacing an existing workbook |
 | 8 | **End-user MCP chat** (optional deliverable) | least-privilege OAC user handed the connect steps | `docs/oac_mcp_setup.md` hand-off | confirm the end-user OAC account is **least-privilege** (v1.4 exposes write/delete/ACL tools) |
 
@@ -62,8 +62,8 @@ seven skills to invoke, or in what order.
 **Why front-loaded (not Step 8).** `/workbook-authoring` and autopilot's own
 step-6/7 detectors *consume* the `oac-mcp-server` tools (`search_catalog`,
 `describe_data`, save-validation). They are a **prerequisite** for the OAC half
-of the journey. And establishing the connector/token (`dashboard mcp-setup` /
-`mcp-token`) requires a **Claude Code restart/reconnect** before the tools come
+of the journey. And establishing the connector (`dashboard mcp-setup`) requires
+a **Claude Code restart/reconnect** before the tools come
 alive (`docs/oac_mcp_setup.md` — MCP servers bind at session start; a mid-flow
 setup can't transparently light them up). So the connection is set up **early,
 once**, before the minutes-long Bootstrap/Seed — by the time those finish the
@@ -77,15 +77,43 @@ before Bootstrap. On an already-configured tenant, probe it first thing.
 1. **Probe liveness** — a cheap `oracle_analytics-search_catalog` ping (or
    `claude mcp list` → expect `oac-mcp-server ✔ Connected`).
 2. **Live → continue** to Bootstrap; record `[✓] mcp connect`.
-3. **Dead → set up + restart.** Run `aidp-fusion-bundle dashboard mcp-setup`
-   (or `mcp-token` for the non-interactive path — Claude Code can't do the
-   browser elicitation; see the OAC-MCP-auth root cause). This stages the
-   connector, writes the 0600 token file, and wires `.mcp.json`. Then **PAUSE
-   with an explicit handoff**: *"OAC MCP staged — restart/reconnect Claude Code
-   (`/mcp` → reconnect `oac-mcp-server`, or relaunch), then re-run autopilot; it
-   resumes at the next phase."* Autopilot is state-first, so re-invoking it after
-   the restart just continues. **Do not** try to proceed into phases 6–7 on a
-   dead connection.
+3. **Dead → set up + restart.** Run `aidp-fusion-bundle dashboard mcp-setup`.
+   This stages the connector, writes the 0600 connector config, and wires
+   `.mcp.json`. Before stopping, write `.aidp/autopilot/resume.md` with the
+   user's goal and next step. Then **PAUSE with an explicit handoff**: *"OAC MCP
+   staged — restart/reconnect Claude Code (`/mcp` → reconnect
+   `oac-mcp-server`, or relaunch), then paste: `Resume the Fusion dashboard
+   workflow from .aidp/autopilot/resume.md`."* Autopilot is state-first, and the
+   checkpoint preserves the goal if chat context is lost. **Do not** try to
+   proceed into phases 6–7 on a dead connection.
+
+## Persistent resume checkpoint
+
+Before any pause that may cross a Claude Code restart/reconnect or a long
+manual UI step, write a non-secret checkpoint at:
+
+```text
+.aidp/autopilot/resume.md
+```
+
+Use the helper from this skill directory:
+
+```bash
+python3 skills/aidp-fusion-autopilot/write_resume_checkpoint.py \
+  --workdir . \
+  --goal "<dashboard or workflow goal>" \
+  --phase "Step 1b OAC MCP connect" \
+  --next-step "Reconnect Claude Code, verify oac-mcp-server, then re-run /aidp-fusion-autopilot" \
+  --completed "bundle.yaml and aidp.config.yaml exist" \
+  --pending "OAC MCP liveness check" \
+  --evidence "OAC URL configured" \
+  --note "No secrets recorded"
+```
+
+Resolve the script path relative to the active skill directory when the user is
+running from a separate customer bundle. Do not put passwords, private keys,
+tokens, full OCIDs, or connection payloads in the checkpoint. On resume, read
+the checkpoint first, then re-probe live state; the file is context, not proof.
 
 ## First run (fresh install)
 If `bundle.yaml` / `aidp.config.yaml` don't exist yet (brand-new install), Step
@@ -107,8 +135,8 @@ dim_supplier"*:
 2. **Detect that entity's state**, in order, and **jump to the first gap**:
    - **No live gold table** for it → start at **Step 3 (seed)** (Bootstrap first
      if no profile).
-   - **Seeded, but no OAC dataset** over it → **Step 6** (hand the dataset spec
-     for the OAC UI).
+   - **Seeded, but no OAC dataset** over it → **Step 6** (`/oac-dataset-setup`
+     hands the dataset spec to the user for the OAC UI and verifies it after).
    - **Dataset exists, no workbook** → skip straight to **Step 7
      (`/workbook-authoring`)** — this is the common "already built upstream, just
      need the dashboard" case.
@@ -135,8 +163,9 @@ scoped routing explicit.
    chat) if the user wants downstream clients to query OAC directly.
 
 **The one hard ordering rule:** never enter phases 6–7 with a dead
-`oac-mcp-server`. If the Step 1b probe fails, set up + hand off the restart and
-stop there — re-running autopilot after the restart resumes the journey.
+`oac-mcp-server`. If the Step 1b probe fails, set up, write the resume
+checkpoint, hand off the restart, and stop there. Re-running autopilot after the
+restart reads the checkpoint and resumes the journey.
 
 ## State detection (reuse the family's helpers — no new probes)
 - **Config / profile / cluster:** `python3 skills/aidp-fusion-seed/preconditions.py
@@ -164,12 +193,13 @@ stop there — re-running autopilot after the restart resumes the journey.
   semantic-variant picks; on a multi-match, let a human choose.
 - **Mart authoring** — show `/mart-author`'s chosen change (rung, blast radius)
   before authoring/seeding it.
-- **OAC dataset creation** — autopilot cannot create the dataset (MCP has no
-  create-dataset tool); present the exact spec (tables, columns, join key) for
-  the user to create in the OAC UI, then continue.
-- **OAC MCP not connected (Step 1b)** — stage it (`dashboard mcp-setup` /
-  `mcp-token`), then **stop for the operator to restart/reconnect Claude Code**;
-  the tools can't activate inside the current session. Resume on re-run.
+- **OAC dataset creation** — delegate to `/oac-dataset-setup`; it presents the
+  exact spec (tables, columns, join key), pauses for the OAC UI action, then
+  verifies the saved dataset with MCP.
+- **OAC MCP not connected (Step 1b)** — stage it with `dashboard mcp-setup`,
+  write `.aidp/autopilot/resume.md`, then **stop for the operator to
+  restart/reconnect Claude Code**; the tools can't activate inside the current
+  session. Resume from the checkpoint on re-run.
 - **Missing `fusion:` connectivity / non-least-privilege MCP user** — stop and ask.
 - **Anything overwriting populated data or external state.**
 
@@ -186,13 +216,15 @@ On a pause, state exactly what you need from the user and which step resumes.
 
 ## Skill family (what autopilot conducts)
 `/aidp-fusion-config` · `/aidp-fusion-bootstrap` / `medallion-author` · `/aidp-fusion-seed` ·
-`/aidp-fusion-status` · `/oac-dataset-advisor` · `/mart-author` (+ `use-pack`) ·
-`/workbook-authoring` · `dashboard mcp-setup`. Day-2: `/aidp-fusion-incremental`
-(deltas) with `/fusion-drift-doctor` as its drift precheck. **On any gate
-failure (AIDPF-2072/4070/4071/2012/4040 — schema/PVO drift, plan-hash) route to
-`/fusion-drift-doctor`**, which diagnoses and hands to `bootstrap --refresh` /
-`/medallion-author` / re-seed. Autopilot adds no mechanism — it sequences these
-and holds the user's goal across them.
+`/aidp-fusion-status` · `/oac-dataset-advisor` · `/oac-dataset-setup` ·
+`/mart-author` (+ `use-pack`) · `/workbook-authoring` · `/aidpf-error-triage` ·
+`dashboard mcp-setup`. Day-2: `/aidp-fusion-incremental` (deltas) with
+`/fusion-drift-doctor` as its drift precheck. On known drift gates
+(`AIDPF-2072`/`4070`/`4071`/`2012`/`4040` — schema/PVO drift, plan-hash), route
+directly to `/fusion-drift-doctor`, which diagnoses and hands to
+`bootstrap --refresh` / `/medallion-author` / re-seed. On any other `AIDPF-*`
+code or ambiguous failure, route first to `/aidpf-error-triage`. Autopilot adds
+no mechanism — it sequences these and holds the user's goal across them.
 
 ## Safety invariants (do not regress)
 - Never weaken a sub-skill's guard to "keep moving."
@@ -201,5 +233,7 @@ and holds the user's goal across them.
 - Never enter phases 6–7 with a dead `oac-mcp-server`, and never read a dead/
   unauthenticated MCP connection as an empty catalog — set up Step 1b + restart
   first.
+- Never guess recovery from an unfamiliar `AIDPF-*` code; route to
+  `/aidpf-error-triage`.
 - Never create the OAC dataset or seed populated data without the gate.
 - Surface every irreversible/external action before doing it.

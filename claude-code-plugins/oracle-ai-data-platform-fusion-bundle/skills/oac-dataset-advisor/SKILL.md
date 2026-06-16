@@ -18,7 +18,8 @@ it answers three questions, in order:
 
 It **advises only** — it never creates datasets or marts. Dataset creation is
 an OAC action over the AIDP connection (the OAC MCP server has no
-create-dataset tool); new marts are the job of the mart-authoring skill.
+create-dataset tool); hand CREATE recommendations to `/oac-dataset-setup`.
+New marts are the job of the mart-authoring skill.
 
 ## Evidence discipline (the load-bearing rule)
 
@@ -192,7 +193,8 @@ Emit one of:
   - table **`<b>`**: columns `<…>` *(when multi-table)*
   - join: `<a>.<key> = <b>.<key>`
   Creation is an OAC UI action over the AIDP connection — the OAC MCP server
-  reads/searches the catalog but cannot create datasets. After it exists, hand
+  reads/searches the catalog but cannot create datasets. Hand this
+  recommendation to `/oac-dataset-setup`; after it verifies the dataset, hand
   to `workbook-authoring` to build the visualization(s)."
 - **GAP:** "Your live gold layer can't serve this — missing **<metric/dim/grain>**
   (no live table provides it). Author a new mart (new YAML+SQL) with the
@@ -207,7 +209,8 @@ as a substitute for it.
 
 ## Skill family
 
-- **Upstream of** `workbook-authoring`: this skill decides *which dataset*; the
+- **Upstream of** `/oac-dataset-setup` and `workbook-authoring`: this skill
+  decides *which dataset*; setup guides and verifies the OAC UI checkpoint; the
   workbook skill binds visualizations to it (and needs the real `XSA(...)`
   subject area from `describe_data`).
 - **Hands off to** the mart-authoring skill (forthcoming) on a **true GAP**

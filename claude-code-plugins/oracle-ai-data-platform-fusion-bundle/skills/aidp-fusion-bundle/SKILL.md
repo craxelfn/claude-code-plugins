@@ -6,7 +6,11 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 
 # `aidp-fusion-bundle` — Fusion ERP/HCM/SCM → AIDP, batteries included
 
-Productizes the official Oracle blog [Bring Fusion Data into Oracle AI Data Platform Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc) plus the ateam companion [How to Extract Fusion Data using Oracle AI Data Platform](https://www.ateam-oracle.com/how-to-extract-fusion-data-using-oracle-ai-data-platform). The current path is: configure → connect OAC MCP → bootstrap → seed AIDP gold → advise the OAC dataset → create the governed OAC connection/dataset in the UI → author the workbook via OAC MCP.
+Productizes the official Oracle blog [Bring Fusion Data into Oracle AI Data Platform Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc) plus the ateam companion [How to Extract Fusion Data using Oracle AI Data Platform](https://www.ateam-oracle.com/how-to-extract-fusion-data-using-oracle-ai-data-platform). The current path is: configure → connect OAC MCP → bootstrap → seed AIDP gold → advise the OAC dataset → use `oac-dataset-setup` for the governed manual OAC connection/dataset checkpoint → author the workbook via OAC MCP.
+
+When a run, bootstrap, validation, dashboard, or workbook flow reports an
+`AIDPF-*` code, start with [`aidpf-error-triage`](../aidpf-error-triage/SKILL.md).
+It is read-only and routes the failure to the recovery skill that owns it.
 
 ## When to use
 
@@ -61,7 +65,7 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    ```bash
    aidp-fusion-bundle dashboard mcp-setup --connector-js <path to oac-mcp-connect.js>
    ```
-   Restart/reconnect Claude Code after this. Autopilot and workbook-authoring need OAC MCP for `search_catalog`, `describe_data`, and `save_catalog_content`.
+   Restart/reconnect Claude Code after this. Autopilot and workbook-authoring need OAC MCP for `search_catalog`, `describe_data`, and `save_catalog_content`. If setup happens mid-journey, autopilot writes `.aidp/autopilot/resume.md`; resume with: "Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md."
 
 4. **Probe prerequisites and pin tenant variation**:
    ```bash
@@ -82,11 +86,15 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    the seed" into the correct guarded `run --mode seed` invocation — it parses
    the scope, auto-satisfies preconditions (validate / `/aidp-fusion-bootstrap` / cluster),
    and **fail-closed-confirms** before overwriting populated silver/gold marts.
+   If the run reports an `AIDPF-*` code, use
+   [`aidpf-error-triage`](../aidpf-error-triage/SKILL.md) before choosing a
+   recovery path.
 
 6. **Build dashboards (MCP-native — the current path).** Ask
    [`oac-dataset-advisor`](../oac-dataset-advisor/SKILL.md) what OAC dataset your
-   goal needs (grounded in the **live** AIDP gold layer), create the AIDP
-   connection and dataset manually in OAC UI, then have
+   goal needs (grounded in the **live** AIDP gold layer), use
+   [`oac-dataset-setup`](../oac-dataset-setup/SKILL.md) to guide the manual AIDP
+   connection/dataset step and verify it through MCP, then have
    [`workbook-authoring`](../workbook-authoring/SKILL.md) generate the
    visualization(s) and write them via the OAC MCP `save_catalog_content` tool.
    If the gold layer can't serve the goal,
@@ -102,8 +110,7 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    ```bash
    aidp-fusion-bundle dashboard mcp-setup --connector-js <path to oac-mcp-connect.js>
    ```
-   (`mcp-token` for IDCS Bearer-token instances; `mcp-config` only for browser-
-   auth clients.) Then ask "what's our AR aging?" and watch MCP call
+   Then ask "what's our AR aging?" and watch MCP call
    `search_catalog` → `describe_data` → `execute_logical_sql` against
    `fusion_catalog.gold.*`. **Scope the OAC user to least privilege** — the v1.4
    connector exposes catalog write/delete/ACL tools governed by that user's grants.

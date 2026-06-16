@@ -153,6 +153,14 @@ def _parse_args() -> argparse.Namespace:
         help="orchestrator.run mode.",
     )
     p.add_argument(
+        "--force-fingerprint-skip", dest="force_fingerprint_skip",
+        action="store_true",
+        help="Break-glass: skip the bronze-fingerprint drift gate (writes an "
+             "audit row). Use ONLY when the schema is known-current — e.g. a "
+             "just-seeded, bronze-only, single-dataset test where the profile-"
+             "wide fingerprint references datasets not materialized in scope.",
+    )
+    p.add_argument(
         "--layers", default="silver,gold",
         help="Comma-separated layers to run (orchestrator.run --layers). "
              "Default 'silver,gold' assumes a pre-populated bronze (A/B "
@@ -196,6 +204,7 @@ def build_notebook(
     profile_yaml: str, snapshot_yaml: str | None,
     secret_name: str, secret_key: str,
     backend: str, mode: str, layers: list[str],
+    force_fingerprint_skip: bool = False,
 ) -> dict:
     """Generate the executable notebook payload.
 
@@ -281,12 +290,14 @@ def build_notebook(
         f'        summary = orchestrator.run(\n'
         f'            bundle_path=BUNDLE_PATH, spark=spark, mode={mode!r},\n'
         f'            layers={layers!r}, dry_run=False,\n'
+        f'            force_fingerprint_skip={force_fingerprint_skip!r},\n'
         f'            resolved_pack=resolved_pack, tenant_profile=tenant_profile,\n'
         f'        )\n'
         f'    else:\n'
         f'        summary = orchestrator.run(\n'
         f'            bundle_path=BUNDLE_PATH, spark=spark, mode={mode!r},\n'
         f'            layers={layers!r}, dry_run=False,\n'
+        f'            force_fingerprint_skip={force_fingerprint_skip!r},\n'
         f'        )\n'
         f'    for s in summary.steps: _fmt_step(s)\n'
         f'    payload.update({{\n'
@@ -550,6 +561,7 @@ def main() -> int:
             secret_name=args.secret_name, secret_key=args.secret_key,
             backend=backend, mode=args.mode,
             layers=[s.strip() for s in args.layers.split(",") if s.strip()],
+            force_fingerprint_skip=args.force_fingerprint_skip,
         )
         notebook_name = (
             f"phase4_{args.mode}_{backend.replace('-', '_')}_"
