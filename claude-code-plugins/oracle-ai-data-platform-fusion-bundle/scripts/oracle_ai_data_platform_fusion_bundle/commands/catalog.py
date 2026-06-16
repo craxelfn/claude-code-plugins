@@ -164,6 +164,12 @@ def _extract_datastore_names(body: Any) -> set[str]:
                 val = node.get(key)
                 if isinstance(val, str):
                     names.add(val)
+            for key in ("dataStores", "datastores"):
+                val = node.get(key)
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, str):
+                            names.add(item)
             for v in node.values():
                 visit(v)
         elif isinstance(node, list):

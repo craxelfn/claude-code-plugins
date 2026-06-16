@@ -21,7 +21,8 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from ..schema.bundle import AidpConfig, Bundle
-from ..schema.refs import find_vault_refs
+from ..schema.fusion_catalog import CATALOG
+from ..schema.refs import find_vault_refs, render_tree
 
 
 AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK = "AIDPF-2081"
@@ -166,7 +167,7 @@ def _load_bundle(path: Path, console: Console, issues: list[str]) -> Bundle | No
         issues.append(f"{path} not found")
         return None
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = render_tree(yaml.safe_load(path.read_text(encoding="utf-8")))
         return Bundle.model_validate(raw)
     except ValidationError as exc:
         issues.append(f"bundle.yaml schema errors:\n{exc}")
@@ -180,7 +181,7 @@ def _load_config(path: Path, console: Console, issues: list[str]) -> AidpConfig 
         issues.append(f"{path} not found")
         return None
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = render_tree(yaml.safe_load(path.read_text(encoding="utf-8")))
         return AidpConfig.model_validate(raw)
     except ValidationError as exc:
         issues.append(f"aidp.config.yaml schema errors:\n{exc}")

@@ -31,6 +31,7 @@ def init(template: str, *, force: bool, console: Console | None = None) -> int:
 
     bundle_target = Path("bundle.yaml")
     config_target = Path("aidp.config.yaml")
+    env_target = Path(".env")
 
     if not force and (bundle_target.exists() or config_target.exists()):
         console.print(
@@ -47,6 +48,19 @@ def init(template: str, *, force: bool, console: Console | None = None) -> int:
 
     console.print(f"[green]wrote[/green] {bundle_target}  ([dim]{bundle_source}[/dim])")
     console.print(f"[green]wrote[/green] {config_target}  ([dim]{config_source}[/dim])")
+
+    # Also scaffold a .env from .env.example so users can fill in creds in
+    # one spot. The bundle auto-loads .env at startup via load_dotenv().
+    # Never overwrite an existing .env (could contain real secrets) — even
+    # with --force, that's too dangerous.
+    env_example = _plugin_root() / ".env.example"
+    if env_target.exists():
+        console.print(f"[dim]skipped[/dim] {env_target}  ([dim].env already exists; left untouched[/dim])")
+    elif env_example.exists():
+        shutil.copy(env_example, env_target)
+        console.print(f"[green]wrote[/green] {env_target}  ([dim].env.example[/dim])")
+    else:
+        console.print(f"[yellow]skipped[/yellow] {env_target}  ([dim].env.example not found[/dim])")
     console.print(
         "\n[bold]Next steps:[/bold]\n"
         "  1. Fill in [cyan]variables.team[/cyan] and the Fusion/OAC values in [cyan]bundle.yaml[/cyan]\n"
@@ -58,6 +72,12 @@ def init(template: str, *, force: bool, console: Console | None = None) -> int:
         "  5. Run [cyan]aidp-fusion-bundle bootstrap[/cyan] to probe live prereqs.\n"
     )
     return 0
+
+
+def _plugin_root() -> Path:
+    """Locate the plugin root (where .env.example, pyproject.toml live)."""
+    here = Path(__file__).resolve()
+    return here.parent.parent.parent.parent
 
 
 def _examples_dir() -> Path:
