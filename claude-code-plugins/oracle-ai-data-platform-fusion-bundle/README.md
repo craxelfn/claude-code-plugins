@@ -4,9 +4,13 @@
 >
 > Same pattern shown in the official Oracle blog [Bring Fusion Data into AIDP Workbench Using BICC](https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc), productized.
 
-**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (see [tests/live/](tests/live/)). Single content-pack execution path (Phase 9). **1360 unit + 12 architectural + 5 integration tests pass, plus the conversational skill family's own unit suites.** **Live-validated 2026-06-15** on the `fusion_bundle_dev` cluster: a `mart-author` overlay seeded `gold.ar_invoice_summary` (49 rows) end-to-end, and OAC workbooks were created via the OAC MCP `save_catalog_content` write tool.
+**Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (see [tests/live/](tests/live/)). The bundle now uses a single content-pack execution path. **1360 unit + 12 architectural + 5 integration tests pass, plus the conversational skill family's own unit suites.** **Live-validated 2026-06-15** on the `fusion_bundle_dev` cluster: a `mart-author` overlay seeded `gold.ar_invoice_summary` (49 rows) end-to-end, and OAC workbooks were created via the OAC MCP `save_catalog_content` write tool.
 
-CLI commands wired: `init`, `init-config`, `use-pack`, `validate`, `bootstrap`, `catalog list/probe/probe-pvo`, `run`, `status`, `content-pack list/info/validate`, `dashboard install/validate/uninstall`, `dashboard mcp-config/mcp-setup`.
+Primary CLI commands wired: `init`, `init-config`, `use-pack`, `validate`,
+`bootstrap`, `catalog list/probe/probe-pvo`, `run`, `status`, `migrate-bundle`,
+`content-pack list/info/validate`, `dashboard install/validate/uninstall`, and
+`dashboard mcp-config/mcp-setup`. The supported Claude Code OAC setup path is
+`dashboard mcp-setup`.
 
 **Dashboard authoring is now MCP-native**: `oac-dataset-advisor` (intent → dataset, grounded in the live AIDP catalog) → `oac-dataset-setup` (guided manual OAC connection/dataset checkpoint + MCP verification) → `workbook-authoring` (generates schema-valid workbook JSON, writes via OAC MCP). The `.bar` `dashboard install` REST flow still ships as a legacy alternative.
 
@@ -21,7 +25,7 @@ reference. The documentation map is [docs/README.md](docs/README.md).
 
 ---
 
-## What you get (per pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform")
+## What you get
 
 1. **Custom ML/AI training** on operational ERP/HCM/SCM data (PySpark + Python in AIDP notebooks)
 2. **Cross-source enrichment** — join Fusion data with non-Fusion sources via the AIDP `aidataplatform` connector family
@@ -30,11 +34,11 @@ reference. The documentation map is [docs/README.md](docs/README.md).
 5. **BI & reporting via JDBC** — OAC, Tableau, Power BI consume the gold layer
 6. **Delta Sharing** (v3 roadmap) — share curated datasets with other teams or external partners
 
-> **Phase status (Phase 9, 2026-06-09)**:
+> **Current execution model (validated 2026-06-15)**:
 > - **Single execution path** — bronze, silver, gold all dispatch
 >   through the content-pack runner. The legacy `dimensions/dim_*.py`
 >   + `transforms/gold/*.py` modules + the `--execution-backend` CLI
->   flag + the python_legacy adapter were deleted in Phase 9.
+>   flag + the python_legacy adapter have been removed.
 > - **Content pack ships at** `scripts/oracle_ai_data_platform_fusion_bundle/content_packs/fusion-finance-starter/`
 >   with per-file `bronze/<id>.yaml` (11 datasets), `silver/<id>.{yaml,sql}`
 >   (3 dims), `gold/<id>.{yaml,sql}` (3 marts) — all customer-extensible
@@ -61,13 +65,17 @@ hand-running the CLI. The orchestrator routes through the rest:
 | `aidp-fusion-config` | Resolve `aidp.config.yaml` coords from human-friendly names (no hand-copied OCIDs). |
 | `aidp-fusion-bootstrap` | Guided bootstrap: validate prerequisites, run `bootstrap --check-iam`, pin tenant variation into `profiles/`, and route `AIDPF-2010/2011` to `medallion-author`. |
 | `aidp-fusion-seed` | Natural-language → guarded `run --mode seed` (intent parse, precondition ladder, **fail-closed** destructive guard). |
+| `aidp-fusion-incremental` | Natural-language → guarded `run --mode incremental` for day-2 refresh, with cursor, watermark, and drift-gate checks. |
 | `aidp-fusion-status` | Read-only pipeline health — reconciles `fusion_bundle_state` with the **live** catalog (HEALTHY / STALE / FAILED / DEFERRED / UNTRACKED …). |
 | `aidpf-error-triage` | Read-only `AIDPF-*` failure router: explain the code, name the evidence, and hand off to the right recovery skill or command. |
+| `fusion-drift-doctor` | Diagnoses schema/PVO/plan-hash drift gates and routes to bootstrap refresh, `medallion-author`, scoped reseed, or investigation. |
 | `oac-dataset-advisor` | Dashboard intent → which OAC dataset to create, grounded in the **live AIDP gold layer** (never pack YAMLs). |
 | `oac-dataset-setup` | Guided manual OAC AIDP connection/dataset creation, then MCP verification with `describe_data` before workbook authoring. |
 | `mart-author` | When the gold layer can't serve a request, author a new mart additively (content-pack YAML+SQL overlay), inspecting the Fusion PVO source — never touching living delta. Wires the bundle via `use-pack`. |
 | `medallion-author` | Tier-2 overlay for tenant variation (column aliases / semantic variants). |
+| `incremental-mechanism` | Evidence-driven design aid for choosing key/timestamp/period-window incremental behavior for a node. |
 | `workbook-authoring` | Generate schema-valid OAC workbook JSON and write it via OAC MCP. |
+| `aidp-rest` | Internal/control-plane REST helper skill for OCI-signed AIDP workspace, cluster, and notebook-dispatch operations. |
 
 `aidp-fusion-bundle` remains the discovery/reference skill (positioning, gotchas,
 when-NOT-to-use). The CLI stays the contract; skills are guarded wrappers around it.
@@ -90,12 +98,18 @@ pip install -e .
 pip install -e '.[test]'
 make test
 
-# 2. Create a customer bundle from the Phase 9 starter template
+# 2. Create a customer bundle from the starter content pack
 mkdir my-fusion-lake
 cd my-fusion-lake
 aidp-fusion-bundle init
 
-# 3. Set up operator OAC MCP before OAC phases, then restart/reconnect Claude Code
+# Configure bundle.yaml / aidp.config.yaml values. Local env vars normally
+# include FUSION_BICC_* and OAC_URL; production secrets belong in the AIDP
+# credential store, not committed files.
+
+# 3. Set up operator OAC MCP before OAC phases, then restart/reconnect Claude Code.
+#    Use a least-privilege OAC user via OAC_MCP_USER / OAC_MCP_PASSWORD
+#    or pass --user / --password explicitly.
 aidp-fusion-bundle dashboard mcp-setup \
   --connector-js /path/to/oac-mcp-connect.js
 #    If this interrupts an active dashboard request, resume from .aidp/autopilot/resume.md.
@@ -139,8 +153,9 @@ A 25-minute pipeline can hit a transient BICC outage, a cluster auto-termination
 # After an interrupted run, find the run_id you want to resume:
 aidp-fusion-bundle status      # surfaces the latest fusion_bundle_state per dataset_id
 
-# Resume by run_id (must run with --inline; REST dispatch wiring is P1.5ε scope):
-aidp-fusion-bundle run --inline --mode seed --resume <run_id>
+# Resume by run_id. Normal laptop use dispatches to AIDP over REST; use
+# --inline only from an AIDP notebook/runtime with Spark already available.
+aidp-fusion-bundle run --mode seed --resume <run_id>
 ```
 
 What happens on resume:
@@ -149,6 +164,8 @@ What happens on resume:
 - All other datasets re-attempt under the **original `run_id`**, preserving the medallion `<layer>_run_id` audit invariant (one logical pipeline = one `run_id` across the resumed history).
 - `preflight_bronze_schemas` only probes un-succeeded bronze nodes — already-succeeded schemas are pulled from the stored `plan_snapshot`.
 - A drift gate compares the current plan + execution identity (Fusion pod URL, BICC storage, Fusion username, AIDP target paths, plugin version) against the stored hash. Any change raises `ResumeBundleMismatchError` pre-dispatch with the diff rendered: identity changes first, dataset changes second, hash echo last.
+- Resume is supported on both normal REST dispatch and `--inline`; `--inline`
+  is reserved for AIDP notebook/runtime sessions.
 
 The state table becomes append-only on resumed runs — multiple rows per `(run_id, dataset_id)` are expected (failed attempt + carry-forward + eventual success). **Always read from the `fusion_bundle_state_latest` Delta VIEW** (created automatically by `ensure_state_table`), which projects one row per `(run_id, dataset_id)` via `ROW_NUMBER() OVER (PARTITION BY run_id, dataset_id ORDER BY last_run_at DESC)`. See `LIMITS.md` §L-Resume for the full consumer-side contract.
 
@@ -164,19 +181,27 @@ If a `--resume` raises one of:
 
 ## Incremental refresh (`--mode incremental`)
 
-`--mode seed` rebuilds bronze + silver + gold from scratch on every cycle — full BICC extract, `CREATE OR REPLACE TABLE` everywhere. Fine for a fresh-tenant first run; wasteful for a daily refresh that touches the same 50M-row GL fact only a few thousand rows at a time. P1.17 ships `--mode incremental`:
+`--mode seed` rebuilds bronze + silver + gold from scratch on every cycle —
+full BICC extract, `CREATE OR REPLACE TABLE` where the content-pack strategy
+requires it. Fine for a fresh-tenant first run; wasteful for a daily refresh
+that touches the same large Fusion facts only a few thousand rows at a time.
+Day-2 refresh uses `--mode incremental`:
 
 - **Bronze** — BICC's `fusion.initial.extract-date` filter receives the prior run's safety-windowed watermark; the orchestrator `MERGE INTO bronze_target ... ON target.<natural_key> = src.<natural_key>` instead of `mode("overwrite")`. The overlap re-extracted by the safety window dedupes by natural key.
 - **Silver `dim_supplier`, `dim_account` + Gold `gl_balance` (row-level)** — `MERGE INTO target USING (... WHERE bronze_extract_ts > <layer-local watermark>) ON target.<natural_key> = src.<natural_key>`. One bronze row changed → one silver/gold row updated.
-- **Exempt marts (`supplier_spend`, `ap_aging`, `dim_calendar`)** — always run `CREATE OR REPLACE TABLE` regardless of mode. `supplier_spend`'s GROUP BY mixes a mutable fact attribute (`approval_status`) so partial-MERGE would leave stale aggregate rows on status flips (correct incremental ships in P1.17b). `ap_aging` buckets are `CURRENT_DATE()`-anchored — incremental MERGE would freeze the bucket assignment a row had on the last run, going stale by one day daily. `dim_calendar` is parameter-driven, no source watermark.
+- **Exempt marts (`supplier_spend`, `ap_aging`, `dim_calendar`)** — always run `CREATE OR REPLACE TABLE` regardless of mode. `supplier_spend`'s GROUP BY mixes a mutable fact attribute (`approval_status`) so partial-MERGE would leave stale aggregate rows on status flips. `ap_aging` buckets are `CURRENT_DATE()`-anchored — incremental MERGE would freeze the bucket assignment a row had on the last run, going stale by one day daily. `dim_calendar` is parameter-driven, no source watermark.
 
 ```bash
 # First incremental run requires a prior --mode seed run to have populated each
 # layer's last_watermark in fusion_bundle_state. The orchestrator raises
 # IncrementalCursorMissingError listing every silver/gold dataset that lacks one.
-aidp-fusion-bundle run --inline --mode seed              # day 1
-aidp-fusion-bundle run --inline --mode incremental       # day 2+
+aidp-fusion-bundle run --mode seed              # day 1
+aidp-fusion-bundle run --mode incremental       # day 2+
 ```
+
+Prefer the conversational path? Use `/aidp-fusion-incremental`. If the run
+fails with schema, PVO, fingerprint, or plan-hash drift, start with
+`/aidpf-error-triage`; known drift gates route to `/fusion-drift-doctor`.
 
 ### Tuning the safety window — `bundle.incremental.watermark_safety_window_seconds`
 
@@ -251,41 +276,47 @@ explicitly needed.
 
 | Bundle id | Datastore | Source | Confirmed? |
 |---|---|---|---|
-| `erp_suppliers` | `FscmTopModelAM.SupplierExtractPVO` | pdf1 Step 3 | ✅ |
-| `po_orders` | `FscmTopModelAM.PrcExtractPO` | pdf2 p2 default | ✅ |
-| `scm_items` | `ItemExtractPVO` | pdf2 p2 default | ✅ |
-| `hcm_worker_assignments` | `workerAssignmentExtracts` (saas-batch) | pdf2 p4 | ✅ (v2) |
-| `gl_journal_lines` | `JournalLinesPVO` | placeholder | 🟡 verify-live |
-| `gl_period_balances` | `GLBalancePVO` | placeholder | 🟡 verify-live |
-| `gl_coa` | `ChartOfAccountsPVO` | placeholder | 🟡 verify-live |
-| `ar_invoices` / `ar_receipts` / `ar_aging` | `AR*PVO` | placeholders | 🟡 verify-live |
-| `ap_invoices` / `ap_payments` / `ap_aging` | `AP*PVO` | placeholders | 🟡 verify-live |
-| `po_receipts` | `RcvShipmentLinePVO` | placeholder | 🟡 verify-live |
+| `erp_suppliers` | `SupplierExtractPVO` | Oracle BICC blog + live catalog | ✅ |
+| `po_orders` | `PurchasingDocumentHeaderExtractPVO` | Oracle A-Team BICC pattern + live catalog | ✅ |
+| `scm_items` | `ItemExtractPVO` | Oracle A-Team BICC pattern + live catalog | ✅ |
+| `hcm_worker_assignments` | `workerAssignmentExtracts` (saas-batch) | Oracle A-Team saas-batch pattern | ✅ |
+| `gl_journal_lines` | `JournalHeaderExtractPVO` | live BICC catalog | ✅ |
+| `gl_period_balances` | `BalanceExtractPVO` | live BICC catalog | ✅ |
+| `gl_coa` | `CodeCombinationExtractPVO` | live BICC catalog | ✅ |
+| `ar_invoices` / `ar_receipts` | `TransactionHeaderExtractPVO` / `ReceiptHeaderExtractPVO` | live BICC catalog | ✅ |
+| `ap_invoices` / `ap_payments` / `ap_aging_periods` | `InvoiceHeaderExtractPVO` / `PaymentHistoryDistributionExtractPVO` / `AgingPeriodHeaderExtractPVO` | live BICC catalog | ✅ |
+| `po_receipts` | `ReceivingReceiptTransactionExtractPVO` | live BICC catalog | ✅ |
 
-Run `aidp-fusion-bundle catalog probe --pod <url>` to reconcile placeholders against your live BICC console.
+The table uses short display names. Run `aidp-fusion-bundle catalog list` for
+the exact AM-hierarchy datastore paths used by the CLI, and
+`aidp-fusion-bundle catalog probe --pod <url>` to reconcile the catalog against
+the tenant's live BICC console.
 
 ---
 
 ## Use cases
 
-1. **New AIDP customer onboarding** — create a customer bundle, run bootstrap + seed, create the OAC AIDP connection/dataset, then author the workbook via OAC MCP.
-2. **CFO demo path** — clone repo → set up OAC MCP → `bootstrap` → `run --mode seed` → `oac-dataset-advisor` → `oac-dataset-setup` → `workbook-authoring` → open OAC workbook → optionally hand off end-user MCP chat.
-3. **Custom GenAI agents grounded on Fusion data** *(0.1.0a ✅)* — `ai_generate("which suppliers had >$1M Q1 spend?")` against the bundle's curated gold marts via OCI Generative AI.
-4. **Fusion-side of the SAP-modernization pattern** *(Phase 2 🚧)* — Fusion data lands here; SAP data via parallel pipeline; both unified in AIDP gold layer.
-5. **Build cross-source data products** *(Phase 2 🚧)* — combine Fusion + Salesforce/Workday/S3/Postgres via the same `aidataplatform` connector family.
-6. **Cross-module analytics** *(Phase 2 🚧)* — order-to-cash health (AR × PO), commitments-vs-actuals (PO × GL), with conformed dimensions.
-7. **Conformed dim reuse** *(Phase 2 🚧)* — your existing AIDP notebooks join to `fusion_silver.dim_account` instead of re-deriving.
-8. **Daily incremental refresh** *(Phase 2 🚧)* — schedule the orchestrator as an AIDP job; bundle handles watermarks + Fusion's first-then-incremental BICC behavior.
-9. **Fusion quarterly-update resilience** *(Phase 2 🚧)* — schema-drift detection auto-evolves on adds, quarantines on remove/change.
-10. **SOX-ready audit trail** *(0.1.0a ✅)* — every load writes `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`; Iceberg/Delta time-travel + audit columns satisfy auditors.
-11. **Customer customizations** *(Phase 2 🚧)* — extend `dim_account` for additional COA segments per `docs/customizing.md`; no fork needed.
-12. **Pod migration** *(Phase 2 🚧)* — change `fusion.serviceUrl` in `bundle.yaml`, re-run `seed`, bundle reloads everything against new pod.
+### Supported now
+
+1. **New AIDP customer onboarding** — create a customer bundle, run `bootstrap --check-iam`, seed the medallion layers, create the OAC AIDP connection/dataset, then author the workbook through OAC MCP.
+2. **CFO demo path** — clone repo → set up OAC MCP with `dashboard mcp-setup` → `bootstrap` → `run --mode seed` → `oac-dataset-advisor` → `oac-dataset-setup` → `workbook-authoring` → open the OAC workbook → optionally hand off end-user MCP chat.
+3. **Day-2 incremental refresh** — schedule `run --mode incremental` after the first seed; the bundle manages watermarks, BICC safety windows, exempt full-refresh marts, and cursor diagnostics.
+4. **Fusion quarterly-update resilience** — route `AIDPF-*` failures through `aidpf-error-triage`; known schema/PVO/plan-hash drift routes to `fusion-drift-doctor`, bootstrap refresh, `medallion-author`, or scoped reseed.
+5. **Customer custom marts** — use `mart-author` to add content-pack overlay YAML+SQL for tenant-specific analytics, then wire it with `use-pack` without forking the starter pack.
+6. **Tenant semantic variation** — use `aidp-fusion-bootstrap` and `medallion-author` to pin profile evidence under `profiles/` and handle aliases or semantic variants additively.
+7. **Custom GenAI agents grounded on Fusion data** — call OCI Generative AI from AIDP notebooks against curated gold marts, for example `ai_generate("which suppliers had >$1M Q1 spend?")`.
+8. **SOX-ready audit trail** — every load writes `_extract_ts`, `_source_pvo`, `_run_id`, `_watermark_used`; Delta time travel plus audit columns supports reviewer evidence.
+
+### Adjacent patterns
+
+1. **Fusion-side of the SAP-modernization pattern** — Fusion data lands through this bundle; SAP data lands through a parallel pipeline; both unify in the AIDP gold layer.
+2. **Cross-source data products** — combine Fusion gold marts with Salesforce, Workday, S3, Postgres, or other AIDP-connected sources in downstream AIDP notebooks and marts.
+3. **Pod migration** — change `fusion.serviceUrl` in `bundle.yaml`, run bootstrap validation against the new pod, then reseed with a fresh run identity.
 
 ---
 
 ## References
 
-- **Plan**: `oracle-ai-data-platform-fusion-bundle.md` in the private planning workspace.
 - **Sibling plugin** (single-PVO connector skill): `oracle-ai-data-platform-workbench-spark-connectors`.
 - **Official Oracle BICC blog**: https://blogs.oracle.com/ai-data-platform/bring-fusion-data-into-oracle-ai-data-platform-workbench-using-bicc
 - **Ateam saas-batch blog**: https://www.ateam-oracle.com/how-to-extract-fusion-data-using-oracle-ai-data-platform
