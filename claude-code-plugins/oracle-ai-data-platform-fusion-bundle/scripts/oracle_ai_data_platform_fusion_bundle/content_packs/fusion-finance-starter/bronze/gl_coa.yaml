@@ -6,8 +6,13 @@ implementation:
   pvo_id: FscmTopModelAM.FinExtractAM.GlBiccExtractAM.CodeCombinationExtractPVO
   biccSchema: Financial
   schemaOverride: null
-  # gl_coa is bucket-config style — full re-extract per cycle.
-  incrementalCapable: false
+  # Live-verified 2026-06-16 (saasfademo1): BICC honors the
+  # fusion.initial.extract-date lineage delta for CodeCombinationExtractPVO, so
+  # gl_coa extracts incrementally on CodeCombinationLastUpdateDate (declared
+  # below). It is a master-data chart-of-accounts entity, NOT a bucket-config
+  # table — the prior false flag was inherited by analogy. See
+  # tests/live/TC35_gl_coa_incremental_results.md.
+  incrementalCapable: true
   auditColumnsMode: bronze_v1
 target: gl_coa
 dependsOn:

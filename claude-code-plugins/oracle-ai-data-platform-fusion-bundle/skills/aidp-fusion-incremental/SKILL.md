@@ -41,8 +41,9 @@ Honour `ambiguous` / `unknown_tokens` (list pack nodes, ask) and `needs_run_id`
 python3 ../aidp-fusion-seed/preconditions.py --bundle bundle.yaml --config aidp.config.yaml --env <env>
 ```
 Act on `missing` via the same ladder as seed: `bundle` → init/fix; `config` →
-`/aidp-fusion-config`; `profile` → `bootstrap` (or `use-pack` if the node is in
-an unwired overlay); `cluster` → start it. Re-run until `ok: true`.
+`/aidp-fusion-config`; `profile` → `/aidp-fusion-bootstrap` (or `use-pack` if
+the node is in an unwired overlay); `cluster` → start it. Re-run until
+`ok: true`.
 
 ### 3 — Incremental-specific prechecks (this is what seed doesn't do)
 These are the failure modes incremental adds — front-run them so the operator

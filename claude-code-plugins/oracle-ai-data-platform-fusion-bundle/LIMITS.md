@@ -153,21 +153,42 @@ traceability; the VIEW is the contract consumers reach for first.
 
 ### P1.17-L2 — `incremental_capable=False` PVOs re-extract in full every cycle
 
-**What it is**: three bronze PVOs carry `incremental_capable=False` because BICC's
-`fusion.initial.extract-date` filter is not respected for them: `gl_period_balances`
-(monthly-snapshot semantics), `gl_coa` (chart-of-accounts; tiny), `ap_aging_periods`
-(bucket-config table). Under `--mode incremental` these still re-extract the FULL
-row set every cycle. The bronze MERGE dedupes by natural key so the target row
-count doesn't grow, but BICC-side cost equals seed-mode cost.
+**What it is**: `gl_period_balances` (`BalanceExtractPVO`, monthly-snapshot
+semantics) carries `incremental_capable=False` because BICC's
+`fusion.initial.extract-date` filter is not respected for it. Under
+`--mode incremental` it still re-extracts the FULL row set every cycle. The bronze
+MERGE dedupes by natural key so the target row count doesn't grow, but BICC-side
+cost equals seed-mode cost.
+
+**Update (2026-06-16)** — all three originally-listed PVOs were live-probed
+(`tests/live/TC35_gl_coa_incremental_results.md`):
+- `gl_period_balances` (`BalanceExtractPVO`) — **CONFIRMED IGNORED**: full =
+  12,101,410 rows; a recent-watermark extract (2026-12-31, after the max LUD of
+  2026-05-27) STILL returned the full 12.1M. Native delta genuinely unavailable —
+  the lever is the period-window datastore filter (`bicc-period-window-extract`
+  feature), not the native cursor. This is the limit's remaining real case.
+- `gl_coa` (`CodeCombinationExtractPVO`) — **REMOVED**: BICC honors the lineage
+  delta (recent-watermark = 0 rows vs full 69,578). Now `incremental_capable=True`
+  on `CodeCombinationLastUpdateDate`. The prior `false` was inherited by analogy.
+- `ap_aging_periods` (`AgingPeriodHeaderExtractPVO`) — **probed HONORED, flipped
+  to `incremental_capable=True`** (recent-watermark = 0 vs unfiltered = 2). This is
+  catalog-truth only: there is no shipped content-pack bronze node for it, so
+  nothing extracts it today; a future node must declare watermark
+  `ApAgingPeriodsLastUpdateDate`. Probe discrimination was weak (max LUD 2023
+  precedes the test watermarks) but honored-vs-ignored is unambiguous — an ignored
+  PVO returns the FULL set under a watermark, not 0.
 
 **Severity**: low (cost, not correctness)
 **Affects**: tenants whose daily incremental cost budget assumes BICC
 short-circuits on no-op cycles.
 
-**Mitigation**: documented as expected behavior; flip the catalog flag if/when
-BICC adds cursor support for one of these PVOs.
+**Mitigation**: documented as expected behavior; flip the catalog flag if/when a
+live probe confirms BICC honors the cursor for one of the remaining PVOs (as was
+done for `gl_coa`).
 
-**Status**: tracked-by-design.
+**Status**: tracked-by-design (narrowed from 3 PVOs to 1 real case — only
+`gl_period_balances`, addressed by the period-window feature; `gl_coa` and
+`ap_aging_periods` both flipped to `incremental_capable=True` after live probes).
 
 ---
 

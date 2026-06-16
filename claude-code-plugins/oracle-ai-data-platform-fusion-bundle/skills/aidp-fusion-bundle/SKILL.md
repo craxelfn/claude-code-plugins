@@ -1,4 +1,5 @@
 ---
+name: aidp-fusion-bundle
 description: Productized Fusion → Oracle AI Data Platform pipeline with curated BICC extracts (GL/AR/AP/PO/Suppliers/Items), bronze/silver/gold medallion in Delta, conformed dimensions (account/calendar/org/supplier/item), gold marts (AR-Aging/AP-Aging/GL-Balance/PO-Backlog/Supplier-Spend), and MCP-native OAC workbook authoring. Use when the user wants to load Fusion ERP/HCM/SCM data into AIDP, build a CFO dashboard from Fusion, set up a Fusion-backed lakehouse, create OAC datasets/workbooks over AIDP gold, set up OAC MCP for operator authoring or natural-language Fusion analytics in Claude/Cline/Copilot, run BICC extracts incrementally, productize the Oracle blog "Bring Fusion Data into AIDP Workbench Using BICC", or extract Fusion via the saas-batch REST API. Triggers — "load Fusion into AIDP", "set up Fusion bronze layer", "build CFO dashboard from Fusion", "create OAC workbook from Fusion", "run BICC extract", "Fusion AIDP medallion", "saas-batch Fusion extract".
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -62,11 +63,14 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    ```
    Restart/reconnect Claude Code after this. Autopilot and workbook-authoring need OAC MCP for `search_catalog`, `describe_data`, and `save_catalog_content`.
 
-4. **Probe prerequisites against your pod**:
+4. **Probe prerequisites and pin tenant variation**:
    ```bash
    aidp-fusion-bundle bootstrap --check-iam
    ```
-   Confirms BICC role, BICC External Storage profile (set in BICC console), AIDP catalog, IAM policies, Vault access.
+   Prefer to drive this conversationally? Use
+   [`aidp-fusion-bootstrap`](../aidp-fusion-bootstrap/SKILL.md). It confirms BICC role,
+   BICC External Storage profile (set in BICC console), AIDP catalog, IAM policies,
+   Vault access, and routes unresolved variation to `medallion-author`.
 
 5. **Run the orchestrator**:
    ```bash
@@ -76,7 +80,7 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    Prefer to drive this conversationally? The [`aidp-fusion-seed`](../aidp-fusion-seed/SKILL.md)
    skill turns "seed", "seed supplier_spend", "seed just bronze", or "resume
    the seed" into the correct guarded `run --mode seed` invocation — it parses
-   the scope, auto-satisfies preconditions (validate / bootstrap / cluster),
+   the scope, auto-satisfies preconditions (validate / `/aidp-fusion-bootstrap` / cluster),
    and **fail-closed-confirms** before overwriting populated silver/gold marts.
 
 6. **Build dashboards (MCP-native — the current path).** Ask

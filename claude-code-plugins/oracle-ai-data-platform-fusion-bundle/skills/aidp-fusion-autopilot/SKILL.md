@@ -1,6 +1,6 @@
 ---
 name: aidp-fusion-autopilot
-description: "End-to-end conductor for the Fusion -> AIDP -> OAC dashboard journey. Takes one high-level goal ('I want a supplier-spend vs GL-balance dashboard from Fusion') and drives the whole chain — configure -> connect OAC MCP (prerequisite for the OAC steps) -> bootstrap -> seed -> advise dataset -> author mart if needed -> create OAC dataset -> author workbook -> (optional) enable end-user MCP chat — by detecting current state and delegating each step to the right sibling skill/command. Auto-advances on clean steps; pauses for real decisions (destructive seed, variation freeze, OAC dataset creation, ambiguous intent, gaps). Use when the user states a dashboard/analytics goal and wants it driven start-to-finish, OR on first run after installing the plugin — 'I just installed this, what now', 'get me started', 'set me up', 'set up Fusion analytics from scratch / end to end', 'autopilot this', 'take me from nothing to a dashboard'. This is the front door for a fresh install (setup scaffolds the bundle). NOT for a single known step (call that skill directly)."
+description: "End-to-end conductor for the Fusion to AIDP to OAC dashboard journey. Takes one high-level goal ('I want a supplier-spend vs GL-balance dashboard from Fusion') and drives the whole chain: configure, connect OAC MCP, bootstrap, seed, advise dataset, author mart if needed, create OAC dataset, author workbook, and optionally enable end-user MCP chat by detecting current state and delegating each step to the right sibling skill/command. Auto-advances on clean steps; pauses for real decisions (destructive seed, variation freeze, OAC dataset creation, ambiguous intent, gaps). Use when the user states a dashboard/analytics goal and wants it driven start-to-finish, OR on first run after installing the plugin: 'I just installed this, what now', 'get me started', 'set me up', 'set up Fusion analytics from scratch / end to end', 'autopilot this', 'take me from nothing to a dashboard'. This is the front door for a fresh install (setup scaffolds the bundle). NOT for a single known step (call that skill directly)."
 allowed-tools: Read, Bash, Glob, Grep, mcp__oac-mcp-server__oracle_analytics-search_catalog, mcp__oac-mcp-server__oracle_analytics-find_matching_datasources, mcp__oac-mcp-server__oracle_analytics-describe_data
 ---
 
@@ -44,7 +44,7 @@ seven skills to invoke, or in what order.
 |---|---|---|---|---|
 | 1 | **Config** | `bundle.yaml` + `aidp.config.yaml` exist; coords non-placeholder | `aidp-fusion-bundle init` (scaffold if absent — fresh install) → `/aidp-fusion-config` for coords | missing `fusion:` connectivity (human-only) |
 | **1b** | **OAC MCP connect** (front-loaded prerequisite — see §below) | `oac-mcp-server` tools answer a live `search_catalog` ping | `aidp-fusion-bundle dashboard mcp-setup` / `mcp-token`, then **restart/reconnect Claude Code** | **always when dead** — staging the connector/token needs a Claude Code restart before its tools work; PAUSE for the restart, then resume here |
-| 2 | **Bootstrap** | `profiles/<tenant>.yaml` present + fingerprint pinned | `aidp-fusion-bundle bootstrap` | multi-match variation needs a human pick (never `--non-interactive`); surface frozen picks |
+| 2 | **Bootstrap** | `profiles/<tenant>.yaml` present + fingerprint pinned | `/aidp-fusion-bootstrap` | multi-match variation needs a human pick (never `--non-interactive`); surface frozen picks |
 | 3 | **Seed** | live gold has the needed tables (probe) | `/aidp-fusion-seed` | always confirm the destructive guard's CONFIRM outcome |
 | 4 | **Advise** | — (always run for the goal) | `/oac-dataset-advisor` | — |
 | 5 | **Author mart** (only on advisor GAP) | the gap node exists live after seed | `/mart-author` → `use-pack` → back to Step 3 | confirm the authored change before seeding it |
@@ -185,7 +185,7 @@ goal: supplier spend vs GL closing balance, by currency
 On a pause, state exactly what you need from the user and which step resumes.
 
 ## Skill family (what autopilot conducts)
-`/aidp-fusion-config` · `bootstrap` / `medallion-author` · `/aidp-fusion-seed` ·
+`/aidp-fusion-config` · `/aidp-fusion-bootstrap` / `medallion-author` · `/aidp-fusion-seed` ·
 `/aidp-fusion-status` · `/oac-dataset-advisor` · `/mart-author` (+ `use-pack`) ·
 `/workbook-authoring` · `dashboard mcp-setup`. Day-2: `/aidp-fusion-incremental`
 (deltas) with `/fusion-drift-doctor` as its drift precheck. **On any gate

@@ -202,7 +202,7 @@ _GL_COA = PvoEntry(
     schema="Financial",
     bronze_table_name="gl_coa",
     description="Chart of accounts (code combinations) — verified-live PVO name. Source for dim_account.",
-    incremental_capable=False,
+    incremental_capable=True,
     confirmed=True,
     # Natural key used by dim_account as account_id.
     natural_key="CodeCombinationCodeCombinationId",
@@ -270,7 +270,7 @@ _AP_AGING_PERIODS = PvoEntry(
     schema="Financial",
     bronze_table_name="ap_aging_periods",
     description="AP aging period definitions — bucket configs only; aging gold mart computed downstream from ap_invoices + ap_payments.",
-    incremental_capable=False,
+    incremental_capable=True,
     confirmed=True,
     # Inferred key; verify via `catalog probe`.
     natural_key="AgingPeriodHeaderAgingPeriodId",

@@ -101,6 +101,17 @@ validates and carries the evidence; it is not the source of truth.** Use BICC
 metadata, PVO semantics, and data-owner/business confirmation rather than
 column-name guesses.
 
+> **Verify incremental capability live — do not guess it from PVO class.** The
+> table below is a *hypothesis*, not the answer. The "snapshot/config ⇒
+> `incrementalCapable: false`" heuristic is wrong often enough to matter:
+> `gl_coa` shipped `false` because it "looked like config," yet a live BICC probe
+> proved BICC fully honors the lineage delta for it (recent-watermark extract = 0
+> rows vs full 69,578) — it is perfectly incrementable. Before you stamp
+> `incrementalCapable` (true OR false) on a new bronze node, hand the source PVO
+> to **`/incremental-mechanism`**, which live-probes whether BICC honors
+> `fusion.initial.extract-date` and returns the verified rung. Stamp the YAML from
+> that verdict, not from the class label.
+
 | PVO class | Required authoring behavior |
 |---|---|
 | **Transaction / change-feed PVO** | Use `incrementalCapable: true` only when live BICC metadata exposes a reliable `isLastUpdateDate` column and the business semantics confirm changes advance through that column. The column may have a PVO-specific name; record the exact metadata-observed watermark column and natural key in YAML. |
@@ -108,8 +119,10 @@ column-name guesses.
 | **Period-windowable snapshot** | Treat high-volume period snapshots like `gl_period_balances` specially. Do not silently create a daily full-pull source; require explicit user approval and either attach/document an `extract_window` policy or create a backlog item until runtime supports it. |
 
 If classification is uncertain, stop and ask for evidence from BICC metadata or
-the Fusion data owner. Never mark a snapshot PVO `incrementalCapable: true`
-just to make the extract faster.
+the Fusion data owner — or run `/incremental-mechanism` to settle it empirically.
+Never mark a snapshot PVO `incrementalCapable: true` just to make the extract
+faster; and never mark a node `false` on a hunch — the live probe is cheap and
+authoritative.
 
 ### 4 — Plan the change (pick the rung)
 Build a field-resolution map — for each required field, where is it sourced?
