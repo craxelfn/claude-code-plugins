@@ -917,9 +917,9 @@ def dashboard_mcp_token(
 @click.option("--oac-url", default=None,
               help="OAC base URL (default: $OAC_URL).")
 @click.option("--user", "user", default=None,
-              help="OAC basic-auth username (default: $OAC_ADMIN_USER).")
+              help="OAC basic-auth username (default: $OAC_MCP_USER; legacy fallback: $OAC_ADMIN_USER).")
 @click.option("--password", "password", default=None,
-              help="OAC basic-auth password, or ${vault:OCID} (default: $OAC_ADMIN_PASSWORD).")
+              help="OAC basic-auth password, or ${vault:OCID} (default: $OAC_MCP_PASSWORD; legacy fallback: $OAC_ADMIN_PASSWORD).")
 @click.option("--connector-js", default=None,
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Path to the downloaded oac-mcp-connect.js to stage. Omit if one is "
@@ -951,22 +951,31 @@ def dashboard_mcp_setup(
       3. wires a credential-free .mcp.json (single connector arg — URL and creds stay
          in the 0600 config, never in the committed repo).
 
-    Credentials are read from --user/--password (or $OAC_ADMIN_USER/$OAC_ADMIN_PASSWORD)
-    and never echoed. Scope the OAC user to least privilege — v1.4 exposes catalog
-    write/delete/ACL tools governed by that user's grants.
+    Credentials are read from --user/--password or $OAC_MCP_USER/$OAC_MCP_PASSWORD
+    and never echoed. $OAC_ADMIN_USER/$OAC_ADMIN_PASSWORD remain supported as a
+    backward-compatible fallback, but the user does not need to be an administrator.
+    Scope the OAC user to least privilege — v1.4 exposes catalog write/delete/ACL
+    tools governed by that user's grants.
     """
     import os as _os
 
     from .oac.mcp_token import DEFAULT_CONNECTOR_CONFIG_FILE, setup_basic_auth
     from .utils import vault
 
+    def _env_first(*names: str) -> str | None:
+        for name in names:
+            value = _os.environ.get(name)
+            if value:
+                return value
+        return None
+
     oac_url = oac_url or _os.environ.get("OAC_URL")
-    user = user or _os.environ.get("OAC_ADMIN_USER")
-    password = password or _os.environ.get("OAC_ADMIN_PASSWORD")
+    user = user or _env_first("OAC_MCP_USER", "OAC_ADMIN_USER")
+    password = password or _env_first("OAC_MCP_PASSWORD", "OAC_ADMIN_PASSWORD")
 
     missing = [n for n, v in (("--oac-url/$OAC_URL", oac_url),
-                              ("--user/$OAC_ADMIN_USER", user),
-                              ("--password/$OAC_ADMIN_PASSWORD", password)) if not v]
+                              ("--user/$OAC_MCP_USER", user),
+                              ("--password/$OAC_MCP_PASSWORD", password)) if not v]
     if missing:
         console.print(f"[red]mcp-setup requires {', '.join(missing)}[/red]")
         sys.exit(2)

@@ -77,7 +77,7 @@ On the same MCP Connect tab, click **Copy JSON** to copy the per-user MCP server
 > ⚠️ **Terminal clients can't do interactive auth.** Claude Code's MCP client reports `elicitation = not-supported`, so the connector's default **browser login cannot complete** — the connector exits and you see `-32000: Connection closed`. Use the supported `dashboard mcp-setup` path below so the connector credentials are supplied up front.
 
 Claude Code does **not** read `mcpServers` from `settings.json`. Use one of:
-- **Project-scoped (recommended for this repo):** the bundle ships a committed `.mcp.json` at the repo root with an `oac-mcp-server` entry. After running `dashboard mcp-setup` (below) it points at the staged connector via `${HOME}/.oac-connect/oac-mcp-connect.js` — **no URL or credentials are committed** (those live in a 0600 connector config file). Restart Claude Code and approve the server when prompted.
+- **Project-scoped (recommended for this repo):** the bundle ships a committed `.mcp.json` at the repo root with an `oac-mcp-server` entry. Out of the box it launches `node ${OAC_MCP_CONNECT_PATH}` — so set **`OAC_MCP_CONNECT_PATH`** (in your `.env` / shell) to the connector you extracted in Step 1, and the server starts with no further wiring. If it's unset the server simply doesn't start — the AIDP medallion pipeline is unaffected. Alternatively, running `dashboard mcp-setup` (below) stages the connector and rewrites `.mcp.json` to the fixed `${HOME}/.oac-connect/oac-mcp-connect.js` path. Either way **no URL or credentials are committed** (those live in a 0600 connector config file). Restart Claude Code and approve the server when prompted.
 - **Personal (any project):** `claude mcp add oac-mcp-server -- node ~/.oac-connect/oac-mcp-connect.js` (writes to your user config; the connector reads URL + auth from its config file).
 
 ---
@@ -87,7 +87,9 @@ Claude Code does **not** read `mcpServers` from `settings.json`. Use one of:
 On a **non-IDCS** instance, OAC issues tokens its own APIs reject, so bearer-token auth is a dead end. The connector's **basic auth** is the working path: credentials are supplied up front (the connector sends `Authorization: Basic base64(user:pass)`), so it never needs a browser. One command sets it all up:
 
 ```bash
-# Reads OAC_URL / OAC_ADMIN_USER / OAC_ADMIN_PASSWORD from your env (or pass --oac-url/--user/--password)
+# Reads OAC_URL / OAC_MCP_USER / OAC_MCP_PASSWORD from your env
+# (or pass --oac-url/--user/--password). OAC_ADMIN_* is accepted only as
+# a legacy fallback; the account should be least-privilege, not an admin.
 aidp-fusion-bundle dashboard mcp-setup \
   --connector-js ~/Downloads/oac-mcp-connect/oac-mcp-connect.js
 ```
@@ -116,7 +118,7 @@ After reconnect, paste:
 Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md.
 ```
 
-> 🔐 **Least privilege.** Basic-auth credentials sit in a plaintext 0600 file on your workstation, and connector **v1.4 exposes catalog write/delete/ACL tools** governed by that user's grants. Use a scoped, query-only OAC user — not an admin — for anything beyond local testing.
+> 🔐 **Least privilege.** Basic-auth credentials sit in a plaintext 0600 file on your workstation, and connector **v1.4 exposes catalog write/delete/ACL tools** governed by that user's grants. Use a normal OAC user scoped to the intended workflow — read/query for analysis, plus catalog-save grants only when authoring workbooks. Do not use an admin account except in a disposable demo environment.
 
 > The committed `.mcp.json` carries **no** OAC URL, username, or password — only `${HOME}/.oac-connect/oac-mcp-connect.js` (Claude Code expands `${HOME}` at launch).
 
@@ -181,7 +183,7 @@ OAC MCP (Preview, Nov 2025) is intentionally narrow:
 |---|---|
 | List/describe datasets, subject areas, columns, measures | Create OAC AIDP connections or datasets; do those in the OAC UI |
 | Run governed Logical SQL queries | Register data sources; use OAC UI for first AIDP connection creation |
-| Manage catalog items (v1.4: copy/move/delete/ACL) — **only if the OAuth user has those grants** | Run arbitrary SQL DDL (no schema changes, no inserts) |
+| Manage catalog items (v1.4: copy/move/delete/ACL) — **only if the connecting OAC user has those grants** | Run arbitrary SQL DDL (no schema changes, no inserts) |
 | Auth runs as the **end user** — governance preserved | Bypass OAC grants, row security, or column permissions |
 
 Workbook authoring uses MCP `save_catalog_content` when that tool is available
@@ -201,7 +203,7 @@ dataset; those remain manual OAC UI steps in the current workflow. The legacy
 | `oracle_analytics-execute_logical_sql` returns empty | Workbook/dataset not visible to your user, or query referenced a column that doesn't exist | Check OAC permissions; describe the dataset first to confirm column names |
 | `tools/call` returns `401 Unauthorized` (tools list fine) | No completed auth session — `tools/list` works unauthenticated but data calls need credentials | **Claude Code:** run `dashboard mcp-setup` (basic auth). **Desktop:** complete the browser login, or pass a `token.json` as the connector's 3rd arg (IDCS only) |
 | Claude Code: server drops with `-32000: Connection closed` on first tool call | Connector fell back to **interactive** browser auth, which Claude Code can't drive (`elicitation = not-supported`) | Supply credentials up front: `dashboard mcp-setup` for basic auth (works on non-IDCS pods) |
-| Basic auth: `401` on every call | Wrong credentials, or the OAC user lacks access | Re-check `OAC_ADMIN_USER`/`OAC_ADMIN_PASSWORD`; confirm the user can log into the OAC web UI |
+| Basic auth: `401` on every call | Wrong credentials, or the OAC user lacks access | Re-check `OAC_MCP_USER`/`OAC_MCP_PASSWORD`; confirm the user can log into the OAC web UI and has grants to the needed catalog objects |
 | MCP server crashes on start | Node.js < 18 | Upgrade Node.js |
 | `OAC_INSTANCE_URL` mismatch | Copied JSON pointed at a different OAC instance | Re-fetch JSON from the right OAC's MCP Connect tab |
 

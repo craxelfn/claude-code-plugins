@@ -877,6 +877,108 @@ class TestMigrateBundle:
         assert "Traceback" not in result.output
 
 
+class TestDashboardMcpSetup:
+    def _connector(self, tmp_path: Path) -> Path:
+        connector = tmp_path / "oac-mcp-connect.js"
+        connector.write_text("// connector\n", encoding="utf-8")
+        return connector
+
+    def _summary(self, tmp_path: Path, *, user: str) -> dict[str, str]:
+        return {
+            "config_file": str(tmp_path / "config.json"),
+            "oac_url": "https://oac.example.com",
+            "user": user,
+            "connector": str(tmp_path / "staged" / "oac-mcp-connect.js"),
+            "mcp_json": str(tmp_path / ".mcp.json"),
+            "connector_arg": "${HOME}/.oac-connect/oac-mcp-connect.js",
+        }
+
+    def test_uses_oac_mcp_env_before_legacy_admin_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OAC_URL", "https://oac.example.com")
+        monkeypatch.setenv("OAC_MCP_USER", "least-priv-user")
+        monkeypatch.setenv("OAC_MCP_PASSWORD", "least-priv-password")
+        monkeypatch.setenv("OAC_ADMIN_USER", "admin-user")
+        monkeypatch.setenv("OAC_ADMIN_PASSWORD", "admin-password")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.mcp_token.setup_basic_auth",
+            return_value=self._summary(tmp_path, user="least-priv-user"),
+        ) as setup:
+            result = CliRunner().invoke(
+                cli.main,
+                [
+                    "dashboard",
+                    "mcp-setup",
+                    "--connector-js",
+                    str(self._connector(tmp_path)),
+                    "--mcp-json",
+                    str(tmp_path / ".mcp.json"),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        kwargs = setup.call_args.kwargs
+        assert kwargs["user"] == "least-priv-user"
+        assert kwargs["password"] == "least-priv-password"
+
+    def test_legacy_admin_env_is_backward_compatible_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OAC_URL", "https://oac.example.com")
+        monkeypatch.delenv("OAC_MCP_USER", raising=False)
+        monkeypatch.delenv("OAC_MCP_PASSWORD", raising=False)
+        monkeypatch.setenv("OAC_ADMIN_USER", "legacy-user")
+        monkeypatch.setenv("OAC_ADMIN_PASSWORD", "legacy-password")
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.mcp_token.setup_basic_auth",
+            return_value=self._summary(tmp_path, user="legacy-user"),
+        ) as setup:
+            result = CliRunner().invoke(
+                cli.main,
+                [
+                    "dashboard",
+                    "mcp-setup",
+                    "--connector-js",
+                    str(self._connector(tmp_path)),
+                    "--mcp-json",
+                    str(tmp_path / ".mcp.json"),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        kwargs = setup.call_args.kwargs
+        assert kwargs["user"] == "legacy-user"
+        assert kwargs["password"] == "legacy-password"
+
+    def test_missing_credentials_names_oac_mcp_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OAC_URL", "https://oac.example.com")
+        monkeypatch.delenv("OAC_MCP_USER", raising=False)
+        monkeypatch.delenv("OAC_MCP_PASSWORD", raising=False)
+        monkeypatch.delenv("OAC_ADMIN_USER", raising=False)
+        monkeypatch.delenv("OAC_ADMIN_PASSWORD", raising=False)
+
+        result = CliRunner().invoke(
+            cli.main,
+            [
+                "dashboard",
+                "mcp-setup",
+                "--connector-js",
+                str(self._connector(tmp_path)),
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "$OAC_MCP_USER" in result.output
+        assert "$OAC_MCP_PASSWORD" in result.output
+        assert "$OAC_ADMIN_USER" not in result.output
+        assert "$OAC_ADMIN_PASSWORD" not in result.output
+
+
 class TestStatus:
     def test_pyspark_unavailable_falls_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

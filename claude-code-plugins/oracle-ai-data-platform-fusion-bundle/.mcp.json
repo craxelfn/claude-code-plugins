@@ -3,7 +3,7 @@
     "oac-mcp-server": {
       "command": "node",
       "args": [
-        "${HOME}/.oac-connect/oac-mcp-connect.js"
+        "${OAC_MCP_CONNECT_PATH}"
       ]
     }
   }
