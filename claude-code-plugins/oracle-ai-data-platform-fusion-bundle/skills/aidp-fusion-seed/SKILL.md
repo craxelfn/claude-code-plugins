@@ -1,6 +1,6 @@
 ---
 name: aidp-fusion-seed
-description: "Turn a natural-language seed request into a correct, guarded `aidp-fusion-bundle run --mode seed`. Parses intent into scope flags (--datasets / --layers / --strict-scope / --resume), auto-satisfies preconditions (validate + bootstrap + cluster), guards the destructive replace-on-silver/gold behaviour with a fail-closed confirmation, then dispatches and offers resume on failure. Use when the user says 'seed', 'seed supplier_spend', 'seed the bronze layer', 'seed the marts', 'resume the seed', 'materialize bronze/silver/gold', or otherwise wants a first-run / re-run of the medallion pipeline. NOT for incremental runs (--mode incremental), bootstrap-only variation resolution, or dashboard install."
+description: "Turn a natural-language seed request into a correct, guarded `aidp-fusion-bundle run --mode seed`. Parses intent into scope flags (--datasets / --layers / --strict-scope / --resume), auto-satisfies preconditions (validate + `/aidp-fusion-bootstrap` + cluster), guards the destructive replace-on-silver/gold behaviour with a fail-closed confirmation, then dispatches and offers resume on failure. Use when the user says 'seed', 'seed supplier_spend', 'seed the bronze layer', 'seed the marts', 'resume the seed', 'materialize bronze/silver/gold', or otherwise wants a first-run / re-run of the medallion pipeline. NOT for incremental runs (--mode incremental), bootstrap-only variation resolution (use `/aidp-fusion-bootstrap`), or dashboard install."
 allowed-tools: Read, Bash, Glob, Grep
 ---
 
@@ -34,8 +34,8 @@ when data is seen.
 
 - **Incremental runs** (`--mode incremental`) — that is the planned
   `aidp-fusion-incremental` sibling skill. This skill always runs `--mode seed`.
-- **Bootstrap-only** variation resolution (no run) — use `bootstrap` directly
-  or the `medallion-author` skill for tier-2 overlay drafting.
+- **Bootstrap-only** variation resolution (no run) — use
+  `/aidp-fusion-bootstrap`, or `medallion-author` for tier-2 overlay drafting.
 - **Dashboard install / OAC** — use the `dashboard` command / OAC skills.
 - **Unit-test runs** — use `pytest`. **Dataset-extract debugging** — use the
   catalog probe commands.
@@ -122,9 +122,9 @@ cluster_state, config_placeholders[], validate_ok, details{}}`. Act on
   missing `fusion:` connectivity — `init-config` cannot supply that.)
 
 - **`missing` contains `"profile"`** (no `contentPack.profile`, or
-  `profiles/<tenant>.yaml` absent) → **auto-run `bootstrap`**:
+  `profiles/<tenant>.yaml` absent) → **route through `/aidp-fusion-bootstrap`**:
   ```bash
-  aidp-fusion-bundle bootstrap
+  aidp-fusion-bundle bootstrap --check-iam
   ```
   ⚠️ Bootstrap **freezes tenant variation choices** (column-alias /
   semantic-variant picks) into the profile. **Surface what it resolved** to the

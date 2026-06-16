@@ -36,20 +36,21 @@ Autopilot follows this order:
 | Phase | Purpose | Driver | Stops for |
 |---|---|---|---|
 | 1. Config | Create/validate `bundle.yaml` and `aidp.config.yaml` | `aidp-fusion-bundle init`, `/aidp-fusion-config` | Missing Fusion connectivity |
-| 1b. OAC MCP connect | Make OAC tools available before OAC phases | `dashboard mcp-setup` or `dashboard mcp-token` | Claude Code restart/reconnect |
-| 2. Bootstrap | Probe prerequisites and pin tenant variation | `aidp-fusion-bundle bootstrap` | Variation choices |
+| 1b. OAC MCP connect | Make OAC tools available before OAC phases | `dashboard mcp-setup` | Claude Code restart/reconnect |
+| 2. Bootstrap | Probe prerequisites and pin tenant variation | `/aidp-fusion-bootstrap` | Variation choices |
 | 3. Seed | Materialize AIDP bronze/silver/gold | `/aidp-fusion-seed` | Destructive seed confirmation |
 | 4. Advise dataset | Decide whether live gold covers the goal | `/oac-dataset-advisor` | True data gaps |
 | 5. Author mart | Add missing analytical content when needed | `/mart-author`, then `use-pack` | Overlay approval |
-| 6. OAC connection/dataset | Create the OAC data surface over AIDP gold | OAC UI, guided by advisor | Manual OAC action |
+| 6. OAC connection/dataset | Create the OAC data surface over AIDP gold | `/oac-dataset-setup` guiding OAC UI | Manual OAC action |
 | 7. Workbook | Generate and save the workbook | `/workbook-authoring` | Replace existing workbook |
 | 8. End-user MCP chat | Let downstream users query OAC from their clients | `docs/oac_mcp_setup.md` | Least-privilege OAC account |
 
 Phase 1b is intentionally early. Autopilot and workbook authoring need OAC MCP
 tools such as `search_catalog`, `describe_data`, and `save_catalog_content`.
-After `dashboard mcp-setup` or `dashboard mcp-token`, Claude Code must restart
-or reconnect the MCP server before those tools exist in the session. Doing that
-before bootstrap/seed avoids stopping later in the OAC phases.
+After `dashboard mcp-setup`, Claude Code must restart or reconnect the MCP
+server before those tools exist in the session. Doing that before bootstrap/seed
+avoids stopping later in the OAC phases. Because restart can lose chat context,
+autopilot must write `.aidp/autopilot/resume.md` before pausing.
 
 Phase 8 is different from Phase 1b. Phase 1b equips the operator's Claude Code
 session so autopilot can inspect and write OAC content. Phase 8 is the optional
@@ -106,22 +107,36 @@ aidp-fusion-bundle validate
 Once the OAC URL and credentials are known, connect OAC MCP before continuing
 to the long-running pipeline phases.
 
-For Claude Code, use non-interactive auth:
+For Claude Code, use the supported setup command:
 
 ```bash
 aidp-fusion-bundle dashboard mcp-setup \
   --connector-js <path-to-oac-mcp-connect.js>
 ```
 
-For IDCS bearer-token environments, use:
-
-```bash
-aidp-fusion-bundle dashboard mcp-token --oac-url <oac-url> ...
-```
-
 Then restart or reconnect Claude Code and verify that `oac-mcp-server` is
 connected. Do not interpret a dead or unauthenticated MCP connection as "no OAC
 dataset exists"; it is a connectivity failure, not catalog evidence.
+
+Before stopping for the restart, write a non-secret resume checkpoint:
+
+```bash
+python3 skills/aidp-fusion-autopilot/write_resume_checkpoint.py \
+  --workdir . \
+  --goal "<dashboard goal>" \
+  --phase "Step 1b OAC MCP connect" \
+  --next-step "Reconnect Claude Code, verify oac-mcp-server, then resume autopilot" \
+  --pending "OAC MCP liveness check"
+```
+
+After reconnect, paste:
+
+```text
+Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md.
+```
+
+On resume, read the checkpoint, then re-probe live state. The checkpoint
+preserves intent; it is not evidence that a dataset, workbook, or table exists.
 
 Use a least-privilege OAC user. Connector v1.4 exposes catalog write, delete,
 ACL, save, and export tools, and those tools run with the connecting user's
@@ -129,7 +144,7 @@ OAC grants.
 
 ## Bootstrap
 
-Run bootstrap after config is valid:
+Run bootstrap after config is valid, preferably through `/aidp-fusion-bootstrap`:
 
 ```bash
 aidp-fusion-bundle bootstrap
@@ -210,7 +225,9 @@ Common recovery routes:
 - `AIDPF-4040`: plan-hash drift, usually re-seed the changed node or revert the
   unintended SQL/profile change.
 
-For the full code table, see `docs/aidpf-error-codes.md`.
+When the code is not one of these common routes, start with
+`/aidpf-error-triage`. For the full code table, see
+`docs/aidpf-error-codes.md`.
 
 ## Advise the OAC Dataset
 
@@ -333,8 +350,10 @@ Table B: fusion_catalog.gold.gl_balance
 Join: currency_code = currency_code
 ```
 
-After the dataset exists, resume autopilot. It should use OAC MCP to find and
-describe the dataset, then hand off to `/workbook-authoring`.
+Use `/oac-dataset-setup` for this checkpoint. It should turn the advisor
+recommendation into exact OAC UI steps, pause while the operator creates the
+connection/dataset, then use OAC MCP to find and describe the dataset before
+handing off to `/workbook-authoring`.
 
 ## Workbook Authoring
 
@@ -362,8 +381,8 @@ Routing:
 
 - If the profile is missing, bootstrap.
 - If the live gold/silver table is missing, seed it.
-- If the table exists but no OAC dataset exists, hand the user the OAC dataset
-  spec and pause.
+- If the table exists but no OAC dataset exists, use `/oac-dataset-setup` to
+  hand the user the OAC dataset spec and pause for the OAC UI action.
 - If the dataset exists but no workbook exists, go straight to
   `/workbook-authoring`.
 - If the workbook exists, return its path or `viewUrl` and ask whether the user
@@ -391,8 +410,10 @@ in addition to query tools, so permissions must be controlled by OAC grants.
 
 - Do not claim a table exists from pack YAML. Use the live AIDP catalog.
 - Do not claim an OAC dataset/workbook exists when MCP is disconnected.
+- Before any MCP restart/reconnect pause, write `.aidp/autopilot/resume.md`.
 - Do not seed populated targets without explicit confirmation.
 - Do not bypass drift gates outside dev. Use `/fusion-drift-doctor`.
+- Do not guess recovery from an unfamiliar `AIDPF-*` code. Use `/aidpf-error-triage`.
 - Do not author new content in the shipped starter pack. Use overlays.
 - Do not create or expose high-PII dashboard columns.
 - Do not confuse operator MCP setup with end-user MCP rollout.

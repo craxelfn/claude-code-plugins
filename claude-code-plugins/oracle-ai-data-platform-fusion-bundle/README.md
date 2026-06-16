@@ -6,15 +6,16 @@
 
 **Status**: alpha (`0.1.0a0`) — Tier-1 features complete and live-validated end-to-end against the saasfademo1 Fusion demo pod + multiple OAC instances (see [tests/live/](tests/live/)). Single content-pack execution path (Phase 9). **1360 unit + 12 architectural + 5 integration tests pass, plus the conversational skill family's own unit suites.** **Live-validated 2026-06-15** on the `fusion_bundle_dev` cluster: a `mart-author` overlay seeded `gold.ar_invoice_summary` (49 rows) end-to-end, and OAC workbooks were created via the OAC MCP `save_catalog_content` write tool.
 
-CLI commands wired: `init`, `init-config`, `use-pack`, `validate`, `bootstrap`, `catalog list/probe/probe-pvo`, `run`, `status`, `content-pack list/info/validate`, `dashboard install/validate/uninstall`, `dashboard mcp-config/mcp-token/mcp-setup`.
+CLI commands wired: `init`, `init-config`, `use-pack`, `validate`, `bootstrap`, `catalog list/probe/probe-pvo`, `run`, `status`, `content-pack list/info/validate`, `dashboard install/validate/uninstall`, `dashboard mcp-config/mcp-setup`.
 
-**Dashboard authoring is now MCP-native**: `oac-dataset-advisor` (intent → dataset, grounded in the live AIDP catalog) → `workbook-authoring` (generates schema-valid workbook JSON, writes via OAC MCP). The `.bar` `dashboard install` REST flow still ships as a legacy alternative.
+**Dashboard authoring is now MCP-native**: `oac-dataset-advisor` (intent → dataset, grounded in the live AIDP catalog) → `oac-dataset-setup` (guided manual OAC connection/dataset checkpoint + MCP verification) → `workbook-authoring` (generates schema-valid workbook JSON, writes via OAC MCP). The `.bar` `dashboard install` REST flow still ships as a legacy alternative.
 
 Start with [docs/project_setup.md](docs/project_setup.md) for a fresh checkout
 or customer bundle, then use [workflow.md](workflow.md) for the operator flow.
-Use [docs/aidpf-error-codes.md](docs/aidpf-error-codes.md) when a CLI run,
-bootstrap, validator, or diagnostic artifact reports an `AIDPF-*` code. The
-documentation map is [docs/README.md](docs/README.md).
+Use `/aidpf-error-triage` when a CLI run, bootstrap, validator, or diagnostic
+artifact reports an `AIDPF-*` code; use
+[docs/aidpf-error-codes.md](docs/aidpf-error-codes.md) for the full static
+reference. The documentation map is [docs/README.md](docs/README.md).
 
 **Positioning**: This bundle is **additive to and complementary with** Oracle's managed Fusion data offerings. It productizes Option 1 of the BICC blog's three-option architecture (BICC into AIDP for "Custom AI and ML, raw data access, data engineering"). Never positioned as a replacement for FDI, OAC, OTBI, BIP, or Data Transforms — different jobs, same Oracle ecosystem.
 
@@ -58,9 +59,12 @@ hand-running the CLI. The orchestrator routes through the rest:
 |---|---|
 | **`aidp-fusion-autopilot`** | **Front door.** State a goal ("build a supplier-spend vs GL-balance dashboard"); it detects current state and drives the whole chain, pausing only for real decisions. |
 | `aidp-fusion-config` | Resolve `aidp.config.yaml` coords from human-friendly names (no hand-copied OCIDs). |
+| `aidp-fusion-bootstrap` | Guided bootstrap: validate prerequisites, run `bootstrap --check-iam`, pin tenant variation into `profiles/`, and route `AIDPF-2010/2011` to `medallion-author`. |
 | `aidp-fusion-seed` | Natural-language → guarded `run --mode seed` (intent parse, precondition ladder, **fail-closed** destructive guard). |
 | `aidp-fusion-status` | Read-only pipeline health — reconciles `fusion_bundle_state` with the **live** catalog (HEALTHY / STALE / FAILED / DEFERRED / UNTRACKED …). |
+| `aidpf-error-triage` | Read-only `AIDPF-*` failure router: explain the code, name the evidence, and hand off to the right recovery skill or command. |
 | `oac-dataset-advisor` | Dashboard intent → which OAC dataset to create, grounded in the **live AIDP gold layer** (never pack YAMLs). |
+| `oac-dataset-setup` | Guided manual OAC AIDP connection/dataset creation, then MCP verification with `describe_data` before workbook authoring. |
 | `mart-author` | When the gold layer can't serve a request, author a new mart additively (content-pack YAML+SQL overlay), inspecting the Fusion PVO source — never touching living delta. Wires the bundle via `use-pack`. |
 | `medallion-author` | Tier-2 overlay for tenant variation (column aliases / semantic variants). |
 | `workbook-authoring` | Generate schema-valid OAC workbook JSON and write it via OAC MCP. |
@@ -94,6 +98,7 @@ aidp-fusion-bundle init
 # 3. Set up operator OAC MCP before OAC phases, then restart/reconnect Claude Code
 aidp-fusion-bundle dashboard mcp-setup \
   --connector-js /path/to/oac-mcp-connect.js
+#    If this interrupts an active dashboard request, resume from .aidp/autopilot/resume.md.
 
 # 4. Probe prerequisites and pin tenant variation
 aidp-fusion-bundle bootstrap --check-iam
@@ -104,11 +109,11 @@ aidp-fusion-bundle run --mode seed
 # 6. Ask the oac-dataset-advisor skill which OAC dataset to create.
 #    It must use the live AIDP gold catalog, not pack YAML alone.
 
-# 7. Create the AIDP connection and OAC dataset manually in OAC.
+# 7. Use oac-dataset-setup to guide the manual OAC connection/dataset step.
 #    Connection JSON can be generated with --print-only:
 aidp-fusion-bundle dashboard install --target oac --oac-url ... --print-only
 #    Then in OAC UI: Data -> Connections -> Create -> Oracle AI Data Platform.
-#    Create the dataset over the advised AIDP gold table(s).
+#    Create the dataset over the advised AIDP gold table(s), then verify with MCP.
 
 # 8. Resume autopilot. It finds/describes the dataset over OAC MCP and
 #    hands off to workbook-authoring to save the workbook.
@@ -223,16 +228,16 @@ Both signals show up in the orchestrator stdout under the same `[step]` line for
 ```
 Fusion BICC PVOs
   -> AIDP bronze/silver/gold content-pack pipeline
-  -> OAC AIDP connection + OAC dataset (created manually in OAC UI)
+  -> OAC AIDP connection + OAC dataset (guided by oac-dataset-setup, created manually in OAC UI)
   -> OAC workbook JSON authored by workbook-authoring
   -> OAC MCP save_catalog_content
   -> end-user OAC MCP chat in Claude / Cline / Copilot
 ```
 
 The current dashboard path is MCP-native. `oac-dataset-advisor` grounds the
-dataset recommendation in the live AIDP gold catalog; the user creates the OAC
-AIDP connection and dataset in the OAC UI; `workbook-authoring` binds workbook
-JSON to the dataset XSA reference and saves it via OAC MCP when
+dataset recommendation in the live AIDP gold catalog; `oac-dataset-setup`
+guides the manual OAC AIDP connection/dataset step and verifies it through MCP;
+`workbook-authoring` binds workbook JSON to the dataset XSA reference and saves it via OAC MCP when
 `save_catalog_content` is available.
 
 The legacy `.bar` snapshot deployment remains available for packaged workbook
@@ -264,7 +269,7 @@ Run `aidp-fusion-bundle catalog probe --pod <url>` to reconcile placeholders aga
 ## Use cases
 
 1. **New AIDP customer onboarding** — create a customer bundle, run bootstrap + seed, create the OAC AIDP connection/dataset, then author the workbook via OAC MCP.
-2. **CFO demo path** — clone repo → set up OAC MCP → `bootstrap` → `run --mode seed` → `oac-dataset-advisor` → create the OAC dataset → `workbook-authoring` → open OAC workbook → optionally hand off end-user MCP chat.
+2. **CFO demo path** — clone repo → set up OAC MCP → `bootstrap` → `run --mode seed` → `oac-dataset-advisor` → `oac-dataset-setup` → `workbook-authoring` → open OAC workbook → optionally hand off end-user MCP chat.
 3. **Custom GenAI agents grounded on Fusion data** *(0.1.0a ✅)* — `ai_generate("which suppliers had >$1M Q1 spend?")` against the bundle's curated gold marts via OCI Generative AI.
 4. **Fusion-side of the SAP-modernization pattern** *(Phase 2 🚧)* — Fusion data lands here; SAP data via parallel pipeline; both unified in AIDP gold layer.
 5. **Build cross-source data products** *(Phase 2 🚧)* — combine Fusion + Salesforce/Workday/S3/Postgres via the same `aidataplatform` connector family.

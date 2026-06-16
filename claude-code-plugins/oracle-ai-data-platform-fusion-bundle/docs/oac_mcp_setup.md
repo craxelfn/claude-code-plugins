@@ -74,9 +74,7 @@ On the same MCP Connect tab, click **Copy JSON** to copy the per-user MCP server
 
 ### Claude Code (`claude` CLI)
 
-> ⚠️ **Terminal clients can't do interactive auth.** Claude Code's MCP client reports `elicitation = not-supported`, so the connector's default **browser login cannot complete** — the connector exits and you see `-32000: Connection closed`. You must give the connector credentials **up front**. Two non-interactive options:
-> - **Basic auth** (recommended; the only option on **non-IDCS** instances, where tokens are rejected) — see [Non-interactive auth for Claude Code](#non-interactive-auth-for-claude-code-basic-auth) below.
-> - **Bearer token** (IDCS instances only) — `aidp-fusion-bundle dashboard mcp-token` (separate flow).
+> ⚠️ **Terminal clients can't do interactive auth.** Claude Code's MCP client reports `elicitation = not-supported`, so the connector's default **browser login cannot complete** — the connector exits and you see `-32000: Connection closed`. Use the supported `dashboard mcp-setup` path below so the connector credentials are supplied up front.
 
 Claude Code does **not** read `mcpServers` from `settings.json`. Use one of:
 - **Project-scoped (recommended for this repo):** the bundle ships a committed `.mcp.json` at the repo root with an `oac-mcp-server` entry. After running `dashboard mcp-setup` (below) it points at the staged connector via `${HOME}/.oac-connect/oac-mcp-connect.js` — **no URL or credentials are committed** (those live in a 0600 connector config file). Restart Claude Code and approve the server when prompted.
@@ -100,6 +98,23 @@ This:
 3. wires a **credential-free** `.mcp.json` — the connector is launched with a single arg (its own path); the URL and credentials stay only in the 0600 file, never in the committed repo.
 
 Then **restart / reconnect Claude Code** (`/mcp` → reconnect `oac-mcp-server`) and confirm with `claude mcp list` (expect `✔ Connected`). The `--connector-js` arg is only needed the first time (to stage the connector); later runs that just rotate credentials can omit it.
+
+If a dashboard/autopilot journey is already in progress, write a non-secret
+resume checkpoint before restarting:
+
+```bash
+python3 skills/aidp-fusion-autopilot/write_resume_checkpoint.py \
+  --workdir . \
+  --goal "<dashboard goal>" \
+  --phase "OAC MCP reconnect required" \
+  --next-step "Reconnect Claude Code, verify oac-mcp-server, then resume autopilot"
+```
+
+After reconnect, paste:
+
+```text
+Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md.
+```
 
 > 🔐 **Least privilege.** Basic-auth credentials sit in a plaintext 0600 file on your workstation, and connector **v1.4 exposes catalog write/delete/ACL tools** governed by that user's grants. Use a scoped, query-only OAC user — not an admin — for anything beyond local testing.
 

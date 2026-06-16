@@ -132,6 +132,23 @@ Then restart or reconnect Claude Code and verify `oac-mcp-server` is connected.
 Do not treat a disconnected MCP server as proof that an OAC dataset or workbook
 does not exist.
 
+If MCP setup happens after the user has already stated a dashboard goal, write
+the resume checkpoint before restarting:
+
+```bash
+python3 skills/aidp-fusion-autopilot/write_resume_checkpoint.py \
+  --workdir . \
+  --goal "<dashboard goal>" \
+  --phase "OAC MCP reconnect required" \
+  --next-step "Reconnect Claude Code, verify oac-mcp-server, then resume autopilot"
+```
+
+After reconnect, paste:
+
+```text
+Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md.
+```
+
 Full setup and troubleshooting details are in
 [oac_mcp_setup.md](oac_mcp_setup.md).
 
@@ -149,8 +166,9 @@ Bootstrap probes prerequisites and pins tenant variation into:
 profiles/<contentPack.profile>.yaml
 ```
 
-If bootstrap reports an `AIDPF-*` code, use
-[aidpf-error-codes.md](aidpf-error-codes.md).
+If bootstrap reports an `AIDPF-*` code, use `/aidpf-error-triage` for
+conversational routing, or [aidpf-error-codes.md](aidpf-error-codes.md) for the
+full static reference.
 
 ## First Seed
 
@@ -171,7 +189,8 @@ prove a physical target is empty in every environment.
 
 ## OAC Connection And Dataset
 
-After the needed AIDP gold table exists, create the OAC data surface manually.
+After the needed AIDP gold table exists, use `/oac-dataset-setup` to guide the
+manual OAC data-surface step.
 
 First, generate the AIDP connection JSON:
 
@@ -189,7 +208,8 @@ Data -> Connections -> Create -> Oracle AI Data Platform
 ```
 
 Upload the generated JSON and private key PEM, then create the dataset over the
-advised AIDP gold table(s).
+advised AIDP gold table(s). `/oac-dataset-setup` should verify the saved dataset
+with OAC MCP before workbook authoring begins.
 
 This step is manual for two reasons:
 
@@ -203,7 +223,8 @@ The full explanation is in
 
 ## Workbook Authoring
 
-After the OAC dataset exists, resume autopilot or use `workbook-authoring`.
+After `/oac-dataset-setup` verifies the OAC dataset, resume autopilot or use
+`workbook-authoring`.
 The skill should:
 
 - find the dataset with OAC MCP,

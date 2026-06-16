@@ -1,7 +1,6 @@
 ---
 name: workbook-authoring
 description: "Author regenerated OAC workbook JSON with deterministic template-first generation, runtime semantic validation checks, MCP save-validation, and preview iteration."
-version: 1.3.0
 ---
 
 # Workbook Authoring (Regenerated JSON, Runtime-Valid)
@@ -28,11 +27,14 @@ Use this skill to generate full workbook JSON that is both schema-shaped and plu
    - **If dead / unauthenticated:** STOP with an actionable message — do not
      proceed into catalog resolution (it would fail deep with an opaque error,
      or worse, read an empty result as "datasets don't exist"). Tell the user:
-     run `aidp-fusion-bundle dashboard mcp-setup` (or `mcp-token` — the
-     non-interactive path for Claude Code), then **restart/reconnect Claude
-     Code** (`/mcp` → reconnect `oac-mcp-server`) so the tools activate, then
-     re-invoke. MCP servers bind at session start; the connection cannot be
-     established mid-session. (Autopilot front-loads this as Step 1b.)
+     run `aidp-fusion-bundle dashboard mcp-setup --connector-js
+     <path-to-oac-mcp-connect.js>`, then **restart/reconnect Claude Code**
+     (`/mcp` → reconnect `oac-mcp-server`) so the tools activate, then
+     re-invoke. If this workbook request is part of the Fusion bundle journey,
+     write `.aidp/autopilot/resume.md` first with
+     `skills/aidp-fusion-autopilot/write_resume_checkpoint.py`. MCP servers
+     bind at session start; the connection cannot be established mid-session.
+     (Autopilot front-loads this as Step 1b.)
    - A save-unavailable connection is fine (disk-first fallback below); a fully
      *dead* connection is not.
 

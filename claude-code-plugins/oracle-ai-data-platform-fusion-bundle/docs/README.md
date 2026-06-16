@@ -23,7 +23,7 @@ aidp-fusion-autopilot
   -> OAC MCP setup
   -> bootstrap and seed AIDP gold
   -> oac-dataset-advisor
-  -> manual OAC AIDP connection and dataset
+  -> oac-dataset-setup for manual OAC AIDP connection and dataset verification
   -> workbook-authoring via OAC MCP
 ```
 

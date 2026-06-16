@@ -5,6 +5,9 @@ Fusion bundle plugin. Use it when a CLI command, bootstrap run, seed run,
 incremental run, content-pack validation, dashboard validation, or diagnostic
 artifact reports an `AIDPF` code.
 
+For conversational recovery, start with `/aidpf-error-triage`; it extracts the
+code and diagnostic context, then routes to the right recovery skill or command.
+
 Most structured diagnostics are written under:
 
 ```text
