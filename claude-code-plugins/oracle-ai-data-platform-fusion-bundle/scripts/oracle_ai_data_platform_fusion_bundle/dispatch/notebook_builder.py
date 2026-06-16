@@ -31,6 +31,7 @@ from typing import Any, Literal
 # for the same strings.
 MARKER_BEGIN = "AIDP_LIVE_TEST_RESULT_BEGIN"
 MARKER_END = "AIDP_LIVE_TEST_RESULT_END"
+_SENSITIVE_ENV_KEY_PARTS = ("PASSWORD", "SECRET", "TOKEN")
 
 
 def _code_cell(source: str) -> dict:
@@ -82,10 +83,21 @@ def _build_creds_cell(
     bundle_yaml: str,
     bicc_secret_name: str,
     bicc_secret_key: str,
+    env_vars: Mapping[str, str] | None = None,
 ) -> str:
+    safe_env_vars = {
+        str(k): str(v)
+        for k, v in sorted((env_vars or {}).items())
+        if not any(part in str(k).upper() for part in _SENSITIVE_ENV_KEY_PARTS)
+    }
     return (
         f"import os\n"
         f"from pathlib import Path\n"
+        f"_RUNTIME_ENV = {safe_env_vars!r}\n"
+        f"for _k, _v in _RUNTIME_ENV.items():\n"
+        f"    os.environ[_k] = _v\n"
+        f"if _RUNTIME_ENV:\n"
+        f'    print("runtime env loaded: " + ", ".join(sorted(_RUNTIME_ENV)))\n'
         f'os.environ["FUSION_BICC_PASSWORD"] = aidputils.secrets.get(  # noqa: F821\n'
         f"    name={bicc_secret_name!r}, key={bicc_secret_key!r}\n"
         f")\n"
@@ -372,6 +384,9 @@ def build_notebook(
     # Splices into the run-cell orchestrator.run kwargs so the cluster-side
     # run adopts the supplied resume run_id. ``None`` starts a fresh run.
     resume_run_id: str | None = None,
+    # Non-secret runtime env needed by bundle.yaml placeholders on the cluster.
+    # Secrets continue to resolve through AIDP credential store in the creds cell.
+    env_vars: Mapping[str, str] | None = None,
     # ``--strict-scope`` opts out of implicit transitive include. Threaded
     # into the generated orchestrator.run() call as a literal kwarg.
     strict_scope: bool = False,
@@ -425,6 +440,7 @@ def build_notebook(
                 bundle_yaml=bundle_yaml,
                 bicc_secret_name=bicc_secret_name,
                 bicc_secret_key=bicc_secret_key,
+                env_vars=env_vars,
             )
         ),
     ]

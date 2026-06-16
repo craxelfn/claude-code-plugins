@@ -15,7 +15,7 @@ from oracle_ai_data_platform_fusion_bundle import cli
 
 
 class TestInit:
-    def test_default_template_is_current_minimal_bundle(
+    def test_default_template_is_current_full_starter_bundle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.chdir(tmp_path)
@@ -27,6 +27,10 @@ class TestInit:
         assert "contentPack:" in bundle
         assert "fusion-finance-starter" in bundle
         assert "supplier_spend" in bundle
+        assert "ap_aging" in bundle
+        assert "gl_balance" in bundle
+        assert "dim_account" in bundle
+        assert "gl_period_balances" in bundle
         assert "project: my-fusion-lake" in config
 
     def test_writes_minimal_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,6 +216,27 @@ class TestBootstrap:
         # OR the templated env is named 'dev' and matches -> probes proceed
         # We don't assert exit code; only that bicc-auth was reported as SKIP.
         assert "bicc-auth" in result.output
+
+    def test_bicc_probe_skips_aidp_secret_reference(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from oracle_ai_data_platform_fusion_bundle.commands.bootstrap import (
+            _ProbeResult,
+            _probe_bicc,
+        )
+
+        monkeypatch.setenv("FUSION_BICC_USER", "user")
+        monkeypatch.setenv(
+            "FUSION_BICC_PASSWORD",
+            "${aidp:secret:fusion_bicc_password.password}",
+        )
+        results: list[_ProbeResult] = []
+
+        _probe_bicc(MagicMock(name="Bundle"), results)
+
+        assert results[0].name == "bicc-auth"
+        assert results[0].status == "SKIP"
+        assert "AIDP credential-store" in results[0].detail
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +948,44 @@ class TestDashboardMcpSetup:
         assert kwargs["user"] == "least-priv-user"
         assert kwargs["password"] == "least-priv-password"
 
+    def test_loads_customer_project_dotenv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("OAC_URL", raising=False)
+        monkeypatch.delenv("OAC_MCP_USER", raising=False)
+        monkeypatch.delenv("OAC_MCP_PASSWORD", raising=False)
+        monkeypatch.delenv("OAC_ADMIN_USER", raising=False)
+        monkeypatch.delenv("OAC_ADMIN_PASSWORD", raising=False)
+        (tmp_path / ".env").write_text(
+            "OAC_URL=https://dotenv-oac.example.com\n"
+            "OAC_MCP_USER=dotenv-user\n"
+            "OAC_MCP_PASSWORD=dotenv-password\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "oracle_ai_data_platform_fusion_bundle.oac.mcp_token.setup_basic_auth",
+            return_value=self._summary(tmp_path, user="dotenv-user"),
+        ) as setup:
+            result = CliRunner().invoke(
+                cli.main,
+                [
+                    "dashboard",
+                    "mcp-setup",
+                    "--connector-js",
+                    str(self._connector(tmp_path)),
+                    "--mcp-json",
+                    str(tmp_path / ".mcp.json"),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        kwargs = setup.call_args.kwargs
+        assert kwargs["oac_url"] == "https://dotenv-oac.example.com"
+        assert kwargs["user"] == "dotenv-user"
+        assert kwargs["password"] == "dotenv-password"
+
     def test_legacy_admin_env_is_backward_compatible_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -956,6 +1019,7 @@ class TestDashboardMcpSetup:
     def test_missing_credentials_names_oac_mcp_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("OAC_URL", "https://oac.example.com")
         monkeypatch.delenv("OAC_MCP_USER", raising=False)
         monkeypatch.delenv("OAC_MCP_PASSWORD", raising=False)

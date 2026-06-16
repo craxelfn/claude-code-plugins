@@ -35,6 +35,12 @@ import oci
 # the per-call latency; ``time.monotonic()`` alone cannot cancel a blocking
 # HTTP call.
 _DIAG_BUDGET_S = 10
+_RUNTIME_ENV_PASSTHROUGH_KEYS = (
+    "FUSION_BICC_BASE_URL",
+    "FUSION_BICC_USER",
+    "FUSION_BICC_EXTERNAL_STORAGE",
+    "OAC_URL",
+)
 
 from ..schema.bundle import AidpConfig, EnvSpec
 from ..schema.diagnostic_artifact import (
@@ -83,6 +89,15 @@ def _format_preflight_failure(results: list[PreflightResult]) -> str:
     return "; ".join(lines) if not any(
         "\n" in line for line in lines
     ) else "\n".join(lines)
+
+
+def _collect_runtime_env_passthrough() -> dict[str, str]:
+    """Return non-secret env vars the cluster needs to load bundle.yaml."""
+    return {
+        key: value
+        for key in _RUNTIME_ENV_PASSTHROUGH_KEYS
+        if (value := os.environ.get(key))
+    }
 
 
 def dispatch_via_rest(
@@ -271,6 +286,7 @@ def dispatch_via_rest(
         force_fingerprint_skip=force_fingerprint_skip,
         repin_plan_hash=repin_plan_hash,
         schema_snapshot_yaml=schema_snapshot_yaml,
+        env_vars=_collect_runtime_env_passthrough(),
         # Emit ``strict_scope=...`` in the generated orchestrator.run() call so
         # the cluster honors the operator's opt-out of implicit transitive
         # include.
@@ -512,17 +528,18 @@ def dispatch_via_rest(
         detail = ""
         try:
             cell_errors = AidpRestClient.extract_cell_errors(executed_notebook)
-            # The canonical 4-cell layout is: markdown + install (1) +
-            # creds (2) + run (3) + verify (4). Run-cell errors live at
-            # cell_index == 3.
+            # The legacy layout put the run cell at index 3; content-pack runs
+            # insert a bootstrap cell before the run cell, so fall back to the
+            # last captured cell error when index 3 is not the failing cell.
             run_cell_err = next(
                 (e for e in cell_errors if e.get("cell_index") == 3),
                 None,
-            )
+            ) or (cell_errors[-1] if cell_errors else None)
             if run_cell_err is not None:
+                cell_index = run_cell_err.get("cell_index", "?")
                 ename = run_cell_err.get("ename") or "UnknownError"
                 evalue = (run_cell_err.get("evalue") or "")[:200]
-                detail = f"; cell 3 error: {ename}: {evalue}"
+                detail = f"; cell {cell_index} error: {ename}: {evalue}"
         except Exception:  # noqa: BLE001 - diagnostic is best-effort
             detail = ""
         raise DispatchRunFailedError(

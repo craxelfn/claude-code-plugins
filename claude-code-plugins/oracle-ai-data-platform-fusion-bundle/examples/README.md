@@ -4,10 +4,11 @@ Current examples focus on the Phase 9 content-pack workflow.
 
 | Example | Purpose |
 |---|---|
-| [minimal-bundle/](minimal-bundle/) | Customer bundle scaffold used by `aidp-fusion-bundle init`. Builds the shipped `supplier_spend` mart and includes `bundle.yaml` plus `aidp.config.yaml`. |
+| [full-finance-starter/](full-finance-starter/) | Default customer bundle scaffold used by `aidp-fusion-bundle init`. Enables the full shipped finance starter scope and includes `bundle.yaml` plus `aidp.config.yaml`. |
+| [minimal-bundle/](minimal-bundle/) | Narrow scaffold used by `aidp-fusion-bundle init --template minimal-bundle`. Builds only the `supplier_spend` chain. |
 | [overlay-pack/](overlay-pack/) | Additive content-pack overlay that adds a new gold mart without changing the shipped starter pack. See [../docs/mart_overlay_authoring.md](../docs/mart_overlay_authoring.md). |
-| [fusion-finance-starter.yaml](fusion-finance-starter.yaml) | Older single-file content-pack bundle example kept for compatibility. Prefer `minimal-bundle/` for new users. |
-| [aidp.config.example.yaml](aidp.config.example.yaml) | Older standalone AIDP config example kept for compatibility. Prefer `minimal-bundle/aidp.config.yaml` for new users. |
+| [fusion-finance-starter.yaml](fusion-finance-starter.yaml) | Older single-file content-pack bundle example kept for compatibility. Prefer `full-finance-starter/` for new users. |
+| [aidp.config.example.yaml](aidp.config.example.yaml) | Older standalone AIDP config example kept for compatibility. Prefer `full-finance-starter/aidp.config.yaml` for new users. |
 
 The old `minimal_gl_only.yaml` and `full_finance.yaml` examples are legacy
 fixtures from the pre-Phase-9 runner. They remain in the repository for tests

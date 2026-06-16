@@ -20,16 +20,16 @@ refresh:
     watermark:
       source: gl_journal_lines
       column: GlJeHeadersLastUpdateDate
-    naturalKey: [GlJeHeadersJeHeaderId]
+    naturalKey: [JeHeaderId]
 requiredColumns:
   gl_journal_lines:
-    - GlJeHeadersJeHeaderId
+    - JeHeaderId
     - GlJeHeadersLedgerId
     - GlJeHeadersPeriodName
     - GlJeHeadersLastUpdateDate
 outputSchema:
   columns:
-    - { name: GlJeHeadersJeHeaderId, type: long, nullable: true, pii: none }
+    - { name: JeHeaderId, type: long, nullable: true, pii: none }
     - { name: GlJeHeadersLedgerId, type: "decimal(18,0)", nullable: true, pii: none }
     - { name: GlJeHeadersPeriodName, type: string, nullable: true, pii: none }
     - { name: GlJeHeadersLastUpdateDate, type: timestamp, nullable: true, pii: none }

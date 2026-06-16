@@ -22,21 +22,21 @@ refresh:
     strategy: merge
     watermark:
       source: po_receipts
-      column: RcvTransactionsLastUpdateDate
-    naturalKey: [RcvTransactionsTransactionId]
+      column: RcvngRcptTrnsctnExtrctPEOLastUpdateDate
+    naturalKey: [RcvngRcptTrnsctnExtrctPEOTransactionId]
 requiredColumns:
   po_receipts:
-    - RcvTransactionsTransactionId
-    - RcvTransactionsPoHeaderId
-    - RcvTransactionsQuantity
-    - RcvTransactionsLastUpdateDate
+    - RcvngRcptTrnsctnExtrctPEOTransactionId
+    - RcvngRcptTrnsctnExtrctPEOPoHeaderId
+    - RcvngRcptTrnsctnExtrctPEOQuantity
+    - RcvngRcptTrnsctnExtrctPEOLastUpdateDate
 outputSchema:
   columns:
-    - { name: RcvTransactionsTransactionId, type: long, nullable: true, pii: none }
-    - { name: RcvTransactionsPoHeaderId, type: long, nullable: true, pii: none }
-    - { name: RcvTransactionsQuantity, type: "decimal(28,8)", nullable: true, pii: low }
-    - { name: RcvTransactionsTransactionDate, type: timestamp, nullable: true, pii: none }
-    - { name: RcvTransactionsLastUpdateDate, type: timestamp, nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOTransactionId, type: long, nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOPoHeaderId, type: long, nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOQuantity, type: "decimal(28,8)", nullable: true, pii: low }
+    - { name: RcvngRcptTrnsctnExtrctPEOTransactionDate, type: timestamp, nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }
     - { name: _run_id, type: string, nullable: false, pii: none }

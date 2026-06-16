@@ -1,14 +1,20 @@
 # Minimal Bundle Example
 
-This directory is the default scaffold used by `aidp-fusion-bundle init`. It
-builds `gold.supplier_spend` from the shipped `fusion-finance-starter` content
-pack.
+This directory is the narrow scaffold used by
+`aidp-fusion-bundle init --template minimal-bundle`. It builds
+`gold.supplier_spend` from the shipped `fusion-finance-starter` content pack.
 
 Use it like this:
 
 ```bash
 mkdir my-fusion-lake
 cd my-fusion-lake
+aidp-fusion-bundle init --template minimal-bundle
+```
+
+For the default full finance starter, omit `--template`:
+
+```bash
 aidp-fusion-bundle init
 ```
 

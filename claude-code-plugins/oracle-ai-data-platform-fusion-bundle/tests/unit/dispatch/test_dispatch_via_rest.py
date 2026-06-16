@@ -560,6 +560,46 @@ class TestResumeRunIdThreading:
         )
         assert captured.get("resume_run_id") == "phase-2-abc-123"
 
+    def test_dispatch_via_rest_threads_non_secret_runtime_env_into_notebook(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_client(monkeypatch)
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_wheel",
+            lambda **_: Path("/tmp/fake.whl"),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_build_notebook(**kwargs):
+            captured.update(kwargs)
+            return {"cells": [], "nbformat": 4, "nbformat_minor": 5}
+
+        monkeypatch.setattr(
+            "oracle_ai_data_platform_fusion_bundle.dispatch.build_notebook",
+            fake_build_notebook,
+        )
+        monkeypatch.setenv("FUSION_BICC_BASE_URL", "https://fa.example.com")
+        monkeypatch.setenv("FUSION_BICC_USER", "fusion.user")
+        monkeypatch.setenv("FUSION_BICC_EXTERNAL_STORAGE", "bicc_storage")
+        monkeypatch.setenv("OAC_URL", "https://oac.example.com")
+        monkeypatch.setenv("FUSION_BICC_PASSWORD", "must-not-thread")
+
+        dispatch_via_rest(
+            bundle_path=bundle_path,
+            config=_config(),
+            env=_env(),
+            env_name="dev",
+            mode="seed",
+            datasets=None,
+            layers=None,
+        )
+        assert captured["env_vars"] == {
+            "FUSION_BICC_BASE_URL": "https://fa.example.com",
+            "FUSION_BICC_USER": "fusion.user",
+            "FUSION_BICC_EXTERNAL_STORAGE": "bicc_storage",
+            "OAC_URL": "https://oac.example.com",
+        }
+
     def test_dispatch_via_rest_dry_run_with_resume_run_id_no_op(
         self, bundle_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -701,26 +741,31 @@ class TestMarkerDegradedHandling:
 #                       → ResumeBundleMismatchError
 
 
-def _executed_notebook_with_cell3_error(ename: str, evalue: str) -> str:
-    """Build a fetchOutput-shaped JSON string with a cell-3 error
+def _executed_notebook_with_cell3_error(
+    ename: str, evalue: str, *, cell_index: int = 3
+) -> str:
+    """Build a fetchOutput-shaped JSON string with a cell error
     output mimicking what AIDP produces when orchestrator.run raises."""
+    cells = [{"cell_type": "markdown", "outputs": []}]
+    cells.extend(
+        {"cell_type": "code", "outputs": []}
+        for _ in range(max(cell_index - 1, 0))
+    )
+    cells.append(
+        {
+            "cell_type": "code",
+            "outputs": [
+                {
+                    "output_type": "error",
+                    "ename": ename,
+                    "evalue": evalue,
+                    "traceback": [],
+                }
+            ],
+        }
+    )
     notebook = {
-        "cells": [
-            {"cell_type": "markdown", "outputs": []},
-            {"cell_type": "code", "outputs": []},  # install (1)
-            {"cell_type": "code", "outputs": []},  # creds (2)
-            {
-                "cell_type": "code",
-                "outputs": [
-                    {
-                        "output_type": "error",
-                        "ename": ename,
-                        "evalue": evalue,
-                        "traceback": [],
-                    }
-                ],
-            },
-        ]
+        "cells": cells
     }
     return json.dumps(notebook)
 
@@ -833,6 +878,34 @@ class TestRunFailedCellErrorEnrichment:
         msg = str(exc_info.value)
         assert "ResumeBundleMismatchError" in msg
         assert "bundle drift detected against run_id='bad-id'" in msg
+
+    def test_run_failed_enriched_with_content_pack_cell4_error(
+        self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = _stub_client(monkeypatch)
+        self._setup(monkeypatch)
+        client.poll_run.return_value = RunResult(
+            status="FAILED",
+            raw={"taskToTaskRunMap": {"orchestrator_run": "task-run-key-1"}},
+        )
+        client.fetch_output.return_value = _executed_notebook_with_cell3_error(
+            "BundleLoadError",
+            "Missing env var 'variable ${FUSION_BICC_BASE_URL} not found'",
+            cell_index=4,
+        )
+        with pytest.raises(DispatchRunFailedError) as exc_info:
+            dispatch_via_rest(
+                bundle_path=bundle_path,
+                config=_config(),
+                env=_env(),
+                env_name="dev",
+                mode="seed",
+                datasets=None,
+                layers=None,
+            )
+        msg = str(exc_info.value)
+        assert "cell 4 error: BundleLoadError" in msg
+        assert "FUSION_BICC_BASE_URL" in msg
 
     def test_run_failed_no_cell_error_falls_back_to_generic_message(
         self, bundle_path: Path, monkeypatch: pytest.MonkeyPatch,

@@ -135,6 +135,33 @@ class TestCredsCell:
         creds = "".join(nb["cells"][2]["source"])
         assert repr(yaml_body) in creds
 
+    def test_runtime_env_vars_injected_without_password_like_values(
+        self, wheel: Path
+    ) -> None:
+        nb = build_notebook(
+            wheel_path=wheel,
+            bundle_yaml="",
+            mode="seed",
+            datasets=None,
+            layers=None,
+            env_vars={
+                "FUSION_BICC_BASE_URL": "https://fa.example.com",
+                "FUSION_BICC_USER": "oac.operator",
+                "FUSION_BICC_PASSWORD": "local-password",
+                "OAC_OAUTH_CLIENT_SECRET": "local-secret",
+                "OAC_URL": "https://oac.example.com",
+            },
+        )
+        creds = "".join(nb["cells"][2]["source"])
+        assert "FUSION_BICC_BASE_URL" in creds
+        assert "https://fa.example.com" in creds
+        assert "FUSION_BICC_USER" in creds
+        assert "OAC_URL" in creds
+        assert "runtime env loaded:" in creds
+        assert "local-password" not in creds
+        assert "OAC_OAUTH_CLIENT_SECRET" not in creds
+        assert "local-secret" not in creds
+
 
 class TestRunCell:
     def test_mode_injected(self, wheel: Path) -> None:

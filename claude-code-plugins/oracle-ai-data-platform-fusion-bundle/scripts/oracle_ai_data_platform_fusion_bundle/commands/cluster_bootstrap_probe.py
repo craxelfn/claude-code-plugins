@@ -27,6 +27,7 @@ carry the same payload — Step 8's writers translate them to disk.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -636,25 +637,47 @@ def _serialize_stdout(executed_notebook: dict | None) -> str:
 
 
 def _find_plugin_checkout(bundle_path: Path) -> Path:
-    """Walk up from ``bundle.yaml`` to the plugin checkout root.
+    """Find the plugin checkout root used to build the dispatch wheel.
 
     The wheel builder needs the directory containing ``pyproject.toml`` +
-    ``scripts/oracle_ai_data_platform_fusion_bundle``. In customer
-    bundles that's typically two-or-three levels above the bundle YAML
-    (e.g. ``customer-repo/<env>/bundle.yaml`` → ``customer-repo``).
-    For the plugin's own dev bundles it's the repo root.
+    ``scripts/oracle_ai_data_platform_fusion_bundle``. Customer bundle
+    directories are commonly siblings of the plugin checkout, so walking up
+    from ``bundle.yaml`` alone is not enough. Resolution order:
+
+    1. ``AIDP_FUSION_PLUGIN_CHECKOUT`` override.
+    2. Ancestors of ``bundle.yaml`` for legacy in-repo bundles.
+    3. Ancestors of this installed module for editable installs.
     """
-    here = bundle_path.parent.resolve()
-    for candidate in [here, *here.parents]:
-        if (candidate / "pyproject.toml").exists() and (
-            candidate / "scripts" / "oracle_ai_data_platform_fusion_bundle"
-        ).exists():
+    env_override = os.environ.get("AIDP_FUSION_PLUGIN_CHECKOUT")
+    if env_override:
+        candidate = Path(env_override).expanduser().resolve()
+        if _is_plugin_checkout(candidate):
             return candidate
+        raise FileNotFoundError(
+            "AIDP_FUSION_PLUGIN_CHECKOUT does not point to a plugin checkout "
+            f"(expected pyproject.toml + scripts/oracle_ai_data_platform_fusion_bundle): "
+            f"{candidate}"
+        )
+
+    search_roots = [bundle_path.parent.resolve(), Path(__file__).resolve().parent]
+    for root in search_roots:
+        for candidate in [root, *root.parents]:
+            if _is_plugin_checkout(candidate):
+                return candidate
+
     raise FileNotFoundError(
         f"could not locate plugin checkout (looked for pyproject.toml + "
         f"scripts/oracle_ai_data_platform_fusion_bundle) walking up from "
-        f"{bundle_path!r}"
+        f"{bundle_path!r} and from installed module {Path(__file__).resolve()!r}; "
+        "set AIDP_FUSION_PLUGIN_CHECKOUT=/path/to/oracle-ai-data-platform-fusion-bundle "
+        "to override."
     )
+
+
+def _is_plugin_checkout(candidate: Path) -> bool:
+    return (candidate / "pyproject.toml").exists() and (
+        candidate / "scripts" / "oracle_ai_data_platform_fusion_bundle"
+    ).exists()
 
 
 __all__ = [

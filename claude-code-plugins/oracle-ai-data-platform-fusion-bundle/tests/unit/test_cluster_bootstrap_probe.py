@@ -143,6 +143,33 @@ def fake_wheel(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+class TestPluginCheckoutResolution:
+    def test_external_customer_bundle_uses_installed_module_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AIDP_FUSION_PLUGIN_CHECKOUT", raising=False)
+        customer_dir = tmp_path / "demo-fusion-cfo"
+        customer_dir.mkdir()
+        bundle_path = customer_dir / "bundle.yaml"
+        bundle_path.write_text("apiVersion: x\n", encoding="utf-8")
+
+        checkout = cbp._find_plugin_checkout(bundle_path)
+
+        assert (checkout / "pyproject.toml").exists()
+        assert (checkout / "scripts" / "oracle_ai_data_platform_fusion_bundle").exists()
+
+    def test_env_override_must_point_to_plugin_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AIDP_FUSION_PLUGIN_CHECKOUT", str(tmp_path))
+        bundle_path = tmp_path / "customer" / "bundle.yaml"
+        bundle_path.parent.mkdir()
+        bundle_path.write_text("apiVersion: x\n", encoding="utf-8")
+
+        with pytest.raises(FileNotFoundError, match="AIDP_FUSION_PLUGIN_CHECKOUT"):
+            cbp._find_plugin_checkout(bundle_path)
+
+
 class TestHappyPath:
     def test_returns_validated_cluster_probe_marker(self, monkeypatch, tmp_path) -> None:
         _patch_chain(monkeypatch, tmp_path, helper_return=_happy_marker_payload())

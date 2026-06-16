@@ -6,7 +6,8 @@ bundle. After setup is complete, continue with the operator workflow in
 
 Scaffolded templates live under [../examples/](../examples/). For a first
 customer project, `aidp-fusion-bundle init` writes the current
-[../examples/minimal-bundle/](../examples/minimal-bundle/) starter.
+[../examples/full-finance-starter/](../examples/full-finance-starter/) starter,
+which enables the full tested finance starter scope by default.
 
 ## What You Are Setting Up
 
@@ -83,7 +84,7 @@ For more REST job dispatch details, including AIDP credential-store setup, see
 ## Create A Customer Bundle
 
 Create the customer project outside the plugin checkout. From an empty customer
-project directory, run the current Phase 9 scaffold:
+project directory, run the current content-pack scaffold:
 
 ```bash
 mkdir my-fusion-lake
@@ -91,12 +92,18 @@ cd my-fusion-lake
 aidp-fusion-bundle init
 ```
 
-The default scaffold uses the Phase 9 content-pack shape:
+The default scaffold uses the content-pack shape and enables the full starter
+finance scope:
 
 ```yaml
 contentPack:
   name: fusion-finance-starter
   profile: finance-default
+gold:
+  marts:
+    - supplier_spend
+    - ap_aging
+    - gl_balance
 ```
 
 Resolve AIDP workspace and cluster coordinates:

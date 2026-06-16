@@ -13,6 +13,10 @@ from pathlib import Path
 from rich.console import Console
 
 TEMPLATES: dict[str, tuple[str, str]] = {
+    "full-finance-starter": (
+        "full-finance-starter/bundle.yaml",
+        "full-finance-starter/aidp.config.yaml",
+    ),
     "minimal-bundle": ("minimal-bundle/bundle.yaml", "minimal-bundle/aidp.config.yaml"),
     "minimal": ("minimal_gl_only.yaml", "aidp.config.example.yaml"),
     "full-finance": ("full_finance.yaml", "aidp.config.example.yaml"),

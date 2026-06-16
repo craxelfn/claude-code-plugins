@@ -20,12 +20,19 @@ from rich.console import Console
 
 from . import __version__
 
-# Auto-load .env from the user's current working directory so placeholders
-# like ${FUSION_BICC_BASE_URL} in bundle.yaml resolve without needing
-# `set -a; source .env; set +a` before every run.
-load_dotenv()
-
 console = Console()
+
+
+def _load_cwd_dotenv() -> None:
+    """Load `.env` from the directory where the operator ran the CLI.
+
+    `load_dotenv()` without an explicit path searches relative to the Python
+    module in some execution modes, which can miss a customer bundle's `.env`
+    when the package is installed from another checkout.
+    """
+    env_path = Path.cwd() / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +50,7 @@ console = Console()
 @click.pass_context
 def main(ctx: click.Context, bundle_path: Path, config_path: Path, env_name: str) -> None:
     """Productized Fusion -> AIDP pipeline (BICC + Delta + OAC)."""
+    _load_cwd_dotenv()
     ctx.ensure_object(dict)
     ctx.obj["bundle_path"] = bundle_path
     ctx.obj["config_path"] = config_path
@@ -55,9 +63,12 @@ def main(ctx: click.Context, bundle_path: Path, config_path: Path, env_name: str
 
 
 @main.command()
-@click.option("--template", type=click.Choice(["minimal-bundle", "minimal", "full-finance"]),
-              default="minimal-bundle",
-              help="Which example to scaffold (default: minimal-bundle).")
+@click.option(
+    "--template",
+    type=click.Choice(["full-finance-starter", "minimal-bundle", "minimal", "full-finance"]),
+    default="full-finance-starter",
+    help="Which example to scaffold (default: full-finance-starter).",
+)
 @click.option("--force", is_flag=True, help="Overwrite existing bundle.yaml / aidp.config.yaml.")
 def init(template: str, force: bool) -> None:
     """Scaffold a bundle.yaml + aidp.config.yaml in the current directory."""

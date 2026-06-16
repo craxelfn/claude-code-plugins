@@ -391,6 +391,14 @@ def _probe_bicc(bundle: Bundle, results: list[_ProbeResult]) -> None:
         ))
         return
 
+    if _is_aidp_secret_ref(pwd):
+        results.append(_ProbeResult(
+            "bicc-auth", "SKIP",
+            "FUSION_BICC_PASSWORD points to an AIDP credential-store secret",
+            "set a local plaintext FUSION_BICC_PASSWORD only if you want the laptop-side BICC auth probe",
+        ))
+        return
+
     pod_url = bundle.fusion.service_url.rstrip("/")
     if "$" in pod_url:
         results.append(_ProbeResult(
@@ -435,6 +443,10 @@ def _probe_bicc(bundle: Bundle, results: list[_ProbeResult]) -> None:
             "bicc-catalog-reconcile", "PASS",
             f"all {len([d for d in bundle.datasets if d.id in CATALOG])} datasets reconcile",
         ))
+
+
+def _is_aidp_secret_ref(value: str) -> bool:
+    return value.startswith("${aidp:secret:") and value.endswith("}")
 
 
 def _probe_aidp(env, results: list[_ProbeResult]) -> None:
