@@ -44,6 +44,9 @@ enforces it).
    installed `content_packs/` tree.
 5. **Inspect the Fusion PVO source schema, not bronze**, to discover raw fields
    (metadata-only; cheap; authoritative for "what could be extracted").
+6. **Classify every new bronze PVO before authoring.** A rung-4
+   `bronze_extract` must be classified as transaction/change-feed,
+   snapshot/config, or period-windowable snapshot before its YAML is accepted.
 
 ## Helpers
 
@@ -92,6 +95,22 @@ aidp-fusion-bundle catalog probe-pvo <dataset_id> \      # one PVO's schema, met
 `probe-pvo` does a schema-only roundtrip (no row pull) and emits a **draft
 bronze YAML** — the additive extract for rung 4.
 
+For any rung-4 `bronze_extract`, classify the source PVO before accepting the
+draft YAML. **The skill owns this classification. `change_planner.py` only
+validates and carries the evidence; it is not the source of truth.** Use BICC
+metadata, PVO semantics, and data-owner/business confirmation rather than
+column-name guesses.
+
+| PVO class | Required authoring behavior |
+|---|---|
+| **Transaction / change-feed PVO** | Use `incrementalCapable: true` only when live BICC metadata exposes a reliable `isLastUpdateDate` column and the business semantics confirm changes advance through that column. The column may have a PVO-specific name; record the exact metadata-observed watermark column and natural key in YAML. |
+| **Snapshot / config PVO** | Use `incrementalCapable: false`. Warn the user that incremental runs will full-pull this bronze source, then MERGE/payload-diff downstream. If the source may be large, stop for explicit user approval. |
+| **Period-windowable snapshot** | Treat high-volume period snapshots like `gl_period_balances` specially. Do not silently create a daily full-pull source; require explicit user approval and either attach/document an `extract_window` policy or create a backlog item until runtime supports it. |
+
+If classification is uncertain, stop and ask for evidence from BICC metadata or
+the Fusion data owner. Never mark a snapshot PVO `incrementalCapable: true`
+just to make the extract faster.
+
 ### 4 — Plan the change (pick the rung)
 Build a field-resolution map — for each required field, where is it sourced?
 `existing_gold` / `existing_silver` / `existing_bronze` / `pvo_only` / `missing`
@@ -99,10 +118,36 @@ Build a field-resolution map — for each required field, where is it sourced?
 ```bash
 python3 change_planner.py --input change_request.json
 ```
+For every `pvo_only` field, include the PVO classification before planning:
+
+```json
+{
+  "name": "invoice_status",
+  "source": "pvo_only",
+  "pvo": "InvoiceHeaderExtractPVO",
+  "sourceColumn": "StatusCode",
+  "pvoClassification": "transaction_change_feed",
+  "metadataLastUpdateColumns": ["ApInvoicesLastUpdateDate"],
+  "watermarkColumn": "ApInvoicesLastUpdateDate",
+  "businessSemanticsConfirmed": true
+}
+```
+
+Supported `pvoClassification` values are `transaction_change_feed`,
+`snapshot_config`, and `period_windowable_snapshot`. For a transaction/change
+feed PVO, provide the exact `metadataLastUpdateColumns` seen from BICC, the
+chosen `watermarkColumn`, and `businessSemanticsConfirmed: true`. The watermark
+column does not need to be named `LastUpdateDate`; it must be the metadata-backed
+column that really advances on meaningful source changes. For a
+period-windowable snapshot, provide an `extractWindowPolicy` or capture explicit
+user approval before writing bronze.
+
 Returns `{decision, reason, blastRadius, requiresNewBronze, missingFields,
-warnings, touchesLivingDelta, nodeSpecs}`. Act on it:
+warnings, touchesLivingDelta, pvoClassifications, nodeSpecs}`. Act on it:
 - **`hard_gap`** (a field exists nowhere, not even at the PVO) → stop and tell
   the user it can't be served as specified; name the missing field(s).
+- **`requiresNewBronze: true`** → present the PVO classification, expected
+  incremental behavior, and full-pull/window risk to the user before writing.
 - otherwise → present the chosen rung + blast radius to the user before writing,
   and resolve any `warnings` (e.g. add `currency_code` to an aggregate's grain).
 
@@ -118,6 +163,10 @@ shipped installed `content_packs/` tree. For each `nodeSpec`:
   `dependsOn`, the planner's `refresh` strategy **with its documented reason**,
   and `outputSchema.columns` with a **mandatory `pii` classification per column**
   (missing → AIDPF-2030). High-PII columns must not be exposed to dashboards.
+  For `bronze_extract`, `incrementalCapable` must match the classification from
+  step 3: true only for proven transaction/change-feed PVOs; false for
+  snapshot/config PVOs; explicit approval or `extract_window` policy for
+  high-volume period-windowable snapshots.
 - **`<id>.sql`** — Jinja template enforcing the medallion invariants:
   `COALESCE(...,0)` around every amount arithmetic; **currency in the grain** of
   any amount aggregate; deterministic **`xxhash64(natural_key)`** surrogate keys
@@ -196,6 +245,8 @@ YAML+SQL in an overlay, per ADR-0021 / CLAUDE.md "where new work goes".
 - **Additive, non-destructive** — new node or new column; never alter an
   existing node's grain/keys, never rewrite materialized tables.
 - **PVO, not bronze**, for source-field discovery (metadata-only).
+- **Classify new bronze PVOs** before authoring; do not create a high-volume
+  full-pull source or fake CDC by setting `incrementalCapable: true`.
 - **PII mandatory** on every authored column; keep high-PII out of dashboards.
 - **Overlay pack only** — never edit the shipped starter pack.
 - Don't seed, don't query live data, don't create OAC datasets — hand off.

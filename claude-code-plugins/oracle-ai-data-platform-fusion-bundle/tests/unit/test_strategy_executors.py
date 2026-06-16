@@ -291,6 +291,60 @@ class TestExecuteMergeEmptyDelta:
         assert first_call.kwargs["args"] == {"watermark_erp_thing": "2026-06-01"}
 
 
+class TestExecuteMergeNonEmptyDelta:
+    """The non-empty-delta path that actually reaches schema-reconcile +
+    MERGE. Previously uncovered — every merge test used the empty-delta
+    early return, so a wrong-signature call to the schema-reconcile helper
+    (``target_table=``/``source_df=`` instead of
+    ``target=``/``source_columns=``/``source_schema_struct=``) slipped past
+    unit tests and only blew up on a live incremental (TypeError)."""
+
+    def test_nonempty_delta_calls_reconcile_with_real_signature(self) -> None:
+        """REGRESSION: the executor must call the schema-reconcile helper
+        with kwargs that bind to the REAL
+        ``state._ensure_target_schema_for_merge`` signature. The spy binds
+        every call against that signature, so a wrong-keyword call raises
+        TypeError here (as it did live) instead of passing silently."""
+        import inspect
+        from unittest.mock import patch
+
+        from oracle_ai_data_platform_fusion_bundle.orchestrator import (
+            merge_helpers,
+            state,
+        )
+
+        real_sig = inspect.signature(state._ensure_target_schema_for_merge)
+        seen: dict[str, bool] = {}
+
+        def _signature_checking_spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+            real_sig.bind(*args, **kwargs)  # TypeError if the executor passes bad kwargs
+            seen["called"] = True
+            return MagicMock(name="SchemaReconcileResult")
+
+        spark = _fake_spark_for_merge(probe_rows=3, target_row_count=10)
+        node = _load_node(NODE_YAML_MERGE)
+        rendered = RenderedSql(
+            sql="SELECT * FROM s WHERE _extract_ts > :watermark_erp_thing",
+            params={"watermark_erp_thing": "2026-06-01"},
+            hash_input="h",
+        )
+
+        with patch.object(
+            merge_helpers, "ensure_target_schema_for_merge", _signature_checking_spy
+        ):
+            result = execute_merge(
+                spark, node, rendered, "fusion_catalog.silver.dim_thing", _default_ctx()
+            )
+
+        assert seen.get("called") is True, "schema-reconcile was never reached"
+        assert result.strategy == "merge"
+        assert result.merge_skipped_empty_delta is False
+        assert result.rows_scanned == 10
+        # A real MERGE INTO must have been issued (not the empty-delta skip).
+        all_stmts = [c.args[0] for c in spark.sql.call_args_list]
+        assert any("MERGE INTO" in s for s in all_stmts)
+
+
 # ---------------------------------------------------------------------------
 # execute_strategy dispatcher
 # ---------------------------------------------------------------------------
