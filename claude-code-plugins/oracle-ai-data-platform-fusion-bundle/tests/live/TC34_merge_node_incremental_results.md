@@ -1,103 +1,77 @@
 # TC34 — MERGE-node content-pack incremental (mode-normalized plan-hash)
 
 **Test case ID**: TC34
-**Status**: ⏸️ **BLOCKED (2026-06-15)** — upstream Fusion BICC service returned
-`CONNECTOR_0255` ("system level error from Fusion Applications … Service
-Temporarily unavailable") on two consecutive dispatch attempts. The blocker is
-an **upstream Fusion source outage**, *not* the code under test. Re-run when the
-pod recovers.
-**Tracks**: first live-green **row-grain MERGE-node** `--mode incremental`
-(closes `LIMITS.md` P-incr-L1 — the mode-normalized plan-hash / Approach 3 fix +
-the `--repin-plan-hash` break-glass). Sibling to TC33 (which proved the
-*replace*-strategy incremental on `ar_invoice_summary`).
+**Status**: ✅ **EXECUTED + GREEN 2026-06-16** on the dev cluster / `dev` env via
+REST dispatch. Seed → incremental → incremental on the row-grain MERGE node
+`gl_balance`, all SUCCESS, **no AIDPF-4040** on either incremental, gold node
+executed via **MERGE** (not replace).
+**Tracks**: closes `LIMITS.md` **P-incr-L1** (mode-normalized plan-hash /
+Approach 3) — first live-green **MERGE-node** `--mode incremental`. Sibling to
+TC33 (which proved the *replace*-strategy incremental on `ar_invoice_summary`).
 
-## What this will verify (acceptance)
+## What this verifies
 
-- A row-grain **MERGE** node (`gl_balance`, `incremental.strategy: merge`,
-  primary watermark `gl_period_balances._extract_ts`) **passes the AIDPF-4040
-  plan-hash continuity gate** on its first `--mode incremental` after a seed —
-  with **no** `--repin-plan-hash` — proving the seed↔incremental hash now
-  matches because the watermark predicate is mode-normalized (`1=1`) in the
-  hash input while the executable SQL stays mode-correct.
-- The gold node executes a **MERGE** (delta), not a full `replace`.
-- A **second** incremental also stays clean (cursor advances; the latest
-  successful row is now the first incremental, not the seed).
+- **AIDPF-4040 passes on a MERGE node's first incremental-after-seed.** Before
+  the fix, `{{ watermark_predicate }}` rendered `1=1` on seed vs
+  `<col> > :watermark` on incremental, so the seed-pinned plan-hash and the
+  incremental's diverged on SQL text and the continuity gate false-tripped. The
+  mode-normalized hash (Approach 3) makes them equal; the incremental sails past
+  the gate into execution.
+- **Gold node executes a true delta-MERGE, not a rebuild.** `gl_balance`
+  incremental ran ~3× the seed's wall time (207s / 256s vs 73s) — the signature
+  of `MERGE INTO` over 10.18M rows vs `CREATE OR REPLACE`.
+- **Steady-state holds.** Incremental #2 compared against incremental #1's pin
+  (not the seed) and stayed clean — repeated incrementals don't drift.
 
-## Fix is confirmed deployed (independent of the blocker)
+## Live runs (run_ids truncated)
 
-The dispatched run cell on the cluster carries the new kwarg — the fixed wheel
-(`0db10970c1772267`) is what executed:
+Wheel `a5ac395…` (carries both the plan-hash fix and the MERGE-executor fix
+below). Cluster ACTIVE; `--force-fingerprint-skip` (dev bundle includes datasets
+whose bronze isn't all materialized on this pod — break-glass, dev only).
 
-```
-summary = orchestrator.run(
-    mode='seed', datasets=['gl_balance'], layers=['gold'],
-    force_fingerprint_skip=True,
-    repin_plan_hash=False,            # <-- this turn's threading, live on cluster
-    strict_scope=False,
-    execution_backend="content-pack", ...
-)
-```
+| Step | run_id | dataset | layer | status | rows | strategy | duration |
+|---|---|---|---|---|---|---|---|
+| Seed | `e1aa1c32…` | dim_account | silver | SUCCESS | 63,464 | replace | 43.5s |
+| Seed | `e1aa1c32…` | gl_balance | gold | SUCCESS | 10,184,102 | replace | 73.7s |
+| Inc #1 | `6e062821…` | dim_account | silver | SUCCESS | 63,464 | merge | 31.3s |
+| Inc #1 | `6e062821…` | gl_balance | gold | SUCCESS | 10,184,102 | **merge** | 207.8s |
+| Inc #2 | `869c320a…` | dim_account | silver | SUCCESS | 63,464 | merge | 54.7s |
+| Inc #2 | `869c320a…` | gl_balance | gold | SUCCESS | 10,184,102 | **merge** | 256.6s |
 
-Offline proof is complete and green (unit): seed-rendered vs incremental-rendered
-plan-hash of a MERGE node are **equal**; SQL-body / profile / watermark-column
-edits still **differ**; `--repin-plan-hash` bypasses + audit-rows. See
-`tests/unit/test_sql_renderer.py::TestHashDeterminism`,
-`tests/unit/test_plan_hash_phase2.py`,
-`tests/unit/test_sql_runner.py::TestRepinPlanHashBreakGlass`.
+Each run: `2 success · 0 failed · 0 skipped · 0 deferred`. Row count is stable at
+10,184,102 across all three — the GL balances cube doesn't grow between no-change
+cycles (bronze `gl_period_balances` re-extracts full and dedupes on the natural
+key; the gold MERGE re-applies the same key set). Correct.
 
-## Blocker detail
+## Bug found + fixed during this test (the live run earned its keep)
 
-Both attempts failed in ~12–15s — **before** any plan-hash code ran. The failure
-is in the **AIDPF-2072 Fusion-PVO drift gate**, which probes the live bronze PVO
-schema via BICC *before* `_run_content_pack_backend`:
+The first incremental attempt **passed AIDPF-4040** (plan-hash fix confirmed)
+but then failed with:
 
 ```
-orchestrator/__init__.py:559  _run_fusion_pvo_drift_gate(...)
-orchestrator/__init__.py:738  probe_bronze_schemas(...)
-builtins/bronze_extract_adapter.py:210  bicc_extractor.extract_pvo(...)
-extractors/bicc.py  -> Py4JJavaError:
-  com.oracle.dicom.connectivity.exception.ConnectorException:
-  CONNECTOR_0255 - Received system level error from Fusion Applications …
-  Possible cause: Service Temporarily unavailable
-  (BiccUtil.getExternalStorages / getLatestExternalStorage)
+TypeError: _ensure_target_schema_for_merge() got an unexpected keyword
+argument 'target_table'
 ```
 
-So `gl_balance`'s bronze dependency (`gl_period_balances`) couldn't be probed
-because the Fusion BICC endpoint itself is erroring. The plan-hash gate is never
-reached.
+The silver/gold MERGE strategy executor
+(`orchestrator/strategy_executors.py`) called the schema-reconcile helper with
+made-up keyword names (`target_table=`, `source_df=`) instead of the real
+signature (`target=`, `source_columns=`, `source_schema_struct=`). **Latent**
+defect: every merge *unit* test used the empty-delta early-return path, which
+returns before the reconcile call, so the non-empty MERGE path had never
+executed until this live run.
 
-## How to resume (when the pod is healthy)
+**Fix:** corrected the call to match the real signature (mirrors the working
+bronze caller `bronze_extract_adapter.py:412`). **Regression guard:** new
+`tests/unit/test_strategy_executors.py::TestExecuteMergeNonEmptyDelta` exercises
+the non-empty path and binds the reconcile call against the real
+`state._ensure_target_schema_for_merge` signature, so a wrong-keyword call now
+fails in unit tests, not just live.
 
-```
-# 1. Seed — re-pin the plan-hash with the fixed wheel.
-aidp-fusion-bundle --config dev/aidp.config.yaml --env dev run \
-    --mode seed --datasets gl_balance --layers gold \
-    --force-fingerprint-skip --poll-timeout 3000
+## Notes / scope
 
-# 2. Incremental #1 — THE PROOF (no --repin-plan-hash; must NOT raise 4040).
-aidp-fusion-bundle --config dev/aidp.config.yaml --env dev run \
-    --mode incremental --datasets gl_balance --layers gold \
-    --force-fingerprint-skip --poll-timeout 3000
-
-# 3. Incremental #2 — cursor advances; still clean.
-aidp-fusion-bundle --config dev/aidp.config.yaml --env dev run \
-    --mode incremental --datasets gl_balance --layers gold \
-    --force-fingerprint-skip --poll-timeout 3000
-```
-
-Confirm a healthy pod first with a dry-run (preflight only, no BICC):
-`… run --mode seed --datasets gl_balance --layers gold --dry-run --force-fingerprint-skip`.
-
-**Fallback if the pod is flaky but a prior seed's bronze/silver are
-materialized**: the AIDPF-2072 gate only fires when bronze is in scope, so a
-gold-only run over pre-existing bronze/silver would skip the live BICC probe —
-but it needs `bronze.gl_period_balances` + `silver.dim_account` already present
-and the strict-scope dependency set declared. Prefer the full happy-path above
-once the pod recovers.
-
-## Scope / notes
-
-- `--force-fingerprint-skip` for the same reason as TC33 (dev bundle references
-  datasets whose bronze isn't all materialized on this pod; dev/sandbox only).
-- Demo-pod identifiers (service URL, OCIDs, job/run UUIDs) intentionally omitted
-  per the repo redaction rule.
+- Run UUIDs truncated; pod URL / OCIDs / storage-profile name omitted per the
+  repo redaction rule.
+- `gl_period_balances` still full-re-extracts each cycle (`P1.17-L2`,
+  `incremental_capable=False`) — the gold MERGE on top is still a correct delta;
+  the extract cost is the subject of the `bicc-period-window-extract` feature.

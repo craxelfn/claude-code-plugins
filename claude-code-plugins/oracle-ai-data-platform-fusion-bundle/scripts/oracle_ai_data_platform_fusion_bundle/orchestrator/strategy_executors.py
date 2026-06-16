@@ -303,7 +303,10 @@ def execute_merge(
     source_df.createOrReplaceTempView(temp_view)
     try:
         merge_helpers.ensure_target_schema_for_merge(
-            spark=spark, target_table=target, source_df=source_df
+            spark=spark,
+            target=target,
+            source_columns=source_df.schema.names,
+            source_schema_struct=source_df.schema,
         )
 
         # No payload-diff predicate at the silver/gold layer: silver/gold

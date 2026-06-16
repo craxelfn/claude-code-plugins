@@ -41,13 +41,22 @@ Input JSON (stdin or --input):
       "fields": [                              # where each REQUIRED source field lives
         {"name":"supplier_number","source":"existing_silver","table":"silver.dim_supplier"},
         {"name":"total_paid","source":"existing_gold","table":"gold.supplier_spend"},
-        {"name":"promised_date","source":"pvo_only","pvo":"InvoiceHeaderExtractPVO","sourceColumn":"ApInvoicesPromisedDate"},
+        {
+          "name":"promised_date",
+          "source":"pvo_only",
+          "pvo":"InvoiceHeaderExtractPVO",
+          "sourceColumn":"ApInvoicesPromisedDate",
+          "pvoClassification":"transaction_change_feed",
+          "metadataLastUpdateColumns":["ApInvoicesLastUpdateDate"],
+          "watermarkColumn":"ApInvoicesLastUpdateDate",
+          "businessSemanticsConfirmed": true
+        },
         {"name":"currency_code","source":"existing_bronze","table":"bronze.ap_invoices"}
       ]
     }
 
 Output JSON: {decision, reason, blastRadius, requiresNewBronze, missingFields,
-              warnings, touchesLivingDelta, nodeSpecs:[...]}.
+              warnings, touchesLivingDelta, pvoClassifications, nodeSpecs:[...]}.
 """
 from __future__ import annotations
 
@@ -68,6 +77,232 @@ _AUDIT_BY_LAYER = {
 _CURRENCY_HINTS = ("currency_code", "currency")
 
 _VALID_SOURCES = {"existing_gold", "existing_silver", "existing_bronze", "pvo_only", "missing"}
+
+_PVO_CLASS_ALIASES = {
+    "transaction": "transaction_change_feed",
+    "transaction_change_feed": "transaction_change_feed",
+    "transaction-change-feed": "transaction_change_feed",
+    "change_feed": "transaction_change_feed",
+    "change-feed": "transaction_change_feed",
+    "snapshot": "snapshot_config",
+    "snapshot_config": "snapshot_config",
+    "snapshot-config": "snapshot_config",
+    "config": "snapshot_config",
+    "period_windowable": "period_windowable_snapshot",
+    "period-windowable": "period_windowable_snapshot",
+    "period_windowable_snapshot": "period_windowable_snapshot",
+    "period-windowable-snapshot": "period_windowable_snapshot",
+}
+
+_PVO_CLASS_LABELS = {
+    "transaction_change_feed": "transaction/change-feed",
+    "snapshot_config": "snapshot/config",
+    "period_windowable_snapshot": "period-windowable snapshot",
+}
+
+_PVO_INCREMENTAL_RECOMMENDATION = {
+    "transaction_change_feed": True,
+    "snapshot_config": False,
+    "period_windowable_snapshot": False,
+}
+
+
+def _normalize_pvo_classification(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower().replace(" ", "_").replace("/", "_")
+    return _PVO_CLASS_ALIASES.get(normalized)
+
+
+def _boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _string_listish(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, tuple):
+        items = list(value)
+    else:
+        return []
+
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, str) and item:
+            names.append(item)
+        elif isinstance(item, dict):
+            name = item.get("name") or item.get("column") or item.get("columnName")
+            if name:
+                names.append(str(name))
+    return names
+
+
+def _metadata_last_update_columns(fields: list[dict]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for f in fields:
+        for key in (
+            "metadataLastUpdateColumns",
+            "biccLastUpdateColumns",
+            "isLastUpdateDateColumns",
+        ):
+            for name in _string_listish(f.get(key)):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+    return names
+
+
+def _classify_pvo_only_fields(pvo_only: list[dict]) -> tuple[dict[str, dict], list[str]]:
+    """Validate author-supplied rung-4 PVO classification evidence."""
+    grouped: dict[str, list[dict]] = {}
+    for f in pvo_only:
+        pvo_id = f.get("pvo") or f.get("name") or "<unknown-pvo>"
+        grouped.setdefault(str(pvo_id), []).append(f)
+
+    classifications: dict[str, dict] = {}
+    warnings: list[str] = []
+    for pvo_id, fields in grouped.items():
+        raw_class = next(
+            (
+                f.get("pvoClassification")
+                or f.get("pvo_classification")
+                or f.get("pvoClass")
+                for f in fields
+                if (
+                    f.get("pvoClassification")
+                    or f.get("pvo_classification")
+                    or f.get("pvoClass")
+                )
+            ),
+            None,
+        )
+        pvo_class = _normalize_pvo_classification(raw_class)
+        info = {
+            "classification": pvo_class,
+            "classificationLabel": _PVO_CLASS_LABELS.get(pvo_class),
+            "incrementalCapableRecommendation": (
+                _PVO_INCREMENTAL_RECOMMENDATION.get(pvo_class)
+                if pvo_class is not None
+                else None
+            ),
+            "requiresExplicitApproval": False,
+            "requiresExtractWindowPolicy": False,
+        }
+
+        if raw_class is None:
+            warnings.append(
+                f"PVO {pvo_id}: missing pvoClassification for new bronze extract — "
+                "classify as transaction_change_feed, snapshot_config, or "
+                "period_windowable_snapshot before writing bronze YAML."
+            )
+            info["requiresExplicitApproval"] = True
+        elif pvo_class is None:
+            warnings.append(
+                f"PVO {pvo_id}: unsupported pvoClassification {raw_class!r}; use "
+                "transaction_change_feed, snapshot_config, or "
+                "period_windowable_snapshot."
+            )
+            info["requiresExplicitApproval"] = True
+        elif pvo_class == "transaction_change_feed":
+            metadata_cols = _metadata_last_update_columns(fields)
+            metadata_evidence = bool(metadata_cols) or any(
+                _boolish(
+                    f.get("hasReliableLastUpdateDate")
+                    or f.get("reliableLastUpdateDate")
+                    or f.get("isLastUpdateDateReliable")
+                )
+                for f in fields
+            )
+            watermark_col = next(
+                (
+                    f.get("lastUpdateDateColumn")
+                    or f.get("watermarkColumn")
+                    or f.get("last_update_date_column")
+                    for f in fields
+                    if (
+                        f.get("lastUpdateDateColumn")
+                        or f.get("watermarkColumn")
+                        or f.get("last_update_date_column")
+                    )
+                ),
+                None,
+            )
+            if watermark_col is None and len(metadata_cols) == 1:
+                watermark_col = metadata_cols[0]
+            semantics_confirmed = any(
+                _boolish(
+                    f.get("businessSemanticsConfirmed")
+                    or f.get("changesAdvanceWatermark")
+                    or f.get("cdcSemanticsConfirmed")
+                )
+                for f in fields
+            )
+            info["metadataLastUpdateColumns"] = metadata_cols
+            info["lastUpdateDateColumn"] = watermark_col
+            info["businessSemanticsConfirmed"] = semantics_confirmed
+            if not metadata_evidence or not watermark_col:
+                warnings.append(
+                    f"PVO {pvo_id}: transaction_change_feed requires live BICC "
+                    "metadata evidence of an isLastUpdateDate column and the "
+                    "chosen watermarkColumn before setting incrementalCapable: true. "
+                    "Do not infer CDC safety from column naming alone."
+                )
+            elif len(metadata_cols) > 1 and not any(
+                f.get("lastUpdateDateColumn")
+                or f.get("watermarkColumn")
+                or f.get("last_update_date_column")
+                for f in fields
+            ):
+                warnings.append(
+                    f"PVO {pvo_id}: multiple BICC isLastUpdateDate columns were "
+                    "reported; choose an explicit watermarkColumn."
+                )
+            if not semantics_confirmed:
+                warnings.append(
+                    f"PVO {pvo_id}: transaction_change_feed also requires "
+                    "business semantics confirmation that meaningful source "
+                    "changes advance the chosen watermark column."
+                )
+        elif pvo_class == "snapshot_config":
+            warnings.append(
+                f"PVO {pvo_id}: snapshot_config should use incrementalCapable: false; "
+                "incremental runs will full-pull this bronze source, then MERGE/"
+                "payload-diff. Stop for approval if the source is high volume."
+            )
+            if any(_boolish(f.get("highVolume") or f.get("isHighVolume")) for f in fields):
+                info["requiresExplicitApproval"] = True
+        elif pvo_class == "period_windowable_snapshot":
+            has_policy = any(
+                _boolish(f.get("hasExtractWindowPolicy") or f.get("extractWindowPolicy"))
+                for f in fields
+            )
+            approved = any(
+                _boolish(f.get("explicitUserApproval") or f.get("approvedFullPull"))
+                for f in fields
+            )
+            has_safety_path = has_policy or approved
+            info["requiresExtractWindowPolicy"] = not has_safety_path
+            info["requiresExplicitApproval"] = not has_safety_path
+            if not has_safety_path:
+                warnings.append(
+                    f"PVO {pvo_id}: period_windowable_snapshot needs an "
+                    "extract_window policy or explicit user approval before "
+                    "creating a potential high-volume full-pull "
+                    "bronze extract."
+                )
+
+        classifications[pvo_id] = info
+
+    return classifications, warnings
 
 
 def _refresh_for(layer: str, grain: list, is_aggregate: bool) -> dict:
@@ -141,6 +376,7 @@ def plan(payload: dict) -> dict:
             "requiresNewBronze": False,
             "missingFields": sorted(missing),
             "warnings": warnings,
+            "pvoClassifications": {},
             "touchesLivingDelta": False,
             "nodeSpecs": [],
         }
@@ -160,8 +396,12 @@ def plan(payload: dict) -> dict:
     # 2. Rung 4: a raw field is only at the PVO -> new ADDITIVE bronze extract + node.
     if pvo_only:
         bronze_ids = sorted({f.get("pvo") or f["name"] for f in pvo_only})
+        pvo_classifications, pvo_warnings = _classify_pvo_only_fields(pvo_only)
+        warnings.extend(pvo_warnings)
         bronze_specs = []
         for f in pvo_only:
+            pvo_id = str(f.get("pvo") or f["name"])
+            pvo_info = pvo_classifications.get(pvo_id, {})
             bronze_specs.append({
                 "id": f["name"],
                 "layer": "bronze",
@@ -169,6 +409,10 @@ def plan(payload: dict) -> dict:
                 "implementation": "bronze_extract",
                 "pvo": f.get("pvo"),
                 "sourceColumn": f.get("sourceColumn"),
+                "pvoClassification": pvo_info.get("classification"),
+                "incrementalCapableRecommendation": (
+                    pvo_info.get("incrementalCapableRecommendation")
+                ),
                 "note": "NEW additive bronze extract — never alters an existing bronze table.",
             })
         depends.setdefault("bronze", [])
@@ -184,6 +428,7 @@ def plan(payload: dict) -> dict:
             "requiresNewBronze": True,
             "missingFields": [],
             "warnings": warnings,
+            "pvoClassifications": pvo_classifications,
             "touchesLivingDelta": False,
             "nodeSpecs": [*bronze_specs, downstream],
         }
@@ -202,6 +447,7 @@ def plan(payload: dict) -> dict:
                 f"verify the new column's grain matches {add_to}'s existing grain; if it "
                 "would change the grain, author a new node instead (do not alter the existing one).",
             ],
+            "pvoClassifications": {},
             "touchesLivingDelta": False,
             "nodeSpecs": [{
                 "addColumnTo": add_to,
@@ -220,6 +466,7 @@ def plan(payload: dict) -> dict:
         "requiresNewBronze": False,
         "missingFields": [],
         "warnings": warnings,
+        "pvoClassifications": {},
         "touchesLivingDelta": False,
         "nodeSpecs": [_node_spec(request, target_layer, depends)],
     }
