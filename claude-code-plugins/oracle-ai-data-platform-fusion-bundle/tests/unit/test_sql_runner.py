@@ -701,15 +701,35 @@ quality:
 """
 
 
-def _fake_struct(names):
+# Declared types for the _BRONZE_NODE_YAML fixture's non-audit columns.
+# A name-only probe (``_fake_struct([...])``) defaults each field to the
+# fixture's declared type so the AIDPF-4070 type gate is satisfied and the
+# presence-only (AIDPF-4071) tests stay green. Pass ``types={...}`` to force a
+# mismatch and exercise the type gate.
+_FIXTURE_DECLARED_TYPES = {
+    "VENDORID": "decimal(38,30)",
+    "SEGMENT1": "string",
+    "LASTUPDATEDATE": "timestamp",
+}
+
+
+def _fake_struct(names, types=None):
     from types import SimpleNamespace
-    return SimpleNamespace(fields=[
-        SimpleNamespace(
-            name=n, nullable=True,
-            dataType=SimpleNamespace(simpleString=lambda: "string"),
+    types = types or {}
+
+    def _field(n):
+        t = (
+            types.get(n)
+            or types.get(n.lower())
+            or _FIXTURE_DECLARED_TYPES.get(n.upper(), "string")
         )
-        for n in names
-    ])
+        return SimpleNamespace(
+            name=n, nullable=True,
+            # bind ``t`` per-field (avoid the late-binding closure trap).
+            dataType=SimpleNamespace(simpleString=(lambda tt: (lambda: tt))(t)),
+        )
+
+    return SimpleNamespace(fields=[_field(n) for n in names])
 
 
 def _bronze_node():
@@ -798,6 +818,40 @@ class TestBronzeSourceSchemaGate:
             MagicMock(), node=_bronze_node(), pack=MagicMock(), profile=_gate_profile(), ctx=_gate_ctx()
         ) is None
 
+    def test_type_mismatch_returns_4070_pre_extract(self, monkeypatch):
+        # Names all present, but VENDORID materialises as decimal(18,0) while
+        # the fixture declares decimal(38,30) — the hoisted AIDPF-4070 gate
+        # must fire BEFORE extraction.
+        self._patch(monkeypatch, ["VENDORID", "SEGMENT1"])
+        # override VENDORID's probed type to a mismatch
+        import oracle_ai_data_platform_fusion_bundle.orchestrator.builtins.bronze_extract_adapter as bea
+        monkeypatch.setattr(bea, "probe_bronze_schemas", lambda *a, **k: {
+            "test_bronze": _fake_struct(
+                ["VENDORID", "SEGMENT1"], types={"VENDORID": "decimal(18,0)"}
+            )
+        })
+        result = _bronze_source_schema_gate(
+            MagicMock(), node=_bronze_node(), pack=MagicMock(),
+            profile=_gate_profile(), ctx=_gate_ctx(),
+        )
+        assert result is not None
+        msg, diag = result
+        assert AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT in msg
+        assert "VENDORID" in msg
+        assert diag["errorCode"] == AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT
+        assert diag["typeMismatches"] == [
+            {"column": "VENDORID", "declared": "decimal(38,30)",
+             "materialised": "decimal(18,0)"}
+        ]
+
+    def test_type_match_returns_none(self, monkeypatch):
+        # Probed types equal declared types (case-insensitive name) → pass.
+        self._patch(monkeypatch, ["vendorid", "segment1"])
+        assert _bronze_source_schema_gate(
+            MagicMock(), node=_bronze_node(), pack=MagicMock(),
+            profile=_gate_profile(), ctx=_gate_ctx(),
+        ) is None
+
 
 class TestBatchBronzeSourceSchemaGate:
     """check_bronze_source_schemas — ONE probe over all in-scope bronze
@@ -839,6 +893,19 @@ class TestBatchBronzeSourceSchemaGate:
         assert out[0]["node"] == "test_bronze"
         assert AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING in out[0]["message"]
         assert out[0]["diagnostic"]["missingColumns"] == ["SEGMENT1"]
+
+    def test_type_mismatch_returns_4070_failure(self, monkeypatch):
+        # All names present but VENDORID type drifts → batch gate fails the
+        # node with AIDPF-4070 BEFORE any extract.
+        self._patch(monkeypatch, {"test_bronze": _fake_struct(
+            ["VENDORID", "SEGMENT1"], types={"VENDORID": "decimal(18,0)"}
+        )})
+        out = self._call()
+        assert len(out) == 1
+        assert out[0]["node"] == "test_bronze"
+        assert AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT in out[0]["message"]
+        assert out[0]["diagnostic"]["errorCode"] == AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT
+        assert out[0]["diagnostic"]["typeMismatches"][0]["column"] == "VENDORID"
 
     def test_probe_failure_degrades_to_empty(self, monkeypatch):
         import oracle_ai_data_platform_fusion_bundle.orchestrator.builtins.bronze_extract_adapter as bea

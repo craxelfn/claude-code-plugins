@@ -32,9 +32,9 @@ requiredColumns:
     - RcvngRcptTrnsctnExtrctPEOLastUpdateDate
 outputSchema:
   columns:
-    - { name: RcvngRcptTrnsctnExtrctPEOTransactionId, type: long, nullable: true, pii: none }
-    - { name: RcvngRcptTrnsctnExtrctPEOPoHeaderId, type: long, nullable: true, pii: none }
-    - { name: RcvngRcptTrnsctnExtrctPEOQuantity, type: "decimal(28,8)", nullable: true, pii: low }
+    - { name: RcvngRcptTrnsctnExtrctPEOTransactionId, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOPoHeaderId, type: "decimal(18,0)", nullable: true, pii: none }
+    - { name: RcvngRcptTrnsctnExtrctPEOQuantity, type: "decimal(38,30)", nullable: true, pii: low }
     - { name: RcvngRcptTrnsctnExtrctPEOTransactionDate, type: timestamp, nullable: true, pii: none }
     - { name: RcvngRcptTrnsctnExtrctPEOLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }

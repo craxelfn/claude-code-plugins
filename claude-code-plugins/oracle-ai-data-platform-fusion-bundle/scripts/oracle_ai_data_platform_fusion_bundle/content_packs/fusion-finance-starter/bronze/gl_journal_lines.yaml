@@ -29,7 +29,7 @@ requiredColumns:
     - GlJeHeadersLastUpdateDate
 outputSchema:
   columns:
-    - { name: JeHeaderId, type: long, nullable: true, pii: none }
+    - { name: JeHeaderId, type: "decimal(18,0)", nullable: true, pii: none }
     - { name: GlJeHeadersLedgerId, type: "decimal(18,0)", nullable: true, pii: none }
     - { name: GlJeHeadersPeriodName, type: string, nullable: true, pii: none }
     - { name: GlJeHeadersLastUpdateDate, type: timestamp, nullable: true, pii: none }

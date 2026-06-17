@@ -1179,6 +1179,79 @@ def _source_schema_miss(
     return message, diagnostic
 
 
+def _source_type_miss(
+    node: "NodeYaml",  # noqa: F821
+    st: "object | None",
+    *,
+    run_id: str,
+    tenant: str | None,
+) -> tuple[str, dict] | None:
+    """Given a bronze node and its live PVO ``StructType`` (or None), return
+    ``(message, AIDPF-4070 diagnostic)`` if any declared non-audit
+    ``outputSchema`` column that IS present in the PVO carries a type that
+    differs from the declared type (after :func:`_normalise_spark_type`);
+    ``None`` when every present column's type matches / nothing to check.
+
+    Columns *absent* from the PVO are :data:`AIDPF-4071`'s responsibility and
+    are skipped here (run the name gate first). Audit columns (``_``-prefixed)
+    are adapter-generated and excluded.
+
+    This HOISTS the post-write ``AIDPF-4070`` assertion
+    (:func:`_assert_materialized_matches_declared` ``subset=True``) to a
+    pre-extract, metadata-only check, so declared-vs-live *type* drift fails
+    in seconds — before the multi-minute pull that would otherwise
+    materialise and then be rejected post-write. It uses the SAME
+    case-insensitive name match + ``_normalise_spark_type`` comparison so the
+    two gates agree. The post-write assertion stays as the authoritative net
+    for any residual inferSchema-vs-materialised divergence.
+    """
+    if st is None:
+        return None
+    present_ci = {f.name.lower(): f.dataType.simpleString() for f in st.fields}
+    mismatches: list[dict] = []
+    for col in node.output_schema.columns:
+        if col.name.startswith("_"):  # audit cols are adapter-generated
+            continue
+        live = present_ci.get(col.name.lower())
+        if live is None:
+            continue  # absence is AIDPF-4071's job, not this gate's
+        if _normalise_spark_type(live) != _normalise_spark_type(col.type):
+            mismatches.append(
+                {"column": col.name, "declared": col.type, "materialised": live}
+            )
+    if not mismatches:
+        return None
+    summary = ", ".join(
+        f"{m['column']} (declared={m['declared']} live={m['materialised']})"
+        for m in mismatches
+    )
+    message = (
+        f"{AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT}: bronze node {node.id!r} "
+        f"declares outputSchema type(s) that differ from live PVO "
+        f"{node.implementation.datastore!r}: {summary}. Extract skipped "
+        f"(metadata-only preflight) to avoid a multi-minute pull that would "
+        f"fail the post-write schema assertion. Fix the declared outputSchema "
+        f"type(s) to match the live PVO (or author a columnAlias/type overlay)."
+    )
+    diagnostic = {
+        "schemaVersion": 1,
+        "runId": run_id,
+        "tenant": tenant,
+        "errorCode": AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT,
+        "errorMessage": message,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "node": node.id,
+        "datastore": node.implementation.datastore,
+        "typeMismatches": mismatches,
+        "pvoColumns": [
+            {"name": f.name, "type": f.dataType.simpleString(),
+             "nullable": bool(f.nullable)}
+            for f in st.fields
+        ],
+    }
+    return message, diagnostic
+
+
 def check_bronze_source_schemas(
     spark: "SparkSession",  # noqa: F821
     *,
@@ -1225,10 +1298,15 @@ def check_bronze_source_schemas(
         node = pack.bronze.get(nid)
         if node is None:
             continue
+        st = schemas.get(nid)
         res = _source_schema_miss(
-            node, schemas.get(nid), run_id=run_id, tenant=tenant,
+            node, st, run_id=run_id, tenant=tenant,
             extra_required=downstream_required.get(nid, frozenset()),
         )
+        if res is None:
+            # Names all present → validate declared types against the live
+            # PVO before extraction (hoisted AIDPF-4070).
+            res = _source_type_miss(node, st, run_id=run_id, tenant=tenant)
         if res is not None:
             msg, diag = res
             failures.append({"node": nid, "message": msg, "diagnostic": diag})
@@ -1269,10 +1347,13 @@ def _bronze_source_schema_gate(
         )
     except Exception:  # noqa: BLE001 — probe failure → defer to the real extract
         return None
-    return _source_schema_miss(
-        node, schemas.get(node.id),
-        run_id=ctx.run_id, tenant=getattr(profile, "tenant", None),
-    )
+    st = schemas.get(node.id)
+    tenant = getattr(profile, "tenant", None)
+    name_miss = _source_schema_miss(node, st, run_id=ctx.run_id, tenant=tenant)
+    if name_miss is not None:
+        return name_miss
+    # Names present → validate declared types vs the live PVO (hoisted 4070).
+    return _source_type_miss(node, st, run_id=ctx.run_id, tenant=tenant)
 
 
 def _execute_bronze_extract_node(
@@ -1321,13 +1402,21 @@ def _execute_bronze_extract_node(
     )
     if source_gate is not None:
         source_gate_msg, source_gate_diag = source_gate
+        # A type mismatch reports as the same status as the post-write 4070
+        # assertion (output_schema_drift); a missing/renamed column keeps
+        # source_schema_missing. Both abort the node before extraction.
+        _gate_status = (
+            "output_schema_drift"
+            if source_gate_diag.get("errorCode") == AIDPF_4070_MATERIALIZED_SCHEMA_DRIFT
+            else "source_schema_missing"
+        )
         _safe_write_failure_row(
             spark, paths, node=node, ctx=ctx,
-            status="source_schema_missing", message=source_gate_msg,
+            status=_gate_status, message=source_gate_msg,
             profile=profile,
         )
         return NodeExecutionResult(
-            status="source_schema_missing", error_message=source_gate_msg,
+            status=_gate_status, error_message=source_gate_msg,
             diagnostic=source_gate_diag,
         )
 
