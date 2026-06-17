@@ -20,9 +20,19 @@ from __future__ import annotations
 from typing import Iterable
 from unittest.mock import MagicMock
 
+import pytest
+
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+from oracle_ai_data_platform_fusion_bundle.orchestrator import state as state_mod
 from oracle_ai_data_platform_fusion_bundle.orchestrator.state import (
+    AIDPF_4021_STATE_LOCATION_ORPHANED,
+    _extract_location_from_error,
+    _is_non_empty_location_error,
+    ensure_schemas,
     ensure_state_table,
+)
+from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+    OrchestratorConfigError,
 )
 
 
@@ -98,6 +108,150 @@ _LEGACY_COLUMNS = [
     "duration_seconds",
     # No plan_hash, no plan_snapshot — table predates the migration.
 ]
+
+
+# ---------------------------------------------------------------------------
+# Fresh-tenant schema provisioning (CREATE SCHEMA IF NOT EXISTS)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_schemas_creates_all_three_medallion_schemas() -> None:
+    """A brand new catalog has no bronze/silver/gold namespaces. The
+    helper must emit an idempotent CREATE SCHEMA for each."""
+    spark = _CapturingSpark()
+    ensure_schemas(spark, _paths())
+    schema_calls = [s for s in spark.sql_calls if "CREATE SCHEMA" in s]
+    assert any("fusion_catalog.bronze" in s for s in schema_calls)
+    assert any("fusion_catalog.silver" in s for s in schema_calls)
+    assert any("fusion_catalog.gold" in s for s in schema_calls)
+    for s in schema_calls:
+        assert "IF NOT EXISTS" in s, "schema create must be idempotent"
+
+
+def test_ensure_schemas_dedupes_collapsed_schema_names() -> None:
+    """A bundle that points all three layers at one schema must not
+    emit duplicate CREATE SCHEMA statements."""
+    spark = _CapturingSpark()
+    paths = TablePaths(
+        catalog="c", bronze_schema="s", silver_schema="s", gold_schema="s",
+    )
+    ensure_schemas(spark, paths)
+    schema_calls = [s for s in spark.sql_calls if "CREATE SCHEMA" in s]
+    assert len(schema_calls) == 1, f"expected 1 deduped create; got {schema_calls}"
+
+
+def test_ensure_state_table_creates_schemas_before_state_table() -> None:
+    """Ordering invariant — the bronze schema MUST be created before the
+    state-table DDL, or a fresh catalog dies with 'no database bronze'."""
+    spark = _CapturingSpark()
+    ensure_state_table(spark, _paths())
+    bronze_schema_idx = next(
+        i for i, s in enumerate(spark.sql_calls)
+        if "CREATE SCHEMA" in s and "fusion_catalog.bronze" in s
+    )
+    create_table_idx = next(
+        i for i, s in enumerate(spark.sql_calls) if "CREATE TABLE" in s
+    )
+    assert bronze_schema_idx < create_table_idx
+
+
+def test_ensure_schemas_targets_custom_catalog_and_schemas() -> None:
+    spark = _CapturingSpark()
+    paths = TablePaths(
+        catalog="cust_cat", bronze_schema="cust_b",
+        silver_schema="cust_s", gold_schema="cust_g",
+    )
+    ensure_schemas(spark, paths)
+    schema_calls = [s for s in spark.sql_calls if "CREATE SCHEMA" in s]
+    assert any("cust_cat.cust_b" in s for s in schema_calls)
+    assert any("cust_cat.cust_s" in s for s in schema_calls)
+    assert any("cust_cat.cust_g" in s for s in schema_calls)
+
+
+# ---------------------------------------------------------------------------
+# Orphaned-location self-heal (DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION)
+# ---------------------------------------------------------------------------
+
+
+_ORPHAN_LOC = (
+    "oci://bucket@ns/managed/fusion_catalog.cat/bronze.db/fusion_bundle_state"
+)
+_NON_EMPTY_ERR = (
+    "[DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION] Cannot create table "
+    f"('fusion_catalog.bronze.fusion_bundle_state'). The associated location "
+    f"('{_ORPHAN_LOC}') is not empty but it's not a Delta table."
+)
+
+
+class _OrphanLocationSpark(_CapturingSpark):
+    """Raises a non-empty-location error on the partitioned CREATE TABLE
+    (the state-table DDL), succeeds on everything else."""
+
+    def __init__(self, error_msg: str, **kw) -> None:
+        super().__init__(**kw)
+        self._error_msg = error_msg
+        self._raised = False
+
+    def sql(self, query: str):
+        if (
+            "CREATE TABLE IF NOT EXISTS" in query
+            and "PARTITIONED BY" in query
+            and not self._raised
+        ):
+            self.sql_calls.append(query)
+            self._raised = True
+            raise RuntimeError(self._error_msg)
+        return super().sql(query)
+
+
+def test_is_non_empty_location_error_matches_delta_error() -> None:
+    assert _is_non_empty_location_error(RuntimeError(_NON_EMPTY_ERR))
+    assert _is_non_empty_location_error(
+        RuntimeError("the location /x is not empty")
+    )
+    assert not _is_non_empty_location_error(RuntimeError("permission denied"))
+
+
+def test_extract_location_pulls_uri_from_error() -> None:
+    assert _extract_location_from_error(_NON_EMPTY_ERR) == _ORPHAN_LOC
+
+
+def test_orphaned_valid_delta_location_is_adopted_in_place(monkeypatch) -> None:
+    """A prior aborted run left a VALID Delta log at the state-table location.
+    ensure_state_table must adopt it (CREATE TABLE ... USING DELTA LOCATION),
+    NOT raise — the fresh-tenant self-heal the user asked for."""
+    monkeypatch.setattr(state_mod, "_location_is_delta", lambda spark, loc: True)
+    spark = _OrphanLocationSpark(_NON_EMPTY_ERR)
+    ensure_state_table(spark, _paths())  # must not raise
+    adopt = [
+        s for s in spark.sql_calls
+        if "USING DELTA LOCATION" in s and _ORPHAN_LOC in s
+    ]
+    assert len(adopt) == 1, f"expected one adopt CREATE; got {adopt}"
+    # And the rest of init still ran (view definition emitted).
+    assert any("CREATE OR REPLACE VIEW" in s for s in spark.sql_calls)
+
+
+def test_orphaned_non_delta_location_raises_aidpf_4021(monkeypatch) -> None:
+    """Location has files but is NOT a valid Delta table → we will not
+    auto-delete; raise a clear AIDPF-4021 naming the path."""
+    monkeypatch.setattr(state_mod, "_location_is_delta", lambda spark, loc: False)
+    spark = _OrphanLocationSpark(_NON_EMPTY_ERR)
+    with pytest.raises(OrchestratorConfigError) as ei:
+        ensure_state_table(spark, _paths())
+    msg = str(ei.value)
+    assert AIDPF_4021_STATE_LOCATION_ORPHANED in msg
+    assert _ORPHAN_LOC in msg
+    # Must NOT have attempted an adopt when the location isn't Delta.
+    assert not any("USING DELTA LOCATION" in s for s in spark.sql_calls)
+
+
+def test_unrelated_create_error_propagates_unchanged() -> None:
+    """A non-location CREATE failure (e.g. permission) must propagate as-is,
+    NOT be misclassified as the orphaned-location case."""
+    spark = _OrphanLocationSpark("PERMISSION_DENIED: no CREATE grant")
+    with pytest.raises(RuntimeError, match="PERMISSION_DENIED"):
+        ensure_state_table(spark, _paths())
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import TablePaths
+from oracle_ai_data_platform_fusion_bundle.schema.errors import (
+    OrchestratorConfigError,
+)
+
+#: Raised when the state-table's storage location holds files but no metastore
+#: entry (orphaned) AND the location is NOT a valid Delta table, so it can't be
+#: adopted in place. The recoverable case (valid Delta log) self-heals silently.
+AIDPF_4021_STATE_LOCATION_ORPHANED = "AIDPF-4021"
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -489,11 +497,170 @@ def _latest_view_ddl(table_path: str, view_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def ensure_schemas(spark: "SparkSession", paths: TablePaths) -> None:
+    """Idempotent ``CREATE SCHEMA IF NOT EXISTS`` for the bronze / silver /
+    gold medallion namespaces.
+
+    Fresh-tenant prerequisite. The catalog (``aidp.catalog``) is expected to
+    already exist — it's a one-time admin/provisioning step — but on a brand
+    new catalog the medallion *schemas* do not. Nothing else in the bundle
+    creates them: seed writes tables via ``saveAsTable`` /
+    ``CREATE OR REPLACE TABLE`` and even the state table at
+    ``{catalog}.{bronze_schema}.fusion_bundle_state`` assumes the schema is
+    already there. Without this, the very first write dies inside the
+    metastore at ``HMSCatalog.createTable`` with
+    ``InvalidObjectException: There is no database <catalog>.<schema>``.
+
+    Runs BEFORE :func:`ensure_state_table`'s state-table DDL so the state
+    write itself succeeds on a fresh catalog. ``IF NOT EXISTS`` makes every
+    statement a no-op on established tenants, and duplicate schema names
+    (e.g. a bundle that points bronze/silver/gold at one schema) collapse
+    harmlessly.
+
+    Identifier safety: ``paths.catalog`` and the three schema names were
+    validated against the strict SQL-identifier regex at ``TablePaths``
+    construction, so unquoted interpolation here cannot inject.
+    """
+    seen: set[str] = set()
+    for schema in (paths.bronze_schema, paths.silver_schema, paths.gold_schema):
+        if schema in seen:
+            continue
+        seen.add(schema)
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {paths.catalog}.{schema}")
+
+
+def _is_non_empty_location_error(exc: Exception) -> bool:
+    """True when a CREATE TABLE failed because the target's storage location
+    already holds files but the metastore has no entry (orphaned location).
+
+    Delta surfaces this as ``[DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION]``;
+    some engines word it ``... location ... is not empty``. Match both.
+    """
+    msg = str(exc)
+    return (
+        "DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION" in msg
+        or ("location" in msg.lower() and "not empty" in msg.lower())
+    )
+
+
+def _extract_location_from_error(msg: str) -> "str | None":
+    """Pull the storage URI the non-empty-location error names. Delta embeds
+    the exact path in the message; prefer it (authoritative for THIS failure).
+    """
+    import re
+
+    m = re.search(r"[a-z0-9]+://[^\s'\")\]]+", msg)
+    if not m:
+        return None
+    # Trim trailing sentence punctuation the regex may have swept up.
+    return m.group(0).rstrip(".,;)")
+
+
+def _derive_state_table_location(
+    spark: "SparkSession", paths: TablePaths
+) -> "str | None":
+    """Fallback when the error message carries no path: derive the managed
+    location from the bronze schema's ``db_location`` (DESCRIBE SCHEMA
+    EXTENDED exposes it inside a Properties tuple) + the table name.
+    """
+    import re
+
+    try:
+        rows = spark.sql(
+            f"DESCRIBE SCHEMA EXTENDED {paths.catalog}.{paths.bronze_schema}"
+        ).collect()
+    except Exception:
+        return None
+    loc = None
+    for r in rows:
+        for i in range(len(r)):
+            v = str(r[i])
+            m = re.search(r"db_location,([a-z0-9]+://[^),]+)", v)
+            if m:
+                loc = m.group(1).strip()
+            elif loc is None and "://" in v and v.strip().endswith(".db"):
+                loc = v.strip()
+    if not loc:
+        return None
+    return f"{loc.rstrip('/')}/{_STATE_TABLE_NAME}"
+
+
+def _location_is_delta(spark: "SparkSession", location: str) -> bool:
+    """True when ``location`` is a valid Delta table (has a ``_delta_log``).
+    Factored out so tests can stub it without a real Delta runtime.
+    """
+    try:
+        from delta.tables import DeltaTable
+
+        return bool(DeltaTable.isDeltaTable(spark, location))
+    except Exception:
+        return False
+
+
+def _create_or_adopt_state_table(
+    spark: "SparkSession", paths: TablePaths, table_path: str
+) -> None:
+    """Create the state table, self-healing the orphaned-location case.
+
+    Fresh-tenant reality: a prior aborted run can leave Delta files at the
+    state table's managed location while the metastore entry is gone. A plain
+    ``CREATE TABLE IF NOT EXISTS`` then dies with
+    ``DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION``. The state table is the
+    orchestrator's own append-only run log (disposable bookkeeping), so when
+    the orphaned location is a VALID Delta table we adopt it in place
+    (``CREATE TABLE ... USING DELTA LOCATION``) — the seed proceeds, no data
+    touched, no operator action needed.
+
+    Only raises (``AIDPF-4021``) when the location holds files but is NOT a
+    valid Delta table — an ambiguous case we will not auto-delete. The
+    operator clears that one prefix and re-runs.
+    """
+    try:
+        spark.sql(_ddl(table_path))
+        return
+    except Exception as exc:  # re-raised below unless it's the known case
+        if not _is_non_empty_location_error(exc):
+            raise
+        location = (
+            _extract_location_from_error(str(exc))
+            or _derive_state_table_location(spark, paths)
+        )
+        if location and _location_is_delta(spark, location):
+            logger.warning(
+                "state table %s: orphaned-but-valid Delta location %s — "
+                "adopting in place (fresh-tenant self-heal)",
+                table_path, location,
+            )
+            spark.sql(
+                f"CREATE TABLE {table_path} USING DELTA LOCATION '{location}'"
+            )
+            return
+        raise OrchestratorConfigError(
+            f"{AIDPF_4021_STATE_LOCATION_ORPHANED}: the state-table location "
+            f"for {table_path} "
+            f"({location or 'path not reported in the Delta error'}) holds "
+            f"files but is not a valid Delta table and is not registered in "
+            f"the catalog. The bundle will not auto-delete it. Inspect that "
+            f"one object-storage prefix; if it is leftover garbage from an "
+            f"aborted run, delete ONLY that prefix and re-run seed "
+            f"({_STATE_TABLE_NAME} is disposable run-audit history, not "
+            f"source data)."
+        ) from exc
+
+
 def ensure_state_table(spark: "SparkSession", paths: TablePaths) -> None:
     """HARD prerequisite — create the state table if missing AND probe
     writeability via INSERT/DELETE sentinel. Raises on any failure;
     the run loop's caller (``orchestrator.run``) lets this propagate
     uncaught so a structural problem halts BEFORE any module dispatch.
+
+    First action is :func:`ensure_schemas` so the bronze/silver/gold
+    namespaces exist before the state-table DDL — otherwise a fresh catalog
+    fails at the state write with ``no database <catalog>.<bronze_schema>``.
+    The CREATE then routes through :func:`_create_or_adopt_state_table`, which
+    self-heals an orphaned-but-valid Delta location (a prior aborted run's
+    remnant) by adopting it in place rather than dying with
+    ``DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION``.
 
     Catches the high-probability failure modes:
       - wrong ``aidp.catalog`` (Spark AnalysisException at the DDL step)
@@ -513,9 +680,17 @@ def ensure_state_table(spark: "SparkSession", paths: TablePaths) -> None:
     consumer queries that filter by canonical status never see it; the
     sentinel is deleted immediately after insertion.
     """
+    # Fresh-tenant guard — create bronze/silver/gold schemas before any
+    # state-table DDL. The state table lives in the bronze schema, so on a
+    # brand new catalog this MUST run first or the CREATE below fails with
+    # "no database <catalog>.<bronze_schema>". Idempotent on existing tenants.
+    ensure_schemas(spark, paths)
     table_path = _state_table_path(paths)
     view_path = _state_latest_view_path(paths)
-    spark.sql(_ddl(table_path))
+    # Create the state table, self-healing an orphaned-but-valid Delta
+    # location (fresh-tenant remnant of a prior aborted run) by adopting it
+    # in place. Raises AIDPF-4021 only when the location is non-empty garbage.
+    _create_or_adopt_state_table(spark, paths, table_path)
     # Schema-aware additive migration. `CREATE TABLE IF NOT EXISTS`
     # is a no-op when the table exists, so the new columns need an
     # `ALTER TABLE` migration to materialize on tables created by
@@ -1462,6 +1637,8 @@ def read_content_pack_resumable_state(
 
 
 __all__ = [
+    "AIDPF_4021_STATE_LOCATION_ORPHANED",
+    "ensure_schemas",
     "ensure_state_table",
     "write_state_row",
     "write_fingerprint_skip_row",

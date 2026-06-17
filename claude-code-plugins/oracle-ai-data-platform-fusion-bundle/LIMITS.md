@@ -363,6 +363,42 @@ collides across the varied prefixes); use core-exact / semantic matching.
 
 ---
 
+## Resolved limits
+
+### §Resolved-FreshTenant — seed assumed medallion schemas + a clean state-table location already existed
+
+**Symptom (fresh tenant / newly created catalog):** the first `run --mode seed`
+died at cluster-side state-table init (notebook cell 4) — first with
+`InvalidObjectException: There is no database <catalog>.bronze`, then, once the
+schema existed, with `DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION` on
+`fusion_catalog.bronze.fusion_bundle_state`.
+
+**Root cause:** nothing in the shipped bundle provisioned the inside-the-catalog
+prerequisites. The original dev catalog only worked because
+`dev/BOOTSTRAP_fusion_catalog.py` (a manual paste-into-notebook script) had
+created the bronze/silver/gold schemas once by hand. On a fresh catalog the
+schemas were absent, and a prior aborted run could leave an orphaned Delta
+location (a `_delta_log` with no metastore entry) at the state-table path.
+
+**Fix (`orchestrator/state.py`):** seed now self-heals the *inside-the-catalog*
+prerequisites at run start, idempotently:
+
+* `ensure_schemas()` runs first inside `ensure_state_table()` —
+  `CREATE SCHEMA IF NOT EXISTS` for bronze/silver/gold (deduped).
+* `_create_or_adopt_state_table()` catches the non-empty-location error and
+  **adopts** an orphaned-but-valid Delta location in place
+  (`CREATE TABLE ... USING DELTA LOCATION`). Only the non-adoptable garbage
+  case raises (**AIDPF-4021**) — the bundle never auto-deletes storage.
+
+**Boundary preserved:** the **catalog** itself remains the operator's one manual
+prerequisite (it needs storage/governance config); everything inside it is now
+provisioned by seed. Pattern: *missing → create, present → use, orphaned →
+adopt.* Verified live on `fusion_bundle_dev` (2026-06-17): the orphaned
+`fusion_bundle_state` location was a valid empty Delta table and was adopted
+cleanly.
+
+---
+
 ## Cross-references
 
 * [`BACKLOG.md`](BACKLOG.md) — items tracking limit mitigations.

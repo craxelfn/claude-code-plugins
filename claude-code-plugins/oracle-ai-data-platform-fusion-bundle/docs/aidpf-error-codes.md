@@ -91,6 +91,7 @@ older reports, ADRs, and tests can be interpreted without guessing.
 | `AIDPF-3020` | Custom extractors | Historical | Planned code for custom extractor load failure or invalid returned schema. | Check the extractor import path, signature, and required audit columns. |
 | `AIDPF-4001` | Tenant drift | Historical | Planned code for tenant fingerprint change. | Confirm the tenant change and refresh bootstrap/profile evidence. |
 | `AIDPF-4020` | Runtime preflight | Historical | Planned code for dropped target preflight failure. | Reseed or recreate the missing target. |
+| `AIDPF-4021` | State init | Active | State-table location holds files but is not a valid Delta table and is unregistered (orphaned, non-adoptable). The valid-Delta case self-heals silently (adopt-in-place). | Inspect that one object-storage prefix; if it is leftover garbage from an aborted run, delete ONLY that prefix and re-run seed (`fusion_bundle_state` is disposable run-audit history, not source data). |
 | `AIDPF-4030` | Strategy execution | Active | Strategy is not supported by the current content-pack runner. | Change the node strategy or implement support. |
 | `AIDPF-4031` | Strategy execution | Active | Target identifier failed the allowlist. | Use a valid three-part target identifier. |
 | `AIDPF-4040` | Resume / incremental | Active | Plan-hash drift detected on resume or incremental continuity check. | Confirm the plan change; rerun seed or use the documented repin path only when intentional. |
