@@ -90,48 +90,62 @@ when-NOT-to-use). The CLI stays the contract; skills are guarded wrappers around
 > [workflow.md](workflow.md). Fresh setup details are in
 > [docs/project_setup.md](docs/project_setup.md).
 
+**Route 1: Claude Code plugin.** Use this for normal customer/demo work. Run
+these slash commands in Claude Code:
+
+```text
+/plugin marketplace add repo/oracle-ai-data-platform-fusion-bundle
+/plugin install oracle-ai-data-platform-fusion-bundle@aidp-fusion-bundle
+```
+
+Create a clean customer project as a sibling of the plugin repo, then open
+Claude Code from that customer directory:
+
 ```bash
-# 1. Install the CLI on your laptop (development install from local source)
+cd Workspace
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
+```
+
+Then ask autopilot to drive the setup:
+
+```text
+/aidp-fusion-autopilot Build a CFO dashboard for supplier spend, AP aging, and GL balance using this Fusion tenant.
+```
+
+The skill installs/uses the bundled CLI if needed, scaffolds missing
+`bundle.yaml`, `aidp.config.yaml`, and `.env`, then drives config, OAC MCP
+setup, bootstrap, seed, dataset advice, and workbook authoring. It pauses for
+secrets, Claude Code MCP reconnect, destructive seed confirmation, and the
+manual OAC connection/dataset UI step.
+
+**Route 2: manual CLI.** Use this when you want each command explicitly:
+
+```bash
+cd Workspace/oracle-ai-data-platform-fusion-bundle
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
-# 1a. (optional, for contributors) install test deps + run the unit suite
-pip install -e '.[test]'
-make test
-
-# 2. Create a customer bundle from the starter content pack
-mkdir my-fusion-lake
-cd my-fusion-lake
+cd ..
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
 aidp-fusion-bundle init
-
-# Configure bundle.yaml / aidp.config.yaml values. Local env vars normally
-# include FUSION_BICC_* and OAC_URL; production secrets belong in the AIDP
-# credential store, not committed files.
-
-# 3. Set up operator OAC MCP before OAC phases, then restart/reconnect Claude Code.
-#    Use a least-privilege OAC user via OAC_MCP_USER / OAC_MCP_PASSWORD
-#    or pass --user / --password explicitly.
-aidp-fusion-bundle dashboard mcp-setup \
+aidp-fusion-bundle init-config \
+  --aidp-id <aidp-ocid> \
+  --workspace "<workspace name>" \
+  --cluster "<cluster name>"
+aidp-fusion-bundle validate
+env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD \
+  -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+  aidp-fusion-bundle dashboard mcp-setup \
   --connector-js /path/to/oac-mcp-connect.js
-#    If this interrupts an active dashboard request, resume from .aidp/autopilot/resume.md.
-
-# 4. Probe prerequisites and pin tenant variation
 aidp-fusion-bundle bootstrap --check-iam
-
-# 5. Run the orchestrator (first time = full extract; subsequent = incremental)
 aidp-fusion-bundle run --mode seed
-
-# 6. Ask the oac-dataset-advisor skill which OAC dataset to create.
-#    It must use the live AIDP gold catalog, not pack YAML alone.
-
-# 7. Use oac-dataset-setup to guide the manual OAC connection/dataset step.
-#    Connection JSON can be generated with --print-only:
-aidp-fusion-bundle dashboard install --target oac --oac-url ... --print-only
-#    Then in OAC UI: Data -> Connections -> Create -> Oracle AI Data Platform.
-#    Create the dataset over the advised AIDP gold table(s), then verify with MCP.
-
-# 8. Resume autopilot. It finds/describes the dataset over OAC MCP and
-#    hands off to workbook-authoring to save the workbook.
 ```
+
+Full first-run details, including the generated directory layout and OAC MCP
+credential handling, are in [docs/project_setup.md](docs/project_setup.md).
 
 Why the manual OAC step exists: OAC's public REST validator does not reliably
 accept AIDP `idljdbc` first-connection creation, and OAC MCP can inspect and

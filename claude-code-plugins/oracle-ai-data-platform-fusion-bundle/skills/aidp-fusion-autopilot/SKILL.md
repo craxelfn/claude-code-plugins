@@ -124,12 +124,24 @@ the checkpoint first, then re-probe live state; the file is context, not proof.
 
 ## First run (fresh install)
 If `bundle.yaml` / `aidp.config.yaml` don't exist yet (brand-new install), Step
-1 starts from zero: run **`aidp-fusion-bundle init`** to scaffold them, then
+1 starts from zero.
+
+First, make sure the CLI exists. On a plugin-only install, the user may have
+downloaded the Claude Code plugin but not manually run `pip install -e`. Do not
+send them back to a setup guide for that. Check `command -v aidp-fusion-bundle`;
+if it is missing, install the CLI from the plugin root that contains this skill
+directory, then continue. The plugin root is two directories above this file
+(`skills/aidp-fusion-autopilot/../..`). Use the active Python, create or reuse
+the plugin repo's `.venv` only when needed, and keep the customer bundle
+directory separate.
+
+Then run **`aidp-fusion-bundle init`** from the clean customer bundle directory
+to scaffold `bundle.yaml`, `aidp.config.yaml`, and `.env`, then
 `/aidp-fusion-config` to resolve the AIDP coords from names. Capture the user's
 goal first (even a rough one) so the rest of the journey has a target; if they
 have no goal yet, scaffold + configure and stop there with "what dashboard do
-you want?". Don't ask for OCIDs by hand — that's what `init` + `/aidp-fusion-config`
-are for.
+you want?". Don't ask for OCIDs by hand — that's what `init` +
+`/aidp-fusion-config` are for.
 
 ## Returning user (re-entry fast-path — don't redo built work)
 

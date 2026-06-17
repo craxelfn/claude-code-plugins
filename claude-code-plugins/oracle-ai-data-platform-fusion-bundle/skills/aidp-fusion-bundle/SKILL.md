@@ -43,12 +43,15 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
 
 ## Quickstart
 
-> **Just want it driven end-to-end?** State your goal to
-> [`aidp-fusion-autopilot`](../aidp-fusion-autopilot/SKILL.md) — e.g. *"build a
-> supplier-spend vs GL-balance dashboard from Fusion"* — and it conducts the
-> whole chain (configure → bootstrap → seed → advise → author → dataset →
-> workbook → MCP chat), pausing only for real decisions. The manual quickstart
-> below is the step-by-step path the autopilot automates.
+> **Recommended route:** install the Claude Code plugin, open Claude Code from a
+> clean customer bundle directory such as `Workspace/demo-fusion-cfo/`, then
+> invoke [`aidp-fusion-autopilot`](../aidp-fusion-autopilot/SKILL.md) with the
+> dashboard goal. Autopilot installs/uses the bundled CLI if needed, scaffolds
+> customer files, and conducts the whole chain (configure → OAC MCP setup →
+> bootstrap → seed → advise → dataset → workbook → optional MCP chat), pausing
+> only for real decisions. Keep the customer directory separate from the plugin
+> source. The manual quickstart below is the step-by-step path autopilot
+> automates.
 
 1. **Install the CLI** on your laptop:
    ```bash

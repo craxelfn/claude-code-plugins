@@ -18,8 +18,22 @@ There are two working directories involved:
 | Plugin checkout | This repository. It provides the CLI, skills, content packs, and workbook tooling. |
 | Customer bundle directory | A separate project created with `aidp-fusion-bundle init`; it holds `bundle.yaml`, `aidp.config.yaml`, tenant profiles, evidence, and overlays. |
 
-Do not author customer changes inside the shipped starter pack. New customer
-medallion work belongs in overlays under the customer bundle directory.
+Keep them as siblings:
+
+```text
+Workspace/
+  oracle-ai-data-platform-fusion-bundle/   # plugin repo: CLI, skills, content packs
+  demo-fusion-cfo/                         # customer/demo project: config + generated evidence
+```
+
+The plugin repo is the product. `demo-fusion-cfo/` is the customer
+implementation. Do not author customer changes inside the plugin checkout or
+inside the shipped starter pack. New customer medallion work belongs in overlays
+under the customer bundle directory.
+
+A clean customer bundle directory is empty, or at least has no existing
+`bundle.yaml` or `aidp.config.yaml`; `aidp-fusion-bundle init` writes those
+files.
 
 ## Local Prerequisites
 
@@ -32,7 +46,48 @@ medallion work belongs in overlays under the customer bundle directory.
 | Claude Code | Needed for the conversational skill/autopilot experience. |
 | OAC MCP connector zip | Downloaded from OAC Profile -> MCP Connect. |
 
-## Install The Plugin CLI
+## Route 1: Claude Code Plugin
+
+Recommended for users. Download the plugin, open Claude Code from a clean
+customer bundle directory, and let `aidp-fusion-autopilot` drive setup and
+delivery.
+
+Run these slash commands in Claude Code:
+
+```text
+/plugin marketplace add repo/oracle-ai-data-platform-fusion-bundle
+/plugin install oracle-ai-data-platform-fusion-bundle@aidp-fusion-bundle
+```
+
+Then create or open the customer project as a sibling of the plugin repo:
+
+```bash
+cd Workspace
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
+```
+
+Start Claude Code from `demo-fusion-cfo/`, not from the plugin repo, and ask
+autopilot to drive the work:
+
+```text
+/aidp-fusion-autopilot Build a CFO dashboard for supplier spend, AP aging, and GL balance using this Fusion tenant.
+```
+
+Autopilot will install/use the bundled CLI if `aidp-fusion-bundle` is not on
+`PATH`, scaffold missing customer files with `aidp-fusion-bundle init`, route
+config through `/aidp-fusion-config`, stage OAC MCP when needed, run
+validation/bootstrap/seed, advise the OAC dataset, and hand off workbook
+authoring. It pauses only for real external actions: secrets and tenant values,
+Claude Code MCP restart, destructive seed confirmation, and the manual OAC
+connection/dataset step.
+
+## Route 2: Manual CLI Setup
+
+Use this path when you want each command explicitly, or when you are developing
+the plugin itself.
+
+### Install The Plugin CLI
 
 From this repository:
 
@@ -83,13 +138,27 @@ For more REST job dispatch details, including AIDP credential-store setup, see
 
 ## Create A Customer Bundle
 
-Create the customer project outside the plugin checkout. From an empty customer
-project directory, run the current content-pack scaffold:
+If you are using Route 1, create/open this directory and let
+`/aidp-fusion-autopilot` run `aidp-fusion-bundle init` when it detects missing
+customer files. If you are using Route 2 manually, run the scaffold yourself.
+
+Create the customer project outside the plugin checkout. For example:
 
 ```bash
-mkdir my-fusion-lake
-cd my-fusion-lake
+# From Workspace/oracle-ai-data-platform-fusion-bundle after installing the CLI:
+cd ..
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
 aidp-fusion-bundle init
+```
+
+After init, the customer folder has:
+
+```text
+demo-fusion-cfo/
+  bundle.yaml
+  aidp.config.yaml
+  .env
 ```
 
 The default scaffold uses the content-pack shape and enables the full starter
@@ -126,18 +195,34 @@ Then validate:
 aidp-fusion-bundle validate
 ```
 
+Fill the generated files before bootstrap:
+
+- `.env`: `FUSION_BICC_BASE_URL`, `FUSION_BICC_USER`,
+  `FUSION_BICC_PASSWORD`, `FUSION_BICC_EXTERNAL_STORAGE`, `OAC_URL`,
+  `OAC_MCP_USER`, and `OAC_MCP_PASSWORD`.
+- `bundle.yaml`: project name, team, schemas, catalog, and any scoped starter
+  marts that differ from the default.
+- `aidp.config.yaml`: prefer `aidp-fusion-bundle init-config`; do not
+  hand-copy opaque workspace or cluster keys unless you must.
+
 ## Configure Operator OAC MCP
 
 Set up OAC MCP before the OAC phases of autopilot:
 
 ```bash
-aidp-fusion-bundle dashboard mcp-setup \
+env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD \
+  -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+  aidp-fusion-bundle dashboard mcp-setup \
   --connector-js <path-to-oac-mcp-connect.js>
 ```
 
 Then restart or reconnect Claude Code and verify `oac-mcp-server` is connected.
 Do not treat a disconnected MCP server as proof that an OAC dataset or workbook
 does not exist.
+
+Run this from the customer bundle directory. The command writes project-scoped
+`.mcp.json` in `demo-fusion-cfo/`; OAC credentials stay under
+`~/.oac-connect/` and must not be committed.
 
 If MCP setup happens after the user has already stated a dashboard goal, write
 the resume checkpoint before restarting:
@@ -193,6 +278,31 @@ aidp-fusion-bundle run --mode seed
 
 The seed skill is intentionally fail-closed because the current CLI cannot
 prove a physical target is empty in every environment.
+
+After bootstrap and seed, the customer project grows like this:
+
+```text
+demo-fusion-cfo/
+  bundle.yaml
+  aidp.config.yaml
+  .env
+  .mcp.json
+  profiles/
+    finance-default.yaml
+  evidence/
+  .aidp/
+    autopilot/
+      resume.md
+  overlays/              # only if mart-author or medallion-author creates custom work
+```
+
+For a live demo, open Claude Code from `demo-fusion-cfo/`, not from the plugin
+repo, so skills and CLI commands operate on the customer bundle by default.
+Then use a prompt such as:
+
+```text
+/aidp-fusion-autopilot Build a CFO dashboard for supplier spend, AP aging, and GL balance using this Fusion tenant.
+```
 
 ## OAC Connection And Dataset
 

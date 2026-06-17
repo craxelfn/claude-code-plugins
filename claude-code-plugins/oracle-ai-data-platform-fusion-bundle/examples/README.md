@@ -14,11 +14,22 @@ The old `minimal_gl_only.yaml` and `full_finance.yaml` examples are legacy
 fixtures from the pre-Phase-9 runner. They remain in the repository for tests
 and reference, but new projects should start from `aidp-fusion-bundle init`.
 
-## Recommended New-User Path
+## Recommended New-User Paths
+
+Most users should install the Claude Code plugin and let autopilot drive the
+setup from a clean sibling customer directory:
+
+```text
+/plugin marketplace add repo/oracle-ai-data-platform-fusion-bundle
+/plugin install oracle-ai-data-platform-fusion-bundle@aidp-fusion-bundle
+/aidp-fusion-autopilot Build a CFO dashboard for supplier spend, AP aging, and GL balance using this Fusion tenant.
+```
+
+Use the manual CLI path when you want each command explicitly:
 
 ```bash
-mkdir my-fusion-lake
-cd my-fusion-lake
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
 aidp-fusion-bundle init
 aidp-fusion-bundle validate
 aidp-fusion-bundle dashboard mcp-setup --connector-js <path-to-oac-mcp-connect.js>

@@ -59,17 +59,38 @@ Copilot client connected to OAC MCP.
 
 ## First-Time Setup
 
-Install the CLI from this checkout:
+Recommended route: install the Claude Code plugin, open Claude Code from a
+clean customer bundle directory, and let `aidp-fusion-autopilot` drive setup.
 
-```bash
-pip install -e .
+```text
+/plugin marketplace add repo/oracle-ai-data-platform-fusion-bundle
+/plugin install oracle-ai-data-platform-fusion-bundle@aidp-fusion-bundle
 ```
 
-Create a customer project from the Phase 9 starter template:
+Keep the customer implementation separate from the plugin source:
 
 ```bash
-mkdir my-fusion-lake
-cd my-fusion-lake
+cd Workspace
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
+```
+
+Then start Claude Code from `demo-fusion-cfo/` and invoke:
+
+```text
+/aidp-fusion-autopilot Build a CFO dashboard for supplier spend, AP aging, and GL balance using this Fusion tenant.
+```
+
+Manual route: install the CLI from the plugin checkout, then scaffold the
+customer project from the Phase 9 starter template:
+
+```bash
+cd Workspace/oracle-ai-data-platform-fusion-bundle
+pip install -e .
+
+cd ..
+mkdir demo-fusion-cfo
+cd demo-fusion-cfo
 aidp-fusion-bundle init
 ```
 
