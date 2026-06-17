@@ -431,10 +431,23 @@ def run(
                 f"bronze node {node.id!r}: incremental MERGE requires a "
                 f"non-empty refresh.incremental.naturalKey."
             )
+        # natural_key + data_cols interpolate unquoted into the MERGE ON /
+        # payload-diff predicates below. The pack-load validator (AIDPF-2082)
+        # covers the declared naturalKey, but data_cols are live source-DataFrame
+        # column names (from the customer's Fusion PVO), so validate both here
+        # before they reach SQL — reject injection and cryptic Spark errors.
+        from oracle_ai_data_platform_fusion_bundle.config.paths import (
+            _validate_identifier,
+        )
+
+        for c in natural_key:
+            _validate_identifier(f"bronze node {node.id!r} naturalKey", c)
         join_predicate = " AND ".join(
             f"target.{c} <=> src.{c}" for c in natural_key
         )
         data_cols = [c for c in df.schema.names if c not in BRONZE_AUDIT_COLUMNS]
+        for c in data_cols:
+            _validate_identifier(f"bronze node {node.id!r} source column", c)
         payload_diff: str | None = (
             " OR ".join(
                 f"target.{c} IS DISTINCT FROM src.{c}" for c in data_cols

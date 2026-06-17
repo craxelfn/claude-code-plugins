@@ -31,6 +31,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -72,6 +73,18 @@ AIDPF_2081_BUNDLE_DATASET_NOT_IN_PACK = "AIDPF-2081"
 # RAISE: bundle.yaml::datasets[].id does not resolve in any pack layer
 # (bronze ∪ silver ∪ gold). Replaces the old fusion_catalog.CATALOG check.
 
+AIDPF_2082_INVALID_SQL_IDENTIFIER = "AIDPF-2082"
+# RAISE: a column name declared in naturalKey / partitionColumns /
+# trackedColumns / watermark.column is not a safe unquoted SQL identifier.
+# These names interpolate directly into MERGE ON / partition / watermark SQL,
+# so they are validated at pack-load to reject both injection and cryptic
+# Spark parse errors from typos.
+
+AIDPF_2083_INVALID_CALENDAR_DATE = "AIDPF-2083"
+# RAISE: a CalendarProfile startDate/endDate is not an ISO-8601 (YYYY-MM-DD)
+# date. These values interpolate into the dim_calendar `sequence(DATE'...')`
+# SQL, so they are validated at pack-load.
+
 
 # ---------------------------------------------------------------------------
 # SemVer validation
@@ -101,6 +114,66 @@ def _validate_semver(value: str) -> str:
 
 
 SemVerStr = Annotated[str, Field(description="SemVer 2.0.0 version string (e.g., 0.1.0)")]
+
+
+# ---------------------------------------------------------------------------
+# SQL-identifier and calendar-date validation
+# ---------------------------------------------------------------------------
+# Column names declared in naturalKey / partitionColumns / trackedColumns /
+# watermark.column are interpolated unquoted into MERGE ON predicates,
+# partition clauses, and watermark SQL. CalendarProfile dates are interpolated
+# into ``sequence(DATE'...')``. Validating both at pack-load keeps untrusted /
+# typo'd values from ever reaching the renderer. Same identifier rule as
+# ``config.paths._SQL_IDENTIFIER_RE``.
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_sql_identifier_list(field_name: str, values: list[str]) -> list[str]:
+    """Reject any column name that wouldn't safely interpolate into Spark SQL."""
+    for value in values:
+        if not isinstance(value, str) or not _SQL_IDENTIFIER_RE.match(value):
+            raise ValueError(
+                f"{AIDPF_2082_INVALID_SQL_IDENTIFIER}: {field_name} entry "
+                f"{value!r} is not a valid unquoted SQL identifier — must match "
+                r"^[A-Za-z_][A-Za-z0-9_]*$. These names interpolate directly "
+                "into MERGE / partition / watermark SQL."
+            )
+    return values
+
+
+def _validate_sql_identifier(field_name: str, value: str) -> str:
+    """Reject a single column name that wouldn't safely interpolate into SQL."""
+    if not isinstance(value, str) or not _SQL_IDENTIFIER_RE.match(value):
+        raise ValueError(
+            f"{AIDPF_2082_INVALID_SQL_IDENTIFIER}: {field_name}={value!r} is not "
+            r"a valid unquoted SQL identifier — must match ^[A-Za-z_][A-Za-z0-9_]*$."
+        )
+    return value
+
+
+def _validate_iso_date(field_name: str, value: str) -> str:
+    """Validate an ISO-8601 (YYYY-MM-DD) date string; raise AIDPF-2083 on failure.
+
+    Checks both the literal shape and that it is a real calendar date (so
+    ``2020-13-40`` is rejected, not just non-numeric junk).
+    """
+    from datetime import date
+
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        raise ValueError(
+            f"{AIDPF_2083_INVALID_CALENDAR_DATE}: {field_name}={value!r} is not an "
+            "ISO-8601 date (YYYY-MM-DD)."
+        )
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{AIDPF_2083_INVALID_CALENDAR_DATE}: {field_name}={value!r} is not a "
+            f"valid calendar date ({exc})."
+        ) from exc
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +255,11 @@ class CalendarProfile(BaseModel):
     end_date: str = Field(alias="endDate")
 
     fiscal_start_month: int = Field(default=1, alias="fiscalStartMonth", ge=1, le=12)
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _check_iso_date(cls, v: str) -> str:
+        return _validate_iso_date("calendar date", v)
 
 
 class ChartOfAccountsProfile(BaseModel):
@@ -530,6 +608,11 @@ class WatermarkSpec(BaseModel):
     column: str
     """Bronze/silver column whose monotonic values drive the watermark predicate."""
 
+    @field_validator("column")
+    @classmethod
+    def _check_column(cls, v: str) -> str:
+        return _validate_sql_identifier("watermark.column", v)
+
 
 class SourceRef(BaseModel):
     """One entry in ``dependsOn.bronze[]`` or ``dependsOn.silver[]``.
@@ -581,6 +664,11 @@ class IncrementalWatermark(BaseModel):
 
     column: str
 
+    @field_validator("column")
+    @classmethod
+    def _check_column(cls, v: str) -> str:
+        return _validate_sql_identifier("incremental.watermark.column", v)
+
 
 class AffectedPartitionsFrom(BaseModel):
     """Maps source delta to target partitions (replace_partition strategy)."""
@@ -606,6 +694,11 @@ class RefreshIncremental(BaseModel):
     tracked_columns: list[str] = Field(default_factory=list, alias="trackedColumns")
     """For scd2: columns whose changes close a record (deferred — schema only)."""
     reason: str | None = None
+
+    @field_validator("natural_key", "partition_columns", "tracked_columns")
+    @classmethod
+    def _check_identifier_lists(cls, v: list[str], info: "ValidationInfo") -> list[str]:
+        return _validate_sql_identifier_list(f"incremental.{info.field_name}", v)
 
 
 class RefreshSpec(BaseModel):

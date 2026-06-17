@@ -187,8 +187,7 @@ Atomic commits preferred — one P-id / TC-id per commit so backlog cross-refs a
 ### Branches
 
 - `main` — release-track. Protected.
-- `oussama-dev` / `<contributor>-dev` — long-running feature branches. PRs merge here first for integration, then up to `main` once green.
-- Per the workspace-level memory: never push to `main` directly on `oci-llm-dfl`; all PRs target `maxwell-dev`. (That rule is for a different repo — for this plugin, target the contributor branch or `main` per the project owner's direction.)
+- `<contributor>-dev` — long-running feature branches. PRs merge here first for integration, then up to `main` once green.
 
 ### Pull-request template
 

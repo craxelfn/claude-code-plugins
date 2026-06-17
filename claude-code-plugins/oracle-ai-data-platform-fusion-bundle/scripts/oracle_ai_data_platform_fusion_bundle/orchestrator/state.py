@@ -248,6 +248,14 @@ def _build_add_columns_ddl(table_path: str, missing: list[tuple[str, str]]) -> s
     columns via :func:`_existing_state_columns` and invokes this
     helper only when at least one column is missing.
     """
+    # Column names interpolate unquoted into the ADD COLUMNS clause (mutating a
+    # customer table's schema). Validate each name against the central
+    # identifier allowlist. dtype is Spark's own ``simpleString()`` (e.g.
+    # ``decimal(28,8)``) and is NOT an identifier, so it is not allowlisted.
+    from oracle_ai_data_platform_fusion_bundle.config.paths import _validate_identifier
+
+    for name, _dtype in missing:
+        _validate_identifier("ADD COLUMNS column", name)
     col_specs = ", ".join(f"{name} {dtype}" for name, dtype in missing)
     return f"ALTER TABLE {table_path} ADD COLUMNS ({col_specs})"
 

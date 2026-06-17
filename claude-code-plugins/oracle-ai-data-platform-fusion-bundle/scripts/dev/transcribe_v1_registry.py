@@ -65,7 +65,14 @@ FIXTURE_SOURCE = (
 
 
 def _git_blob_hash(data: bytes) -> str:
-    """Compute the git blob SHA-1 for a byte string (matches ``git hash-object``)."""
+    """Compute the git blob SHA-1 for a byte string (matches ``git hash-object``).
+
+    Normalize CRLF -> LF first so the hash matches git's stored (LF) blob
+    regardless of the checkout's line endings. Without this, a Windows
+    checkout (autocrlf) reads CRLF bytes and the hash diverges from the
+    LF-based pin even though the committed content is unchanged.
+    """
+    data = data.replace(b"\r\n", b"\n")
     header = f"blob {len(data)}\0".encode("utf-8")
     return hashlib.sha1(header + data).hexdigest()  # noqa: S324 — git uses SHA-1
 
@@ -280,4 +287,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # The transcribed YAML contains non-ASCII identifiers (e.g. "P1.5ε"), so
+    # force UTF-8 stdout or printing crashes on a non-UTF-8 console / pipe
+    # (Windows cp1252). Safe no-op when already UTF-8.
+    try:
+        if (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "") != "utf8":
+            sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
     main()

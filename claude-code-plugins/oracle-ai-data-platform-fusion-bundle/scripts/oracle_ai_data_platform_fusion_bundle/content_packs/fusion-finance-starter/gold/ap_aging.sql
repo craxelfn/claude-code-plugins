@@ -14,6 +14,17 @@ WITH open_invoices AS (
     AND {{ semantic.cancelled_status }}
     AND CAST(ApInvoicesInvoiceAmount AS DECIMAL(28, 2))
       - CAST(COALESCE(ApInvoicesAmountPaid, 0) AS DECIMAL(28, 2)) <> 0
+),
+supplier AS (
+  SELECT vendor_id, supplier_number, supplier_name, business_relationship
+  FROM (
+    SELECT
+      vendor_id, supplier_number, supplier_name, business_relationship,
+      ROW_NUMBER() OVER (PARTITION BY vendor_id ORDER BY supplier_number) AS _rn
+    FROM {{ catalog }}.{{ silver_schema }}.dim_supplier
+    WHERE vendor_id IS NOT NULL
+  )
+  WHERE _rn = 1
 )
 SELECT
   o.vendor_id                                                       AS vendor_id,
@@ -45,7 +56,7 @@ SELECT
   current_timestamp()                                               AS gold_built_at,
   {{ run_id_literal }}                                              AS gold_run_id
 FROM open_invoices o
-LEFT JOIN {{ catalog }}.{{ silver_schema }}.dim_supplier ds
+LEFT JOIN supplier ds
   ON ds.vendor_id = o.vendor_id
 GROUP BY
   o.vendor_id,

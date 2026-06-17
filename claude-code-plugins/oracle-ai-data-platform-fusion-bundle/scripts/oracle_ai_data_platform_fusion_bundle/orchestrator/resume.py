@@ -185,16 +185,22 @@ def check_identity_drift(
     rendered by ``render_drift_error`` (with empty current/stored
     node tuples so only the identity section shows).
     """
-    from .errors import ResumeBundleMismatchError
+    from .errors import ResumeBundleMismatchError, ResumeRunNotResumableError
     from .plan_hash import _identity_dict
 
     try:
         snapshot = json.loads(plan_snapshot_json)
-    except (ValueError, TypeError):  # pragma: no cover — guard
-        # Unparseable snapshot is a non-resumable condition, not a
-        # drift condition. read_resumable_state should have rejected
-        # this already; defense in depth.
-        return
+    except (ValueError, TypeError) as exc:
+        # Unparseable snapshot is a non-resumable condition. This gate runs
+        # BEFORE any credential unwrap / BICC call, so it MUST fail closed —
+        # returning here would silently skip the identity-drift check and let
+        # a resume proceed (e.g. send credentials to a drifted endpoint).
+        # ``read_content_pack_resumable_state`` does NOT validate snapshot
+        # parseability, so a corrupt-but-non-NULL snapshot reaches here.
+        raise ResumeRunNotResumableError(
+            f"plan_snapshot is not valid JSON: {exc!r}. Cannot verify "
+            "identity drift before resume — re-run from scratch."
+        ) from exc
 
     stored_identity = snapshot.get("identity", {})
     current_identity = _identity_dict(bundle, paths, plugin_version)

@@ -3,9 +3,9 @@ SELECT
   CAST(CodeCombinationCodeCombinationId AS BIGINT)                 AS account_id,
   CAST(CodeCombinationChartOfAccountsId AS BIGINT)                 AS chart_of_accounts_id,
   CONCAT_WS('.',
-    CodeCombinationSegment1, CodeCombinationSegment2,
-    CodeCombinationSegment3, CodeCombinationSegment4,
-    CodeCombinationSegment5, CodeCombinationSegment6
+    COALESCE(CodeCombinationSegment1, ''), COALESCE(CodeCombinationSegment2, ''),
+    COALESCE(CodeCombinationSegment3, ''), COALESCE(CodeCombinationSegment4, ''),
+    COALESCE(CodeCombinationSegment5, ''), COALESCE(CodeCombinationSegment6, '')
   )                                                                AS code_combination,
   CodeCombinationSegment1                                          AS segment_01,
   CodeCombinationSegment2                                          AS segment_02,

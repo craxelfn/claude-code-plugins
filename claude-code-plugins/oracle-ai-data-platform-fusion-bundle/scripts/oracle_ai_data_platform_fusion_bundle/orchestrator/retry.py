@@ -1,16 +1,21 @@
 """Transient-exception classification + retry-with-backoff helper.
 
-Wraps per-step dispatch in ``_execute_node`` so transient infrastructure hiccups
-(OCI Object Storage 5xx, Spark executor loss, BICC connection reset) don't burn
-a full pipeline run. Permanent errors (schema-not-found, auth denied, Delta
-merge failures) skip retry entirely and fail fast — matches the cascade-vs-abort
-contract by NOT masking real bugs.
+:func:`run_with_retry` retries a thunk on transient infrastructure hiccups
+(OCI Object Storage 5xx, Spark executor loss, BICC connection reset) with
+exponential backoff, while permanent errors (schema-not-found, auth denied,
+Delta merge failures) skip retry entirely and fail fast — so real bugs are
+never masked. The classifier (:func:`is_transient`) and backoff loop are
+covered by ``tests/integration/test_retry_chaos.py``.
 
-Scope: this is Tier 1+2 of the layered fault-tolerance design. Tier 3 (resume
-from checkpoint via ``--resume <run_id>``) ships in ``orchestrator/resume.py``
-+ the resume flow in ``orchestrator/__init__.py``. Tier 4 (chaos-test that
-injects transient + permanent failures in CI) lives in
-``tests/integration/test_retry_chaos.py``.
+NOTE — not yet wired into the content-pack node loop. The current per-node
+runner (``orchestrator/__init__.py`` → ``cp_execute_node``) dispatches each
+node directly, WITHOUT this wrapper, so transient failures currently fail the
+node rather than being retried. Wrapping ``cp_execute_node`` in
+``run_with_retry`` is a tracked follow-up (it changes live extract/MERGE
+runtime behavior and needs its own chaos-test validation); until then this
+module provides the classifier + helper for callers that opt in, not an
+always-on resilience tier. Resume-from-checkpoint (``--resume <run_id>``) is a
+separate, live capability in ``orchestrator/resume.py``.
 """
 from __future__ import annotations
 

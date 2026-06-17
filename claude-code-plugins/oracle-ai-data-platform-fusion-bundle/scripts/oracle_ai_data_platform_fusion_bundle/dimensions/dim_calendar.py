@@ -31,6 +31,8 @@ Design notes
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import TYPE_CHECKING, Final
 
 from oracle_ai_data_platform_fusion_bundle.config.paths import DEFAULT_PATHS, TablePaths
@@ -43,6 +45,27 @@ TARGET_SILVER_TABLE: Final[str] = DEFAULT_PATHS.silver("dim_calendar")
 DEFAULT_START_DATE: Final[str]  = "2020-01-01"
 DEFAULT_END_DATE:   Final[str]  = "2030-12-31"
 DEFAULT_FISCAL_START_MONTH: Final[int] = 1   # calendar year = fiscal year
+
+_ISO_DATE_RE: Final[re.Pattern[str]] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_calendar_date(field_name: str, value: str) -> None:
+    """Reject any value that isn't a real ISO-8601 (YYYY-MM-DD) date.
+
+    ``start_date`` / ``end_date`` interpolate into ``sequence(DATE'...')``;
+    this guards the tenant-override path that bypasses the Pydantic
+    CalendarProfile validator. Mirrors AIDPF-2083 at the SQL-builder layer.
+    """
+    if not isinstance(value, str) or not _ISO_DATE_RE.match(value):
+        raise ValueError(
+            f"{field_name}={value!r} is not an ISO-8601 date (YYYY-MM-DD)."
+        )
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name}={value!r} is not a valid calendar date ({exc})."
+        ) from exc
 
 
 def _run_id_audit_sql(run_id: str | None) -> str:
@@ -82,6 +105,13 @@ def build_dim_calendar_sql(
         raise ValueError(
             f"fiscal_start_month must be in [1, 12]; got {fiscal_start_month}"
         )
+    # start_date / end_date interpolate into `sequence(DATE'...')` below. The
+    # pack-load CalendarProfile validator (AIDPF-2083) covers the typed path,
+    # but the tenant-override adapter reads the un-modelled profile dict and
+    # passes raw strings here — so validate at the builder too (defense in
+    # depth). Reject anything that isn't a real ISO-8601 (YYYY-MM-DD) date.
+    _validate_calendar_date("start_date", start_date)
+    _validate_calendar_date("end_date", end_date)
 
     # The +1 to fiscal_year (when fiscal_start_month > 1) names the FY by its
     # ending calendar year — Fusion convention. For fiscal_start_month == 1

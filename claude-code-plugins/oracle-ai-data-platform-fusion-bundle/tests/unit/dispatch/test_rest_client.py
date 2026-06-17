@@ -126,7 +126,13 @@ class TestBuildSignerSessionTokenProfile:
     def test_tilde_expansion(self, tmp_path: Path, monkeypatch) -> None:
         # Session-token profiles often use ~/.oci/sessions/<name>/token paths.
         # Verify that ``~`` is expanded so the file actually opens.
+        # expanduser("~") uses HOME on POSIX but USERPROFILE (then
+        # HOMEDRIVE+HOMEPATH) on Windows — set all so the test never reads the
+        # real host ~/.oci token (portability + no host-secret leak).
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.delenv("HOMEDRIVE", raising=False)
+        monkeypatch.delenv("HOMEPATH", raising=False)
         sessions_dir = tmp_path / ".oci" / "sessions" / "AIDP_SESSION"
         sessions_dir.mkdir(parents=True)
         token_file = sessions_dir / "token"

@@ -20,6 +20,25 @@ from rich.console import Console
 
 from . import __version__
 
+
+def _force_utf8_output() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so rich status glyphs (``✓``, ``→``)
+    don't crash on a non-UTF-8 console (e.g. Windows ``cp1252``).
+
+    Safe no-op when the stream is already UTF-8 or doesn't support
+    ``reconfigure`` (e.g. a captured pipe wrapper without the method).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            current = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+            if stream is not None and current != "utf8":
+                stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+_force_utf8_output()
+
 console = Console()
 
 

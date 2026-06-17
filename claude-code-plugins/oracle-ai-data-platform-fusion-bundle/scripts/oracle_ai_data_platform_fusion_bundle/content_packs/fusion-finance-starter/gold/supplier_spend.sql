@@ -10,6 +10,17 @@ WITH invoices AS (
   FROM {{ catalog }}.{{ bronze_schema }}.ap_invoices inv
   WHERE inv.ApInvoicesVendorId IS NOT NULL
     AND {{ watermark_predicate }}
+),
+supplier AS (
+  SELECT vendor_id, supplier_number, supplier_name, business_relationship
+  FROM (
+    SELECT
+      vendor_id, supplier_number, supplier_name, business_relationship,
+      ROW_NUMBER() OVER (PARTITION BY vendor_id ORDER BY supplier_number) AS _rn
+    FROM {{ catalog }}.{{ silver_schema }}.dim_supplier
+    WHERE vendor_id IS NOT NULL
+  )
+  WHERE _rn = 1
 )
 SELECT
   inv.vendor_id                                                     AS vendor_id,
@@ -32,7 +43,7 @@ SELECT
   current_timestamp()                                               AS gold_built_at,
   {{ run_id_literal }}                                              AS gold_run_id
 FROM invoices inv
-LEFT JOIN {{ catalog }}.{{ silver_schema }}.dim_supplier ds
+LEFT JOIN supplier ds
   ON ds.vendor_id = inv.vendor_id
 GROUP BY
   inv.vendor_id,

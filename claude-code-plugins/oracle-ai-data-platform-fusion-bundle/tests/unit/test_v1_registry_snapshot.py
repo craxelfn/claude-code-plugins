@@ -13,6 +13,7 @@ CI fails if:
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -23,10 +24,12 @@ SNAPSHOT = PLUGIN_ROOT / "tests" / "fixtures" / "v1_registry_snapshot.yaml"
 def test_transcription_matches_snapshot() -> None:
     """Re-running the transcription produces byte-identical YAML."""
     result = subprocess.run(
-        ["python", str(SCRIPT)],
+        [sys.executable, str(SCRIPT)],
         cwd=PLUGIN_ROOT,
         capture_output=True,
-        text=True,
+        # The script emits UTF-8 (non-ASCII identifiers like "P1.5ε"); decode
+        # as UTF-8 so a non-UTF-8 locale (Windows cp1252) doesn't mangle it.
+        encoding="utf-8",
         check=False,
     )
     if result.returncode != 0:

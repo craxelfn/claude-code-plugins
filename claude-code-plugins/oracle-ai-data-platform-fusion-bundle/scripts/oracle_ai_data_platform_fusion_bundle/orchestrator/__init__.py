@@ -114,6 +114,14 @@ def _natural_key_join_sql(
                 "before MERGE."
             )
         cols = tuple(natural_key)
+    # Defense in depth: natural-key columns interpolate unquoted into the ON
+    # predicate. Pack-loaded specs are validated at schema-load (AIDPF-2082),
+    # but validate here too so no caller path can reach SQL with an unsafe
+    # identifier.
+    from oracle_ai_data_platform_fusion_bundle.config.paths import _validate_identifier
+
+    for c in cols:
+        _validate_identifier("natural_key", c)
     return " AND ".join(
         f"{target_alias}.{c} <=> {src_alias}.{c}" for c in cols
     )
@@ -193,6 +201,12 @@ def _payload_diff_predicate_sql(
     data_cols = [c for c in data_columns if c not in BRONZE_AUDIT_COLUMNS]
     if not data_cols:
         return None
+    # data_cols are live source-DataFrame column names — validate before they
+    # interpolate unquoted into the payload-diff predicate.
+    from oracle_ai_data_platform_fusion_bundle.config.paths import _validate_identifier
+
+    for c in data_cols:
+        _validate_identifier("payload-diff column", c)
     return " OR ".join(
         f"{target_alias}.{c} IS DISTINCT FROM {src_alias}.{c}" for c in data_cols
     )

@@ -86,6 +86,8 @@ older reports, ADRs, and tests can be interpreted without guessing.
 | `AIDPF-2072` | Runtime gate | Active | Live Fusion PVO schema drifted from pack/profile expectations. | Review the diagnostic, refresh bootstrap evidence, or update the pack/profile. |
 | `AIDPF-2080` | Pack validation | Warn-only | Bronze extract PVO is not in the curated catalog. | Verify it is an intentional custom PVO; the live drift gate catches real typos. |
 | `AIDPF-2081` | Bundle validation | Active | Bundle dataset id does not resolve in any pack layer. | Fix the bundle dataset id or add the node to the pack. |
+| `AIDPF-2082` | Pack validation | Active | A `naturalKey` / `partitionColumns` / `trackedColumns` / `watermark.column` name is not a safe unquoted SQL identifier (`^[A-Za-z_][A-Za-z0-9_]*$`). These names interpolate into MERGE / partition / watermark SQL. | Rename the offending column to a plain SQL identifier (no hyphens, dots, spaces, or punctuation). |
+| `AIDPF-2083` | Pack validation | Active | A `CalendarProfile` `startDate`/`endDate` is not a valid ISO-8601 (`YYYY-MM-DD`) date. The value interpolates into the `dim_calendar` `sequence(DATE'...')` SQL. | Set the calendar dates to real `YYYY-MM-DD` values. |
 | `AIDPF-2092` | Bronze runtime | Active | Bronze cursor exists but target table/state is inconsistent. | Repair the bronze target/state alignment before rerunning incremental extraction. |
 | `AIDPF-3010` | Source preflight | Historical | Planned code for BICC PVO schema mismatch. | Run a metadata probe and update the pack/profile to match the live PVO. |
 | `AIDPF-3020` | Custom extractors | Historical | Planned code for custom extractor load failure or invalid returned schema. | Check the extractor import path, signature, and required audit columns. |

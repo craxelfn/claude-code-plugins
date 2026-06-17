@@ -131,7 +131,9 @@ def test_profile_absent_when_file_missing(tmp_path):
     tenant, path, present, _detail = pre.resolve_profile(b)
     assert tenant == "acme-prod"
     assert present is False
-    assert path.endswith("profiles/acme-prod.yaml")
+    # OS-agnostic: resolve_profile returns a native path (backslashes on
+    # Windows), so normalize to forward slashes before the suffix check.
+    assert Path(path).as_posix().endswith("profiles/acme-prod.yaml")
 
 
 def test_profile_present_when_file_exists(tmp_path):

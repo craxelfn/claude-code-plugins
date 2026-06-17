@@ -16,7 +16,16 @@ with_supplier AS (
     i.amount_paid,
     i.bronze_extract_ts
   FROM invoices i
-  LEFT JOIN {{ catalog }}.{{ silver_schema }}.dim_supplier s
+  LEFT JOIN (
+    SELECT vendor_id
+    FROM (
+      SELECT vendor_id,
+             ROW_NUMBER() OVER (PARTITION BY vendor_id ORDER BY supplier_number) AS _rn
+      FROM {{ catalog }}.{{ silver_schema }}.dim_supplier
+      WHERE vendor_id IS NOT NULL
+    )
+    WHERE _rn = 1
+  ) s
     ON i.vendor_id = s.vendor_id
 )
 SELECT
