@@ -192,6 +192,7 @@ def info_pack(name: str, *, json_output: bool, console) -> int:
         },
         "path": str(pack.root),
         "nodes": {
+            "bronze": list(sorted(pack.bronze)),
             "silver": list(sorted(pack.silver)),
             "gold": list(sorted(pack.gold)),
             "builtin_count": sum(
@@ -224,7 +225,8 @@ def info_pack(name: str, *, json_output: bool, console) -> int:
         f"                  aidp.requiresDelta: {info['compatibility']['requiresDelta']}"
     )
     console.print(
-        f"[bold]Nodes:[/bold]           {len(info['nodes']['silver'])} silver, "
+        f"[bold]Nodes:[/bold]           {len(info['nodes']['bronze'])} bronze, "
+        f"{len(info['nodes']['silver'])} silver, "
         f"{len(info['nodes']['gold'])} gold "
         f"({info['nodes']['builtin_count']} builtin)"
     )
