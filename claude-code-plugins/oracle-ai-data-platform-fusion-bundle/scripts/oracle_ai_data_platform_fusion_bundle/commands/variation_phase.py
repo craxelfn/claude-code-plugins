@@ -85,7 +85,7 @@ from ..schema.tenant_profile import (
     load_tenant_profile,
     resolve_profile_path,
 )
-from .bronze_probe import describe_bronze
+from .bronze_probe import resolve_observed
 from .operator_identity import OperatorIdentityUnresolved, resolve_operator
 from .resolution_prompt import PromptResult, prompt_multi_match
 from .variation_resolver import (
@@ -615,22 +615,6 @@ def _now() -> datetime:
 
 def _generate_run_id() -> str:
     return _now().strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
-
-
-def _bronze_dataset_ids(pack: ResolvedPack) -> list[str]:
-    """Extract bronze dataset ids from the pack.
-
-    ``pack.bronze`` (per-file bronze YAMLs) is the source of
-    truth; legacy ``pack.bronze_yaml`` is retained transitionally.
-    """
-    out: list[str] = list(pack.bronze.keys())
-    bronze = pack.bronze_yaml or {}
-    for entry in bronze.get("datasets", []) or []:
-        if isinstance(entry, dict) and "id" in entry:
-            entry_id = str(entry["id"])
-            if entry_id not in out:
-                out.append(entry_id)
-    return out
 
 
 def _columns_for_applies_to(
@@ -1182,24 +1166,43 @@ def _acquire_probe_result(
         return _probe_result_from_marker(marker)
 
     # ---- Local mode (today's path) ----
-    dataset_ids = _bronze_dataset_ids(pack)
+    # Lazy import — keep the credential resolver (and its transitive
+    # orchestrator surface) off the module-load path for callers that
+    # never enter local mode.
+    from ..orchestrator.runtime import (
+        CredentialResolutionError,
+        _resolve_password,
+    )
+
     catalog = bundle.aidp.catalog
     bronze_schema = bundle.aidp.bronze_schema
-    # id -> physical target table (pack permits id != target).
-    table_names = {
-        nid: pack.bronze[nid].target
-        for nid in dataset_ids
-        if nid in getattr(pack, "bronze", {}) and getattr(pack.bronze[nid], "target", None)
-    }
+
+    # Resolve the BICC password up front (fail fast, before Spark). The
+    # source-schema producer needs it when a bronze table is not yet
+    # landed; resolving here keeps one credential contract and surfaces a
+    # credential error before any probe work — as a credential-specific
+    # error, NOT a generic AIDPF-2049 (that code is reserved for genuine
+    # probe / cluster-marker failures).
+    password_ref = bundle.fusion.password
+    if isinstance(password_ref, str) and password_ref.startswith("${aidp:secret:"):
+        raise CredentialResolutionError(
+            "bundle.fusion.password is an ${aidp:secret:...} reference, which "
+            "the runtime resolver does not support on the local dispatch "
+            "path. Use ${env:VAR} or ${vault:OCID} (same as the local run "
+            "path), or run bootstrap in cluster dispatch mode where the creds "
+            "cell loads the secret from the AIDP credential store."
+        )
+    resolved_password = _resolve_password(password_ref).get_secret_value()
 
     spark = _resolve_spark(options)
     try:
-        observed = describe_bronze(
+        observed = resolve_observed(
             spark,
             catalog=catalog,
             bronze_schema=bronze_schema,
-            dataset_ids=dataset_ids,
-            table_names=table_names,
+            pack=pack,
+            bundle=bundle,
+            resolved_password=resolved_password,
         )
     finally:
         _close_spark_if_owned(spark, options)

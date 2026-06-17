@@ -34,7 +34,12 @@ writes the runtime profile used by seed and incremental runs.
 ## What bootstrap does
 
 - Runs pre-onboarding probes: bundle/config shape, BICC auth, BICC catalog reachability, AIDP REST, and optional IAM checks.
-- Probes the tenant bronze schema for the active content pack.
+- Probes the tenant bronze schema for the active content pack. When a bronze
+  table is already landed it reads the live Delta schema; when it is not yet
+  landed (a fresh tenant) it resolves the same schema from the BICC PVO source
+  via a metadata-only `inferSchema` probe — so bootstrap runs **before** the
+  first seed, with no chicken-and-egg. The fingerprint is identical either way
+  (bronze audit columns are stripped before fingerprinting).
 - Walks pack-declared `columnAliases` and `semanticVariants`.
 - Pins resolved values to `profiles/<contentPack.profile>.yaml`.
 - Writes `profiles/<contentPack.profile>.schema-snapshot.yaml`.

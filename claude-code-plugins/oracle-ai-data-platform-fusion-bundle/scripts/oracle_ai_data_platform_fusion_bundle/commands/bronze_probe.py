@@ -19,6 +19,10 @@ from ..schema.bronze_fingerprint import ColumnInfo
 
 if TYPE_CHECKING:  # pragma: no cover — Spark import-guard
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import StructType
+
+    from ..orchestrator.content_pack import ResolvedPack
+    from ..schema.bundle import Bundle
 
 
 # SQL identifier allowlist. Standard unquoted Spark SQL identifier
@@ -127,6 +131,250 @@ def describe_bronze(
     return out
 
 
+def bronze_table_absent(
+    spark: "SparkSession",
+    *,
+    catalog: str,
+    bronze_schema: str,
+    table: str,
+) -> bool:
+    """Strict, fail-closed check for "this bronze table is not landed yet".
+
+    Returns ``True`` ONLY when the metadata probe fails with a recognized
+    *table/view not found* condition. Any other failure — permission
+    denied, catalog/metastore unreachable, connector error — is
+    **re-raised** (fail closed), so a transient outage is never silently
+    misread as "fresh tenant → source-probe fallback".
+
+    Deliberately does NOT use ``spark.catalog.tableExists`` /
+    ``bronze_extract_adapter._table_exists``: those swallow *all*
+    exceptions and return ``False``, conflating a missing table with an
+    auth/catalog failure (Risk R6).
+
+    Identifiers are validated against the same allowlist as
+    :func:`describe_bronze` before any Spark call.
+
+    Args:
+        spark: an active Spark session.
+        catalog / bronze_schema / table: three-part name parts; ``table``
+            is the physical ``node.target`` (NOT the dataset id).
+
+    Returns:
+        ``True`` if the table is absent (not-found), ``False`` if it
+        exists.
+
+    Raises:
+        UnsafeIdentifierError: an identifier failed the allowlist.
+        Exception: re-raised verbatim for any non-"not found" Spark error.
+    """
+    _validate_identifier(catalog, field="aidp.catalog")
+    _validate_identifier(bronze_schema, field="aidp.bronzeSchema")
+    _validate_identifier(table, field="bronze.dataset.target")
+
+    fully_qualified = f"{catalog}.{bronze_schema}.{table}"
+    try:
+        spark.sql(f"DESCRIBE TABLE {fully_qualified}").take(1)
+        return False
+    except Exception as exc:  # noqa: BLE001 — classify, then re-raise non-NOTFOUND
+        if _is_table_or_view_not_found(exc):
+            return True
+        raise
+
+
+def _is_table_or_view_not_found(exc: Exception) -> bool:
+    """Classify a Spark exception as a "table or view not found" condition.
+
+    Recognizes (in order of precision):
+
+    * the structured ``AnalysisException`` error class
+      ``TABLE_OR_VIEW_NOT_FOUND`` (Spark 3.4+ via ``getErrorClass()``),
+    * the bracketed ``[TABLE_OR_VIEW_NOT_FOUND]`` message prefix Spark
+      emits for that class,
+    * the legacy phrase ``Table or view not found``.
+
+    Anything else returns ``False`` so the caller fails closed. Pure
+    classification — no Spark import, so it is unit-testable with fakes.
+    """
+    get_error_class = getattr(exc, "getErrorClass", None)
+    if callable(get_error_class):
+        try:
+            if get_error_class() == "TABLE_OR_VIEW_NOT_FOUND":
+                return True
+        except Exception:  # noqa: BLE001 — defensive; fall through to message match
+            pass
+    message = str(exc).upper()
+    return (
+        "[TABLE_OR_VIEW_NOT_FOUND]" in message
+        or "TABLE OR VIEW NOT FOUND" in message
+    )
+
+
+def describe_bronze_from_source(
+    spark: "SparkSession",
+    *,
+    pack: "ResolvedPack",
+    bundle: "Bundle",
+    resolved_password: str,
+    dataset_ids: "list[str] | None" = None,
+) -> dict[str, list[ColumnInfo]]:
+    """Build the same ``{dataset_id: [ColumnInfo, ...]}`` mapping as
+    :func:`describe_bronze`, but from the **live BICC PVO source schema**
+    via a metadata-only ``inferSchema`` probe — for the fresh-tenant case
+    where the lakehouse bronze table is not yet landed.
+
+    Delegates the BICC roundtrip to
+    :func:`orchestrator.builtins.bronze_extract_adapter.probe_bronze_schemas`,
+    which already keys by node id and builds its descriptor from
+    ``node.target`` — so the pack-id-vs-physical-table divergence (node
+    ``gl_journal_lines`` targets table ``gl_journal_headers``) is honored
+    natively, identically to the landed ``table_names`` path.
+
+    Args:
+        spark: an active Spark session (cluster-side for default dispatch).
+        pack: assembled ``ResolvedPack``; scope is ``pack.bronze``.
+        bundle: bundle supplying ``fusion.service_url`` / ``username`` /
+            ``external_storage`` (rendered) for the BICC connector.
+        resolved_password: BICC password value, already resolved by the
+            caller via ``_resolve_password`` (NOT a ``${...}`` placeholder).
+        dataset_ids: optional subset filter; ``None`` probes every bronze
+            node in ``pack.bronze``.
+
+    Returns:
+        ``{dataset_id: [ColumnInfo, ...]}`` keyed by node id. Audit columns
+        are NOT present in the source PVO; the fingerprint helper strips
+        them on the landed side, so the two producers agree (Risk R1 parity
+        is asserted by a dedicated test).
+    """
+    # Lazy import — bronze_extract_adapter pulls in the BICC extractor and
+    # a wide orchestrator surface; keep bronze_probe import-light for the
+    # cluster cell and variation_phase.
+    from ..orchestrator.builtins.bronze_extract_adapter import (
+        probe_bronze_schemas,
+    )
+
+    live_schemas = probe_bronze_schemas(
+        spark,
+        pack=pack,
+        bundle=bundle,
+        resolved_password=resolved_password,
+        dataset_ids=dataset_ids,
+    )
+    return {
+        dataset_id: _struct_type_to_columns(schema)
+        for dataset_id, schema in live_schemas.items()
+    }
+
+
+def _struct_type_to_columns(schema: "StructType") -> list[ColumnInfo]:
+    """Convert a Spark ``StructType`` to ``[ColumnInfo]``.
+
+    Uses ``dataType.simpleString()`` so the type string matches the
+    ``data_type`` column ``DESCRIBE TABLE`` emits on the landed side
+    (e.g. ``"string"`` / ``"bigint"`` / ``"decimal(38,0)"``), keeping the
+    canonical fingerprint identical across producers. ``str(dataType)``
+    is deliberately NOT used — it yields ``"StringType()"``.
+    """
+    return [
+        ColumnInfo(name=field.name, type=field.dataType.simpleString())
+        for field in schema.fields
+    ]
+
+
+def _bronze_scope_and_targets(
+    pack: "ResolvedPack",
+) -> tuple[list[str], dict[str, str]]:
+    """Return ``(dataset_ids, table_names)`` for the pack's bronze scope.
+
+    Mirrors ``variation_phase._bronze_dataset_ids`` + its id→target map
+    (replicated here, not imported, to avoid a ``variation_phase`` ↔
+    ``bronze_probe`` import cycle). ``pack.bronze`` is the source of truth;
+    legacy ``pack.bronze_yaml`` ids are appended with an id==target
+    fallback. ``table_names`` carries the **physical** ``node.target`` so a
+    node whose id differs from its table (``gl_journal_lines`` →
+    ``gl_journal_headers``) is probed correctly and keyed by id.
+    """
+    dataset_ids: list[str] = list(pack.bronze.keys())
+    bronze_yaml = getattr(pack, "bronze_yaml", None) or {}
+    for entry in bronze_yaml.get("datasets", []) or []:
+        if isinstance(entry, dict) and "id" in entry:
+            entry_id = str(entry["id"])
+            if entry_id not in dataset_ids:
+                dataset_ids.append(entry_id)
+    table_names = {
+        nid: pack.bronze[nid].target
+        for nid in dataset_ids
+        if nid in pack.bronze and getattr(pack.bronze[nid], "target", None)
+    }
+    return dataset_ids, table_names
+
+
+def resolve_observed(
+    spark: "SparkSession",
+    *,
+    catalog: str,
+    bronze_schema: str,
+    pack: "ResolvedPack",
+    bundle: "Bundle",
+    resolved_password: str,
+) -> dict[str, list[ColumnInfo]]:
+    """Build the ``{dataset_id: [ColumnInfo]}`` map both dispatch paths
+    consume, selecting per node between the landed and source producers.
+
+    For each in-scope bronze node: if its physical target table is absent
+    (strict :func:`bronze_table_absent`), resolve its schema from the live
+    BICC source (:func:`describe_bronze_from_source`); otherwise
+    ``DESCRIBE`` the landed table (:func:`describe_bronze`). Results merge
+    into one map keyed by node id — so a partially-landed tenant gets a
+    consistent observation (Risk R2). Both branches honor the physical
+    ``node.target`` (Risk R8).
+
+    Only nodes present in ``pack.bronze`` are source-probable; a legacy
+    ``bronze_yaml``-only id (no node descriptor) always takes the landed
+    path. ``resolved_password`` is the already-resolved BICC secret (NOT a
+    ``${...}`` placeholder) — the caller resolves it via
+    ``_resolve_password`` (local) or the creds cell (cluster).
+
+    Raises:
+        Any non-"not found" Spark error from :func:`bronze_table_absent`
+        (fail-closed), or :class:`BronzeProbeFailure` from a landed probe.
+    """
+    dataset_ids, table_names = _bronze_scope_and_targets(pack)
+
+    present_ids: list[str] = []
+    absent_ids: list[str] = []
+    for nid in dataset_ids:
+        target = table_names.get(nid, nid)
+        if nid in pack.bronze and bronze_table_absent(
+            spark, catalog=catalog, bronze_schema=bronze_schema, table=target
+        ):
+            absent_ids.append(nid)
+        else:
+            present_ids.append(nid)
+
+    observed: dict[str, list[ColumnInfo]] = {}
+    if present_ids:
+        observed.update(
+            describe_bronze(
+                spark,
+                catalog=catalog,
+                bronze_schema=bronze_schema,
+                dataset_ids=present_ids,
+                table_names=table_names,
+            )
+        )
+    if absent_ids:
+        observed.update(
+            describe_bronze_from_source(
+                spark,
+                pack=pack,
+                bundle=bundle,
+                resolved_password=resolved_password,
+                dataset_ids=absent_ids,
+            )
+        )
+    return observed
+
+
 class BronzeProbeFailure(Exception):
     """Raised when ``DESCRIBE TABLE`` cannot reach a bronze dataset.
 
@@ -204,4 +452,11 @@ def _row_field(row, name: str, index: int):
         return None
 
 
-__all__ = ["BronzeProbeFailure", "UnsafeIdentifierError", "describe_bronze"]
+__all__ = [
+    "BronzeProbeFailure",
+    "UnsafeIdentifierError",
+    "bronze_table_absent",
+    "describe_bronze",
+    "describe_bronze_from_source",
+    "resolve_observed",
+]

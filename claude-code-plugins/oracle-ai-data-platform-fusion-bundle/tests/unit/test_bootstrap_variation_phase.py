@@ -791,3 +791,89 @@ class TestPhase3dRefreshBackfill:
         assert "back-filled" not in outcome2.summary
         assert outcome2.summary == "bootstrap --refresh: no drift detected"
         assert snapshot_path.stat().st_mtime_ns == snapshot_mtime_before
+
+
+# ---------------------------------------------------------------------------
+# Fresh tenant: bronze not landed → local probe resolves via the SOURCE
+# producer (no AIDPF-2049, no "land bronze first"). Step 6 seal.
+# ---------------------------------------------------------------------------
+
+
+def _mock_spark_absent() -> MagicMock:
+    """Spark whose DESCRIBE ... .take(1) reports table-or-view-not-found —
+    the strict absence detector routes every node to the source producer."""
+    spark = MagicMock(name="spark")
+
+    def _sql(_query: str):
+        df = MagicMock(name="df")
+        df.take.side_effect = Exception(
+            "[TABLE_OR_VIEW_NOT_FOUND] bronze table not landed yet"
+        )
+        return df
+
+    spark.sql.side_effect = _sql
+    return spark
+
+
+class TestFreshTenantSourceProbe:
+    def test_absent_bronze_resolves_via_source_no_2049(
+        self,
+        bundle_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from oracle_ai_data_platform_fusion_bundle.commands import bronze_probe
+        from oracle_ai_data_platform_fusion_bundle.schema.bronze_fingerprint import (
+            ColumnInfo,
+        )
+
+        monkeypatch.setenv("USER", "alice@oracle.com")
+        bundle = _load_bundle(bundle_dir / "bundle.yaml")
+
+        # The BICC source produces the same columns a landed table would —
+        # so the variation walkers resolve identically to the landed path.
+        def _fake_source(spark, *, pack, bundle, resolved_password, dataset_ids=None):
+            return {
+                ds: [ColumnInfo(name=c, type="string") for c in SAASFADEMO_BRONZE[ds]]
+                for ds in (dataset_ids or [])
+                if ds in SAASFADEMO_BRONZE
+            }
+
+        monkeypatch.setattr(bronze_probe, "describe_bronze_from_source", _fake_source)
+
+        resolutions_file = bundle_dir / "resolutions.json"
+        resolutions_file.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "tenant": "finance-default",
+                    "resolutions": [
+                        {
+                            "name": "invoice_currency_code",
+                            "kind": "columnAliases",
+                            "chosenCandidate": "ApInvoicesInvoiceCurrencyCode",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        outcome = run_variation_phase(
+            bundle,
+            bundle_dir / "bundle.yaml",
+            options=VariationPhaseOptions(
+                spark_session=_mock_spark_absent(),
+                resolutions_path=resolutions_file,
+            ),
+        )
+
+        # Fresh tenant succeeds via source probe — no error, no AIDPF-2049.
+        assert outcome.exit_code == 0
+        assert outcome.profile_path is not None and outcome.profile_path.exists()
+        assert all(
+            "2049" not in p.name for p in outcome.diagnostic_paths
+        )
+        profile = yaml.safe_load(outcome.profile_path.read_text(encoding="utf-8"))
+        # Walkers resolved from the source-derived observed columns.
+        assert profile["resolved"]["column"]["vendor_id"] == "VENDORID"
+        assert profile["resolved"]["column"]["supplier_natural_key"] == "SEGMENT1"

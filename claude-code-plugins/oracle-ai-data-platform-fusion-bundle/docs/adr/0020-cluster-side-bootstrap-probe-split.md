@@ -163,3 +163,43 @@ to make every decision.
 - `scripts/oracle_ai_data_platform_fusion_bundle/schema/cluster_probe_marker.py`
   — `ClusterProbeEnvelope` + `ClusterProbeMarker` Pydantic models
   carrying the cluster→laptop payload.
+
+## Addendum — 2026-06-17: source-schema fallback for fresh tenants
+
+This ADR assumed the bronze tables already exist (it probes them via
+`DESCRIBE TABLE`, whether laptop-local or cluster-side). On a **truly fresh
+tenant** — bronze never extracted — that assumption recreated a different
+deadlock: bootstrap needs bronze to probe, but bronze is only produced by a
+seed, and seed requires the profile that bootstrap writes. `DESCRIBE TABLE`
+on a not-yet-landed table raised `TABLE_OR_VIEW_NOT_FOUND`, surfacing as an
+error envelope → `ClusterMarkerError` → `AIDPF-2049`.
+
+Decision: the variation probe no longer requires a *landed* bronze table. It
+needs the bronze **schema** (column names + types) — to resolve variation
+points (pure column-presence decisions) and compute `bronzeSchemaFingerprint`
+— and that schema is obtainable from the **BICC PVO `inferSchema`** metadata
+probe (`bronze_extract_adapter.probe_bronze_schemas`) with no table landed.
+
+A single shared helper, `commands/bronze_probe.resolve_observed`, selects per
+node between the landed `DESCRIBE` producer and the source `inferSchema`
+producer (`describe_bronze_from_source`), keyed by a strict, fail-closed
+absence detector (`bronze_table_absent` — only `TABLE_OR_VIEW_NOT_FOUND`
+counts as absent; auth/catalog errors re-raise). Both the laptop path
+(`variation_phase`) and the cluster cell (`cluster_bootstrap_probe`) call it,
+so the probe still runs where this ADR put it (in AIDP for the default
+cluster dispatch). The cluster notebook gains a creds cell mirroring the run
+dispatcher's `_build_creds_cell` (secret fetched cluster-side from
+`biccSecretName`/`biccSecretKey`, never serialized) plus a pre-dispatch
+`_check_bicc_credential` preflight.
+
+Crucially, this required **no change to the plan-hash formula** — bronze runs
+the `AIDPF-4040` gate on incremental with a profile-inclusive hash, so
+altering the formula would have blocked every existing tenant's next
+incremental. Fingerprint parity holds because audit columns (`_extract_ts`
+etc.) are stripped before fingerprinting, so a source-derived fingerprint
+equals the later landed-derived one (asserted by
+`tests/unit/test_fingerprint_source_landed_parity.py`). The fresh-tenant
+sequence is now simply: `bootstrap` (source probe) → `run --mode seed`
+(lands bronze + silver + gold) → `run --mode incremental`.
+
+See `docs/features/bootstrap-source-schema-probe/plan.md` for the full design.

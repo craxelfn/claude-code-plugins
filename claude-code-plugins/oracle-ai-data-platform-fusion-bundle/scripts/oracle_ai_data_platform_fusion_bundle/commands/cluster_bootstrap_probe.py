@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+from ..dispatch import _collect_runtime_env_passthrough
 from ..dispatch.errors import (
     DispatchError,
     DispatchFetchOutputError,
@@ -46,6 +47,7 @@ from ..dispatch.errors import (
     DispatchWheelBuildError,
 )
 from ..dispatch.notebook_builder import (
+    _build_creds_cell,
     _build_install_cell,
     _code_cell,
     _encode_payload_b64,
@@ -53,6 +55,7 @@ from ..dispatch.notebook_builder import (
     _markdown_cell,
 )
 from ..dispatch.notebook_dispatch import dispatch_notebook_and_fetch_marker
+from ..dispatch.preflight import _check_bicc_credential
 from ..dispatch.rest_client import AidpRestClient
 from ..dispatch.wheel_builder import build_wheel
 from ..orchestrator.content_pack_staging import stage_pack_files
@@ -239,13 +242,14 @@ def _build_probe_cell(*, tenant: str) -> str:
     """
     return (
         f"import base64, json, traceback\n"
-        f"import yaml\n"
         f"from datetime import datetime, timezone\n"
-        f"from oracle_ai_data_platform_fusion_bundle.schema.bundle import Bundle\n"
+        f"from oracle_ai_data_platform_fusion_bundle.schema.bundle import load_bundle\n"
         f"from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack "
         f"import load_full_chain\n"
+        f"from oracle_ai_data_platform_fusion_bundle.orchestrator.runtime "
+        f"import CredentialResolutionError, _resolve_password\n"
         f"from oracle_ai_data_platform_fusion_bundle.commands.bronze_probe "
-        f"import describe_bronze\n"
+        f"import resolve_observed\n"
         f"from oracle_ai_data_platform_fusion_bundle.schema.bronze_fingerprint "
         f"import compute_bronze_fingerprint\n"
         f"from oracle_ai_data_platform_fusion_bundle.commands.variation_resolver "
@@ -258,14 +262,30 @@ def _build_probe_cell(*, tenant: str) -> str:
         f"MARKER_BEGIN = {_BOOTSTRAP_MARKER_BEGIN!r}\n"
         f"MARKER_END = {_BOOTSTRAP_MARKER_END!r}\n"
         f"try:\n"
-        f'    bundle = Bundle.model_validate(yaml.safe_load(BUNDLE_PATH.read_text()))\n'
+        f"    # Render the bundle in-cell (load_bundle expands bare ${{VAR}}\n"
+        f"    # fusion fields from the env the creds cell populated; it leaves\n"
+        f"    # ${{env:}}/${{vault:}} refs for _resolve_password).\n"
+        f"    bundle, _paths = load_bundle(BUNDLE_PATH)\n"
         f"    pack = load_full_chain(_TOP_OVERLAY_ROOT, base_resolver=_BASE_RESOLVER)\n"
         f"    catalog = bundle.aidp.catalog\n"
         f"    bronze_schema = bundle.aidp.bronze_schema\n"
-        f"    # bronze.yaml carries the dataset ids the variation phase probes.\n"
-        f"    dataset_ids = sorted({{ds.id for ds in bundle.datasets}})\n"
-        f"    observed = describe_bronze(\n"
-        f"        spark, catalog=catalog, bronze_schema=bronze_schema, dataset_ids=dataset_ids\n"
+        f"    # Resolve the BICC password from the env the creds cell loaded\n"
+        f"    # (${{env:FUSION_BICC_PASSWORD}}) or a ${{vault:OCID}} ref. The\n"
+        f"    # ${{aidp:secret:...}} form is not runtime-resolvable.\n"
+        f"    _pw_ref = bundle.fusion.password\n"
+        f'    if isinstance(_pw_ref, str) and _pw_ref.startswith("${{aidp:secret:"):\n'
+        f"        raise CredentialResolutionError(\n"
+        f'            "bundle.fusion.password is an ${{aidp:secret:...}} reference, "\n'
+        f'            "which the runtime resolver does not support. Use "\n'
+        f'            "${{env:FUSION_BICC_PASSWORD}} (populated by the creds cell "\n'
+        f'            "from biccSecretName/biccSecretKey) or ${{vault:OCID}}."\n'
+        f"        )\n"
+        f"    _resolved_password = _resolve_password(_pw_ref).get_secret_value()\n"
+        f"    # Per-node landed-vs-source selection; scope from pack.bronze,\n"
+        f"    # physical node.target probed, results keyed by node id.\n"
+        f"    observed = resolve_observed(\n"
+        f"        spark, catalog=catalog, bronze_schema=bronze_schema,\n"
+        f"        pack=pack, bundle=bundle, resolved_password=_resolved_password,\n"
         f"    )\n"
         f"    fingerprint = compute_bronze_fingerprint(observed=observed)\n"
         f"    walker_results = []\n"
@@ -347,18 +367,28 @@ def _build_notebook(
     pack_files: Mapping[str, str],
     pack_manifest: dict[str, Any],
     tenant: str,
+    bicc_secret_name: str,
+    bicc_secret_key: str,
+    runtime_env_vars: Mapping[str, str] | None = None,
 ) -> dict:
-    """Compose the 3-cell ipynb dict the cluster runs.
+    """Compose the 4-cell ipynb dict the cluster runs.
 
     Cells in order:
 
     1. **install** — base64-decoded wheel, ``pip install --target``,
        ``sys.path.insert``. Reuses :func:`dispatch.notebook_builder._build_install_cell`
        verbatim — same primitive the run dispatcher ships.
-    2. **stage** — write ``bundle.yaml`` to the cluster's working dir +
+    2. **creds** — load ``FUSION_BICC_PASSWORD`` from the AIDP credential
+       store (``aidputils.secrets.get(name=bicc_secret_name,
+       key=bicc_secret_key)``) + the non-secret Fusion env passthrough.
+       Reuses :func:`dispatch.notebook_builder._build_creds_cell` verbatim
+       (same primitive the run dispatcher ships) so the source-schema probe
+       has BICC credentials. The secret is fetched cluster-side and never
+       serialized into the notebook payload.
+    3. **stage** — write ``bundle.yaml`` to the cluster's working dir +
        materialise the pack tree. Stashes module globals the probe cell
        consumes.
-    3. **probe** — single cell with in-cell ``try``/``except`` that
+    4. **probe** — single cell with in-cell ``try``/``except`` that
        probes, walks, and emits the ``ClusterProbeEnvelope`` payload
        wrapped in base64 between ``MARKER_BEGIN`` / ``MARKER_END``.
     """
@@ -370,6 +400,14 @@ def _build_notebook(
                 "from `aidp-fusion-bundle bootstrap`."
             ),
             _code_cell(_build_install_cell(wheel_path)),
+            _code_cell(
+                _build_creds_cell(
+                    bundle_yaml=bundle_yaml,
+                    bicc_secret_name=bicc_secret_name,
+                    bicc_secret_key=bicc_secret_key,
+                    env_vars=runtime_env_vars,
+                )
+            ),
             _code_cell(
                 _build_bootstrap_staging_cell(
                     bundle_yaml=bundle_yaml,
@@ -489,6 +527,9 @@ def dispatch_cluster_probe(
         pack_files=pack_files,
         pack_manifest=pack_manifest,
         tenant=tenant,
+        bicc_secret_name=env.bicc_secret_name,
+        bicc_secret_key=env.bicc_secret_key,
+        runtime_env_vars=_collect_runtime_env_passthrough(),
     )
 
     # ---- Dispatch via the neutral helper ----
@@ -507,6 +548,27 @@ def dispatch_cluster_probe(
             log=lambda stage, **kw: log(f"[rest] {stage} {kw}"),
         )
     )
+
+    # ---- Credential preflight (Step 5a) ----
+    # The creds cell fetches FUSION_BICC_PASSWORD from the AIDP credential
+    # store; if that entry is missing the failure would otherwise surface
+    # only mid-notebook (after wheel build, upload, submit, cluster ramp) as
+    # a generic run failure with no executed-stdout detail. Fast-fail here
+    # with the credential-specific message — mirrors the run dispatcher's
+    # remote preflight (`_check_bicc_credential`).
+    cred_check = _check_bicc_credential(
+        client, env.bicc_secret_name, env.bicc_secret_key
+    )
+    if cred_check.status != "PASS":
+        raise ClusterDispatchError(
+            f"BICC credential preflight failed: {cred_check.detail}",
+            failure_context=ClusterDispatchFailureContext(
+                failed_step="credential_preflight",
+                cause_type="CredentialPreflightFailed",
+                cause_message=cred_check.detail[:2000],
+                cluster_key=dispatch_config.cluster_key,
+            ),
+        )
 
     try:
         payload = dispatch_notebook_and_fetch_marker(

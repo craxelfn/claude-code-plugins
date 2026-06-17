@@ -18,7 +18,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from oracle_ai_data_platform_fusion_bundle.commands import cluster_bootstrap_probe as cbp
 from oracle_ai_data_platform_fusion_bundle.commands.bootstrap import (
     ResolvedClusterDispatchConfig,
@@ -33,7 +32,6 @@ from oracle_ai_data_platform_fusion_bundle.schema.cluster_probe_marker import (
     ClusterProbeEnvelope,
     ClusterProbeMarker,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -317,29 +315,31 @@ class TestClusterMarkerFailures:
 
 
 class TestNotebookBuilder:
-    def test_three_cells_plus_markdown(self, fake_wheel) -> None:
-        nb = cbp._build_notebook(
+    @staticmethod
+    def _nb(fake_wheel, **overrides):
+        kwargs = dict(
             wheel_path=fake_wheel,
             bundle_yaml="apiVersion: x\n",
             pack_files={"pack.yaml": "id: starter"},
             pack_manifest={"chain_layers": [], "entry_layer_index": 0},
             tenant="saasfademo1",
+            bicc_secret_name="fusion_bicc_password",
+            bicc_secret_key="password",
         )
-        # 1 markdown + 3 code cells (install / stage / probe).
-        assert len(nb["cells"]) == 4
+        kwargs.update(overrides)
+        return cbp._build_notebook(**kwargs)
+
+    def test_four_cells_plus_markdown(self, fake_wheel) -> None:
+        nb = self._nb(fake_wheel)
+        # 1 markdown + 4 code cells (install / creds / stage / probe).
+        assert len(nb["cells"]) == 5
         assert nb["cells"][0]["cell_type"] == "markdown"
         assert all(c["cell_type"] == "code" for c in nb["cells"][1:])
         assert nb["nbformat"] == 4
 
     def test_probe_cell_in_cell_try_except(self, fake_wheel) -> None:
-        nb = cbp._build_notebook(
-            wheel_path=fake_wheel,
-            bundle_yaml="apiVersion: x\n",
-            pack_files={"pack.yaml": "id: starter"},
-            pack_manifest={"chain_layers": [], "entry_layer_index": 0},
-            tenant="saasfademo1",
-        )
-        probe_src = "".join(nb["cells"][3]["source"])
+        nb = self._nb(fake_wheel)
+        probe_src = "".join(nb["cells"][4]["source"])
         # The whole point of plan.md Step 5: try/except is INSIDE the
         # probe cell, not split across cells.
         assert "try:" in probe_src
@@ -349,29 +349,45 @@ class TestNotebookBuilder:
         assert "AIDP_BOOTSTRAP_PROBE_MARKER_BEGIN" in probe_src
         assert "AIDP_BOOTSTRAP_PROBE_MARKER_END" in probe_src
 
-    def test_probe_cell_imports_yaml_and_defines_markers(self, fake_wheel) -> None:
-        nb = cbp._build_notebook(
-            wheel_path=fake_wheel,
-            bundle_yaml="apiVersion: x\n",
-            pack_files={},
-            pack_manifest={"chain_layers": [], "entry_layer_index": 0},
-            tenant="t",
-        )
-        probe_src = "".join(nb["cells"][3]["source"])
-        # plan.md Step 5 low-severity fix #5 — self-contained cell.
-        assert "import yaml" in probe_src
+    def test_probe_cell_renders_bundle_and_uses_source_helper(self, fake_wheel) -> None:
+        nb = self._nb(fake_wheel, pack_files={})
+        probe_src = "".join(nb["cells"][4]["source"])
+        # Renders the bundle in-cell (resolves ${VAR} fusion fields) rather
+        # than the old raw yaml.safe_load — Risk R7.
+        assert "load_bundle(BUNDLE_PATH)" in probe_src
+        assert "yaml.safe_load" not in probe_src
+        # Uses the shared producer-selection helper (landed-vs-source,
+        # physical node.target) — Risk R8.
+        assert "resolve_observed(" in probe_src
+        assert "describe_bronze(" not in probe_src
+        # Resolves the password in-cell and rejects unsupported secret refs.
+        assert "_resolve_password(" in probe_src
+        assert "${aidp:secret:" in probe_src
         assert "MARKER_BEGIN =" in probe_src
         assert "MARKER_END =" in probe_src
 
-    def test_staging_cell_uses_two_arg_materialize_helper(self, fake_wheel) -> None:
-        nb = cbp._build_notebook(
-            wheel_path=fake_wheel,
-            bundle_yaml="apiVersion: x\n",
-            pack_files={"pack.yaml": "id: starter"},
-            pack_manifest={"chain_layers": [], "entry_layer_index": 0},
-            tenant="t",
+    def test_creds_cell_loads_secret_no_plaintext(self, fake_wheel) -> None:
+        nb = self._nb(
+            fake_wheel,
+            bicc_secret_name="my_secret",
+            bicc_secret_key="pw",
         )
-        staging_src = "".join(nb["cells"][2]["source"])
+        creds_src = "".join(nb["cells"][2]["source"])
+        # Fetches the BICC password from the AIDP credential store cluster-side
+        # using the configured name/key (Step 5 credential contract).
+        assert "aidputils.secrets.get(" in creds_src
+        assert "my_secret" in creds_src
+        assert "pw" in creds_src
+        assert 'os.environ["FUSION_BICC_PASSWORD"]' in creds_src
+        # The whole notebook payload must never carry a plaintext password.
+        whole = "".join(
+            "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+        )
+        assert "aidputils.secrets.get(" in whole  # fetched, not embedded
+
+    def test_staging_cell_uses_two_arg_materialize_helper(self, fake_wheel) -> None:
+        nb = self._nb(fake_wheel)
+        staging_src = "".join(nb["cells"][3]["source"])
         # plan.md Step 5 high-severity fix #2 — real signature is
         # (files, manifest) — helper makes its own tempdir.
         assert "materialize_staged_pack(\n    _PACK_FILES, _PACK_MANIFEST\n)" in staging_src
