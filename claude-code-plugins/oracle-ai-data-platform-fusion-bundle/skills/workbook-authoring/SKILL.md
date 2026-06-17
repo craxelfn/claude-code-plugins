@@ -27,11 +27,17 @@ Use this skill to generate full workbook JSON that is both schema-shaped and plu
    - **If dead / unauthenticated:** STOP with an actionable message — do not
      proceed into catalog resolution (it would fail deep with an opaque error,
      or worse, read an empty result as "datasets don't exist"). Tell the user:
-     run `aidp-fusion-bundle dashboard mcp-setup --connector-js
-     <path-to-oac-mcp-connect.js>`, then **restart/reconnect Claude Code**
-     (`/mcp` → reconnect `oac-mcp-server`) so the tools activate, then
-     re-invoke. If this workbook request is part of the Fusion bundle journey,
-     write `.aidp/autopilot/resume.md` first with
+     from the customer project directory, run:
+     ```bash
+     env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+     aidp-fusion-bundle dashboard mcp-setup \
+       --connector-js <path-to-oac-mcp-connect.js>
+     ```
+     Then **restart/reconnect Claude Code** (`/mcp` → reconnect
+     `oac-mcp-server`) so the tools activate, then re-invoke. The `env -u ...`
+     wrapper lets the project `.env` win over any global shell OAC profile. If
+     this workbook request is part of the Fusion bundle journey, write
+     `.aidp/autopilot/resume.md` first with
      `skills/aidp-fusion-autopilot/write_resume_checkpoint.py`. MCP servers
      bind at session start; the connection cannot be established mid-session.
      (Autopilot front-loads this as Step 1b.)

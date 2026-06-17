@@ -56,6 +56,7 @@ import stat
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from .rest.oauth import OacOauthFlow, TokenBundle, derive_oac_scope, discover_oac_audience
 
@@ -77,6 +78,24 @@ PORTABLE_CONNECTOR_ARG = "${HOME}/.oac-connect/oac-mcp-connect.js"
 
 #: The server name the bundle uses in ``.mcp.json`` for the OAC connector.
 DEFAULT_MCP_SERVER_NAME = "oac-mcp-server"
+
+
+def _normalize_oac_base_url(oac_url: str) -> str:
+    """Return the OAC origin expected by the MCP connector."""
+    parsed = urlsplit(oac_url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return oac_url.strip().rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+
+
+def _validate_connector_js(path: Path) -> None:
+    """Reject obvious placeholder/truncated connector files."""
+    size = path.stat().st_size
+    if size < 1024:
+        raise ValueError(
+            f"connector appears too small to be the real OAC MCP connector: "
+            f"{path} ({size} bytes)"
+        )
 
 
 # --------------------------------------------------------------------- format
@@ -289,7 +308,7 @@ def build_connector_config(
     return {
         "mcpServers": [
             {
-                "url": oac_url,
+                "url": _normalize_oac_base_url(oac_url),
                 "default": True,
                 "basicAuth": basic_auth,
                 "headless": headless,
@@ -336,9 +355,11 @@ def stage_connector(
     src = Path(src_js)
     if not src.is_file():
         raise FileNotFoundError(f"connector not found: {src}")
+    _validate_connector_js(src)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if src.resolve() == dest.resolve():
+        _validate_connector_js(dest)
         return dest  # already staged here
     shutil.copyfile(src, dest)
     return dest
@@ -455,7 +476,7 @@ def setup_basic_auth(
         "connector": str(staged),
         "connector_arg": connector_arg,
         "mcp_json": str(wired) if wired else None,
-        "oac_url": oac_url,
+        "oac_url": config["mcpServers"][0]["url"],
         "user": user,
     }
 

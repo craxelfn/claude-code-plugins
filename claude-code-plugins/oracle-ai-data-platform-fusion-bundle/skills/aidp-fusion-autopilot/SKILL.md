@@ -43,7 +43,7 @@ seven skills to invoke, or in what order.
 | # | Step | Done when (detect) | Drive with | PAUSE before if |
 |---|---|---|---|---|
 | 1 | **Config** | `bundle.yaml` + `aidp.config.yaml` exist; coords non-placeholder | `aidp-fusion-bundle init` (scaffold if absent — fresh install) → `/aidp-fusion-config` for coords | missing `fusion:` connectivity (human-only) |
-| **1b** | **OAC MCP connect** (front-loaded prerequisite — see §below) | `oac-mcp-server` tools answer a live `search_catalog` ping | `aidp-fusion-bundle dashboard mcp-setup`, then **restart/reconnect Claude Code** | **always when dead** — staging the connector needs a Claude Code restart before its tools work; write the resume checkpoint, then PAUSE for the restart |
+| **1b** | **OAC MCP connect** (front-loaded prerequisite — see §below) | `oac-mcp-server` tools answer a live `search_catalog` ping | project-scoped `dashboard mcp-setup`, then **restart/reconnect Claude Code** | **always when dead** — staging the connector needs a Claude Code restart before its tools work; write the resume checkpoint, then PAUSE for the restart |
 | 2 | **Bootstrap** | `profiles/<tenant>.yaml` present + fingerprint pinned | `/aidp-fusion-bootstrap` | multi-match variation needs a human pick (never `--non-interactive`); surface frozen picks |
 | 3 | **Seed** | live gold has the needed tables (probe) | `/aidp-fusion-seed` | always confirm the destructive guard's CONFIRM outcome |
 | 4 | **Advise** | — (always run for the goal) | `/oac-dataset-advisor` | — |
@@ -77,15 +77,22 @@ before Bootstrap. On an already-configured tenant, probe it first thing.
 1. **Probe liveness** — a cheap `oracle_analytics-search_catalog` ping (or
    `claude mcp list` → expect `oac-mcp-server ✔ Connected`).
 2. **Live → continue** to Bootstrap; record `[✓] mcp connect`.
-3. **Dead → set up + restart.** Run `aidp-fusion-bundle dashboard mcp-setup`.
+3. **Dead → set up + restart.** From the customer project directory, run:
+   ```bash
+   env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+   aidp-fusion-bundle dashboard mcp-setup \
+     --connector-js <path-to-oac-mcp-connect.js>
+   ```
    This stages the connector, writes the 0600 connector config, and wires
-   `.mcp.json`. Before stopping, write `.aidp/autopilot/resume.md` with the
-   user's goal and next step. Then **PAUSE with an explicit handoff**: *"OAC MCP
-   staged — restart/reconnect Claude Code (`/mcp` → reconnect
-   `oac-mcp-server`, or relaunch), then paste: `Resume the Fusion dashboard
-   workflow from .aidp/autopilot/resume.md`."* Autopilot is state-first, and the
-   checkpoint preserves the goal if chat context is lost. **Do not** try to
-   proceed into phases 6–7 on a dead connection.
+   the project `.mcp.json`. The `env -u ...` wrapper prevents a global shell
+   OAC profile from overriding the project `.env`. Before stopping, write
+   `.aidp/autopilot/resume.md` with the user's goal and next step. Then
+   **PAUSE with an explicit handoff**: *"OAC MCP staged — restart/reconnect
+   Claude Code (`/mcp` → reconnect `oac-mcp-server`, or relaunch), then paste:
+   `Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md`."*
+   Autopilot is state-first, and the checkpoint preserves the goal if chat
+   context is lost. **Do not** try to proceed into phases 6–7 on a dead
+   connection.
 
 ## Persistent resume checkpoint
 

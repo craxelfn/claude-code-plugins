@@ -34,7 +34,8 @@ step because the public REST validator does not reliably accept the AIDP
 - Deciding whether live gold can serve the dashboard -> `/oac-dataset-advisor`.
 - Building missing gold content -> `/mart-author`, then seed and re-run advisor.
 - Creating the workbook -> `/workbook-authoring`.
-- Setting up OAC MCP itself -> `aidp-fusion-bundle dashboard mcp-setup --connector-js ...`.
+- Setting up OAC MCP itself -> run the project-scoped `dashboard mcp-setup`
+  command from the customer project directory.
 - Running seed/incremental to materialize data -> `/aidp-fusion-seed` or `/aidp-fusion-incremental`.
 
 ## Required inputs
@@ -92,8 +93,15 @@ oracle_analytics-search_catalog(type="datasets", search="*")
 If OAC MCP is not connected, tell the user to run the supported setup path:
 
 ```bash
-aidp-fusion-bundle dashboard mcp-setup --connector-js <path-to-oac-mcp-connect.js>
+env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+aidp-fusion-bundle dashboard mcp-setup \
+  --connector-js <path-to-oac-mcp-connect.js>
 ```
+
+Run it from the customer project directory so `.mcp.json` is wired there and
+the local `.env` supplies `OAC_URL`, `OAC_MCP_USER`, and `OAC_MCP_PASSWORD`.
+The `env -u ...` wrapper prevents a global shell OAC profile from overriding
+the project `.env`.
 
 Before stopping, write the resume checkpoint so the dataset plan survives the
 restart:
@@ -269,7 +277,7 @@ Use `BLOCKED` when setup cannot safely continue:
 ```text
 BLOCKED
 reason: OAC MCP is disconnected
-next: run aidp-fusion-bundle dashboard mcp-setup --connector-js <path>, reconnect Claude Code, then resume
+next: run the project-scoped dashboard mcp-setup command, reconnect Claude Code, then resume
 ```
 
 ## Safety invariants

@@ -12,8 +12,8 @@ import stat
 from pathlib import Path
 
 import pytest
+from oracle_ai_data_platform_fusion_bundle.oac import mcp_token as mcp_token_mod
 from oracle_ai_data_platform_fusion_bundle.oac.mcp_token import (
-    DEFAULT_STAGED_CONNECTOR,
     PORTABLE_CONNECTOR_ARG,
     build_basic_auth_mcp_config,
     build_connector_config,
@@ -144,6 +144,13 @@ class TestBuildConnectorConfig:
         cfg = build_connector_config(oac_url="https://oac", basic_auth="u:p", headless=False)
         assert cfg["mcpServers"][0]["headless"] is False
 
+    def test_normalizes_oac_ui_url_to_origin(self) -> None:
+        cfg = build_connector_config(
+            oac_url="http://oac.example.com:9888/dv/ui/home.jsp?pageid=home",
+            basic_auth="u:p",
+        )
+        assert cfg["mcpServers"][0]["url"] == "http://oac.example.com:9888"
+
     def test_rejects_empty_url(self) -> None:
         with pytest.raises(ValueError, match="oac_url"):
             build_connector_config(oac_url="", basic_auth="u:p")
@@ -169,24 +176,33 @@ class TestWriteConnectorConfigFile:
 
 
 class TestStageConnector:
+    def _connector_body(self) -> str:
+        return "#!/usr/bin/env node\n" + ("x" * 2048)
+
     def test_copies_to_dest(self, tmp_path: Path) -> None:
         src = tmp_path / "dl" / "oac-mcp-connect.js"
         src.parent.mkdir()
-        src.write_text("// connector\n")
+        src.write_text(self._connector_body())
         dest = tmp_path / "staged" / "oac-mcp-connect.js"
         out = stage_connector(src, dest)
         assert out == dest
-        assert dest.read_text() == "// connector\n"
+        assert dest.read_text() == self._connector_body()
 
     def test_same_path_is_noop(self, tmp_path: Path) -> None:
         p = tmp_path / "oac-mcp-connect.js"
-        p.write_text("x")
+        p.write_text(self._connector_body())
         assert stage_connector(p, p) == p
-        assert p.read_text() == "x"
+        assert p.read_text() == self._connector_body()
 
     def test_missing_source_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             stage_connector(tmp_path / "nope.js", tmp_path / "d.js")
+
+    def test_rejects_truncated_placeholder(self, tmp_path: Path) -> None:
+        p = tmp_path / "oac-mcp-connect.js"
+        p.write_text("// conn")
+        with pytest.raises(ValueError, match="too small"):
+            stage_connector(p, tmp_path / "staged.js")
 
 
 class TestBasicAuthMcpConfig:
@@ -216,29 +232,37 @@ class TestBasicAuthMcpConfig:
 
 
 class TestSetupBasicAuth:
-    def test_end_to_end_default_location_is_portable(self, tmp_path: Path) -> None:
+    def _connector_body(self) -> str:
+        return "#!/usr/bin/env node\n" + ("x" * 2048)
+
+    def test_end_to_end_default_location_is_portable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         src = tmp_path / "oac-mcp-connect.js"
-        src.write_text("// conn")
+        src.write_text(self._connector_body())
         cfgf = tmp_path / "config.json"
         mcp = tmp_path / ".mcp.json"
+        default_dest = tmp_path / ".oac-connect" / "oac-mcp-connect.js"
+        monkeypatch.setattr(mcp_token_mod, "DEFAULT_STAGED_CONNECTOR", default_dest)
         summary = setup_basic_auth(
-            oac_url="https://oac.example.com",
+            oac_url="https://oac.example.com/dv/ui/home.jsp?pageid=home",
             user="alice",
             password="secret",
             connector_js=src,
             config_file=cfgf,
-            connector_dest=DEFAULT_STAGED_CONNECTOR,  # default → portable ${HOME} arg
+            connector_dest=default_dest,  # default → portable ${HOME} arg
             mcp_json=mcp,
         )
         # config file holds creds; .mcp.json does not
         assert json.loads(cfgf.read_text())["mcpServers"][0]["basicAuth"] == "alice:secret"
         args = json.loads(mcp.read_text())["mcpServers"]["oac-mcp-server"]["args"]
         assert args == [PORTABLE_CONNECTOR_ARG]
+        assert summary["oac_url"] == "https://oac.example.com"
         assert "secret" not in json.dumps(summary)  # summary carries no password
 
     def test_custom_dest_uses_absolute_arg(self, tmp_path: Path) -> None:
         src = tmp_path / "oac-mcp-connect.js"
-        src.write_text("// conn")
+        src.write_text(self._connector_body())
         dest = tmp_path / "staged" / "oac-mcp-connect.js"
         mcp = tmp_path / ".mcp.json"
         summary = setup_basic_auth(

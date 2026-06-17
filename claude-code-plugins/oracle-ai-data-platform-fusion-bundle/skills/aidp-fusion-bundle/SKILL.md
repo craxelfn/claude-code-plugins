@@ -63,9 +63,17 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
 
 3. **Connect operator OAC MCP early**:
    ```bash
-   aidp-fusion-bundle dashboard mcp-setup --connector-js <path to oac-mcp-connect.js>
+   env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+   aidp-fusion-bundle dashboard mcp-setup \
+     --connector-js <path to oac-mcp-connect.js>
    ```
-   Restart/reconnect Claude Code after this. Autopilot and workbook-authoring need OAC MCP for `search_catalog`, `describe_data`, and `save_catalog_content`. If setup happens mid-journey, autopilot writes `.aidp/autopilot/resume.md`; resume with: "Resume the Fusion dashboard workflow from .aidp/autopilot/resume.md."
+   Run from the customer project directory. The `env -u ...` wrapper lets the
+   local `.env` provide the OAC values instead of any global shell profile.
+   Restart/reconnect Claude Code after this. Autopilot and workbook-authoring
+   need OAC MCP for `search_catalog`, `describe_data`, and
+   `save_catalog_content`. If setup happens mid-journey, autopilot writes
+   `.aidp/autopilot/resume.md`; resume with: "Resume the Fusion dashboard
+   workflow from .aidp/autopilot/resume.md."
 
 4. **Probe prerequisites and pin tenant variation**:
    ```bash
@@ -108,7 +116,9 @@ Mirrors pdf1 §"What Can You Do Once the Data is in Oracle AI Data Platform":
    Claude Code (non-interactive **basic auth**, the path that actually works in
    a terminal client):
    ```bash
-   aidp-fusion-bundle dashboard mcp-setup --connector-js <path to oac-mcp-connect.js>
+   env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+   aidp-fusion-bundle dashboard mcp-setup \
+     --connector-js <path to oac-mcp-connect.js>
    ```
    Then ask "what's our AR aging?" and watch MCP call
    `search_catalog` → `describe_data` → `execute_logical_sql` against

@@ -83,7 +83,8 @@ If multiple codes appear, triage in this order:
 
 If there is no `AIDPF-*` code, classify by symptom:
 
-- OAC MCP server missing, disconnected, unauthenticated, or no tools -> `dashboard mcp-setup` plus resume checkpoint.
+- OAC MCP server missing, disconnected, unauthenticated, or no tools -> run
+  project-scoped `dashboard mcp-setup` plus resume checkpoint.
 - `CredentialResolutionError` or missing Fusion password -> fix AIDP credential store / `aidp.config.yaml` secret names.
 - `ResumeRunNotFoundError`, `ResumeRunNotResumableError`, or `ResumeBundleMismatchError` -> resume-specific guidance.
 - Unknown traceback -> ask for the command and nearest error lines; do not guess a destructive fix.
@@ -159,7 +160,10 @@ For OAC MCP disconnect with no AIDPF code:
 code: none
 phase: OAC MCP
 meaning: MCP connection is unavailable; this is not proof that datasets are absent
-route: run aidp-fusion-bundle dashboard mcp-setup --connector-js <path>, write .aidp/autopilot/resume.md, reconnect Claude Code
+route: from the customer project directory run:
+  env -u OAC_URL -u OAC_MCP_USER -u OAC_MCP_PASSWORD -u OAC_ADMIN_USER -u OAC_ADMIN_PASSWORD \
+  aidp-fusion-bundle dashboard mcp-setup --connector-js <path>
+  then write .aidp/autopilot/resume.md and reconnect Claude Code
 next: resume from .aidp/autopilot/resume.md and re-probe OAC
 ```
 
