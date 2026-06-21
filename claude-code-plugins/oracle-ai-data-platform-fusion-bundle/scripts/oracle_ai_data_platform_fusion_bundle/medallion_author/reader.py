@@ -148,6 +148,7 @@ class DiagnosticReadResult:
         return (
             not self.variation_failures
             and not self.source_column_failures
+            and not self.type_mismatch_failures
             and self.identity_failure is None
             and not self.unknown_schema_paths
             and not self.malformed_paths
@@ -156,17 +157,20 @@ class DiagnosticReadResult:
 
     @property
     def has_drift_only(self) -> bool:
-        """Drift artifact present BUT no variation-point failures to act on.
+        """Drift artifact present BUT no skill-actionable failures to act on.
 
         Drift artifacts are produced by ``run``-time preflight; the
         recovery is ``bootstrap --refresh``, not a skill-drafted
         overlay. A drift-only directory means the operator is in
         the wrong recovery flow — skill refuses with a clear
-        hand-off message.
+        hand-off message. A directory with a 4070 type-mismatch (or any
+        skill-recoverable failure) is NOT drift-only.
         """
         return (
             self.schema_drift_failure is not None
             and not self.variation_failures
+            and not self.source_column_failures
+            and not self.type_mismatch_failures
         )
 
     def can_proceed(self) -> bool:
@@ -178,7 +182,11 @@ class DiagnosticReadResult:
         surfaced as context.
         """
         return (
-            (bool(self.variation_failures) or bool(self.source_column_failures))
+            (
+                bool(self.variation_failures)
+                or bool(self.source_column_failures)
+                or bool(self.type_mismatch_failures)
+            )
             and not self.has_identity_failure
             and not self.has_unknown_schema_version
             and not self.has_malformed_artifacts

@@ -67,6 +67,17 @@ def test_write_and_read_type_mismatch_diagnostic(tmp_path: Path) -> None:
     assert res.type_mismatch_failures[0].type_mismatches[1].column == "PARTYID"
 
 
+def test_4070_only_run_is_actionable(tmp_path: Path) -> None:
+    """A run dir with ONLY an AIDPF-4070 diagnostic must be actionable —
+    medallion-author drafts a type-overlay from it."""
+    art = BronzeTypeMismatchV1.model_validate(_DIAG)
+    write_bronze_type_mismatch_diagnostic(tmp_path, _DIAG["runId"], art)
+    res = read_run(tmp_path / ".aidp" / "diagnostics", _DIAG["runId"])
+    assert res.is_empty is False
+    assert res.can_proceed() is True
+    assert res.has_drift_only is False
+
+
 # ---- 6d: drafter ----------------------------------------------------------
 
 
