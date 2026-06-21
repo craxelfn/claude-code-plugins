@@ -112,6 +112,35 @@ carries:
    the bootstrap variation-point path. The columnAlias goes
    in the overlay; bootstrap pins the resolved value on `--refresh`.
 
+## AIDPF-4070 — bronze type mismatch (runtime type gate)
+
+A bronze node's declared `outputSchema` **type** differs from the live PVO
+type (e.g. the `decimal(38,30)` → `decimal(18,0)` supplier-ID overflow). The
+run persists `AIDPF-4070__<node>.json` (read it via the diagnostic reader's
+`type_mismatch_failures`). The sanctioned fix is a **bronze type-overlay** —
+non-destructive, the shipped pack stays immutable. Two equivalent shapes:
+
+- **`overrides:` block** (preferred for a small retype) — declare only the
+  changed columns:
+  ```yaml
+  overrides:
+    bronze/erp_suppliers:
+      outputSchema:
+        columns:
+          - { name: VENDORID, type: "decimal(18,0)" }   # retype to live type
+  ```
+- **Same-id bronze file** `overlays/<name>/bronze/erp_suppliers.yaml` — a full
+  `NodeYaml` (filename stem **must** equal `id`); may differ from base only in
+  `outputSchema` (retain every base column; retype/append) and `quality.tests`
+  (extend, never drop).
+
+`draft_type_overlay()` builds the block shape from the diagnostic for operator
+approval (it does **not** auto-apply/seed). **Off-limits to both shapes:** grain,
+`naturalKey`, `target`, `datastore`/PVO, `refresh`, `requiredColumns` — an
+identity change is a **new node id**, not an override. A `requiredColumns` change
+is out of scope (see `bronze-required-columns-overlay`). Type-overlays are
+**bronze-only**; a silver/gold type fix is `overrides: { sql }` or a new mart id.
+
 ## Required overlay rules
 
 1. **Probe bronze before declaring**. Skill reads the diagnostic

@@ -392,17 +392,45 @@ class OverrideEntry(BaseModel):
     * ``profile:`` -- scalar replace.
     * ``sql:`` -- full-file replace; the named SQL path lives in the overlay.
     * ``quality:`` -- nested ``tests:`` list extends base.
-    * ``extendColumns: true`` -- the overlay extends the base node's
-      ``outputSchema.columns`` rather than replacing it.
+    * ``outputSchema:`` -- name-keyed partial merge of a bronze node's
+      output columns (retype matched columns; append with ``extendColumns``).
+      Bronze targets only; enforced at merge.
 
-    Unknown keys default to scalar replace.
+    Unknown keys fail closed (``extra="forbid"``) with an actionable
+    AIDPF-2001 message — in particular ``requiredColumns`` is out of scope.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     profile: str | None = None
     sql: str | None = None
     quality: dict[str, Any] | None = None
+    output_schema: "OutputSchemaOverride | None" = Field(
+        default=None, alias="outputSchema"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_keys_actionably(cls, data: Any) -> Any:
+        """Raise an AIDPF-2001-family, actionable error for unknown override
+        keys *before* the generic ``extra="forbid"`` Pydantic error fires."""
+        if not isinstance(data, dict):
+            return data
+        known = {"profile", "sql", "quality", "output_schema", "outputSchema"}
+        unknown = [k for k in data if k not in known]
+        if unknown:
+            hint = ""
+            if "requiredColumns" in unknown:
+                hint = (
+                    " `requiredColumns` is out of scope for override; see the "
+                    "`bronze-required-columns-overlay` feature."
+                )
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: unsupported override key(s) "
+                f"{sorted(unknown)!r}. Allowed: profile, sql, quality, "
+                f"outputSchema.{hint}"
+            )
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +761,85 @@ class OutputSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     columns: list[OutputSchemaColumn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _no_duplicate_column_names(self) -> "OutputSchema":
+        """Reject case-insensitive duplicate column names.
+
+        Spark/Delta resolve column names case-insensitively, so ``VENDORID``
+        and ``vendorid`` in one schema are ambiguous (and make the overlay
+        name-keyed merge non-deterministic). Fail closed.
+        """
+        seen: dict[str, str] = {}
+        for col in self.columns:
+            key = col.name.lower()
+            if key in seen:
+                raise ValueError(
+                    f"{AIDPF_2001_ORPHAN_OVERRIDE}: duplicate column name "
+                    f"(case-insensitive): {col.name!r} collides with "
+                    f"{seen[key]!r}. Column names must be unique."
+                )
+            seen[key] = col.name
+        return self
+
+
+class OutputSchemaColumnOverride(BaseModel):
+    """One column entry in an overlay's ``outputSchema`` override.
+
+    Distinct from :class:`OutputSchemaColumn`: ``name`` is the merge key and is
+    required, while ``type``/``nullable``/``pii`` are **optional** so a *matched*
+    (retype) column may override only the fields it changes and inherit the rest
+    from the base column. A *matched* column must still set at least one mutable
+    field (a name-only entry is a no-op and is rejected). Appended columns (a name
+    absent from the base) must carry full ``type`` + ``pii`` — enforced in the
+    merge step, where base-vs-overlay membership is known.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    type: str | None = None
+    nullable: bool | None = None
+    pii: PiiLevel | None = None
+
+    @model_validator(mode="after")
+    def _require_at_least_one_mutable_field(self) -> "OutputSchemaColumnOverride":
+        if self.type is None and self.nullable is None and self.pii is None:
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: override column {self.name!r} "
+                f"provides no mutable field — a name-only override is a no-op. "
+                f"Set at least one of `type`, `nullable`, or `pii`."
+            )
+        return self
+
+
+class OutputSchemaOverride(BaseModel):
+    """An overlay's ``outputSchema`` override: a name-keyed, partial merge into
+    the base node's columns.
+
+    Declare only the columns you change. Matched columns are retyped; with
+    ``extendColumns: true`` a new column may be appended (full ``type`` + ``pii``
+    required, enforced at merge). Base columns not listed are preserved.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    columns: list[OutputSchemaColumnOverride] = Field(min_length=1)
+    extend_columns: bool = Field(default=False, alias="extendColumns")
+
+    @model_validator(mode="after")
+    def _no_duplicate_override_names(self) -> "OutputSchemaOverride":
+        seen: dict[str, str] = {}
+        for col in self.columns:
+            key = col.name.lower()
+            if key in seen:
+                raise ValueError(
+                    f"{AIDPF_2001_ORPHAN_OVERRIDE}: duplicate override column "
+                    f"name (case-insensitive): {col.name!r} collides with "
+                    f"{seen[key]!r}."
+                )
+            seen[key] = col.name
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -1160,6 +1267,11 @@ class ResolvedPack:
         is_merged: True if this is the result of a merge_overlay call.
         chain: list of pack ids in load order (base first, overlays after).
         source_roots: per-artifact pack-root provenance.
+        chain_roots: filesystem roots of every pack in the chain, base-first
+            (``(base.root, …, overlay.root)``). Distinct from ``source_roots``
+            (which root each *artifact* resolves against): ``chain_roots`` is
+            *which packs get staged*, so a pure-metadata overlay that owns no
+            artifact is still staged. Accumulated like ``chain``.
     """
 
     root: Path
@@ -1172,6 +1284,7 @@ class ResolvedPack:
     is_merged: bool = False
     chain: tuple[str, ...] = ()
     source_roots: dict[str, Path] = field(default_factory=dict)
+    chain_roots: tuple[Path, ...] = ()
 
     def all_nodes(self) -> dict[str, "NodeYaml"]:
         """Convenience: bronze, silver, and gold nodes combined."""

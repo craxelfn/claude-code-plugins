@@ -28,8 +28,10 @@ from ..schema.diagnostic_artifact import (
     AIDPF_2012_SCHEMA_DRIFT_DETECTED,
     AIDPF_2048_CLUSTER_BOOTSTRAP_DISPATCH_FAILED,
     AIDPF_2049_CLUSTER_BOOTSTRAP_MARKER_INVALID,
+    AIDPF_4070_BRONZE_TYPE_MISMATCH,
     AIDPF_4071_BRONZE_SOURCE_COLUMN_MISSING,
     BronzeSourceColumnMissingV1,
+    BronzeTypeMismatchV1,
     IdentityDiagnosticV1,
     SchemaDriftDiagnosticV1,
     VariationPointDiagnosticV1,
@@ -75,6 +77,12 @@ class DiagnosticReadResult:
     a column the live PVO lacks. Skill-recoverable: resolve each by
     authoring a columnAlias overlay mapping the declared name to the
     renamed physical column found in the diagnostic's ``pvoColumns``."""
+
+    type_mismatch_failures: list[BronzeTypeMismatchV1] = field(default_factory=list)
+    """One entry per ``AIDPF-4070__<node>.json`` — a bronze node whose declared
+    outputSchema type differs from the live PVO type. Skill-recoverable: draft a
+    bronze type-overlay retyping each column to the diagnostic's
+    ``materialised`` type (block override or same-id bronze file)."""
 
     identity_failure: IdentityDiagnosticV1 | None = None
     """Set if ``AIDPF-1020.json`` is present. Skill refuses to draft
@@ -209,6 +217,7 @@ def read_run(
 
     variation_failures: list[VariationPointDiagnosticV1] = []
     source_column_failures: list[BronzeSourceColumnMissingV1] = []
+    type_mismatch_failures: list[BronzeTypeMismatchV1] = []
     identity_failure: IdentityDiagnosticV1 | None = None
     schema_drift_failure: SchemaDriftDiagnosticV1 | None = None
     unknown_schema_paths: list[Path] = []
@@ -257,6 +266,13 @@ def read_run(
                 source_column_failures.append(
                     BronzeSourceColumnMissingV1.model_validate(payload)
                 )
+            elif error_code == AIDPF_4070_BRONZE_TYPE_MISMATCH:
+                # A bronze node's declared type differs from the live PVO.
+                # Skill-recoverable: draft a bronze type-overlay retyping each
+                # mismatched column to the diagnostic's `materialised` type.
+                type_mismatch_failures.append(
+                    BronzeTypeMismatchV1.model_validate(payload)
+                )
             else:
                 malformed_paths.append(artifact_path)
         except Exception:  # noqa: BLE001 — Pydantic raises a variety of types
@@ -267,6 +283,7 @@ def read_run(
         run_dir=run_dir,
         variation_failures=variation_failures,
         source_column_failures=source_column_failures,
+        type_mismatch_failures=type_mismatch_failures,
         identity_failure=identity_failure,
         schema_drift_failure=schema_drift_failure,
         unknown_schema_paths=unknown_schema_paths,

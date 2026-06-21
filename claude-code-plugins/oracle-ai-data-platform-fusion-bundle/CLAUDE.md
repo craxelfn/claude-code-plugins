@@ -106,9 +106,18 @@ Allowed overlay changes:
 - Override shipped mart SQL while preserving the mart contract.
 - Add tenant-specific column aliases or semantic variants through
   `/medallion-author`.
+- Retype (or additively extend) a **bronze** node's `outputSchema` columns via a
+  bronze type-overlay — either an `overrides: { bronze/<id>: { outputSchema: … }}`
+  block or a same-id `overlays/<name>/bronze/<id>.yaml` file. Use this for a
+  bronze column-type bug (e.g. `decimal(38,30)` → `decimal(18,0)`). The two
+  mechanisms are mutually exclusive per node (declaring both is an error).
 
-Do not change grain, natural key, target table, or output schema of a shipped
-mart in place. Create a new mart id instead.
+Do not change grain, natural key, target table, PVO/datastore, refresh, or
+`requiredColumns` of a shipped node via overlay — those are off-limits to both
+the block and the same-id file (the file is diff-guarded). Create a new node /
+mart id instead. The bronze `outputSchema` type-overlay is **bronze-only**; a
+silver/gold schema change stays `overrides: { sql }` or a new mart id, and a
+same-id silver/gold file is rejected.
 
 Wire overlays with:
 

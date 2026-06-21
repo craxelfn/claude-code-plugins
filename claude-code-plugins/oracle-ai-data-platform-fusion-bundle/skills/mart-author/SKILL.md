@@ -30,6 +30,11 @@ enforces it).
 - The data exists but isn't materialized → `aidp-fusion-bundle run --mode seed`
   (or `/aidp-fusion-seed`); use `oac-dataset-advisor` to confirm.
 - Resolving column-alias / semantic-variant tenant variation → `medallion-author`.
+- A **bronze column-TYPE** bug (a declared `outputSchema` type is wrong vs the
+  live PVO, e.g. `decimal(38,30)` → `decimal(18,0)`) → that's a **bronze
+  type-overlay** via `medallion-author` (AIDPF-4070), **not** a new mart. The PVO
+  source schema you inspect here surfaces the right type; retype in place via the
+  overlay rather than authoring a new node.
 - Building the OAC dataset/workbook → `oac-dataset-advisor` + `workbook-authoring`.
 
 ## Non-negotiable safety rules

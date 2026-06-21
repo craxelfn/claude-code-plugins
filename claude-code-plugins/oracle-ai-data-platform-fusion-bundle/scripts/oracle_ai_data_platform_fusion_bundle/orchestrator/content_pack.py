@@ -37,6 +37,7 @@ from oracle_ai_data_platform_fusion_bundle.schema.dashboard_pack import Dashboar
 from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
     AIDPF_2001_ORPHAN_OVERRIDE,
     NodeYaml,
+    OutputSchemaOverride,
     PackOverlayRef,
     PackYaml,
     # ResolvedPack lives in schema/medallion_pack.py to honor the
@@ -215,6 +216,17 @@ def load_pack(root: Path) -> ResolvedPack:
         for p in sorted(d.glob("*.yaml")):
             raw_node = _read_yaml(p) or {}
             node = NodeYaml.model_validate(raw_node)
+            # Filename stem must equal node.id. The loader keys nodes by id, so
+            # a mismatched filename would silently mis-target — in particular an
+            # overlay's same-id replacement file `bronze/<id>.yaml` carrying a
+            # different `id` would become a new node and leave the base node
+            # untouched (a silent no-op). Fail closed.
+            if p.stem != node.id:
+                raise PackLoaderError(
+                    f"{AIDPF_2001}: node file {p.name!r} declares id "
+                    f"{node.id!r} — the filename stem must equal the node id "
+                    f"(rename the file to {node.id}.yaml or fix the id)."
+                )
             nodes[node.id] = node
         return nodes
 
@@ -252,6 +264,7 @@ def load_pack(root: Path) -> ResolvedPack:
         bronze_yaml=bronze_yaml,
         chain=(pack.id,),
         source_roots=source_roots,
+        chain_roots=(root,),
     )
 
 
@@ -434,9 +447,14 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
     merged_silver = _apply_node_overrides(base.silver, overlay, "silver/")
     merged_gold = _apply_node_overrides(base.gold, overlay, "gold/")
 
-    # Mark every override target's source root as the overlay root,
-    # since the override declared by the overlay points at overlay-side files.
-    for override_key in overlay.pack.overrides:
+    # Reassign source root to the overlay ONLY for `sql:` overrides — the new
+    # SQL file lives in the overlay, so `root_for` must resolve there. A pure
+    # metadata/schema override (outputSchema / quality / profile) keeps the base
+    # root so the node's inherited `implementation.sql` still resolves in
+    # validate_sql_paths (a relocated root would raise a spurious AIDPF-2003).
+    for override_key, override_entry in overlay.pack.overrides.items():
+        if override_entry.sql is None:
+            continue
         normalized = override_key.replace("bronze/", "").replace(
             "silver/", ""
         ).replace("gold/", "")
@@ -447,19 +465,48 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
         elif normalized in base.gold:
             merged_source_roots[f"gold/{normalized}"] = overlay.root
 
-    # Overlay's own bronze/silver/gold (not declared as overrides) are additions.
+    # Node ids the overlay block-overrides (for the file/block conflict guard).
+    block_overridden = {
+        k.replace("bronze/", "").replace("silver/", "").replace("gold/", "")
+        for k in overlay.pack.overrides
+    }
+
+    # Overlay's own bronze nodes: a brand-new id is an addition; a same id as a
+    # base node is a full-node *replacement* (bronze only), guarded.
     for nid, node in overlay.bronze.items():
-        if nid not in merged_bronze:
+        if nid not in base.bronze:
             merged_bronze[nid] = node
             merged_source_roots[f"bronze/{nid}"] = overlay.root
-    for nid, node in overlay.silver.items():
-        if nid not in merged_silver:
-            merged_silver[nid] = node
-            merged_source_roots[f"silver/{nid}"] = overlay.root
-    for nid, node in overlay.gold.items():
-        if nid not in merged_gold:
-            merged_gold[nid] = node
-            merged_source_roots[f"gold/{nid}"] = overlay.root
+            continue
+        # Same-id replacement.
+        if nid in block_overridden:
+            raise OrphanOverrideError(
+                f"{AIDPF_2001}: node {nid!r} is overridden two ways — a same-id "
+                f"file `bronze/{nid}.yaml` AND a `pack.yaml` overrides entry. "
+                f"The two mechanisms are mutually exclusive; declare only one."
+            )
+        _validate_same_id_bronze_replacement(base.bronze[nid], node)
+        merged_bronze[nid] = node
+        merged_source_roots[f"bronze/{nid}"] = overlay.root
+
+    # Silver/gold: a brand-new id is an addition; a same id is rejected
+    # (full same-id replacement of a shipped mart is not supported).
+    for layer, overlay_nodes, base_nodes in (
+        ("silver", overlay.silver, base.silver),
+        ("gold", overlay.gold, base.gold),
+    ):
+        target = merged_silver if layer == "silver" else merged_gold
+        for nid, node in overlay_nodes.items():
+            if nid not in base_nodes:
+                target[nid] = node
+                merged_source_roots[f"{layer}/{nid}"] = overlay.root
+                continue
+            raise OrphanOverrideError(
+                f"{AIDPF_2001}: same-id {layer} file `{layer}/{nid}.yaml` would "
+                f"replace shipped node {nid!r}, which is not supported. Use "
+                f"`overrides: {{ {layer}/{nid}: {{ sql: ... }} }}` for a SQL "
+                f"change, or create a new mart id for a structural change."
+            )
 
     # Dashboards: overlay can add or replace (replace-only,
     # no field-level merge). Inherited dashboards keep base root; overlay
@@ -484,6 +531,10 @@ def merge_overlay(base: ResolvedPack, overlay: ResolvedPack) -> ResolvedPack:
         is_merged=True,
         chain=tuple(list(base.chain) + [overlay.pack.id]),
         source_roots=merged_source_roots,
+        # Accumulate like `chain` (ids) — NOT (base.root, overlay.root), which
+        # would drop middle/base layers in an overlay-of-overlay chain because a
+        # merged base's `.root` is already the top overlay root.
+        chain_roots=tuple(list(base.chain_roots) + [overlay.root]),
     )
 
 
@@ -584,5 +635,121 @@ def _apply_node_overrides(
             new_tests = override_entry.quality.get("tests", [])
             node_data.setdefault("quality", {})["tests"] = existing_tests + new_tests
 
+        if override_entry.output_schema is not None:
+            # Bronze-only: a silver/gold outputSchema override is out of scope
+            # (those are SQL nodes with exact-match post-write assertions).
+            if prefix != "bronze/":
+                raise OrphanOverrideError(
+                    f"{AIDPF_2001}: outputSchema override on node "
+                    f"{override_key!r} is bronze-only. Silver/gold schema "
+                    f"changes go through `overrides: {{ sql }}` or a new mart id."
+                )
+            node_data["outputSchema"]["columns"] = _merge_output_schema_columns(
+                node_data["outputSchema"]["columns"],
+                override_entry.output_schema,
+                node_id,
+            )
+
         out[node_id] = NodeYaml.model_validate(node_data)
     return out
+
+
+def _validate_same_id_bronze_replacement(
+    base_node: NodeYaml, new_node: NodeYaml
+) -> None:
+    """Guard a same-id bronze full-file replacement.
+
+    The file may differ from base ONLY in ``outputSchema`` and ``quality.tests``
+    — a whitelist, so a new/unanticipated extraction field can't slip through.
+    Identity fields (layer/grain, target, datastore/pvo, refresh incl.
+    naturalKey, requiredColumns, …) must equal base → else a new node id.
+    ``outputSchema`` is retain-only (every base column kept; retype/append only)
+    and ``quality.tests`` is superset-only (extend, never drop) — neither may
+    silently narrow the contract. Fail closed (AIDPF-2001 family).
+    """
+    b = base_node.model_dump(by_alias=True)
+    n = new_node.model_dump(by_alias=True)
+    allowed = {"outputSchema", "quality"}
+    for key in sorted(set(b) | set(n)):
+        if key in allowed:
+            continue
+        if b.get(key) != n.get(key):
+            raise OrphanOverrideError(
+                f"{AIDPF_2001}: same-id bronze file for {base_node.id!r} changes "
+                f"{key!r} (identity field). Only `outputSchema` and "
+                f"`quality.tests` may differ; for an identity change create a "
+                f"new node id. base={b.get(key)!r} overlay={n.get(key)!r}."
+            )
+    # outputSchema retain-only (no contract narrowing; subset assertion wouldn't catch a drop).
+    base_cols = {c["name"].lower(): c["name"] for c in b["outputSchema"]["columns"]}
+    new_cols = {c["name"].lower() for c in n["outputSchema"]["columns"]}
+    dropped = [orig for low, orig in base_cols.items() if low not in new_cols]
+    if dropped:
+        raise OrphanOverrideError(
+            f"{AIDPF_2001}: same-id bronze file for {base_node.id!r} drops base "
+            f"outputSchema column(s) {sorted(dropped)!r}. A replacement must "
+            f"retain every base column (retype/append only), incl. audit columns."
+        )
+    # quality.tests superset-only.
+    base_tests = (b.get("quality") or {}).get("tests", []) or []
+    new_tests = (n.get("quality") or {}).get("tests", []) or []
+    for t in base_tests:
+        if t not in new_tests:
+            raise OrphanOverrideError(
+                f"{AIDPF_2001}: same-id bronze file for {base_node.id!r} drops "
+                f"base quality test {t!r}. quality.tests may extend but not drop."
+            )
+
+
+def _merge_output_schema_columns(
+    base_columns: list[dict],
+    override: "OutputSchemaOverride",
+    node_id: str,
+) -> list[dict]:
+    """Name-keyed (case-insensitive) partial merge of override columns into base.
+
+    * Matched column → override only the provided `type`/`nullable`/`pii`;
+      the rest inherit from base. Position preserved.
+    * New column + `extendColumns: true` → appended; full `type` + `pii`
+      required (no column may enter outputSchema without a PII level).
+    * New column without `extendColumns` → orphan-column override, fail closed.
+
+    Base columns not mentioned are retained (no narrowing). The re-validation
+    via `NodeYaml` then enforces the no-duplicate-name invariant on the result.
+    """
+    by_lower = {c["name"].lower(): i for i, c in enumerate(base_columns)}
+    merged = [dict(c) for c in base_columns]
+    for ov in override.columns:
+        key = ov.name.lower()
+        if key in by_lower:
+            col = merged[by_lower[key]]
+            if ov.type is not None:
+                col["type"] = ov.type
+            if ov.nullable is not None:
+                col["nullable"] = ov.nullable
+            if ov.pii is not None:
+                col["pii"] = ov.pii
+        else:
+            if not override.extend_columns:
+                raise OrphanOverrideError(
+                    f"{AIDPF_2001}: outputSchema override for node {node_id!r} "
+                    f"names column {ov.name!r} which is absent from the base "
+                    f"node. Set `extendColumns: true` to append a new column, "
+                    f"or fix the name. Known base columns: "
+                    f"{[c['name'] for c in base_columns]!r}."
+                )
+            if ov.type is None or ov.pii is None:
+                raise OrphanOverrideError(
+                    f"{AIDPF_2001}: appended column {ov.name!r} on node "
+                    f"{node_id!r} must declare both `type` and `pii` "
+                    f"(no column may enter outputSchema without a PII level)."
+                )
+            merged.append(
+                {
+                    "name": ov.name,
+                    "type": ov.type,
+                    "nullable": ov.nullable if ov.nullable is not None else True,
+                    "pii": ov.pii,
+                }
+            )
+    return merged

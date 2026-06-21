@@ -59,6 +59,10 @@ is the "we handle it" half, but the underlying patch requirement remains:
   **AIDPF-4070 / 4071** catch source-schema mismatches at/after extract.
 - Zero-match variation points escalate to `/medallion-author` (overlay a new
   candidate the pack never anticipated).
+- A bronze column-**type** mismatch (**AIDPF-4070**) now has a non-destructive fix
+  path: a **bronze type-overlay** retyping the node's `outputSchema` (block
+  override or same-id bronze file), drafted by `/medallion-author` from the
+  persisted `AIDPF-4070__<node>.json`. See **§Resolved-BronzeTypeOverlay**.
 
 **Remaining mitigations (backlog)**: Fusion release-version detection +
 support-matrix warning at install time; CI live-PVO regression (see **L4**).
@@ -364,6 +368,35 @@ collides across the varied prefixes); use core-exact / semantic matching.
 ---
 
 ## Resolved limits
+
+### §Resolved-BronzeTypeOverlay — no overlay path to fix a bronze outputSchema column type
+
+**Symptom:** the AIDPF-4070 gate's own message told operators to "author a
+columnAlias/type overlay", but no such mechanism existed. The overlay engine's
+node-override surface applied only `sql` / `quality.tests` / `profile`; a same-id
+overlay bronze file was *silently dropped* (additions-only). So a wrong bronze
+column type (e.g. `erp_suppliers` IDs declared `decimal(38,30)`, overflowing
+15-digit Fusion surrogate IDs to NULL and breaking the `supplier_spend` join) had
+no per-tenant, non-destructive fix — only patching the immutable shipped pack or a
+source-pack PR.
+
+**Fix:** overlays can now retype (and additively extend) a **bronze** node's
+`outputSchema` columns via **two** equivalent, fail-closed mechanisms:
+
+* `overrides: { bronze/<id>: { outputSchema: { columns: [...] } } }` — a partial,
+  name-keyed merge (declare only changed columns; the rest inherited).
+* a same-id `overlays/<name>/bronze/<id>.yaml` full-node file — diff-guarded so it
+  can only retype/extend (identity fields and dropped columns/tests fail closed).
+
+Both converge on the same merged `NodeYaml`; the retype flows unchanged through the
+AIDPF-4070 gate, post-write assertion, and `plan_hash`. Guardrails: identity fields
+(grain / naturalKey / target / PVO / refresh / `requiredColumns`) are off-limits to
+both (→ new node id); `requiredColumns` override is out of scope
+(`bronze-required-columns-overlay`); type-overlays are bronze-only (silver/gold →
+`overrides: { sql }` or a new mart id). `/medallion-author` drafts the overlay from
+the persisted `AIDPF-4070__<node>.json` for operator approval (never auto-applied).
+Worked examples: `overlays/fix-supplier-id-types-block/` and
+`overlays/fix-supplier-id-types-file/`.
 
 ### §Resolved-FreshTenant — seed assumed medallion schemas + a clean state-table location already existed
 
