@@ -18,6 +18,10 @@ a route:
   missing_literal    — a declared literal (non-alias) required column vanished
                        from the PVO → investigate (pack/source mismatch).
 
+(This classifier is column-NAME drift only. A column-TYPE drift — AIDPF-4070 —
+is routed separately to `/medallion-author` to draft a bronze type-overlay
+retyping the column to the live type; see the SKILL.md routing table.)
+
 Input JSON (stdin or --input):
     {
       "live": {"ap_invoices": ["ApInvoicesInvoiceId", "ApInvoicesCurrencyCode", ...], ...},

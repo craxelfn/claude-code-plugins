@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 import yaml
 
+from ..schema.diagnostic_artifact import BronzeTypeMismatchV1
 from ..schema.incremental_impact import IncrementalImpact
 from ..schema.medallion_pack import (
     ColumnAlias,
@@ -225,22 +226,95 @@ def draft_overlay(
     return draft
 
 
+def draft_type_overlay(
+    *,
+    overlay_name: str,
+    base_pack_id: str,
+    base_pack_version: str,
+    mismatch: "BronzeTypeMismatchV1",
+    diagnostic_run_id: str,
+    model_id: str,
+    skill_evidence: dict[str, Any] | None = None,
+) -> OverlayDraft:
+    """Draft a bronze type-overlay from an AIDPF-4070 diagnostic.
+
+    Emits an ``overrides: { bronze/<node>: { outputSchema: { columns: [...] }}}``
+    block that retypes each mismatched column to its live (``materialised``)
+    type — for operator approval (never auto-applied). Validated via
+    :func:`validate_overlay` before return.
+    """
+    validate_path_segment(overlay_name, field="overlay.name")
+    validate_path_segment(diagnostic_run_id, field="overlay.diagnosticRunId")
+
+    if not mismatch.type_mismatches:
+        raise OverlayValidationError(
+            "draft_type_overlay called with no type mismatches — nothing to draft."
+        )
+
+    columns = [
+        {"name": m.column, "type": m.materialised} for m in mismatch.type_mismatches
+    ]
+    pack_data: dict[str, Any] = {
+        "id": overlay_name,
+        "version": "0.1.0",
+        "extends": f"{base_pack_id}@{base_pack_version}",
+        "compatibility": {
+            "pluginMinVersion": "0.3.0",
+            "fusionFamilies": ["ERP"],
+            "aidp": {"requiresDelta": True},
+        },
+        "provenance": _build_provenance(
+            diagnostic_run_id=diagnostic_run_id,
+            model_id=model_id,
+            proposals={},
+            incremental_impact={},
+        ),
+        "overrides": {
+            f"bronze/{mismatch.node}": {"outputSchema": {"columns": columns}}
+        },
+    }
+    pack_yaml = PackYaml.model_validate(pack_data)
+    draft = OverlayDraft(
+        overlay_name=overlay_name,
+        base_pack_id=base_pack_id,
+        base_pack_version=base_pack_version,
+        diagnostic_run_id=diagnostic_run_id,
+        model_id=model_id,
+        proposed=(),
+        pack_yaml=pack_yaml,
+        skill_evidence=skill_evidence or {},
+    )
+    validate_overlay(draft)
+    return draft
+
+
 def validate_overlay(draft: OverlayDraft) -> None:
     """Enforce skill-authored overlay restrictions.
 
     * Overlay MUST NOT introduce any silver/gold node definitions
       (skill never authors SQL templates).
-    * Overlay MUST NOT use ``overrides`` to change an existing node
-      (out of scope for v0.3; would require SQL template authoring).
+    * Overlay ``overrides`` may carry ONLY a sanctioned bronze
+      ``outputSchema`` type-overlay (target ``bronze/<id>``, no other override
+      key). Any ``sql`` / ``profile`` / ``quality`` / non-bronze override —
+      i.e. SQL-template authoring — remains forbidden.
     * Overlay MUST carry a non-empty ``provenance.skill_id``,
       ``skill_version``, ``model_id``, ``diagnostic_run_id``.
     """
     pack = draft.pack_yaml
-    if pack.overrides:
-        raise OverlayValidationError(
-            "Skill-authored overlay declared `overrides`; skill-authored "
-            "SQL templates are forbidden."
+    for key, entry in (pack.overrides or {}).items():
+        sanctioned = (
+            key.startswith("bronze/")
+            and entry.output_schema is not None
+            and entry.sql is None
+            and entry.profile is None
+            and entry.quality is None
         )
+        if not sanctioned:
+            raise OverlayValidationError(
+                f"Skill-authored overlay override {key!r} is not a sanctioned "
+                f"bronze `outputSchema` type-overlay; SQL-template authoring "
+                f"(sql/profile/quality, or a non-bronze target) is forbidden."
+            )
     if pack.provenance is None:
         raise OverlayValidationError("Overlay missing `provenance` block.")
     missing = [
@@ -463,6 +537,7 @@ __all__ = [
     "PickOutcome",
     "ProposedCandidate",
     "draft_overlay",
+    "draft_type_overlay",
     "validate_overlay",
     "write_overlay",
     "write_resolutions",
