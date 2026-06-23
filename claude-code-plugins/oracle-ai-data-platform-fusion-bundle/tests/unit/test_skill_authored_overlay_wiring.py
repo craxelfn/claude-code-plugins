@@ -313,7 +313,7 @@ class TestSkillProposedMechanism:
             bundle_dir_with_skill_overlay / "bundle.yaml",
             options=VariationPhaseOptions(
                 spark_session=_mock_spark(bronze),
-                non_interactive=True,
+                non_interactive=True, accept_coa_convention=True,
             ),
         )
         assert outcome.exit_code == 0
@@ -345,7 +345,7 @@ class TestSkillProposedMechanism:
             bundle_dir_with_skill_overlay / "bundle.yaml",
             options=VariationPhaseOptions(
                 spark_session=_mock_spark(bronze),
-                non_interactive=True,
+                non_interactive=True, accept_coa_convention=True,
             ),
         )
         assert outcome.exit_code == 0
@@ -433,7 +433,7 @@ class TestMultiMatchSkillProposedGatedOnCandidateMatch:
             options=VariationPhaseOptions(
                 spark_session=_mock_spark(bronze),
                 resolutions_path=resolutions,
-                non_interactive=True,
+                non_interactive=True, accept_coa_convention=True,
             ),
         )
         assert outcome.exit_code == 0
