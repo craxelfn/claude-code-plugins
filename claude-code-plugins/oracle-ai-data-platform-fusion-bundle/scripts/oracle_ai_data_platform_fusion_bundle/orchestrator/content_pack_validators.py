@@ -40,6 +40,23 @@ AIDPF_8002_PII_HIGH_DASHBOARD_EXPOSURE = "AIDPF-8002"
 # Bronze extract nodes are validated against the Fusion catalog when possible.
 AIDPF_2080_BRONZE_EXTRACT_PVO_NOT_IN_CATALOG = "AIDPF-2080"
 
+# COA semantic-role validation (feature coa-role-segment-resolution).
+AIDPF_2014_COA_ROLE_AS_EXISTENCE_ALIAS = "AIDPF-2014"
+"""A known COA role is modeled as a bare column-existence alias (no
+`resolution: semanticRole`) -- the existence-auto-match anti-pattern."""
+AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT = "AIDPF-2015"
+"""A COA role candidate / chartOfAccounts mapping names a column the gl_coa
+bronze `outputSchema` does not guarantee."""
+
+# Pack alias names conventionally used for COA roles -- a single-candidate
+# existence alias on one of these without `resolution: semanticRole` is the
+# anti-pattern the feature exists to prevent.
+_COA_ROLE_ALIAS_NAMES = {
+    "coa_balancing_segment",
+    "coa_cost_center_segment",
+    "coa_natural_account_segment",
+}
+
 
 # ---------------------------------------------------------------------------
 # Validation report dataclasses
@@ -620,12 +637,103 @@ def validate_bronze_pvo_catalog(pack: ResolvedPack) -> list[ValidationError]:
     return warnings
 
 
+def _gl_coa_contract_columns(pack: ResolvedPack) -> set[str] | None:
+    """Lowercased column names the gl_coa bronze `outputSchema` guarantees, or
+    None when there is no gl_coa node (so the check no-ops for other packs)."""
+    node = pack.bronze.get("gl_coa")
+    if node is None or node.output_schema is None:
+        return None
+    return {c.name.lower() for c in node.output_schema.columns}
+
+
+def validate_coa_semantic_roles(pack: ResolvedPack) -> list[ValidationError]:
+    """COA semantic-role guards (AIDPF-2014, AIDPF-2015).
+
+    * **AIDPF-2014** -- a known COA role alias modeled as a bare
+      column-existence alias (no `resolution: semanticRole`) is rejected: a
+      business role must not be resolved by column existence.
+    * **AIDPF-2015** -- a `semanticRole` COA candidate (its allowed domain) or
+      a `profiles.<p>.chartOfAccounts` mapping that names a column the gl_coa
+      bronze contract does not guarantee is rejected, routing to a bronze
+      contract-extension.
+    """
+    errors: list[ValidationError] = []
+    contract = _gl_coa_contract_columns(pack)
+
+    for name, spec in pack.pack.column_aliases.items():
+        is_coa_role = name in _COA_ROLE_ALIAS_NAMES or (spec.role or "").startswith(
+            "coa."
+        )
+        if not is_coa_role:
+            continue
+        if spec.resolution != "semanticRole":
+            errors.append(
+                ValidationError(
+                    code=AIDPF_2014_COA_ROLE_AS_EXISTENCE_ALIAS,
+                    message=(
+                        f"{AIDPF_2014_COA_ROLE_AS_EXISTENCE_ALIAS}: columnAlias "
+                        f"`{name}` is a COA business role but is modeled as a "
+                        f"column-existence alias. Declare `resolution: semanticRole` "
+                        f"+ `role: coa.<role>` so it resolves from explicit "
+                        f"`profile.chartOfAccounts`, not column existence."
+                    ),
+                    location=f"columnAliases/{name}",
+                )
+            )
+            continue
+        # AIDPF-2015: candidate (allowed domain) must be within the contract.
+        if contract is not None:
+            for cand in spec.candidates:
+                if cand.lower() not in contract:
+                    errors.append(
+                        ValidationError(
+                            code=AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT,
+                            message=(
+                                f"{AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT}: COA role "
+                                f"`{name}` allows candidate `{cand}` which the "
+                                f"`gl_coa` bronze outputSchema does not guarantee. "
+                                f"Extend the gl_coa bronze contract first."
+                            ),
+                            location=f"columnAliases/{name}",
+                        )
+                    )
+
+    # AIDPF-2015: pack-default chartOfAccounts mappings must be in-contract too.
+    if contract is not None:
+        for pname, prof in (pack.pack.profiles or {}).items():
+            coa = prof.chart_of_accounts
+            if coa is None:
+                continue
+            mapped: set[str] = set()
+            default = coa.resolved_default()
+            if default is not None:
+                mapped.update(default.columns().values())
+            for arm in (coa.by_chart or {}).values():
+                mapped.update(arm.columns().values())
+            for col in sorted(mapped):
+                if col.lower() not in contract:
+                    errors.append(
+                        ValidationError(
+                            code=AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT,
+                            message=(
+                                f"{AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT}: "
+                                f"profiles.{pname}.chartOfAccounts binds `{col}` which "
+                                f"the `gl_coa` bronze outputSchema does not guarantee. "
+                                f"Extend the gl_coa bronze contract first."
+                            ),
+                            location=f"profiles/{pname}/chartOfAccounts",
+                        )
+                    )
+    return errors
+
+
 def validate_pack_full(pack: ResolvedPack) -> ValidationReport:
     """Run every validator over the assembled pack; aggregate into a report."""
     report = ValidationReport()
     report.merge_errors(validate_sql_paths(pack))
     report.merge_errors(validate_template_variables(pack))
     report.merge_errors(validate_dag(pack))
+    report.merge_errors(validate_coa_semantic_roles(pack))
     # AIDPF-2080 is WARN-only.
     report.warnings.extend(validate_bronze_pvo_catalog(pack))
     for dashboard in pack.dashboards.values():

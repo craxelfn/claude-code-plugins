@@ -209,6 +209,16 @@ def validate(ctx: click.Context) -> None:
     help="JSON file scripting multi-match resolutions (feature #3 / CI use).",
 )
 @click.option(
+    "--accept-coa-convention", is_flag=True,
+    help=(
+        "Accept the pack's conventional COA role->segment default as a deliberate "
+        "convention (records `defaulted_convention`). Required for a non-interactive "
+        "run with no explicit profile.chartOfAccounts; otherwise the COA semantic-role "
+        "resolver fails closed (AIDPF-2013). Also upgrades a legacy back-derived pin "
+        "from `legacy_unverified` to operator-confirmed."
+    ),
+)
+@click.option(
     "--skip-preonboarding-probes", is_flag=True,
     help=(
         "Skip BICC / AIDP pre-onboarding probes; useful for --refresh after initial "
@@ -261,6 +271,7 @@ def bootstrap(
     refresh: bool,
     operator: str | None,
     non_interactive: bool,
+    accept_coa_convention: bool,
     resolutions_path: Path | None,
     skip_preonboarding_probes: bool,
     dispatch_mode: str,
@@ -279,6 +290,7 @@ def bootstrap(
         refresh=refresh,
         operator=operator,
         non_interactive=non_interactive,
+        accept_coa_convention=accept_coa_convention,
         resolutions_path=resolutions_path,
         skip_preonboarding_probes=skip_preonboarding_probes,
         dispatch_mode=dispatch_mode,

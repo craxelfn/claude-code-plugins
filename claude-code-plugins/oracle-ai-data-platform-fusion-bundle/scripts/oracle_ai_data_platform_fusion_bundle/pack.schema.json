@@ -29,7 +29,82 @@
     },
     "ChartOfAccountsProfile": {
       "additionalProperties": false,
-      "description": "Default COA segment role mapping. Overridden per tenant in profiles/<tenant>.yaml.",
+      "description": "COA segment role->column mapping for a tenant.\n\nTwo shapes are accepted:\n\n* **Flat / legacy** -- ``balancingSegment`` / ``costCenterSegment`` /\n  ``naturalAccountSegment`` directly on this object (the pre-feature pack\n  default shape, kept back-compat-parseable).\n* **Nested** -- ``default`` (a :class:`CoaRoleMapping`) plus optional\n  per-chart ``byChart`` arms keyed by ``CodeCombinationChartOfAccountsId``\n  (the multi-COA serving shape).\n\nThe flat and nested ``default`` shapes are mutually exclusive (declaring\nboth is an error). Use :meth:`resolved_default` to read the effective\ndefault regardless of which shape was authored.",
+      "properties": {
+        "balancingSegment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Balancingsegment"
+        },
+        "byChart": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/CoaRoleMapping"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bychart"
+        },
+        "costCenterSegment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Costcentersegment"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoaRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "naturalAccountSegment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Naturalaccountsegment"
+        },
+        "singletonAccepted": {
+          "default": false,
+          "title": "Singletonaccepted",
+          "type": "boolean"
+        }
+      },
+      "title": "ChartOfAccountsProfile",
+      "type": "object"
+    },
+    "CoaRoleMapping": {
+      "additionalProperties": false,
+      "description": "One chart's COA role -> physical-column-name binding.\n\nValues are physical column names (e.g. ``CodeCombinationSegment4``), not\ninteger positions -- so the binding survives non-conventional column\nnaming and can be existence-validated against the bronze contract.",
       "properties": {
         "balancingSegment": {
           "title": "Balancingsegment",
@@ -49,7 +124,7 @@
         "costCenterSegment",
         "naturalAccountSegment"
       ],
-      "title": "ChartOfAccountsProfile",
+      "title": "CoaRoleMapping",
       "type": "object"
     },
     "ColumnAlias": {
@@ -72,6 +147,27 @@
           "default": true,
           "title": "Required",
           "type": "boolean"
+        },
+        "resolution": {
+          "default": "columnExistence",
+          "enum": [
+            "columnExistence",
+            "semanticRole"
+          ],
+          "title": "Resolution",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
         }
       },
       "required": [
