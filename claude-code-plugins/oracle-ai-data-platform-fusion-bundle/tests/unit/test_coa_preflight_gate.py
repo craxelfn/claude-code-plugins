@@ -118,3 +118,72 @@ def test_multi_coa_with_singleton_accepted_passes() -> None:
         spark, _dim_account_node(pack), pack, _profile(coa), _ctx()
     )
     assert errs == []
+
+
+# --- M3: $coa.* union existence + byChart completeness ----------------------
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.node_preflight import (  # noqa: E402
+    preflight_node,
+)
+
+BYCHART_COA = {
+    "default": SINGLETON_COA["default"],
+    "byChart": {
+        "101": SINGLETON_COA["default"],
+        "5023": {
+            "balancingSegment": "CodeCombinationSegment4",
+            "costCenterSegment": "CodeCombinationSegment2",
+            "naturalAccountSegment": "CodeCombinationSegment5",
+        },
+    },
+}
+
+
+def test_required_columns_union_missing_arm_column_blocks_preflight() -> None:
+    """A byChart arm referencing Segment4, absent from landed gl_coa, blocks
+    preflight via the $coa.* union (M3 required addition #1)."""
+    pack = load_pack(PACK_ROOT)
+    # gl_coa fixture WITHOUT Segment4/5 (arm 5023's columns).
+    cols = [c for c in GL_COA_COLUMNS if c not in ("CodeCombinationSegment4", "CodeCombinationSegment5")]
+    spark = MagicMock()
+
+    def _sql(query: str):
+        df = MagicMock()
+        q = " ".join(query.split())
+        if q.startswith("DESCRIBE TABLE"):
+            df.collect.return_value = [(c, "string", None) for c in cols]
+        elif "GROUP BY CAST(CodeCombinationChartOfAccountsId AS STRING)" in q:
+            df.collect.return_value = [("101", 15000), ("5023", 8000)]
+        else:
+            df.collect.return_value = [(500, 0)]
+        return df
+
+    spark.sql.side_effect = _sql
+    report = preflight_node(
+        spark, _dim_account_node(pack), pack, _profile(BYCHART_COA), _ctx()
+    )
+    assert not report.ok
+    assert any(e.code == "AIDPF-2042" for e in report.errors)
+
+
+def test_byChart_completeness_unmapped_chart_fails() -> None:
+    """A present active chart with no byChart arm fails closed (L3.4)."""
+    pack = load_pack(PACK_ROOT)
+    # byChart maps 101 + 5023, but live gl_coa also has unmapped chart 999.
+    spark = _fake_spark({"101": 15000, "5023": 8000, "999": 4000})
+    errs = _check_coa_gate(
+        spark, _dim_account_node(pack), pack, _profile(BYCHART_COA), _ctx()
+    )
+    assert any(e.code == "AIDPF-2018" for e in errs)
+    assert any("999" in e.message for e in errs)
+
+
+def test_byChart_covering_all_active_charts_passes() -> None:
+    """Remediation end state: byChart maps every active chart -> gate passes
+    (the multi-COA block is resolved by authoring byChart, not --accept)."""
+    pack = load_pack(PACK_ROOT)
+    spark = _fake_spark({"101": 15000, "5023": 8000})
+    errs = _check_coa_gate(
+        spark, _dim_account_node(pack), pack, _profile(BYCHART_COA), _ctx()
+    )
+    assert errs == [], [e.message for e in errs]

@@ -413,12 +413,15 @@ def _substitute_token(
             primary_source=primary_source,
         )
 
+    if token.startswith("coa."):
+        return _render_coa_role(token[len("coa."):], profile=profile, params=params)
+
     # 4. Unknown token.
     raise UnknownTokenError(
         f"{AIDPF_5002_UNKNOWN_TOKEN}: unknown template token {{{{ {token} }}}}. "
         f"Allowed: catalog, bronze_schema, silver_schema, gold_schema, "
         f"run_id_literal, watermark_predicate, snapshot_date, "
-        f"profile.<key>, column.<name>, semantic.<name>."
+        f"profile.<key>, column.<name>, semantic.<name>, coa.<role>."
     )
 
 
@@ -615,6 +618,78 @@ def _render_profile_lookup(
     param_name = f"profile_{_sanitise_param_segment(dotted_key)}"
     params[param_name] = value
     return f":{param_name}"
+
+
+_COA_ROLE_FIELD = {
+    "balancing": "balancingSegment",
+    "cost_center": "costCenterSegment",
+    "natural_account": "naturalAccountSegment",
+}
+
+# Fusion chart_of_accounts_id values are numeric surrogate ids. We require keys
+# to match this shape AND reject any quote/comment/control char defensively.
+_COA_CHART_ID_RE = re.compile(r"^[0-9]{1,18}$")
+_COA_DISCRIMINANT_COLUMN = "CodeCombinationChartOfAccountsId"
+
+
+def _render_coa_role(role: str, *, profile: TenantProfile, params: dict[str, Any]) -> str:
+    """Render ``{{ coa.<role> }}`` from ``profile.profile['chartOfAccounts']``.
+
+    Single-COA (``default`` only) renders a bare, identifier-checked column.
+    Multi-COA (``byChart`` present) renders a per-row CASE keyed by the BRONZE
+    discriminant ``CodeCombinationChartOfAccountsId``; the WHEN chart-id values
+    are PARAMETERIZED (``:coa_chart_<i>``), never inlined — the renderer's
+    untrusted-profile-value contract. THEN columns are identifier-checked; the
+    ELSE arm is a static ``raise_error`` literal. Arms are sorted by chart-id
+    so the rendered text + params are deterministic (stable plan-hash).
+    """
+    field = _COA_ROLE_FIELD.get(role)
+    if field is None:
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: unknown COA role {{{{ coa.{role} }}}}. "
+            f"Known roles: {sorted(_COA_ROLE_FIELD)!r}."
+        )
+    coa = (profile.profile or {}).get("chartOfAccounts")
+    if not isinstance(coa, dict):
+        raise UnresolvedVariationPointError(
+            f"{AIDPF_5003_UNRESOLVED_VARIATION}: {{{{ coa.{role} }}}} referenced but the "
+            f"active profile has no `chartOfAccounts`. Run bootstrap to resolve COA roles."
+        )
+
+    default_block = coa.get("default", coa)
+    by_chart = coa.get("byChart") or {}
+
+    def _col(block: dict) -> str:
+        val = block.get(field)
+        if not isinstance(val, str):
+            raise UnresolvedVariationPointError(
+                f"{AIDPF_5003_UNRESOLVED_VARIATION}: chartOfAccounts mapping is missing "
+                f"{field!r} for role {role!r}."
+            )
+        return _check_identifier(val, source=f"{{{{ coa.{role} }}}}")
+
+    if not by_chart:
+        # Single-COA: bare column (identical to {{ column.coa_* }} behaviour).
+        return _col(default_block)
+
+    # Multi-COA: deterministic CASE with parameterized chart-id WHEN values.
+    default_col = _col(default_block)
+    whens: list[str] = []
+    for i, chart_id in enumerate(sorted(by_chart.keys())):
+        if not _COA_CHART_ID_RE.match(str(chart_id)):
+            raise UnresolvedVariationPointError(
+                f"{AIDPF_5003_UNRESOLVED_VARIATION}: byChart key {chart_id!r} is not a "
+                f"valid numeric chart_of_accounts_id; refusing to render."
+            )
+        col = _col(by_chart[chart_id])
+        param = f"coa_{role}_chart_{i}"
+        params[param] = str(chart_id)
+        whens.append(f"WHEN :{param} THEN {col}")
+    whens_sql = " ".join(whens)
+    return (
+        f"CASE CAST({_COA_DISCRIMINANT_COLUMN} AS STRING) {whens_sql} "
+        f"ELSE raise_error('unmapped chart_of_accounts_id for role {role}') END"
+    )
 
 
 def _render_column_lookup(name: str, profile: TenantProfile) -> str:

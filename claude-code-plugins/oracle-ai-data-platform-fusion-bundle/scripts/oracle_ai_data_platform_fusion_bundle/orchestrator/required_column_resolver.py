@@ -41,6 +41,38 @@ _COLUMN_REF_PREFIX = "$column."
 duplicated here so the run-level gates don't import the per-node
 preflight module (which has heavier Spark imports)."""
 
+_COA_REF_PREFIX = "$coa."
+"""A ``$coa.<role>`` reference expands to the UNION of that COA role's column
+across ``profile.chartOfAccounts.default`` + every ``byChart`` arm. The union
+(not a single column) is what the run-level / preflight gates must validate,
+because the rendered ``{{ coa.<role> }}`` CASE can reference any arm's column."""
+
+_COA_ROLE_FIELD = {
+    "balancing": "balancingSegment",
+    "cost_center": "costCenterSegment",
+    "natural_account": "naturalAccountSegment",
+}
+
+
+def coa_role_union(role: str, tenant_profile: "TenantProfile | None") -> set[str]:
+    """Union of physical columns bound to ``role`` across default + byChart arms."""
+    if tenant_profile is None:
+        return set()
+    coa = (getattr(tenant_profile, "profile", None) or {}).get("chartOfAccounts")
+    if not isinstance(coa, dict):
+        return set()
+    field = _COA_ROLE_FIELD.get(role)
+    if field is None:
+        return set()
+    cols: set[str] = set()
+    default = coa.get("default", coa)
+    if isinstance(default, dict) and isinstance(default.get(field), str):
+        cols.add(default[field])
+    for arm in (coa.get("byChart") or {}).values():
+        if isinstance(arm, dict) and isinstance(arm.get(field), str):
+            cols.add(arm[field])
+    return cols
+
 
 def resolve_required_column_entries(
     entries: "list[str] | set[str] | tuple[str, ...]",
@@ -93,6 +125,11 @@ def resolve_required_column_entries(
         pack_alias_keys = set(resolved_pack.pack.column_aliases.keys())
 
     for entry in entries:
+        if entry.startswith(_COA_REF_PREFIX):
+            # $coa.<role> → union of that role's columns across all arms.
+            # Drop silently when unresolvable (same rationale as $column.*).
+            resolved.update(coa_role_union(entry[len(_COA_REF_PREFIX):], tenant_profile))
+            continue
         if not entry.startswith(_COLUMN_REF_PREFIX):
             resolved.add(entry)
             continue
@@ -109,4 +146,4 @@ def resolve_required_column_entries(
     return resolved
 
 
-__all__ = ["resolve_required_column_entries"]
+__all__ = ["resolve_required_column_entries", "coa_role_union"]

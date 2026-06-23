@@ -26,8 +26,11 @@ from typing import TYPE_CHECKING
 
 from ..schema.medallion_pack import NodeYaml
 from . import coa_gate
+from .required_column_resolver import coa_role_union
 
 _log = logging.getLogger(__name__)
+
+_COA_REF_PREFIX = "$coa."
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -239,6 +242,39 @@ def _check_required_columns(
         present = _describe_columns(spark, table)
         present_ci = {c.lower(): c for c in present}
         for entry in required_cols:
+            # $coa.<role> expands to the UNION of that role's columns across
+            # default + byChart arms; every one must be present in bronze.
+            if entry.startswith(_COA_REF_PREFIX):
+                union = coa_role_union(entry[len(_COA_REF_PREFIX) :], profile)
+                if not union:
+                    errors.append(
+                        PreflightError(
+                            code=AIDPF_2046_REQUIRED_COLUMN_UNRESOLVED_REF,
+                            source=source_id,
+                            message=(
+                                f"requiredColumns entry {entry!r} could not resolve to "
+                                f"any column: the tenant profile has no "
+                                f"`chartOfAccounts` mapping for this role. Run "
+                                f"`aidp-fusion-bundle bootstrap`."
+                            ),
+                        )
+                    )
+                    continue
+                for col in sorted(union):
+                    if col.lower() not in present_ci:
+                        errors.append(
+                            PreflightError(
+                                code=AIDPF_2042_REQUIRED_COLUMN_MISSING,
+                                source=source_id,
+                                message=(
+                                    f"COA column {col!r} (resolved from {entry!r}) "
+                                    f"missing from live bronze for source {source_id!r} "
+                                    f"(table {table!r}). Extend the gl_coa bronze "
+                                    f"contract / re-seed bronze."
+                                ),
+                            )
+                        )
+                continue
             resolved, ref_error = _resolve_required_column_entry(
                 entry, profile, source_id, pack_alias_keys
             )
@@ -514,7 +550,8 @@ def _coa_data_probes(
     ).collect()
     chart_active = {str(r[0]): int(r[1]) for r in rows if r[0] is not None}
 
-    has_by_chart = bool(coa_raw.get("byChart"))
+    by_chart = coa_raw.get("byChart") or {}
+    has_by_chart = bool(by_chart)
     singleton_accepted = bool(coa_raw.get("singletonAccepted"))
     for code, msg in coa_gate.check_multi_coa(
         chart_active,
@@ -522,6 +559,24 @@ def _coa_data_probes(
         has_by_chart=has_by_chart,
     ):
         errors.append(PreflightError(code=code, source=source_id, message=msg))
+
+    # L3.4 completeness: when byChart is declared, every present (active) chart
+    # must have an arm — an unmapped chart would hit the CASE ELSE raise_error.
+    if has_by_chart:
+        mapped = {str(k) for k in by_chart}
+        for chart_id, n in chart_active.items():
+            if n >= coa_gate.MULTI_COA_MIN_ACTIVE_ROWS and chart_id not in mapped:
+                errors.append(
+                    PreflightError(
+                        code=coa_gate.AIDPF_2018_MULTI_COA_UNCONFIGURED,
+                        source=source_id,
+                        message=(
+                            f"chart_of_accounts_id {chart_id!r} has active gl_coa rows "
+                            f"but no `chartOfAccounts.byChart` arm. Declare it (the "
+                            f"rendered CASE would otherwise raise at runtime)."
+                        ),
+                    )
+                )
 
     # Tier B per chart: natural-account ambiguity using that chart's NA column.
     for chart_id, active_rows in chart_active.items():

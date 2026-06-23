@@ -211,6 +211,22 @@ def validate_template_variables(pack: ResolvedPack) -> list[ValidationError]:
                             )
                         )
                     continue
+                if head == "coa":
+                    role = parts[1] if len(parts) > 1 else ""
+                    if role not in {"balancing", "cost_center", "natural_account"}:
+                        errors.append(
+                            ValidationError(
+                                code=AIDPF_5003_UNDECLARED_VARIATION_POINT,
+                                message=(
+                                    f"{AIDPF_5003_UNDECLARED_VARIATION_POINT}: node "
+                                    f"`{qualified}` references `{{{{ {token} }}}}` but "
+                                    f"`{role}` is not a known COA role. Known: "
+                                    f"balancing, cost_center, natural_account."
+                                ),
+                                location=qualified,
+                            )
+                        )
+                    continue
                 if head == "semantic":
                     name = parts[1] if len(parts) > 1 else ""
                     if name not in declared_semantics:
