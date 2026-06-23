@@ -219,6 +219,15 @@ def validate(ctx: click.Context) -> None:
     ),
 )
 @click.option(
+    "--accept-singleton-coa", is_flag=True,
+    help=(
+        "Assert all active charts of accounts share the COA role->segment layout. "
+        "Persists profile.chartOfAccounts.singletonAccepted so the multi-COA preflight "
+        "gate (AIDPF-2018) passes for a singleton mapping. Use only when every chart "
+        "genuinely uses the same segment positions."
+    ),
+)
+@click.option(
     "--skip-preonboarding-probes", is_flag=True,
     help=(
         "Skip BICC / AIDP pre-onboarding probes; useful for --refresh after initial "
@@ -272,6 +281,7 @@ def bootstrap(
     operator: str | None,
     non_interactive: bool,
     accept_coa_convention: bool,
+    accept_singleton_coa: bool,
     resolutions_path: Path | None,
     skip_preonboarding_probes: bool,
     dispatch_mode: str,
@@ -291,6 +301,7 @@ def bootstrap(
         operator=operator,
         non_interactive=non_interactive,
         accept_coa_convention=accept_coa_convention,
+        accept_singleton_coa=accept_singleton_coa,
         resolutions_path=resolutions_path,
         skip_preonboarding_probes=skip_preonboarding_probes,
         dispatch_mode=dispatch_mode,

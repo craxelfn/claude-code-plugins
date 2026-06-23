@@ -160,6 +160,24 @@ def test_explicit_config_conflict_with_pin_fails_closed_without_refresh() -> Non
         )
 
 
+def test_accept_singleton_persists_flag() -> None:
+    res = resolve_coa_roles(
+        CoaResolutionInput(
+            semantic_role_aliases=ALIASES,
+            explicit_config=FLAT_CONFIG,
+            accept_singleton=True,
+        )
+    )
+    assert res.chart_of_accounts.get("singletonAccepted") is True
+
+
+def test_singleton_not_set_by_default() -> None:
+    res = resolve_coa_roles(
+        CoaResolutionInput(semantic_role_aliases=ALIASES, explicit_config=FLAT_CONFIG)
+    )
+    assert "singletonAccepted" not in res.chart_of_accounts
+
+
 def test_byChart_carried_forward_from_config() -> None:
     cfg = dict(FLAT_CONFIG)
     cfg["byChart"] = {

@@ -140,6 +140,12 @@ class VariationPhaseOptions:
     ``profile.chartOfAccounts`` config fails closed (AIDPF-2013), and a legacy
     back-derived pin is recorded as ``legacy_unverified`` with a warning."""
 
+    accept_singleton_coa: bool = False
+    """``--accept-singleton-coa``: operator asserts all active charts of accounts
+    share the COA role->segment layout. Persists
+    ``profile.chartOfAccounts.singletonAccepted: true`` so the multi-COA preflight
+    gate (AIDPF-2018) passes for a singleton mapping."""
+
     # --- Cluster-side bootstrap dispatcher knobs ---
     dispatch_mode: Literal["cluster", "local"] = "local"
     """``"local"`` (default in this dataclass to keep existing test
@@ -1063,6 +1069,7 @@ def _apply_coa_resolution(
         pack_default=_pack_coa_default(pack, tenant_name),
         interactive=not options.non_interactive,
         accept_convention=options.accept_coa_convention,
+        accept_singleton=options.accept_singleton_coa,
         is_refresh=options.refresh,
     )
     result = resolve_coa_roles(inp)

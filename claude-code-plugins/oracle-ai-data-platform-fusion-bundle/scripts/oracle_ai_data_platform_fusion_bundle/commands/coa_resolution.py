@@ -78,6 +78,7 @@ class CoaResolutionInput:
 
     interactive: bool = False
     accept_convention: bool = False
+    accept_singleton: bool = False
     is_refresh: bool = False
 
 
@@ -242,6 +243,14 @@ def resolve_coa_roles(inp: CoaResolutionInput) -> CoaResolutionResult:
         if src_block and "byChart" in src_block:
             chart_of_accounts["byChart"] = src_block["byChart"]
             break
+
+    # singletonAccepted: set by --accept-singleton-coa, or carried forward.
+    existing_singleton = any(
+        bool((b or {}).get("singletonAccepted"))
+        for b in (inp.explicit_config, inp.existing_chart_of_accounts)
+    )
+    if inp.accept_singleton or existing_singleton:
+        chart_of_accounts["singletonAccepted"] = True
 
     return CoaResolutionResult(
         column_map=column_map,

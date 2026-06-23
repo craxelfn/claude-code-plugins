@@ -20,10 +20,14 @@ gates only; SQL rendering and execution stay in ``sql_runner``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..schema.medallion_pack import NodeYaml
+from . import coa_gate
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -171,6 +175,11 @@ def preflight_node(
     #    much later in execute_node).
     if _is_replace_partition_strategy(node):
         errors.extend(_check_partition_columns(spark, node, ctx))
+
+    # 4. COA semantic-role plausibility + multi-COA gate (feature
+    #    coa-role-segment-resolution M2). No-ops unless the pack declares COA
+    #    semanticRole aliases on a bronze source this node consumes.
+    errors.extend(_check_coa_gate(spark, node, pack, profile, ctx))
 
     return PreflightReport(errors=tuple(errors))
 
@@ -372,6 +381,182 @@ def _check_partition_columns(
     # closed here — just record a soft warning that the runtime check
     # will repeat once the target materialises.
     return []
+
+
+_COA_DISCRIMINANT = "CodeCombinationChartOfAccountsId"
+_COA_ACCOUNT_TYPE = "CodeCombinationAccountType"
+_COA_ENABLED_FLAG = "CodeCombinationEnabledFlag"
+
+
+def _coa_role_aliases(pack: "ResolvedPack") -> dict[str, tuple[str, str]]:
+    """Return {alias_name: (role_token, applies_to_source)} for COA semanticRole
+    aliases declared in the pack. Empty when the pack has none."""
+    out: dict[str, tuple[str, str]] = {}
+    for name, spec in pack.pack.column_aliases.items():
+        resolution = getattr(spec, "resolution", "columnExistence")
+        role = getattr(spec, "role", None)
+        if resolution != "semanticRole" or not isinstance(role, str):
+            continue
+        applies_to = getattr(spec, "appliesTo", "")
+        source = applies_to.split(".", 1)[1] if "." in applies_to else applies_to
+        out[name] = (role, source)
+    return out
+
+
+def _node_consumes_source(node: NodeYaml, source_id: str) -> bool:
+    deps = getattr(node, "depends_on", None)
+    if deps is None:
+        return False
+    for dep in (getattr(deps, "bronze", None) or []):
+        if dep.id == source_id:
+            return True
+    return False
+
+
+def _check_coa_gate(
+    spark: "SparkSession",
+    node: NodeYaml,
+    pack: "ResolvedPack",  # noqa: F821
+    profile: "TenantProfile",  # noqa: F821
+    ctx: "RunContext",
+) -> list[PreflightError]:
+    """COA plausibility + multi-COA gate. Validate-only (no writes, no render).
+
+    Structural checks (Tier A existence-union + per-arm distinctness) are hard
+    and use ``DESCRIBE``. The multi-COA detection and Tier B natural-account
+    probes run live ``gl_coa`` data queries; a probe that cannot execute (e.g.
+    a constrained session) downgrades to a logged warning rather than crashing
+    this validate-only gate. A probe that DOES run and finds a violation
+    fails closed.
+    """
+    aliases = _coa_role_aliases(pack)
+    if not aliases:
+        return []
+    # All COA roles in the starter share one source (gl_coa). Group by source.
+    sources = {src for (_role, src) in aliases.values()}
+    coa_raw = (profile.profile or {}).get("chartOfAccounts")
+    if not isinstance(coa_raw, dict):
+        return []  # no COA config to validate (M1 fails closed earlier)
+
+    errors: list[PreflightError] = []
+    for source_id in sources:
+        if not _node_consumes_source(node, source_id):
+            continue
+        table = ctx.bronze_table_for_source.get(source_id)
+        if table is None:
+            continue
+
+        arms = _coa_arms(coa_raw)
+        # Tier A — distinctness (pure).
+        for code, msg in coa_gate.check_distinctness(arms):
+            errors.append(PreflightError(code=code, source=source_id, message=msg))
+        # Tier A — existence union (DESCRIBE).
+        referenced = {c for m in arms.values() for c in m.values()}
+        present = _describe_columns(spark, table)
+        for code, msg in coa_gate.check_existence_union(referenced, present):
+            errors.append(PreflightError(code=code, source=source_id, message=msg))
+
+        # Data probes (best-effort): multi-COA + Tier B natural-account.
+        try:
+            errors.extend(
+                _coa_data_probes(spark, table, source_id, coa_raw, arms)
+            )
+        except Exception as exc:  # pragma: no cover — constrained-session guard
+            _log.warning(
+                "COA data probe on %s skipped (%s); structural checks still applied.",
+                table,
+                exc,
+            )
+    return errors
+
+
+def _coa_arms(coa_raw: dict) -> dict[str, dict[str, str]]:
+    """Normalise a profile chartOfAccounts dict to {arm_id: {role_token: col}}."""
+
+    def _mapping(block: dict) -> dict[str, str]:
+        return {
+            role: block[alias]
+            for role, alias in (
+                ("coa.balancing", "balancingSegment"),
+                ("coa.cost_center", "costCenterSegment"),
+                ("coa.natural_account", "naturalAccountSegment"),
+            )
+            if alias in block and block[alias] is not None
+        }
+
+    arms: dict[str, dict[str, str]] = {}
+    default_block = coa_raw.get("default", coa_raw)
+    default = _mapping(default_block)
+    if default:
+        arms["default"] = default
+    for chart_id, block in (coa_raw.get("byChart") or {}).items():
+        arms[str(chart_id)] = _mapping(block)
+    return arms
+
+
+def _coa_data_probes(
+    spark: "SparkSession",
+    table: str,
+    source_id: str,
+    coa_raw: dict,
+    arms: dict[str, dict[str, str]],
+) -> list[PreflightError]:
+    """Run the multi-COA + Tier B natural-account live probes against gl_coa."""
+    errors: list[PreflightError] = []
+
+    # Multi-COA: active rows per chart (enabled only).
+    rows = spark.sql(
+        f"SELECT CAST({_COA_DISCRIMINANT} AS STRING) AS chart_id, COUNT(*) AS n "
+        f"FROM {table} "
+        f"WHERE {_COA_DISCRIMINANT} IS NOT NULL "
+        f"AND COALESCE({_COA_ENABLED_FLAG}, 'Y') <> 'N' "
+        f"GROUP BY CAST({_COA_DISCRIMINANT} AS STRING)"
+    ).collect()
+    chart_active = {str(r[0]): int(r[1]) for r in rows if r[0] is not None}
+
+    has_by_chart = bool(coa_raw.get("byChart"))
+    singleton_accepted = bool(coa_raw.get("singletonAccepted"))
+    for code, msg in coa_gate.check_multi_coa(
+        chart_active,
+        singleton_accepted=singleton_accepted,
+        has_by_chart=has_by_chart,
+    ):
+        errors.append(PreflightError(code=code, source=source_id, message=msg))
+
+    # Tier B per chart: natural-account ambiguity using that chart's NA column.
+    for chart_id, active_rows in chart_active.items():
+        mapping = arms.get(chart_id) or arms.get("default") or {}
+        na_col = mapping.get("coa.natural_account")
+        if not na_col:
+            continue
+        agg = spark.sql(
+            f"SELECT "
+            f"COUNT(*) AS total, "
+            f"SUM(CASE WHEN t > 1 THEN 1 ELSE 0 END) AS ambiguous "
+            f"FROM (SELECT {na_col} AS na, "
+            f"COUNT(DISTINCT {_COA_ACCOUNT_TYPE}) AS t "
+            f"FROM {table} "
+            f"WHERE CAST({_COA_DISCRIMINANT} AS STRING) = '{chart_id}' "
+            f"AND {na_col} IS NOT NULL "
+            f"AND COALESCE({_COA_ENABLED_FLAG}, 'Y') <> 'N' "
+            f"GROUP BY {na_col})"
+        ).collect()
+        if not agg:
+            continue
+        total = int(agg[0][0] or 0)
+        ambiguous = int(agg[0][1] or 0)
+        probe = coa_gate.ChartProbe(
+            chart_id=chart_id,
+            active_row_count=active_rows,
+            natural_account_distinct=total,
+            natural_account_ambiguous=ambiguous,
+        )
+        res = coa_gate.check_natural_account(probe)
+        for code, msg in res.errors:
+            errors.append(PreflightError(code=code, source=source_id, message=msg))
+        for warning in res.warnings:
+            _log.warning("COA gate: %s", warning)
+    return errors
 
 
 def _describe_columns(spark: "SparkSession", table: str) -> set[str]:
