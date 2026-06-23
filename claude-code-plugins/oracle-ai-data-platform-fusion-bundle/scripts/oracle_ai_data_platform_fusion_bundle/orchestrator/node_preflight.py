@@ -21,6 +21,7 @@ gates only; SQL rendering and execution stay in ``sql_runner``.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,14 @@ from .required_column_resolver import coa_role_union
 _log = logging.getLogger(__name__)
 
 _COA_REF_PREFIX = "$coa."
+
+AIDPF_5001_IDENTIFIER_ALLOWLIST = "AIDPF-5001"
+"""A COA role column from the tenant profile fails the SQL identifier allowlist.
+Mirrors ``sql_renderer._check_identifier`` so a bad/hand-edited
+``profile.chartOfAccounts`` value is blocked BEFORE it reaches probe SQL."""
+
+# Same allowlist as orchestrator.sql_renderer._IDENTIFIER_RE.
+_COA_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -483,6 +492,31 @@ def _check_coa_gate(
             continue
 
         arms = _coa_arms(coa_raw)
+        # Tier A.0 — identifier allowlist (HARD, FIRST). The tenant profile's
+        # chartOfAccounts is free-form and hand-editable; pack validation does
+        # NOT cover it. Every COA role column is interpolated into the Tier B
+        # probe SQL (and rendered later), so validate each against the SAME
+        # allowlist the renderer uses BEFORE any SQL is constructed. A bad value
+        # (injection or just an invalid identifier) blocks here — we do NOT run
+        # the data probes when any identifier is invalid.
+        ident_ok = True
+        for arm_id, mapping in arms.items():
+            for role, col in mapping.items():
+                if not _COA_IDENT_RE.match(col or ""):
+                    ident_ok = False
+                    errors.append(
+                        PreflightError(
+                            code=AIDPF_5001_IDENTIFIER_ALLOWLIST,
+                            source=source_id,
+                            message=(
+                                f"COA mapping for arm {arm_id!r} role {role!r} resolves "
+                                f"to {col!r}, which fails the identifier allowlist "
+                                f"`^[A-Za-z_][A-Za-z0-9_]{{0,62}}$`. Fix "
+                                f"`profile.chartOfAccounts` — a COA role must bind a "
+                                f"plain column name."
+                            ),
+                        )
+                    )
         # Tier A — distinctness (pure).
         for code, msg in coa_gate.check_distinctness(arms):
             errors.append(PreflightError(code=code, source=source_id, message=msg))
@@ -492,7 +526,10 @@ def _check_coa_gate(
         for code, msg in coa_gate.check_existence_union(referenced, present):
             errors.append(PreflightError(code=code, source=source_id, message=msg))
 
-        # Data probes (best-effort): multi-COA + Tier B natural-account.
+        # Data probes (multi-COA + Tier B): interpolate COA columns into SQL, so
+        # ONLY run when every identifier passed the allowlist above.
+        if not ident_ok:
+            continue
         try:
             errors.extend(
                 _coa_data_probes(spark, table, source_id, coa_raw, arms)

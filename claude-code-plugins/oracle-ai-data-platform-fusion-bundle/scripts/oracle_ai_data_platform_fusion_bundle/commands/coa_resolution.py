@@ -238,10 +238,31 @@ def resolve_coa_roles(inp: CoaResolutionInput) -> CoaResolutionResult:
             "naturalAccountSegment": mapping["coa.natural_account"],
         }
     }
-    # Carry forward any byChart arms from an explicit/existing source verbatim.
+    # Carry forward any byChart arms from an explicit/existing source verbatim,
+    # AND record per-chart/per-role provenance for them (honest provenance must
+    # cover the chart-specific bindings, not only the default). The byChart arms
+    # came from the same source/mechanism as the default mapping above.
     for src_block in (inp.explicit_config, inp.existing_chart_of_accounts):
         if src_block and "byChart" in src_block:
-            chart_of_accounts["byChart"] = src_block["byChart"]
+            by_chart = src_block["byChart"]
+            chart_of_accounts["byChart"] = by_chart
+            by_chart_prov: dict = {}
+            for chart_id, arm in (by_chart or {}).items():
+                arm_prov: dict = {}
+                for role, alias in (
+                    ("balancing", "balancingSegment"),
+                    ("cost_center", "costCenterSegment"),
+                    ("natural_account", "naturalAccountSegment"),
+                ):
+                    col = (arm or {}).get(alias)
+                    if col is not None:
+                        arm_prov[role] = {
+                            "column": col,
+                            "mechanism": mechanism,
+                            "source": source,
+                        }
+                by_chart_prov[str(chart_id)] = arm_prov
+            role_provenance["byChart"] = by_chart_prov
             break
 
     # singletonAccepted: set by --accept-singleton-coa, or carried forward.

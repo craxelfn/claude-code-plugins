@@ -178,6 +178,36 @@ def test_byChart_completeness_unmapped_chart_fails() -> None:
     assert any("999" in e.message for e in errs)
 
 
+def test_malicious_coa_column_blocks_before_tier_b_probe() -> None:
+    """A hand-edited tenant profile with an injection/invalid naturalAccountSegment
+    must fail the identifier allowlist BEFORE any Tier B probe SQL is built."""
+    pack = load_pack(PACK_ROOT)
+    sql_calls: list[str] = []
+    spark = MagicMock()
+
+    def _sql(query: str):
+        sql_calls.append(query)
+        df = MagicMock()
+        df.collect.return_value = [(c, "string", None) for c in GL_COA_COLUMNS]
+        return df
+
+    spark.sql.side_effect = _sql
+    bad = {
+        "default": {
+            "balancingSegment": "CodeCombinationSegment1",
+            "costCenterSegment": "CodeCombinationSegment2",
+            "naturalAccountSegment": "CodeCombinationSegment3) FROM x; DROP TABLE y--",
+        }
+    }
+    errs = _check_coa_gate(
+        spark, _dim_account_node(pack), pack, _profile(bad), _ctx()
+    )
+    assert any(e.code == "AIDPF-5001" for e in errs), [e.code for e in errs]
+    # No Tier B aggregate (the GROUP BY <na_col> probe) was ever constructed.
+    assert not any("GROUP BY" in q and "DROP TABLE" in q for q in sql_calls)
+    assert not any("DROP TABLE" in q for q in sql_calls)
+
+
 def test_byChart_covering_all_active_charts_passes() -> None:
     """Remediation end state: byChart maps every active chart -> gate passes
     (the multi-COA block is resolved by authoring byChart, not --accept)."""

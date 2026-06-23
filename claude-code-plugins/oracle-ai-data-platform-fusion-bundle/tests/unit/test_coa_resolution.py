@@ -192,3 +192,33 @@ def test_byChart_carried_forward_from_config() -> None:
     )
     assert "byChart" in res.chart_of_accounts
     assert "5023" in res.chart_of_accounts["byChart"]
+
+
+def test_per_chart_provenance_recorded_for_every_arm() -> None:
+    """Multi-COA: provenance must cover each chart/role binding, not just the
+    default — otherwise chart-specific acceptance is unprovable."""
+    cfg = dict(FLAT_CONFIG)
+    cfg["byChart"] = {
+        "101": {
+            "balancingSegment": "CodeCombinationSegment1",
+            "costCenterSegment": "CodeCombinationSegment2",
+            "naturalAccountSegment": "CodeCombinationSegment3",
+        },
+        "5023": {
+            "balancingSegment": "CodeCombinationSegment4",
+            "costCenterSegment": "CodeCombinationSegment2",
+            "naturalAccountSegment": "CodeCombinationSegment5",
+        },
+    }
+    res = resolve_coa_roles(
+        CoaResolutionInput(semantic_role_aliases=ALIASES, explicit_config=cfg)
+    )
+    by_chart = res.role_provenance["byChart"]
+    assert set(by_chart) == {"101", "5023"}
+    # Each chart records per-role provenance with column + mechanism + source.
+    assert by_chart["5023"]["natural_account"]["column"] == "CodeCombinationSegment5"
+    assert by_chart["5023"]["natural_account"]["mechanism"] == "config_resolved"
+    assert by_chart["101"]["balancing"]["column"] == "CodeCombinationSegment1"
+    for arm in by_chart.values():
+        for role_prov in arm.values():
+            assert role_prov["mechanism"] != "auto_resolve"
