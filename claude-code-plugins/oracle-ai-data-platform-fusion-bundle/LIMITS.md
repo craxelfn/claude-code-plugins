@@ -402,10 +402,20 @@ correct for conventional charts, silently **wrong** for a non-conventional tenan
   `Segment1–6`. `content-pack validate` rejects a COA role modeled as a bare
   existence alias (AIDPF-2014) or bound out-of-contract (AIDPF-2015).
 
+**Deep COA (Segment7–30):** supported via a **tenant overlay** (no starter-pack
+fork) — extend the COA candidate domain (`inherit` + deep segments) **and** the
+`gl_coa` bronze `outputSchema` together, then pin `profile.chartOfAccounts`; see
+`examples/coa-deep-overlay/` and `/medallion-author coa-depth`. Candidates capped at
+`CodeCombinationSegment(1–30)` (AIDPF-2019); a deep binding without the matching
+`outputSchema` extension is rejected (AIDPF-2015). `gl_coa.requiredColumns` extension
+is deferred to `[[bronze-required-columns-overlay]]` (not load-bearing — BICC lands the
+full PVO).
+
 **Residual:** balancing↔cost-center swap can't be proven from `gl_coa` data alone
 (needs Fusion flexfield-qualifier metadata — a deferred spike); `byChart` keys are
 discovered from data but role *meaning* is operator/metadata-sourced; gap 1 of
-**P3-L2** (only three of six roles aliased) remains.
+**P3-L2** (only three of six roles aliased) remains; deep segments surface as COA
+*roles* but not as positional `segment_07..30` columns (additive, separate).
 
 ### §Resolved-BronzeTypeOverlay — no overlay path to fix a bronze outputSchema column type
 

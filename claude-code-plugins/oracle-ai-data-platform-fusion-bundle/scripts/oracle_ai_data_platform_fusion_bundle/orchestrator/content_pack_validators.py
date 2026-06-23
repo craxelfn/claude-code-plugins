@@ -48,6 +48,17 @@ AIDPF_2015_COA_BINDING_OUT_OF_CONTRACT = "AIDPF-2015"
 """A COA role candidate / chartOfAccounts mapping names a column the gl_coa
 bronze `outputSchema` does not guarantee."""
 
+AIDPF_2019_COA_SEGMENT_OUT_OF_RANGE = "AIDPF-2019"
+"""A COA role candidate is not a ``CodeCombinationSegment<N>`` with N in 1..30
+(Fusion's GL key-flexfield max). Catches typos like Segment31 / a non-segment
+column before the contract check."""
+
+# Fusion GL key-flexfield supports up to 30 segments. A COA role may only bind
+# CodeCombinationSegment1..CodeCombinationSegment30.
+_COA_SEGMENT_RE = re.compile(
+    r"^CodeCombinationSegment([1-9]|[12][0-9]|30)$", re.IGNORECASE
+)
+
 # Pack alias names conventionally used for COA roles -- a single-candidate
 # existence alias on one of these without `resolution: semanticRole` is the
 # anti-pattern the feature exists to prevent.
@@ -697,6 +708,22 @@ def validate_coa_semantic_roles(pack: ResolvedPack) -> list[ValidationError]:
                 )
             )
             continue
+        # AIDPF-2019: candidate must be a valid COA segment (1..30) -- catches
+        # Segment31+ / non-segment typos before the contract check.
+        for cand in spec.candidates:
+            if not _COA_SEGMENT_RE.match(cand):
+                errors.append(
+                    ValidationError(
+                        code=AIDPF_2019_COA_SEGMENT_OUT_OF_RANGE,
+                        message=(
+                            f"{AIDPF_2019_COA_SEGMENT_OUT_OF_RANGE}: COA role "
+                            f"`{name}` allows candidate `{cand}` which is not a "
+                            f"`CodeCombinationSegment<N>` with N in 1..30 (Fusion GL "
+                            f"flexfield max). Fix the candidate name."
+                        ),
+                        location=f"columnAliases/{name}",
+                    )
+                )
         # AIDPF-2015: candidate (allowed domain) must be within the contract.
         if contract is not None:
             for cand in spec.candidates:

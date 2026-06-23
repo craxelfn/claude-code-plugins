@@ -37,6 +37,30 @@ All notable changes to this project are documented here.
 - New tests: `test_coa_resolution`, `test_coa_gate`, `test_coa_validators`,
   `test_coa_renderer`, `test_coa_preflight_gate` (+ updated bootstrap/render suites).
 
+### Added — COA depth via tenant overlay (Segment7–30)
+- **Tenants with deep COA layouts (role at `CodeCombinationSegment7–30`) are now
+  supported by a tenant overlay — no starter-pack fork.** An overlay extends the
+  COA role candidate domain (`inherit` + deep segments) **and** the `gl_coa` bronze
+  `outputSchema` (`extendColumns`) together; the tenant pins meaning in
+  `profile.chartOfAccounts`; `bootstrap --refresh` derives `resolved.column.coa_*`.
+  Ships `examples/coa-deep-overlay/` as a product sample (+ a profile fragment).
+- **Validator domain cap:** COA role candidates must be `CodeCombinationSegment(1–30)`
+  (Fusion GL flexfield max) — `Segment31`+/non-segment rejected (**AIDPF-2019**);
+  binding a deep segment still requires the overlay to extend `gl_coa.outputSchema`
+  (**AIDPF-2015**), so depth is gated by the contract, not a hardcoded 6.
+- **medallion-author COA-depth mode** (`/medallion-author coa-depth --tenant <t>
+  --segments 7-10`): drafts the coordinated overlay (candidates + `gl_coa.outputSchema`)
+  + a `profile.chartOfAccounts` runbook fragment, from **operator input with no runtime
+  diagnostic** (the AIDPF-2015 trigger writes none). Honest provenance: `trigger:
+  operator_input` + `operatorInputId` (never a faked `diagnosticRunId`);
+  `validate_overlay` now requires `diagnosticRunId` **XOR** `operatorInputId`.
+- **Gate ordering:** a deep segment declared in the extended `outputSchema` but absent
+  from the live PVO fails closed at the **`gl_coa` bronze** source gate (AIDPF-4071),
+  before `dim_account` preflight; the `$coa.*` union existence check (AIDPF-2042) is the
+  silver-side backstop. `gl_coa.requiredColumns` extension is deferred to
+  `bronze-required-columns-overlay` (not load-bearing — the full PVO lands regardless).
+- New tests: `test_coa_depth_overlay`, `test_coa_depth_drafter`.
+
 ### Security & correctness — maintainer review (2026-06-17, PR #4)
 - **SQL-identifier allowlisting at pack-load (AIDPF-2082).** `RefreshIncremental.naturalKey` / `partitionColumns` / `trackedColumns` and `watermark.column` are now validated against `^[A-Za-z_][A-Za-z0-9_]*$` when a pack loads. These names interpolate unquoted into `MERGE ON` / partition / watermark SQL; validation rejects both injection and cryptic Spark parse errors from typos. Defense-in-depth checks were added at the MERGE-helper layer (`_natural_key_join_sql`, `_payload_diff_predicate_sql`), the bronze-extract adapter (live PVO column names), and the state schema-reconcile `ADD COLUMNS` path.
 - **Calendar-date validation (AIDPF-2083).** `CalendarProfile.startDate`/`endDate` must be real ISO-8601 (`YYYY-MM-DD`) dates; `dim_calendar` builder re-validates at the SQL-builder layer so the tenant-override path (which bypasses Pydantic) can't interpolate raw strings into `sequence(DATE'...')`.

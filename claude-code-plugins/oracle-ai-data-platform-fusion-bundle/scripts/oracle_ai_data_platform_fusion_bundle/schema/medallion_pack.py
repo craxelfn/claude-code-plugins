@@ -636,7 +636,20 @@ class PackProvenance(BaseModel):
     diagnostic_run_id: str | None = Field(default=None, alias="diagnosticRunId")
     """The bootstrap run_id whose diagnostic artifacts triggered the
     skill invocation. Threads the audit trail from failure → draft →
-    commit."""
+    commit. Mutually exclusive with ``operator_input_id`` — exactly one
+    identifies how the overlay was triggered."""
+
+    operator_input_id: str | None = Field(default=None, alias="operatorInputId")
+    """Set for overlays drafted from explicit operator input (no runtime
+    diagnostic) — e.g. the COA-depth mode triggered by an ``AIDPF-2015``
+    content-pack-validate failure, which writes no diagnostic artifact. A
+    path-safe synthetic id like ``operator-input-<id>`` (never a fake bootstrap
+    run id). Mutually exclusive with ``diagnostic_run_id``."""
+
+    trigger: str | None = None
+    """How the overlay was triggered: ``"diagnostic"`` (a runtime
+    ``.aidp/diagnostics`` artifact) or ``"operator_input"`` (explicit operator
+    command, no diagnostic)."""
 
     proposals: dict[str, SkillProposalRecord] | None = Field(
         default=None, alias="proposals"

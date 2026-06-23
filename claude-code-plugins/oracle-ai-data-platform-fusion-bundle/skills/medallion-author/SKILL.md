@@ -37,7 +37,10 @@ and never writes profile resolutions directly.
   LLM dependency at runtime. This skill is operator-initiated and runs between
   bootstraps.
 - When the diagnostic artifact is missing — the skill refuses to
-  invent context (no synthesised proposals from thin air).
+  invent context (no synthesised proposals from thin air). **Exception: the
+  COA-depth mode** (below) is explicitly **operator-input driven** and runs with
+  NO diagnostic artifact — its trigger (`AIDPF-2015`, a `content-pack validate`
+  failure) writes none.
 - When `AIDPF-1020` is present — operator-identity gate is unrelated
   to overlay drafting; fix the identity environment first.
 - To author NEW silver/gold nodes (a SQL template the pack doesn't declare).
@@ -140,6 +143,38 @@ approval (it does **not** auto-apply/seed). **Off-limits to both shapes:** grain
 identity change is a **new node id**, not an override. A `requiredColumns` change
 is out of scope (see `bronze-required-columns-overlay`). Type-overlays are
 **bronze-only**; a silver/gold type fix is `overrides: { sql }` or a new mart id.
+
+## COA-depth mode — operator-input (no diagnostic)
+
+For a tenant whose chart of accounts uses COA role segments beyond the starter
+pack's `Segment1–6` (up to `CodeCombinationSegment30`), `content-pack validate`
+rejects a binding to e.g. `Segment10` with **AIDPF-2015** (out of contract) — a
+validate failure that writes **no** `.aidp/diagnostics` artifact. So COA-depth is
+driven by **explicit operator input**, not a diagnostic:
+
+```
+/medallion-author coa-depth --tenant <tenant> --segments 7-10 \
+    [--role natural_account=CodeCombinationSegment10] [--chart <id>=...]
+```
+
+`draft_coa_depth_overlay()` drafts ONE **coordinated** overlay that extends:
+
+1. the three `coa_*` semantic-role **candidate lists** (`inherit` + the deep
+   `CodeCombinationSegment<N>`), re-declaring `resolution: semanticRole` + `role:`
+   (overlay merge keeps the overlay entry's fields; only `candidates` inherit), and
+2. the **`gl_coa` bronze `outputSchema`** (`extendColumns` the same deep segments)
+   — so the binding is contract-backed (no AIDPF-2015 / Tier-A AIDPF-2042).
+
+It does **not** touch `gl_coa.requiredColumns` (out of scope — see
+`bronze-required-columns-overlay`); it surfaces that dependency instead. The skill
+drafts a **profile runbook fragment** for `profile.chartOfAccounts` (operator
+authors the meaning; the skill never writes `resolved.column.coa_*` — bootstrap
+does). Segments are capped 1..30 (Fusion GL flexfield max).
+
+**Provenance (operator-input):** the overlay carries `trigger: operator_input` +
+`operatorInputId: operator-input-<id>` (NOT a faked `diagnosticRunId`) +
+`evidence: { trigger, tenant, segments, roles }`. `validate_overlay` requires
+exactly one of `diagnosticRunId` XOR `operatorInputId`.
 
 ## Required overlay rules
 

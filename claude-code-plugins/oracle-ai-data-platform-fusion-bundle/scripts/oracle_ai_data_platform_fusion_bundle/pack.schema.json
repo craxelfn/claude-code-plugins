@@ -549,6 +549,18 @@
           "default": null,
           "title": "Modelid"
         },
+        "operatorInputId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operatorinputid"
+        },
         "proposals": {
           "anyOf": [
             {
@@ -599,6 +611,18 @@
           ],
           "default": null,
           "title": "Skillversion"
+        },
+        "trigger": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger"
         }
       },
       "title": "PackProvenance",
