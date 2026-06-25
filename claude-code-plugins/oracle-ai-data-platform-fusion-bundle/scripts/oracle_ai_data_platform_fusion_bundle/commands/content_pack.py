@@ -246,14 +246,58 @@ def info_pack(name: str, *, json_output: bool, console) -> int:
 # ---------------------------------------------------------------------------
 
 
-def validate_pack_cli(name: str, *, json_output: bool, console) -> int:
+def validate_pack_cli(
+    name: str, *, json_output: bool, console, profile: str | None = None
+) -> int:
     """Run schema + content validation; surface AIDPF codes.
 
     Resolves the full ``extends:`` chain via ``resolve_overlay_chain`` +
     ``merge_overlay`` before validating, so overlay failures (orphan
     overrides → AIDPF-2001, inherited dashboard / SQL errors, etc.) are
     surfaced to the operator.
+
+    ``profile`` (optional) enables the profile-aware leg of the
+    column-contract gate (AIDPF-2045): ``$column.*`` / ``$coa.*`` consumer
+    demands resolve against the active tenant profile. Accepts either a direct
+    path to a profile YAML or a bare profile name resolved against
+    ``./profiles/<name>.yaml`` in the current bundle. When omitted, validation
+    is profile-less (literal + watermark demands still gate).
     """
+    loaded_profile = None
+    if profile is not None:
+        from ..schema.tenant_profile import (
+            load_tenant_profile,
+            resolve_profile_path,
+        )
+
+        profile_path = Path(profile)
+        if not profile_path.exists():
+            # Bare name → resolve against the current bundle's profiles/ dir.
+            try:
+                profile_path = resolve_profile_path(Path.cwd() / "bundle.yaml", profile)
+            except Exception as exc:  # UnsafePathSegmentError etc.
+                msg = f"AIDPF-1033: could not resolve --profile {profile!r}: {exc}"
+                if json_output:
+                    print(json.dumps({"errors": [{"code": "AIDPF-1033", "message": msg}]}, indent=2))
+                else:
+                    console.print(f"[red]{msg}[/red]")
+                return 2
+        if not profile_path.exists():
+            msg = f"AIDPF-1033: profile YAML not found for --profile {profile!r} (looked at {profile_path})."
+            if json_output:
+                print(json.dumps({"errors": [{"code": "AIDPF-1033", "message": msg}]}, indent=2))
+            else:
+                console.print(f"[red]{msg}[/red]")
+            return 2
+        try:
+            loaded_profile = load_tenant_profile(profile_path)
+        except Exception as exc:
+            if json_output:
+                print(json.dumps({"errors": [{"code": "AIDPF-2000", "message": str(exc)}]}, indent=2))
+            else:
+                console.print(f"[red]profile load failed:[/red] {exc}")
+            return 2
+
     try:
         pack_path = resolve_pack_path(name)
     except FileNotFoundError as exc:
@@ -301,7 +345,7 @@ def validate_pack_cli(name: str, *, json_output: bool, console) -> int:
                 console.print(f"  - {e.get('msg', '')} (at {e.get('loc')})")
         return 2
 
-    report: ValidationReport = validate_pack_full(pack)
+    report: ValidationReport = validate_pack_full(pack, profile=loaded_profile)
     if json_output:
         print(
             json.dumps(
