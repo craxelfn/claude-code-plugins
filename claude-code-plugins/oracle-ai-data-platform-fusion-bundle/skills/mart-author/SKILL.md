@@ -35,6 +35,11 @@ enforces it).
   type-overlay** via `medallion-author` (AIDPF-4070), **not** a new mart. The PVO
   source schema you inspect here surfaces the right type; retype in place via the
   overlay rather than authoring a new node.
+- Changing a **bronze** node's `requiredColumns` (assert/pull an extra source
+  column, or relax a normally-required one a tenant's PVO lacks) → that's a
+  **bronze requiredColumns overlay** via `medallion-author` (add via
+  `requiredColumns`, acknowledged removal via `relaxRequiredColumns`;
+  AIDPF-2062/2063), **not** a new mart.
 - Building the OAC dataset/workbook → `oac-dataset-advisor` + `workbook-authoring`.
 
 ## Non-negotiable safety rules

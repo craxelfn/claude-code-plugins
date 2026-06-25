@@ -111,13 +111,22 @@ Allowed overlay changes:
   block or a same-id `overlays/<name>/bronze/<id>.yaml` file. Use this for a
   bronze column-type bug (e.g. `decimal(38,30)` → `decimal(18,0)`). The two
   mechanisms are mutually exclusive per node (declaring both is an error).
+- Adjust a **bronze** node's `requiredColumns` (the source columns the extract
+  asserts exist in the PVO) via overlay — **adding** is additive: `overrides: {
+  bronze/<id>: { requiredColumns: { <src>: [COL, …] }}}` (or a same-id
+  `bronze/<id>.yaml` file, which is **add-only**). **Removing/relaxing** a
+  required column weakens a live safety gate, so it is allowed **only** through an
+  acknowledged block override: `overrides: { bronze/<id>: { relaxRequiredColumns:
+  { <src>: [{ column: COL, reason: "…" }] }}}` — the `reason` is mandatory.
+  A same-id file that drops a base required column fails closed (AIDPF-2062); a
+  relax of a column the base never required fails closed (AIDPF-2063). Bronze-only.
 
-Do not change grain, natural key, target table, PVO/datastore, refresh, or
-`requiredColumns` of a shipped node via overlay — those are off-limits to both
-the block and the same-id file (the file is diff-guarded). Create a new node /
-mart id instead. The bronze `outputSchema` type-overlay is **bronze-only**; a
-silver/gold schema change stays `overrides: { sql }` or a new mart id, and a
-same-id silver/gold file is rejected.
+Do not change grain, natural key, target table, PVO/datastore, or refresh of a
+shipped node via overlay — those are off-limits to both the block and the same-id
+file (the file is diff-guarded). Create a new node / mart id instead. The bronze
+`outputSchema` type-overlay and `requiredColumns` overlay are **bronze-only**; a
+silver/gold schema or required-column change stays `overrides: { sql }` or a new
+mart id, and a same-id silver/gold file is rejected.
 
 Wire overlays with:
 

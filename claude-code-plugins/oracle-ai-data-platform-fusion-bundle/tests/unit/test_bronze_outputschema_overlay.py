@@ -235,14 +235,27 @@ def test_duplicate_column_name_rejected_overlay(tmp_path: Path) -> None:
     assert AIDPF_2001 in str(exc.value)
 
 
-def test_block_override_unknown_key_required_columns_rejected(tmp_path: Path) -> None:
+def test_block_override_required_columns_now_accepted(tmp_path: Path) -> None:
+    # `requiredColumns` is no longer out of scope — the bronze-required-columns-
+    # overlay feature added it as a supported additive override key. Parsing the
+    # overlay pack must succeed (merge behavior is covered in
+    # test_bronze_required_columns_overlay.py).
+    _make_base(tmp_path)
+    ov = _make_overlay(tmp_path, overrides={"bronze/erp_suppliers": {
+        "requiredColumns": {"erp_suppliers": ["X"]}}})
+    pack = load_pack(ov)
+    entry = pack.pack.overrides["bronze/erp_suppliers"]
+    assert entry.required_columns == {"erp_suppliers": ["X"]}
+
+
+def test_block_override_truly_unknown_key_rejected(tmp_path: Path) -> None:
+    # A genuinely unsupported key still fails closed (AIDPF-2001).
     _make_base(tmp_path)
     with pytest.raises(Exception) as exc:
         ov = _make_overlay(tmp_path, overrides={"bronze/erp_suppliers": {
-            "requiredColumns": {"erp_suppliers": ["X"]}}})
+            "grain": "row"}})
         load_pack(ov)
-    msg = str(exc.value)
-    assert AIDPF_2001 in msg and "bronze-required" in msg
+    assert AIDPF_2001 in str(exc.value)
 
 
 def test_nonbronze_outputschema_override_rejected(tmp_path: Path) -> None:
@@ -364,7 +377,9 @@ def test_same_id_file_provenance_points_to_overlay(tmp_path: Path) -> None:
     (lambda n: n["implementation"].__setitem__("datastore", "Other.PVO"), "pvo"),
     (lambda n: n["refresh"]["incremental"].__setitem__("naturalKey", ["VENDORID"]), "natural_key"),
     (lambda n: n.__setitem__("target", "erp_suppliers_x"), "target"),
-    (lambda n: n["requiredColumns"].__setitem__("erp_suppliers", ["SEGMENT1"]), "required_columns"),
+    # `requiredColumns` is no longer an identity field — it is add-only-mutable
+    # via the bronze-required-columns-overlay feature. A *drop* via same-id file
+    # raises AIDPF-2062 (tested in test_bronze_required_columns_overlay.py).
     (lambda n: n["implementation"].__setitem__("biccSchema", "HCM"), "bicc_schema"),
 ])
 def test_same_id_file_changing_identity_field_rejected(tmp_path, mutate, label) -> None:

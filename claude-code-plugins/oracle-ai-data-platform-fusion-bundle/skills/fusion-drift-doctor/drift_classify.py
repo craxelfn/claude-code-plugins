@@ -101,8 +101,12 @@ def classify(payload: dict) -> dict:
             findings.append({
                 "source": source, "column": column, "status": "missing_literal",
                 "route": "investigate",
-                "detail": (f"declared literal column {column!r} missing from live {source} PVO — "
-                           "not a variation point; pack/source mismatch needs a human."),
+                "detail": (f"declared literal column {column!r} missing from live {source} PVO. "
+                           "Two cases — decide with the operator: (a) it SHOULD exist (real "
+                           "pack/source mismatch) → investigate/fix; (b) it is LEGITIMATELY "
+                           "absent for this tenant → relax the requiredColumns assertion via a "
+                           "`relaxRequiredColumns` block overlay (with a reason) through "
+                           "/medallion-author (AIDPF-2062/2063 guard the mechanism)."),
             })
 
     routes: dict[str, list[str]] = {"bootstrap_refresh": [], "medallion_author": [], "investigate": []}

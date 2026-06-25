@@ -83,6 +83,8 @@ older reports, ADRs, and tests can be interpreted without guessing.
 | `AIDPF-2059` | Node strategy | Active | SCD2 strategy is missing tracked columns. | Add tracked columns for SCD2 change detection. |
 | `AIDPF-2060` | Node strategy | Retired | Retired `python_legacy` deprecated invariant. | No current action; Phase 9 deleted the legacy implementation type. |
 | `AIDPF-2061` | Node strategy | Retired | Retired `python_legacy` callable-spec invariant. | No current action; Phase 9 deleted the legacy implementation type. |
+| `AIDPF-2062` | Overlay merge | Active | A same-id bronze file drops a base `requiredColumns` entry. Same-id files are **add-only** for required columns (removal is a gate relaxation). | Restore the dropped column(s); to genuinely remove a required column use a `relaxRequiredColumns` block override (with a `reason`) in `pack.yaml`. |
+| `AIDPF-2063` | Overlay merge | Active | A `relaxRequiredColumns` override names a column absent from the base `requiredColumns` for that source (orphan relaxation). | Fix the column name / source id, or drop the relax entry — you can only relax a column the base actually requires. |
 | `AIDPF-2071` | Runtime gate | Active | Bronze readiness gate failed for silver/gold execution. | Seed or repair the required bronze tables/columns, then rerun. |
 | `AIDPF-2072` | Runtime gate | Active | Live Fusion PVO schema drifted from pack/profile expectations. | Review the diagnostic, refresh bootstrap evidence, or update the pack/profile. |
 | `AIDPF-2080` | Pack validation | Warn-only | Bronze extract PVO is not in the curated catalog. | Verify it is an intentional custom PVO; the live drift gate catches real typos. |

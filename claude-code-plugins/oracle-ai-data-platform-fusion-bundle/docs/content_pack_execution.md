@@ -206,6 +206,25 @@ still gated; alias demands are deferred to the live gates. This is the leg that
 catches an overlay which narrows/retypes a bronze contract below what a
 downstream consumer needs — run it after `use-pack`.
 
+### Bronze `requiredColumns` overlay (add / acknowledged relax)
+
+An overlay may adjust a bronze node's `requiredColumns` (the source columns the
+extract asserts exist in the live PVO; these feed the per-node preflight and the
+AIDPF-4071 source-schema gate — they do **not** project the extract, which always
+writes the full raw PVO):
+
+- **Add** (additive, tightens the assertion) — `overrides: { bronze/<id>: {
+  requiredColumns: { <src>: [COL] }}}`, or a same-id `bronze/<id>.yaml` file
+  (add-only). Adds are validated live by the existing gates: requiring a column
+  the PVO lacks fails closed (AIDPF-4071/2042).
+- **Relax** (weakens the assertion, so acknowledged) — block-only: `overrides: {
+  bronze/<id>: { relaxRequiredColumns: { <src>: [{ column: COL, reason: "…" }] }}}`.
+  `reason` is mandatory. Dropping a required column in a same-id file fails closed
+  (AIDPF-2062); relaxing a column the base never required fails closed
+  (AIDPF-2063). Use relax for a tenant whose PVO legitimately lacks a normally-
+  required column — note the column is still written to bronze when present; relax
+  only turns off the existence assertion + drift watch for it.
+
 ## Renderer tokens worth knowing
 
 * `{{ snapshot_date }}` — emits literal `CURRENT_DATE()` when

@@ -318,7 +318,7 @@
     },
     "OverrideEntry": {
       "additionalProperties": false,
-      "description": "Per-node override declared by an overlay pack.\n\nMerge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``outputSchema:`` -- name-keyed partial merge of a bronze node's\n  output columns (retype matched columns; append with ``extendColumns``).\n  Bronze targets only; enforced at merge.\n\nUnknown keys fail closed (``extra=\"forbid\"``) with an actionable\nAIDPF-2001 message \u2014 in particular ``requiredColumns`` is out of scope.",
+      "description": "Per-node override declared by an overlay pack.\n\nMerge rules:\n\n* ``profile:`` -- scalar replace.\n* ``sql:`` -- full-file replace; the named SQL path lives in the overlay.\n* ``quality:`` -- nested ``tests:`` list extends base.\n* ``outputSchema:`` -- name-keyed partial merge of a bronze node's\n  output columns (retype matched columns; append with ``extendColumns``).\n  Bronze targets only; enforced at merge.\n* ``requiredColumns:`` -- additive per-source union into a bronze node's\n  required columns (adds only; never removes). Bronze targets only.\n* ``relaxRequiredColumns:`` -- acknowledged per-source REMOVAL of a bronze\n  node's required columns (each entry carries a mandatory ``reason``).\n  Bronze targets only; this is the *only* sanctioned removal path.\n\nUnknown keys fail closed (``extra=\"forbid\"``) with an actionable\nAIDPF-2001 message.",
       "properties": {
         "outputSchema": {
           "anyOf": [
@@ -355,6 +355,42 @@
           ],
           "default": null,
           "title": "Quality"
+        },
+        "relaxRequiredColumns": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "items": {
+                  "$ref": "#/$defs/RelaxRequiredColumn"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relaxrequiredcolumns"
+        },
+        "requiredColumns": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requiredcolumns"
         },
         "sql": {
           "anyOf": [
@@ -626,6 +662,28 @@
         }
       },
       "title": "PackProvenance",
+      "type": "object"
+    },
+    "RelaxRequiredColumn": {
+      "additionalProperties": false,
+      "description": "One acknowledged removal of a bronze node's ``requiredColumns`` entry.\n\nRemoving a required column *weakens* a live safety gate (the per-node\npreflight assertion + PVO-drift watch stop covering it), so it is allowed\nonly behind an explicit, audited acknowledgement: the ``reason`` is\nmandatory and must be non-blank \u2014 it is the *only* control on the\ngate-weakening op. A missing key, ``\"\"``, or whitespace-only string all fail\nclosed (a bare ``min_length`` would accept ``\"   \"``).",
+      "properties": {
+        "column": {
+          "minLength": 1,
+          "title": "Column",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "column",
+        "reason"
+      ],
+      "title": "RelaxRequiredColumn",
       "type": "object"
     },
     "RemediationRecord": {

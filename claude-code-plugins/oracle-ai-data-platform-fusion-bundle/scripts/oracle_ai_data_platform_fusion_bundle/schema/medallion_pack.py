@@ -525,6 +525,39 @@ class PackOverlayRef(BaseModel):
         return f"{self.name}@{self.version}"
 
 
+class RelaxRequiredColumn(BaseModel):
+    """One acknowledged removal of a bronze node's ``requiredColumns`` entry.
+
+    Removing a required column *weakens* a live safety gate (the per-node
+    preflight assertion + PVO-drift watch stop covering it), so it is allowed
+    only behind an explicit, audited acknowledgement: the ``reason`` is
+    mandatory and must be non-blank — it is the *only* control on the
+    gate-weakening op. A missing key, ``""``, or whitespace-only string all fail
+    closed (a bare ``min_length`` would accept ``"   "``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: str = Field(min_length=1)
+    """The base ``requiredColumns`` entry to remove (literal or ``$column.*`` /
+    ``$coa.*`` reference, matched verbatim)."""
+
+    reason: str = Field(min_length=1)
+    """Operator-facing justification for relaxing the assertion. Mandatory,
+    non-blank — the acknowledgement of a deliberate gate relaxation."""
+
+    @field_validator("column", "reason")
+    @classmethod
+    def _reject_blank(cls, v: str, info) -> str:
+        if not v.strip():
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: relaxRequiredColumns `{info.field_name}` "
+                f"must be a non-blank string; whitespace-only is not a valid "
+                f"acknowledgement."
+            )
+        return v
+
+
 class OverrideEntry(BaseModel):
     """Per-node override declared by an overlay pack.
 
@@ -536,9 +569,14 @@ class OverrideEntry(BaseModel):
     * ``outputSchema:`` -- name-keyed partial merge of a bronze node's
       output columns (retype matched columns; append with ``extendColumns``).
       Bronze targets only; enforced at merge.
+    * ``requiredColumns:`` -- additive per-source union into a bronze node's
+      required columns (adds only; never removes). Bronze targets only.
+    * ``relaxRequiredColumns:`` -- acknowledged per-source REMOVAL of a bronze
+      node's required columns (each entry carries a mandatory ``reason``).
+      Bronze targets only; this is the *only* sanctioned removal path.
 
     Unknown keys fail closed (``extra="forbid"``) with an actionable
-    AIDPF-2001 message — in particular ``requiredColumns`` is out of scope.
+    AIDPF-2001 message.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -549,6 +587,16 @@ class OverrideEntry(BaseModel):
     output_schema: "OutputSchemaOverride | None" = Field(
         default=None, alias="outputSchema"
     )
+    required_columns: dict[str, list[str]] | None = Field(
+        default=None, alias="requiredColumns"
+    )
+    """Additive: per-source-id lists unioned into the base node's
+    ``requiredColumns``. Cannot express a removal (use ``relaxRequiredColumns``)."""
+    relax_required_columns: dict[str, list[RelaxRequiredColumn]] | None = Field(
+        default=None, alias="relaxRequiredColumns"
+    )
+    """Acknowledged removal: per-source-id lists of columns to drop from the base
+    node's ``requiredColumns``, each with a mandatory ``reason``."""
 
     @model_validator(mode="before")
     @classmethod
@@ -557,19 +605,17 @@ class OverrideEntry(BaseModel):
         keys *before* the generic ``extra="forbid"`` Pydantic error fires."""
         if not isinstance(data, dict):
             return data
-        known = {"profile", "sql", "quality", "output_schema", "outputSchema"}
+        known = {
+            "profile", "sql", "quality", "output_schema", "outputSchema",
+            "required_columns", "requiredColumns",
+            "relax_required_columns", "relaxRequiredColumns",
+        }
         unknown = [k for k in data if k not in known]
         if unknown:
-            hint = ""
-            if "requiredColumns" in unknown:
-                hint = (
-                    " `requiredColumns` is out of scope for override; see the "
-                    "`bronze-required-columns-overlay` feature."
-                )
             raise ValueError(
                 f"{AIDPF_2001_ORPHAN_OVERRIDE}: unsupported override key(s) "
                 f"{sorted(unknown)!r}. Allowed: profile, sql, quality, "
-                f"outputSchema.{hint}"
+                f"outputSchema, requiredColumns, relaxRequiredColumns."
             )
         return data
 
