@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from . import plan_hash as plan_hash_module
 from . import state as state_module
 from . import state_phase2
+from .spark_types import _normalise_spark_type, _SPARK_TYPE_SYNONYMS  # noqa: F401
 
 logger = logging.getLogger(__name__)
 from .node_preflight import preflight_node
@@ -422,6 +423,12 @@ def _assert_materialized_matches_declared(
       type; extra raw columns are allowed. AIDPF-4070 fires only on a
       missing or mistyped declared column.
 
+    This gate validates the contract against LIVE data. The companion
+    design-time gate ``validate_column_contracts`` (AIDPF-2045) validates the
+    other side — that downstream consumers only demand columns the upstream
+    ``outputSchema`` actually guarantees — offline at ``content-pack validate``,
+    making the "contract" above load-bearing rather than aspirational.
+
     Returns a sha256 of the canonicalised materialised schema on
     success — the caller threads it into the success state row for
     audit.
@@ -500,21 +507,10 @@ def _assert_materialized_matches_declared(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-_SPARK_TYPE_SYNONYMS = {
-    "int": "integer",
-    "long": "bigint",
-    "double": "double",
-    "string": "string",
-    "boolean": "boolean",
-    "timestamp": "timestamp",
-    "date": "date",
-}
-
-
-def _normalise_spark_type(type_str: str) -> str:
-    """Map common Spark type synonyms to a canonical form for comparison."""
-    t = type_str.strip().lower()
-    return _SPARK_TYPE_SYNONYMS.get(t, t)
+# ``_SPARK_TYPE_SYNONYMS`` / ``_normalise_spark_type`` now live in the Spark-free
+# :mod:`orchestrator.spark_types` so the design-time column-contract gate
+# (AIDPF-2045) shares the exact comparison used by the AIDPF-4070 runtime gate
+# below. Re-imported here under their original names — the 4070 gate is unchanged.
 
 
 # ---------------------------------------------------------------------------

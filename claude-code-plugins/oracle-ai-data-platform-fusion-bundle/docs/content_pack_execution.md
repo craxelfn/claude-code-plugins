@@ -183,6 +183,29 @@ raised on the active run.
 > content-pack"). Resume is supported on both inline and REST
 > dispatch paths since Phase 5.
 
+### Design-time column-contract gate (AIDPF-2045)
+
+`content-pack validate` (and run-start) check that every silver/gold node only
+demands columns its upstream nodes actually guarantee in their declared
+`outputSchema`. This is offline and source-independent — it needs no live
+cluster — and complements the live `AIDPF-4070`/`4071` gates that compare the
+contract against live Fusion. A demand absent from (or, for a pass-through
+column, type-incompatible with) the upstream contract fails closed with
+`AIDPF-2045`; the fix is to extend the upstream `outputSchema` or correct the
+consumer's `requiredColumns`.
+
+`$column.*` / `$coa.*` consumer demands resolve against the active tenant
+profile, so to check them at validate time run profile-aware:
+
+```bash
+aidp-fusion-bundle content-pack validate <pack> --profile <profile-name-or-path>
+```
+
+Without `--profile`, validation is profile-less: literal + watermark demands are
+still gated; alias demands are deferred to the live gates. This is the leg that
+catches an overlay which narrows/retypes a bronze contract below what a
+downstream consumer needs — run it after `use-pack`.
+
 ## Renderer tokens worth knowing
 
 * `{{ snapshot_date }}` — emits literal `CURRENT_DATE()` when

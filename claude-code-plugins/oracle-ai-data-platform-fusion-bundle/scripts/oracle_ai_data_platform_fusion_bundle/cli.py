@@ -572,11 +572,23 @@ def content_pack_info(name: str, json_output: bool) -> None:
 @content_pack.command("validate")
 @click.argument("name")
 @click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
-def content_pack_validate(name: str, json_output: bool) -> None:
+@click.option(
+    "--profile",
+    default=None,
+    help="Tenant profile (path to a profile YAML, or a bare name resolved "
+    "against ./profiles/<name>.yaml). Enables the profile-aware leg of the "
+    "column-contract gate (AIDPF-2045) so $column.*/$coa.* consumer demands "
+    "are checked. Omit for profile-less validation (literal demands only).",
+)
+def content_pack_validate(name: str, json_output: bool, profile: str | None) -> None:
     """Validate a content pack against the schema + content validators."""
     from .commands.content_pack import validate_pack_cli
 
-    sys.exit(validate_pack_cli(name, json_output=json_output, console=console))
+    sys.exit(
+        validate_pack_cli(
+            name, json_output=json_output, console=console, profile=profile
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

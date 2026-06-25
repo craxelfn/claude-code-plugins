@@ -10,6 +10,7 @@ Validators implemented (one error code per failure mode):
     * :func:`validate_sql_paths` → AIDPF-2003
     * :func:`validate_template_variables` → AIDPF-5002, AIDPF-5003
     * :func:`validate_dag` → AIDPF-2040, AIDPF-2041
+    * :func:`validate_column_contracts` → AIDPF-2045
     * :func:`validate_dashboard_requires` → AIDPF-7001, AIDPF-7003
 
 :func:`validate_pack_full` aggregates the above into a single
@@ -20,15 +21,31 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import ResolvedPack
+from oracle_ai_data_platform_fusion_bundle.orchestrator.required_column_resolver import (
+    resolve_required_column_entries,
+)
+from oracle_ai_data_platform_fusion_bundle.orchestrator.spark_types import (
+    _normalise_spark_type,
+)
 from oracle_ai_data_platform_fusion_bundle.schema.dashboard_pack import DashboardYaml
+
+if TYPE_CHECKING:
+    from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import NodeYaml
+    from oracle_ai_data_platform_fusion_bundle.schema.tenant_profile import TenantProfile
 
 # Error codes surfaced by content-pack validation.
 AIDPF_2003_SQL_FILE_MISSING = "AIDPF-2003"
 AIDPF_2040_DAG_CYCLE = "AIDPF-2040"
 AIDPF_2041_UNRESOLVED_DEPENDENCY = "AIDPF-2041"
+AIDPF_2045_COLUMN_CONTRACT_MISMATCH = "AIDPF-2045"
+"""A silver/gold node demands a column that is missing from -- or
+type-incompatible with -- an upstream node's declared `outputSchema`. A
+design-time, source-independent producer/consumer contract gate (no live PVO):
+the runtime AIDPF-4070/4071 gates compare the contract against live Fusion; this
+compares declared consumer-demand against the declared upstream contract."""
 AIDPF_5002_UNKNOWN_TEMPLATE_VAR = "AIDPF-5002"
 AIDPF_5003_UNDECLARED_VARIATION_POINT = "AIDPF-5003"
 AIDPF_7001_DASHBOARD_MISSING_NODE = "AIDPF-7001"
@@ -365,6 +382,124 @@ def validate_dag(pack: ResolvedPack) -> list[ValidationError]:
     for node in graph:
         if color[node] == WHITE:
             dfs(node, [])
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# validate_column_contracts (AIDPF-2045)
+# ---------------------------------------------------------------------------
+
+
+def _contract_columns(node: "NodeYaml | None") -> dict[str, tuple[str, str]]:
+    """Map lowercased column name -> (original_name, declared_type) for a
+    producer node's `outputSchema`, or ``{}`` when it has none."""
+    if node is None or node.output_schema is None:
+        return {}
+    return {c.name.lower(): (c.name, c.type) for c in node.output_schema.columns}
+
+
+def validate_column_contracts(
+    pack: ResolvedPack, *, profile: "TenantProfile | None" = None
+) -> list[ValidationError]:
+    """Design-time producer/consumer column-contract consistency gate (AIDPF-2045).
+
+    For every silver/gold node, resolve the columns it *demands* from each
+    upstream source (declared ``requiredColumns`` + the incremental
+    ``watermark.column`` against its ``watermark.source``) and assert each is
+    **present** in — and, for pass-through columns, **type-compatible** with —
+    that upstream node's declared ``outputSchema`` *contract*.
+
+    Source-independent: no live PVO probe. ``$column.*`` / ``$coa.*`` demands
+    are resolved via the shared resolver against ``profile``; when ``profile``
+    is ``None`` those refs drop silently (literals + watermark still gate),
+    matching :func:`required_column_resolver.resolve_required_column_entries`.
+
+    Scope notes (see ``docs/features/bronze-contract-consumer-consistency``):
+
+    * **Type** expectation is read from the *consumer's own* ``outputSchema``
+      (``requiredColumns`` carries names only). A demanded column re-declared
+      by the same case-insensitive name in the consumer's ``outputSchema`` is a
+      pass-through and gets a type check; otherwise presence-only (inferring a
+      renamed/derived column's type would need SQL parsing — out of scope).
+    * ``naturalKey`` is intentionally **excluded** — it is the node's own merge
+      key, not an upstream demand.
+    * Edges whose upstream id is not a declared producer are skipped here;
+      :func:`validate_dag` already reports them as AIDPF-2041.
+    """
+    errors: list[ValidationError] = []
+
+    for layer_name, nodes in (("silver", pack.silver), ("gold", pack.gold)):
+        for nid, node in nodes.items():
+            full_id = f"{layer_name}/{nid}"
+            consumer_types = {
+                c.name.lower(): c.type
+                for c in (node.output_schema.columns if node.output_schema else [])
+            }
+
+            # Resolve demand, attributed per upstream source id.
+            demand: dict[str, set[str]] = {}
+            for src_id, entries in (node.required_columns or {}).items():
+                resolved = resolve_required_column_entries(
+                    entries, resolved_pack=pack, tenant_profile=profile
+                )
+                if resolved:
+                    demand.setdefault(src_id, set()).update(resolved)
+            inc = node.refresh.incremental if node.refresh else None
+            wm = inc.watermark if inc else None
+            if wm is not None:
+                demand.setdefault(wm.source, set()).add(wm.column)
+
+            for src_id in sorted(demand):
+                upstream = pack.bronze.get(src_id) or pack.silver.get(src_id)
+                if upstream is None:
+                    # Unknown producer — AIDPF-2041 (validate_dag) owns this.
+                    continue
+                contract = _contract_columns(upstream)
+                if not contract:
+                    continue
+                up_layer = "bronze" if src_id in pack.bronze else "silver"
+                known = sorted(orig for orig, _ in contract.values())
+                for col in sorted(demand[src_id]):
+                    entry = contract.get(col.lower())
+                    if entry is None:
+                        errors.append(
+                            ValidationError(
+                                code=AIDPF_2045_COLUMN_CONTRACT_MISMATCH,
+                                message=(
+                                    f"{AIDPF_2045_COLUMN_CONTRACT_MISMATCH}: node "
+                                    f"`{full_id}` requires column `{col}` from "
+                                    f"upstream `{up_layer}/{src_id}`, but it is not "
+                                    f"in that node's declared outputSchema. Known "
+                                    f"upstream columns: {known!r}. Extend the "
+                                    f"upstream outputSchema or fix requiredColumns."
+                                ),
+                                location=full_id,
+                            )
+                        )
+                        continue
+                    # Pass-through type check: only when the consumer re-declares
+                    # the same column name in its own outputSchema.
+                    consumer_type = consumer_types.get(col.lower())
+                    if consumer_type is None:
+                        continue
+                    _, contract_type = entry
+                    if _normalise_spark_type(consumer_type) != _normalise_spark_type(
+                        contract_type
+                    ):
+                        errors.append(
+                            ValidationError(
+                                code=AIDPF_2045_COLUMN_CONTRACT_MISMATCH,
+                                message=(
+                                    f"{AIDPF_2045_COLUMN_CONTRACT_MISMATCH}: node "
+                                    f"`{full_id}` declares column `{col}` as type "
+                                    f"`{consumer_type}`, but upstream "
+                                    f"`{up_layer}/{src_id}` declares it as "
+                                    f"`{contract_type}`. Align the declared types."
+                                ),
+                                location=full_id,
+                            )
+                        )
 
     return errors
 
@@ -770,12 +905,23 @@ def validate_coa_semantic_roles(pack: ResolvedPack) -> list[ValidationError]:
     return errors
 
 
-def validate_pack_full(pack: ResolvedPack) -> ValidationReport:
-    """Run every validator over the assembled pack; aggregate into a report."""
+def validate_pack_full(
+    pack: ResolvedPack, *, profile: "TenantProfile | None" = None
+) -> ValidationReport:
+    """Run every validator over the assembled pack; aggregate into a report.
+
+    ``profile`` (optional) is threaded only into the column-contract gate
+    (AIDPF-2045), so its ``$column.*`` / ``$coa.*`` demands resolve against the
+    active tenant profile. When ``None`` (e.g. profile-less ``content-pack
+    validate``, or run-start where the profile isn't loaded yet), alias demands
+    drop and only literal + watermark demands gate — the live 4071/preflight
+    gates remain the backstop for alias demands.
+    """
     report = ValidationReport()
     report.merge_errors(validate_sql_paths(pack))
     report.merge_errors(validate_template_variables(pack))
     report.merge_errors(validate_dag(pack))
+    report.merge_errors(validate_column_contracts(pack, profile=profile))
     report.merge_errors(validate_coa_semantic_roles(pack))
     # AIDPF-2080 is WARN-only.
     report.warnings.extend(validate_bronze_pvo_catalog(pack))
