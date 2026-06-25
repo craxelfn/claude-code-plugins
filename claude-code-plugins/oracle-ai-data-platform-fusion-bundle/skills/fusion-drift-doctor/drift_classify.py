@@ -100,7 +100,13 @@ def classify(payload: dict) -> dict:
         if not _present(column, live.get(source) or []):
             findings.append({
                 "source": source, "column": column, "status": "missing_literal",
+                # Primary route stays `investigate`: the classifier cannot decide
+                # whether the absence is a real pack/source bug or a legitimate
+                # tenant variation — a human must. `relax_route` is the
+                # machine-readable hint for the legitimate-absence remediation so
+                # automation can surface (never auto-apply) it.
                 "route": "investigate",
+                "relax_route": "medallion_author",
                 "detail": (f"declared literal column {column!r} missing from live {source} PVO. "
                            "Two cases — decide with the operator: (a) it SHOULD exist (real "
                            "pack/source mismatch) → investigate/fix; (b) it is LEGITIMATELY "
@@ -114,6 +120,12 @@ def classify(payload: dict) -> dict:
         r = f["route"]
         if r in routes:
             routes[r].append(f.get("alias") or f.get("column"))
+    # missing_literal findings carry an optional relax remediation (operator
+    # decides). Surface it in a dedicated bucket without removing them from
+    # `investigate` (their primary, judgment-required route).
+    routes["relax_overlay"] = [
+        f.get("column") for f in findings if f.get("relax_route") == "medallion_author"
+    ]
     summary: dict[str, int] = {}
     for f in findings:
         summary[f["status"]] = summary.get(f["status"], 0) + 1
