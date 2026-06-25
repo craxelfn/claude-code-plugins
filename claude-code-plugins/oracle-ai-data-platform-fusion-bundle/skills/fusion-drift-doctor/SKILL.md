@@ -37,7 +37,7 @@ diagnoses and hands off; it never edits packs/profiles or runs the pipeline.
 
 | File | Role | Invoked via |
 |---|---|---|
-| `drift_classify.py` | Classify each columnAlias against the **live PVO** columns → `present` / `renamed_resolvable` (→ bootstrap --refresh) / `needs_overlay` (→ medallion-author) / `missing_literal` (→ investigate). | `Bash`, JSON in/out |
+| `drift_classify.py` | Classify each columnAlias against the **live PVO** columns → `present` / `renamed_resolvable` (→ bootstrap --refresh) / `needs_overlay` (→ medallion-author) / `missing_literal` (→ investigate if it should exist, OR — if *legitimately absent* for this tenant — relax the `requiredColumns` assertion via a `relaxRequiredColumns` overlay through `/medallion-author`; AIDPF-2062/2063 guard it). | `Bash`, JSON in/out |
 
 ## Workflow
 1. **Get the failure context.** Either read the failed run's diagnostic artifact

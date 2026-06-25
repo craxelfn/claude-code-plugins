@@ -139,10 +139,47 @@ non-destructive, the shipped pack stays immutable. Two equivalent shapes:
 
 `draft_type_overlay()` builds the block shape from the diagnostic for operator
 approval (it does **not** auto-apply/seed). **Off-limits to both shapes:** grain,
-`naturalKey`, `target`, `datastore`/PVO, `refresh`, `requiredColumns` — an
-identity change is a **new node id**, not an override. A `requiredColumns` change
-is out of scope (see `bronze-required-columns-overlay`). Type-overlays are
-**bronze-only**; a silver/gold type fix is `overrides: { sql }` or a new mart id.
+`naturalKey`, `target`, `datastore`/PVO, `refresh` — an identity change is a
+**new node id**, not an override. (`requiredColumns` is now adjustable via its own
+overlay — see the next section.) Type-overlays are **bronze-only**; a silver/gold
+type fix is `overrides: { sql }` or a new mart id.
+
+## Bronze `requiredColumns` overlay — add / acknowledged relax
+
+`requiredColumns` lists the source columns the extract **asserts exist** in the
+live PVO (feeding the per-node preflight + the `AIDPF-4071` source-schema gate).
+It does **not** project the extract — bronze always writes the full raw PVO; an
+add tightens the assertion, a removal turns the assertion + drift-watch off for
+that column (the column still lands when present). A tenant may need to **add** a
+required column (assert/pull an extra source field) or **relax** one its PVO
+legitimately lacks. Both are non-destructive overlays; the shipped pack stays
+immutable.
+
+- **Add** (additive — allowed in **both** the `overrides:` block and a same-id
+  `bronze/<id>.yaml` file, which is add-only):
+  ```yaml
+  overrides:
+    bronze/erp_suppliers:
+      requiredColumns:
+        erp_suppliers: [BUSINESSRELATIONSHIP]   # unioned into the base list
+  ```
+- **Relax / remove** (weakens a gate → **block override only**, with a mandatory
+  `reason` as the acknowledgement):
+  ```yaml
+  overrides:
+    bronze/erp_suppliers:
+      relaxRequiredColumns:
+        erp_suppliers:
+          - { column: PARTYID, reason: "tenant pod does not expose PARTYID" }
+  ```
+
+Guards (fail closed): a same-id file that **drops** a base required column →
+`AIDPF-2062` (use `relaxRequiredColumns` instead); a relax naming a column the
+base never required → `AIDPF-2063`; a blank/missing `reason` → schema validation
+error. **Bronze-only** (a silver/gold `requiredColumns` override is rejected). The
+block and same-id-file mechanisms are mutually exclusive per node. This is the
+path `/fusion-drift-doctor` routes a `missing_literal` to when the column is
+legitimately absent for the tenant.
 
 ## COA-depth mode — operator-input (no diagnostic)
 

@@ -122,7 +122,12 @@ def resolve_required_column_entries(
     resolved: set[str] = set()
     pack_alias_keys: set[str] = set()
     if resolved_pack is not None:
-        pack_alias_keys = set(resolved_pack.pack.column_aliases.keys())
+        # Guard a missing / non-dict ``column_aliases`` (malformed pack, or a
+        # mock pack in tests) — treat it as "no aliases" rather than crashing.
+        # Literal entries still pass through; ``$column.*`` refs then drop.
+        aliases = getattr(getattr(resolved_pack, "pack", None), "column_aliases", None)
+        if isinstance(aliases, dict):
+            pack_alias_keys = set(aliases.keys())
 
     for entry in entries:
         if entry.startswith(_COA_REF_PREFIX):
