@@ -219,6 +219,24 @@ def test_mid_projection_wildcard_fails_even_if_explicit_declared(tmp_path):
     assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
 
 
+def test_coa_role_must_be_declared_on_the_coa_source(tmp_path):
+    # `{{ coa.balancing }}` is read from `src` (its segment cols come from there).
+    # Declaring `$coa.balancing` under a NON-dependency / wrong key must NOT
+    # satisfy it — it has to be on the referenced COA source.
+    sql = "SELECT s.A AS x, {{ coa.balancing }} AS company FROM {{ catalog }}.{{ bronze_schema }}.src s"
+    pack_bad = load_pack(_make_pack(
+        tmp_path / "bad", silver_sql=sql,
+        required={"src": ["A"], "not_src": ["$coa.balancing"]},
+    ))
+    errs = validate_declared_inputs(pack_bad)
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "coa.balancing" in e.message for e in errs)
+    # Declared on the real referenced source → passes.
+    pack_ok = load_pack(_make_pack(
+        tmp_path / "ok", silver_sql=sql, required={"src": ["A", "$coa.balancing"]},
+    ))
+    assert validate_declared_inputs(pack_ok) == []
+
+
 def test_bare_upstream_column_warns_not_errors(tmp_path):
     pack = load_pack(_make_pack(
         tmp_path,

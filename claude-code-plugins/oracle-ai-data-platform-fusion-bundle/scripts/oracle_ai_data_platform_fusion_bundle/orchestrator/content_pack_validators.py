@@ -641,20 +641,26 @@ def validate_declared_inputs(
                             )
                         )
 
-            # COA-role reads (standalone `{{ coa.<role> }}`) → satisfied by a
-            # `$coa.<role>` entry on ANY declared upstream (the COA source).
-            all_declared = {e for entries in req.values() for e in entries}
+            # COA-role reads (standalone `{{ coa.<role> }}`) must be declared on
+            # the COA SOURCE — i.e. an upstream that is BOTH a declared dependency
+            # AND actually referenced as an upstream table in this node's SQL
+            # (its segment columns are read there). Checking only `req[<that
+            # source>]` — not the union of every requiredColumns key — prevents a
+            # `$coa.<role>` declared under a non-dependency or an unrelated
+            # upstream from spuriously satisfying the read.
+            coa_sources = (set(reads.demands) | reads.wildcard_sources) & deps
             for role_sym in sorted(reads.coa_roles):
-                if role_sym not in all_declared:
+                if not any(role_sym in (req.get(src) or []) for src in coa_sources):
                     errors.append(
                         ValidationError(
                             code=AIDPF_2084_UNDECLARED_INPUT,
                             message=(
                                 f"{AIDPF_2084_UNDECLARED_INPUT}: node `{qualified}` "
                                 f"reads COA role `{role_sym}` (via a `{{{{ coa.* }}}}` "
-                                f"token) but no upstream declares it in "
-                                f"requiredColumns. Add `{role_sym}` to the COA "
-                                f"source's requiredColumns."
+                                f"token) but it is not declared in the requiredColumns "
+                                f"of the COA source it reads from "
+                                f"(referenced upstreams: {sorted(coa_sources)!r}). "
+                                f"Add `{role_sym}` to that source's requiredColumns."
                             ),
                             location=qualified,
                         )
