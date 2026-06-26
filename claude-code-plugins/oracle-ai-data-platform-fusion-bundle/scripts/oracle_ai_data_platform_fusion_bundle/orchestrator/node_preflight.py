@@ -219,21 +219,41 @@ def _check_required_columns(
     profile: "TenantProfile",  # noqa: F821
     ctx: "RunContext",
 ) -> list[PreflightError]:
-    """For each entry in ``node.requiredColumns.<source>``, DESCRIBE the
-    source's bronze table and assert the column exists.
+    """For each entry in ``node.requiredColumns.<source>`` that names a **bronze**
+    source, DESCRIBE the source's live bronze table and assert the column exists.
 
     The ``requiredColumns`` map is keyed by source id (matching
-    ``dependsOn.bronze[*].id``). Each value is a list of column names
-    that MUST be present in the live bronze schema. Entries beginning
-    with ``$column.`` are references into ``pack.columnAliases`` —
-    resolved against the tenant profile's ``resolved.column`` map
-    before the live-column check.
+    ``dependsOn.bronze[*].id`` / ``dependsOn.silver[*].id``). Each value is a list
+    of column names that MUST be present. Entries beginning with ``$column.`` are
+    references into ``pack.columnAliases`` — resolved against the tenant profile's
+    ``resolved.column`` map before the live-column check.
+
+    **Bronze-only live gate.** This live-DESCRIBE check exists to catch drift in
+    Fusion-extracted **bronze** tables — schemas the pack does not control. A
+    silver/gold dependency source (e.g. a gold mart requiring columns from
+    ``dim_supplier``) is *pack-built*: its schema is the producer node's own
+    declared ``outputSchema``, already gated design-time by AIDPF-2045
+    (``requiredColumns`` ⊆ ``outputSchema``, with type-compat) and at runtime by
+    the producer's AIDPF-4070/4071 materialization gate. Re-DESCRIBE-ing it here
+    would be redundant — and ``ctx.bronze_table_for_source`` only carries bronze
+    sources, so a live probe isn't even available. A source is treated as
+    pack-built (and skipped) iff it is a declared ``pack.silver`` / ``pack.gold``
+    node; everything else gets the live DESCRIBE, including a bronze source
+    declared only via the legacy ``bronze.yaml`` datasets path.
     """
     errors: list[PreflightError] = []
     required = getattr(node, "required_columns", None) or {}
     pack_alias_keys = set(pack.pack.column_aliases.keys())
 
     for source_id, required_cols in required.items():
+        # Skip silver/gold dependency sources — pack-built, gated by
+        # AIDPF-2045 (static) + the producer's AIDPF-4070/4071 (runtime). The
+        # discriminator is positive membership in pack.silver / pack.gold (NOT
+        # "absent from pack.bronze"): a bronze source declared only via the
+        # legacy bronze.yaml datasets path lives in ctx.bronze_table_for_source
+        # but not in pack.bronze, and must still get the live-drift DESCRIBE.
+        if source_id in pack.silver or source_id in pack.gold:
+            continue
         table = ctx.bronze_table_for_source.get(source_id)
         if table is None:
             errors.append(
