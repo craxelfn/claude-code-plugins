@@ -41,6 +41,12 @@ _COLUMN_REF_PREFIX = "$column."
 duplicated here so the run-level gates don't import the per-node
 preflight module (which has heavier Spark imports)."""
 
+_SEMANTIC_REF_PREFIX = "$semantic."
+"""A ``$semantic.<key>`` reference resolves to the physical column the active
+``semanticVariants.<key>`` candidate detects (``detect.columnExists``), via the
+tenant profile's ``resolved.semantic[<key>]`` pick. So a ``{{ semantic.<key> }}``
+read declared as ``$semantic.<key>`` flows into the live required-column gates."""
+
 _COA_REF_PREFIX = "$coa."
 """A ``$coa.<role>`` reference expands to the UNION of that COA role's column
 across ``profile.chartOfAccounts.default`` + every ``byChart`` arm. The union
@@ -134,6 +140,22 @@ def resolve_required_column_entries(
             # $coa.<role> → union of that role's columns across all arms.
             # Drop silently when unresolvable (same rationale as $column.*).
             resolved.update(coa_role_union(entry[len(_COA_REF_PREFIX):], tenant_profile))
+            continue
+        if entry.startswith(_SEMANTIC_REF_PREFIX):
+            # $semantic.<key> → the active candidate's detect.columnExists column.
+            # Drop silently when unresolvable (per-node gate is authoritative).
+            if tenant_profile is None or resolved_pack is None:
+                continue
+            key = entry[len(_SEMANTIC_REF_PREFIX):]
+            variants = getattr(getattr(resolved_pack, "pack", None), "semantic_variants", None)
+            variant = variants.get(key) if isinstance(variants, dict) else None
+            cand_id = (getattr(tenant_profile.resolved, "semantic", None) or {}).get(key)
+            if variant is None or not cand_id:
+                continue
+            for cand in variant.candidates:
+                if cand.id == cand_id and cand.detect and cand.detect.column_exists:
+                    resolved.add(cand.detect.column_exists)
+                    break
             continue
         if not entry.startswith(_COLUMN_REF_PREFIX):
             resolved.add(entry)

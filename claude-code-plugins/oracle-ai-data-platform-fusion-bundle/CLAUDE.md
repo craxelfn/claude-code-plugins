@@ -128,6 +128,32 @@ file (the file is diff-guarded). Create a new node / mart id instead. The bronze
 silver/gold schema or required-column change stays `overrides: { sql }` or a new
 mart id, and a same-id silver/gold file is rejected.
 
+### SQL authoring convention (declared-inputs gate, AIDPF-2084)
+
+Any silver/gold node SQL you author or edit MUST:
+
+1. **Alias every upstream source** in FROM/JOIN
+   (`{{ catalog }}.{{ silver_schema }}.dim_account da`).
+2. **Never `SELECT *` / `<alias>.*` from an upstream** — project columns
+   explicitly. A wildcard read from a declared upstream is a hard `AIDPF-2084`
+   error (it can't be proven declared).
+3. **Qualify every upstream column** with its alias (`da.code_combination`) and
+   **declare it in `requiredColumns[<source>]`** (literal name, or
+   `$column.<key>` / `$coa.<role>` matching the token used). A read not declared
+   fails `AIDPF-2084`; a bare (unqualified) upstream column warns (`AIDPF-2085`).
+
+**Exception — a source consumed by a `{{ semantic.<name> }}` `{table}` fragment
+MUST stay UNALIASED.** The renderer substitutes `{table}` with the source's
+**full** bronze identifier (`catalog.schema.table`); a correlation name (alias)
+would hide that identifier and the rendered predicate's full-path qualifier
+would fail to resolve at execution. Keep the source unaliased and qualify its
+reads by the table name (`ap_invoices.<col>`) — the extractor attributes those
+exactly like an alias, so the gate still passes. Only the semantic-consuming
+source is affected; alias every other source normally.
+
+This keeps `requiredColumns` an honest record of what the SQL actually consumes,
+so the live preflight/drift gates (AIDPF-2042/2071/2072/4071) cover every read.
+
 Wire overlays with:
 
 ```bash

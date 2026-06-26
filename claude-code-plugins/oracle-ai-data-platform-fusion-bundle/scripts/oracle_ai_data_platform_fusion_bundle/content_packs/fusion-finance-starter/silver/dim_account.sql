@@ -32,13 +32,29 @@ SELECT
   {{ run_id_literal }}                                             AS silver_run_id
 FROM (
   SELECT
-    *,
+    coa.CodeCombinationCodeCombinationId       AS CodeCombinationCodeCombinationId,
+    coa.CodeCombinationChartOfAccountsId       AS CodeCombinationChartOfAccountsId,
+    coa.CodeCombinationSegment1                AS CodeCombinationSegment1,
+    coa.CodeCombinationSegment2                AS CodeCombinationSegment2,
+    coa.CodeCombinationSegment3                AS CodeCombinationSegment3,
+    coa.CodeCombinationSegment4                AS CodeCombinationSegment4,
+    coa.CodeCombinationSegment5                AS CodeCombinationSegment5,
+    coa.CodeCombinationSegment6                AS CodeCombinationSegment6,
+    coa.CodeCombinationAccountType             AS CodeCombinationAccountType,
+    coa.CodeCombinationEnabledFlag             AS CodeCombinationEnabledFlag,
+    coa.CodeCombinationSummaryFlag             AS CodeCombinationSummaryFlag,
+    coa.CodeCombinationDetailPostingAllowedFlag AS CodeCombinationDetailPostingAllowedFlag,
+    coa.CodeCombinationFinancialCategory       AS CodeCombinationFinancialCategory,
+    coa.CodeCombinationStartDateActive         AS CodeCombinationStartDateActive,
+    coa.CodeCombinationEndDateActive           AS CodeCombinationEndDateActive,
+    coa._extract_ts                            AS _extract_ts,
+    coa._source_pvo                            AS _source_pvo,
     ROW_NUMBER() OVER (
-      PARTITION BY CodeCombinationCodeCombinationId
-      ORDER BY _extract_ts DESC
+      PARTITION BY coa.CodeCombinationCodeCombinationId
+      ORDER BY coa._extract_ts DESC
     ) AS _rn
-  FROM {{ catalog }}.{{ bronze_schema }}.gl_coa
-  WHERE CodeCombinationCodeCombinationId IS NOT NULL
+  FROM {{ catalog }}.{{ bronze_schema }}.gl_coa coa
+  WHERE coa.CodeCombinationCodeCombinationId IS NOT NULL
     AND {{ watermark_predicate }}
 )
 WHERE _rn = 1

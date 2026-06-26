@@ -112,6 +112,21 @@ columnAliases:
 # Semantic variants. The fragment is substituted into `{{ semantic.<name> }}`
 # at render time after bootstrap resolves which candidate's
 # `detect.columnExists` matches the tenant.
+# Per-candidate bronze-contract rule (declared-inputs / AIDPF-2045+2084): a
+# semantic candidate's `detect.columnExists` column must be guaranteed by the
+# upstream bronze `outputSchema` *on the tenant that resolves to it*. Candidates
+# here are MUTUALLY EXCLUSIVE per tenant (a Fusion env exposes the cancelled
+# state as a date OR a flag, never both), so a single static bronze contract
+# cannot list both columns without AIDPF-4071 failing on a tenant missing one.
+# The shipped contract therefore backs the reference tenant's resolved arm
+# (`cancelled_date` → `ApInvoicesCancelledDate`, present on the reference ERP
+# tenant; the `cancelled_flag` column is absent there). A tenant whose bootstrap
+# resolves
+# `cancelled_flag` extends `bronze/ap_invoices.outputSchema` with
+# `ApInvoicesCancelledFlag` via a bronze type-overlay (medallion-author); until
+# then `content-pack validate --profile <flag-tenant>` correctly reports
+# AIDPF-2045 for `$semantic.cancelled_status` — the honest "extend the contract"
+# signal, not a silent gap.
 semanticVariants:
   cancelled_status:
     appliesTo: bronze.ap_invoices

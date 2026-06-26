@@ -49,6 +49,11 @@ outputSchema:
     - { name: CodeCombinationSegment6, type: string, nullable: true, pii: none }
     - { name: CodeCombinationAccountType, type: string, nullable: true, pii: none }
     - { name: CodeCombinationEnabledFlag, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationSummaryFlag, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationDetailPostingAllowedFlag, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationFinancialCategory, type: string, nullable: true, pii: none }
+    - { name: CodeCombinationStartDateActive, type: date, nullable: true, pii: none }
+    - { name: CodeCombinationEndDateActive, type: date, nullable: true, pii: none }
     - { name: CodeCombinationLastUpdateDate, type: timestamp, nullable: true, pii: none }
     - { name: _extract_ts, type: timestamp, nullable: false, pii: none }
     - { name: _source_pvo, type: string, nullable: false, pii: none }
