@@ -27,6 +27,9 @@ from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack import Reso
 from oracle_ai_data_platform_fusion_bundle.orchestrator.required_column_resolver import (
     resolve_required_column_entries,
 )
+from oracle_ai_data_platform_fusion_bundle.orchestrator.sql_references import (
+    extract_upstream_reads,
+)
 from oracle_ai_data_platform_fusion_bundle.orchestrator.spark_types import (
     _normalise_spark_type,
 )
@@ -41,6 +44,16 @@ AIDPF_2003_SQL_FILE_MISSING = "AIDPF-2003"
 AIDPF_2040_DAG_CYCLE = "AIDPF-2040"
 AIDPF_2041_UNRESOLVED_DEPENDENCY = "AIDPF-2041"
 AIDPF_2045_COLUMN_CONTRACT_MISMATCH = "AIDPF-2045"
+AIDPF_2084_UNDECLARED_INPUT = "AIDPF-2084"
+"""A silver/gold SQL reads an upstream column not declared in its
+``requiredColumns`` — including a `SELECT *` / `<alias>.*` wildcard from a
+declared upstream, which is unverifiable and therefore fails closed. The
+declared-inputs companion to AIDPF-2045 (SQL reads ⊆ requiredColumns)."""
+AIDPF_2085_UNQUALIFIED_UPSTREAM_COLUMN = "AIDPF-2085"
+"""WARN-only: a bare (unqualified) identifier in a block with an upstream source
+matches that upstream's `outputSchema`. Qualify it with the table alias so the
+declared-inputs gate can verify it. Warn (not error) because a bare name may be
+CTE-derived."""
 """A silver/gold node demands a column that is missing from -- or
 type-incompatible with -- an upstream node's declared `outputSchema`. A
 design-time, source-independent producer/consumer contract gate (no live PVO):
@@ -505,6 +518,194 @@ def validate_column_contracts(
 
 
 # ---------------------------------------------------------------------------
+# validate_declared_inputs (AIDPF-2084) + warnings (AIDPF-2085)
+# ---------------------------------------------------------------------------
+
+
+def _node_depends_on_ids(node: "NodeYaml") -> set[str]:
+    """Declared upstream ids (bronze + silver) for a node."""
+    deps: set[str] = set()
+    dep = node.depends_on
+    if dep is not None:
+        deps.update(s.id for s in dep.bronze)
+        deps.update(s.id for s in dep.silver)
+    return deps
+
+
+def _read_node_sql(pack: ResolvedPack, qualified: str, node: "NodeYaml") -> str | None:
+    """Read a node's pre-render SQL, or ``None`` if it isn't a SQL node / missing."""
+    if node.implementation.type != "sql":
+        return None
+    sql_path = pack.root_for(qualified) / node.implementation.sql
+    if not sql_path.exists():
+        return None  # validate_sql_paths owns the AIDPF-2003 error
+    try:
+        return sql_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _symbol_satisfied(
+    symbol: str,
+    declared_raw: list[str],
+    *,
+    pack: ResolvedPack,
+    profile: "TenantProfile | None",
+) -> bool:
+    """Is a SQL-read ``symbol`` declared in a source's raw ``requiredColumns``?
+
+    Symbol-level (profile-INDEPENDENT) for the common cases:
+    * ``$column.<key>`` / ``$coa.<role>`` → must appear verbatim in the raw list.
+    * literal ``<Col>`` → case-insensitive literal match in the raw list.
+    Cross-plane (profile-DEPENDENT, only when a profile is in scope): a literal
+    read satisfied by a ``$column.*`` / ``$coa.*`` entry that resolves to it.
+    """
+    if symbol.startswith("$"):
+        return symbol in declared_raw
+    low = symbol.lower()
+    if any(not e.startswith("$") and e.lower() == low for e in declared_raw):
+        return True
+    if profile is not None:
+        resolved = resolve_required_column_entries(
+            declared_raw, resolved_pack=pack, tenant_profile=profile
+        )
+        if any(r.lower() == low for r in resolved):
+            return True
+    return False
+
+
+def validate_declared_inputs(
+    pack: ResolvedPack, *, profile: "TenantProfile | None" = None
+) -> list[ValidationError]:
+    """Declared-inputs gate (AIDPF-2084): SQL reads ⊆ declared ``requiredColumns``.
+
+    For each silver/gold SQL node, extract the upstream columns its SQL reads
+    (conservative, block-scoped — see :mod:`orchestrator.sql_references`) and
+    assert each is declared in the node's ``requiredColumns`` for that source.
+    Matching is at the **author symbol level** (literal / ``$column.<key>`` /
+    ``$coa.<role>``), so the gate is profile-independent and fires even on the
+    profile-less run-start validation path; ``profile`` is used only for the
+    cross-plane literal↔alias case. A ``SELECT *`` / ``<alias>.*`` read from a
+    declared upstream is a hard error (unverifiable). Companion to AIDPF-2045.
+    """
+    errors: list[ValidationError] = []
+
+    for layer_name, nodes in (("silver", pack.silver), ("gold", pack.gold)):
+        for nid, node in nodes.items():
+            qualified = f"{layer_name}/{nid}"
+            sql = _read_node_sql(pack, qualified, node)
+            if sql is None:
+                continue
+            deps = _node_depends_on_ids(node)
+            if not deps:
+                continue
+            reads = extract_upstream_reads(sql, depends_on_ids=deps)
+            req = node.required_columns or {}
+
+            # Wildcard from a declared upstream → hard, unverifiable.
+            for src_id in sorted(reads.wildcard_sources):
+                up_layer = "bronze" if src_id in pack.bronze else "silver"
+                errors.append(
+                    ValidationError(
+                        code=AIDPF_2084_UNDECLARED_INPUT,
+                        message=(
+                            f"{AIDPF_2084_UNDECLARED_INPUT}: node `{qualified}` reads "
+                            f"`SELECT *` / `<alias>.*` from upstream "
+                            f"`{up_layer}/{src_id}`, which cannot be proven declared. "
+                            f"Project explicit alias-qualified columns and declare "
+                            f"them in requiredColumns[{src_id}]."
+                        ),
+                        location=qualified,
+                    )
+                )
+
+            # Attributed per-source demands → must be declared symbol-for-symbol.
+            for src_id in sorted(reads.demands):
+                declared_raw = list(req.get(src_id, []))
+                up_layer = "bronze" if src_id in pack.bronze else "silver"
+                for sym in sorted(reads.demands[src_id]):
+                    if not _symbol_satisfied(
+                        sym, declared_raw, pack=pack, profile=profile
+                    ):
+                        errors.append(
+                            ValidationError(
+                                code=AIDPF_2084_UNDECLARED_INPUT,
+                                message=(
+                                    f"{AIDPF_2084_UNDECLARED_INPUT}: node "
+                                    f"`{qualified}` reads `{sym}` from upstream "
+                                    f"`{up_layer}/{src_id}` but it is not declared in "
+                                    f"requiredColumns[{src_id}] "
+                                    f"(declared: {sorted(declared_raw)!r}). Add it."
+                                ),
+                                location=qualified,
+                            )
+                        )
+
+            # COA-role reads (standalone `{{ coa.<role> }}`) → satisfied by a
+            # `$coa.<role>` entry on ANY declared upstream (the COA source).
+            all_declared = {e for entries in req.values() for e in entries}
+            for role_sym in sorted(reads.coa_roles):
+                if role_sym not in all_declared:
+                    errors.append(
+                        ValidationError(
+                            code=AIDPF_2084_UNDECLARED_INPUT,
+                            message=(
+                                f"{AIDPF_2084_UNDECLARED_INPUT}: node `{qualified}` "
+                                f"reads COA role `{role_sym}` (via a `{{{{ coa.* }}}}` "
+                                f"token) but no upstream declares it in "
+                                f"requiredColumns. Add `{role_sym}` to the COA "
+                                f"source's requiredColumns."
+                            ),
+                            location=qualified,
+                        )
+                    )
+
+    return errors
+
+
+def collect_declared_input_warnings(pack: ResolvedPack) -> list[ValidationError]:
+    """Warn-only (AIDPF-2085): bare unqualified identifiers that match an upstream
+    ``outputSchema`` column — they should be alias-qualified so the declared-inputs
+    gate can verify them. Profile-agnostic: matches physical names against
+    physical ``outputSchema`` columns; no token resolution needed.
+    """
+    warnings: list[ValidationError] = []
+    for layer_name, nodes in (("silver", pack.silver), ("gold", pack.gold)):
+        for nid, node in nodes.items():
+            qualified = f"{layer_name}/{nid}"
+            sql = _read_node_sql(pack, qualified, node)
+            if sql is None:
+                continue
+            deps = _node_depends_on_ids(node)
+            if not deps:
+                continue
+            reads = extract_upstream_reads(sql, depends_on_ids=deps)
+            if not reads.bare_identifiers:
+                continue
+            # Union of all declared upstreams' outputSchema column names (lower).
+            upstream_cols: set[str] = set()
+            for src_id in deps:
+                upstream = pack.bronze.get(src_id) or pack.silver.get(src_id)
+                upstream_cols |= set(_contract_columns(upstream))  # lc names
+            for ident in sorted(reads.bare_identifiers):
+                if ident.lower() in upstream_cols:
+                    warnings.append(
+                        ValidationError(
+                            code=AIDPF_2085_UNQUALIFIED_UPSTREAM_COLUMN,
+                            message=(
+                                f"{AIDPF_2085_UNQUALIFIED_UPSTREAM_COLUMN}: node "
+                                f"`{qualified}` reads bare column `{ident}` which "
+                                f"matches an upstream `outputSchema`. Qualify it with "
+                                f"its table alias so declared-inputs (AIDPF-2084) can "
+                                f"verify it."
+                            ),
+                            location=qualified,
+                        )
+                    )
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # validate_dashboard_requires (AIDPF-7001, AIDPF-7003)
 # ---------------------------------------------------------------------------
 
@@ -910,21 +1111,27 @@ def validate_pack_full(
 ) -> ValidationReport:
     """Run every validator over the assembled pack; aggregate into a report.
 
-    ``profile`` (optional) is threaded only into the column-contract gate
-    (AIDPF-2045), so its ``$column.*`` / ``$coa.*`` demands resolve against the
-    active tenant profile. When ``None`` (e.g. profile-less ``content-pack
-    validate``, or run-start where the profile isn't loaded yet), alias demands
-    drop and only literal + watermark demands gate — the live 4071/preflight
-    gates remain the backstop for alias demands.
+    ``profile`` (optional) is threaded into the design-time column gates:
+    * AIDPF-2045 (``validate_column_contracts``) — resolves its ``$column.*`` /
+      ``$coa.*`` demands against the profile; when ``None`` those alias demands
+      drop (literals + watermark still gate).
+    * AIDPF-2084 (``validate_declared_inputs``) — matches SQL reads against
+      declared ``requiredColumns`` **at the author symbol level**, so it runs
+      regardless of ``profile``; the profile is used only for its cross-plane
+      literal↔alias case. The run-start path calls this with ``profile=None``
+      (profile not yet loaded) and the gate still catches token reads.
+    AIDPF-2085 (``collect_declared_input_warnings``) is profile-agnostic, warn-only.
     """
     report = ValidationReport()
     report.merge_errors(validate_sql_paths(pack))
     report.merge_errors(validate_template_variables(pack))
     report.merge_errors(validate_dag(pack))
     report.merge_errors(validate_column_contracts(pack, profile=profile))
+    report.merge_errors(validate_declared_inputs(pack, profile=profile))
     report.merge_errors(validate_coa_semantic_roles(pack))
-    # AIDPF-2080 is WARN-only.
+    # AIDPF-2080 / AIDPF-2085 are WARN-only.
     report.warnings.extend(validate_bronze_pvo_catalog(pack))
+    report.warnings.extend(collect_declared_input_warnings(pack))
     for dashboard in pack.dashboards.values():
         report.merge_errors(validate_dashboard_requires(pack, dashboard))
         report.merge_errors(validate_dashboard_security_and_compat(pack, dashboard))

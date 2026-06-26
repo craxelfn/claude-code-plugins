@@ -206,6 +206,20 @@ still gated; alias demands are deferred to the live gates. This is the leg that
 catches an overlay which narrows/retypes a bronze contract below what a
 downstream consumer needs — run it after `use-pack`.
 
+### Declared-inputs gate (AIDPF-2084 / AIDPF-2085)
+
+The companion to AIDPF-2045, run at `content-pack validate` (offline): it parses
+each silver/gold node's SQL and asserts every upstream column it reads is
+declared in that node's `requiredColumns`. Together they form an honest chain —
+SQL reads ⊆ `requiredColumns` ⊆ upstream `outputSchema` — so the live
+preflight/drift gates (AIDPF-2042/2071/2072/4071) cover every column the SQL
+actually consumes. Authoring rules (see CLAUDE.md "SQL authoring convention"):
+alias every upstream source, never `SELECT *` from an upstream (hard
+`AIDPF-2084`), qualify every upstream column and declare it. A bare unqualified
+upstream column is a warn-only `AIDPF-2085`. Matching is at the author symbol
+level (literal / `$column.<key>` / `$coa.<role>`), so the gate works on the
+profile-less run-start path too.
+
 ### Bronze `requiredColumns` overlay (add / acknowledged relax)
 
 An overlay may adjust a bronze node's `requiredColumns` (the source columns the

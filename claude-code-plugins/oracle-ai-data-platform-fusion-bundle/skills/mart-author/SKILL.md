@@ -57,6 +57,13 @@ enforces it).
 6. **Classify every new bronze PVO before authoring.** A rung-4
    `bronze_extract` must be classified as transaction/change-feed,
    snapshot/config, or period-windowable snapshot before its YAML is accepted.
+7. **Declare your inputs (AIDPF-2084).** In any silver/gold SQL you author:
+   alias every upstream source, **never `SELECT *` from an upstream** (project
+   columns explicitly), qualify every upstream column with its alias, and list
+   every one in the node's `requiredColumns[<source>]` (literal, or
+   `$column.<key>` / `$coa.<role>` for a token). If a consumed column isn't in
+   the upstream's `outputSchema`, add it there too (keeps AIDPF-2045 green). The
+   declared-inputs gate fails closed on an undeclared read or a wildcard.
 
 ## Helpers
 
