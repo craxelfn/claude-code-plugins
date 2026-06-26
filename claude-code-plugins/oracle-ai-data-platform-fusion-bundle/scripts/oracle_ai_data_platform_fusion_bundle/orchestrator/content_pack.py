@@ -50,6 +50,8 @@ from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import (
 # Error codes used by this module.
 AIDPF_2001 = AIDPF_2001_ORPHAN_OVERRIDE  # orphan override / extends cycle
 AIDPF_2004_EXTENDS_VERSION_MISMATCH = "AIDPF-2004"
+AIDPF_2062_SAMEID_DROPS_REQUIRED_COLUMN = "AIDPF-2062"  # same-id bronze file drops a required column
+AIDPF_2063_RELAX_REQUIRED_COLUMN_ORPHAN = "AIDPF-2063"  # relaxRequiredColumns names a non-base column
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,22 @@ class OrphanOverrideError(PackLoaderError):
 
 class OverlayCycleError(PackLoaderError):
     code = AIDPF_2001
+
+
+class RequiredColumnDropError(PackLoaderError):
+    """A same-id bronze file drops a base required column (AIDPF-2062).
+
+    Removal must go through the acknowledged ``relaxRequiredColumns`` block
+    override; a same-id file is add-only for ``requiredColumns``."""
+
+    code = AIDPF_2062_SAMEID_DROPS_REQUIRED_COLUMN
+
+
+class RelaxRequiredColumnOrphanError(PackLoaderError):
+    """``relaxRequiredColumns`` names a column absent from the base
+    ``requiredColumns`` for that source (AIDPF-2063)."""
+
+    code = AIDPF_2063_RELAX_REQUIRED_COLUMN_ORPHAN
 
 
 class ExtendsVersionMismatchError(PackLoaderError):
@@ -650,6 +668,26 @@ def _apply_node_overrides(
                 node_id,
             )
 
+        if (
+            override_entry.required_columns is not None
+            or override_entry.relax_required_columns is not None
+        ):
+            # Bronze-only: requiredColumns feeds the bronze source/preflight
+            # gates; a silver/gold requiredColumns override is out of scope.
+            if prefix != "bronze/":
+                raise OrphanOverrideError(
+                    f"{AIDPF_2001}: requiredColumns override on node "
+                    f"{override_key!r} is bronze-only. Silver/gold required-"
+                    f"column changes go through `overrides: {{ sql }}` or a new "
+                    f"mart id."
+                )
+            node_data["requiredColumns"] = _merge_required_columns(
+                node_data.get("requiredColumns") or {},
+                override_entry.required_columns,
+                override_entry.relax_required_columns,
+                node_id,
+            )
+
         out[node_id] = NodeYaml.model_validate(node_data)
     return out
 
@@ -659,26 +697,46 @@ def _validate_same_id_bronze_replacement(
 ) -> None:
     """Guard a same-id bronze full-file replacement.
 
-    The file may differ from base ONLY in ``outputSchema`` and ``quality.tests``
-    — a whitelist, so a new/unanticipated extraction field can't slip through.
-    Identity fields (layer/grain, target, datastore/pvo, refresh incl.
-    naturalKey, requiredColumns, …) must equal base → else a new node id.
-    ``outputSchema`` is retain-only (every base column kept; retype/append only)
-    and ``quality.tests`` is superset-only (extend, never drop) — neither may
-    silently narrow the contract. Fail closed (AIDPF-2001 family).
+    The file may differ from base ONLY in ``outputSchema``, ``quality.tests``,
+    and ``requiredColumns`` — a whitelist, so a new/unanticipated extraction
+    field can't slip through. Identity fields (layer/grain, target, datastore/
+    pvo, refresh incl. naturalKey, …) must equal base → else a new node id.
+    ``outputSchema`` is retain-only (every base column kept; retype/append only),
+    ``quality.tests`` is superset-only (extend, never drop), and
+    ``requiredColumns`` is **add-only** (every base column kept; new columns
+    allowed) — none may silently narrow the contract. Dropping a required column
+    is a gate relaxation and must go through the acknowledged
+    ``relaxRequiredColumns`` block override, not a same-id file (AIDPF-2062).
+    Fail closed (AIDPF-2001 / 2062 family).
     """
     b = base_node.model_dump(by_alias=True)
     n = new_node.model_dump(by_alias=True)
-    allowed = {"outputSchema", "quality"}
+    allowed = {"outputSchema", "quality", "requiredColumns"}
     for key in sorted(set(b) | set(n)):
         if key in allowed:
             continue
         if b.get(key) != n.get(key):
             raise OrphanOverrideError(
                 f"{AIDPF_2001}: same-id bronze file for {base_node.id!r} changes "
-                f"{key!r} (identity field). Only `outputSchema` and "
-                f"`quality.tests` may differ; for an identity change create a "
-                f"new node id. base={b.get(key)!r} overlay={n.get(key)!r}."
+                f"{key!r} (identity field). Only `outputSchema`, "
+                f"`quality.tests`, and `requiredColumns` may differ; for an "
+                f"identity change create a new node id. base={b.get(key)!r} "
+                f"overlay={n.get(key)!r}."
+            )
+    # requiredColumns add-only (retain every base column per source; removal is a
+    # gate relaxation → relaxRequiredColumns block override, never a silent drop).
+    base_req = b.get("requiredColumns") or {}
+    new_req = n.get("requiredColumns") or {}
+    for src, base_cols in base_req.items():
+        kept = set(new_req.get(src, []))
+        dropped = [c for c in base_cols if c not in kept]
+        if dropped:
+            raise RequiredColumnDropError(
+                f"{AIDPF_2062_SAMEID_DROPS_REQUIRED_COLUMN}: same-id bronze file "
+                f"for {base_node.id!r} drops required column(s) {sorted(dropped)!r} "
+                f"from source {src!r}. A same-id file is add-only for "
+                f"requiredColumns; to remove a required column use a "
+                f"`relaxRequiredColumns` block override (with a reason)."
             )
     # outputSchema retain-only (no contract narrowing; subset assertion wouldn't catch a drop).
     base_cols = {c["name"].lower(): c["name"] for c in b["outputSchema"]["columns"]}
@@ -753,3 +811,58 @@ def _merge_output_schema_columns(
                 }
             )
     return merged
+
+
+def _merge_required_columns(
+    base: dict[str, list[str]],
+    adds: "dict[str, list[str]] | None",
+    relaxes: "dict[str, list[RelaxRequiredColumn]] | None",
+    node_id: str,
+) -> dict[str, list[str]]:
+    """Merge an overlay's bronze ``requiredColumns`` change into the base.
+
+    Two asymmetric operations, source-id keyed:
+
+    * **adds** (``requiredColumns``) — additive union per source, order-stable
+      (base entries first, then new entries not already present). Entries are
+      opaque strings (literal columns and ``$column.*`` / ``$coa.*`` refs alike);
+      resolution stays with the run-time resolver. Adds only — cannot remove.
+    * **relaxes** (``relaxRequiredColumns``) — acknowledged removal. Each entry's
+      ``column`` must be present in the **base** for that source (exact match);
+      an entry that isn't is an orphan relaxation → AIDPF-2063, fail closed. The
+      mandatory ``reason`` is enforced at the schema layer.
+
+    A source whose list becomes empty after relaxation is dropped (an empty
+    required-column list is equivalent to declaring no source key).
+    """
+    result: dict[str, list[str]] = {src: list(cols) for src, cols in base.items()}
+
+    # Relax orphan-check is against the BASE (a relax of a column that base never
+    # required is a misconfiguration, even if an add in the same overlay names it).
+    if relaxes:
+        for src, entries in relaxes.items():
+            base_cols = set(base.get(src, []))
+            for entry in entries:
+                if entry.column not in base_cols:
+                    raise RelaxRequiredColumnOrphanError(
+                        f"{AIDPF_2063_RELAX_REQUIRED_COLUMN_ORPHAN}: "
+                        f"relaxRequiredColumns for node {node_id!r} names column "
+                        f"{entry.column!r} on source {src!r} which is not in the "
+                        f"base requiredColumns. Known base columns for {src!r}: "
+                        f"{sorted(base_cols)!r}."
+                    )
+
+    if adds:
+        for src, cols in adds.items():
+            existing = result.setdefault(src, [])
+            for col in cols:
+                if col not in existing:
+                    existing.append(col)
+
+    if relaxes:
+        for src, entries in relaxes.items():
+            drop = {e.column for e in entries}
+            result[src] = [c for c in result.get(src, []) if c not in drop]
+
+    # Drop any source whose required-column list is now empty.
+    return {src: cols for src, cols in result.items() if cols}

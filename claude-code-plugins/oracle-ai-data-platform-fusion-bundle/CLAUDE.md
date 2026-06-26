@@ -111,13 +111,48 @@ Allowed overlay changes:
   block or a same-id `overlays/<name>/bronze/<id>.yaml` file. Use this for a
   bronze column-type bug (e.g. `decimal(38,30)` → `decimal(18,0)`). The two
   mechanisms are mutually exclusive per node (declaring both is an error).
+- Adjust a **bronze** node's `requiredColumns` (the source columns the extract
+  asserts exist in the PVO) via overlay — **adding** is additive: `overrides: {
+  bronze/<id>: { requiredColumns: { <src>: [COL, …] }}}` (or a same-id
+  `bronze/<id>.yaml` file, which is **add-only**). **Removing/relaxing** a
+  required column weakens a live safety gate, so it is allowed **only** through an
+  acknowledged block override: `overrides: { bronze/<id>: { relaxRequiredColumns:
+  { <src>: [{ column: COL, reason: "…" }] }}}` — the `reason` is mandatory.
+  A same-id file that drops a base required column fails closed (AIDPF-2062); a
+  relax of a column the base never required fails closed (AIDPF-2063). Bronze-only.
 
-Do not change grain, natural key, target table, PVO/datastore, refresh, or
-`requiredColumns` of a shipped node via overlay — those are off-limits to both
-the block and the same-id file (the file is diff-guarded). Create a new node /
-mart id instead. The bronze `outputSchema` type-overlay is **bronze-only**; a
-silver/gold schema change stays `overrides: { sql }` or a new mart id, and a
-same-id silver/gold file is rejected.
+Do not change grain, natural key, target table, PVO/datastore, or refresh of a
+shipped node via overlay — those are off-limits to both the block and the same-id
+file (the file is diff-guarded). Create a new node / mart id instead. The bronze
+`outputSchema` type-overlay and `requiredColumns` overlay are **bronze-only**; a
+silver/gold schema or required-column change stays `overrides: { sql }` or a new
+mart id, and a same-id silver/gold file is rejected.
+
+### SQL authoring convention (declared-inputs gate, AIDPF-2084)
+
+Any silver/gold node SQL you author or edit MUST:
+
+1. **Alias every upstream source** in FROM/JOIN
+   (`{{ catalog }}.{{ silver_schema }}.dim_account da`).
+2. **Never `SELECT *` / `<alias>.*` from an upstream** — project columns
+   explicitly. A wildcard read from a declared upstream is a hard `AIDPF-2084`
+   error (it can't be proven declared).
+3. **Qualify every upstream column** with its alias (`da.code_combination`) and
+   **declare it in `requiredColumns[<source>]`** (literal name, or
+   `$column.<key>` / `$coa.<role>` matching the token used). A read not declared
+   fails `AIDPF-2084`; a bare (unqualified) upstream column warns (`AIDPF-2085`).
+
+**Exception — a source consumed by a `{{ semantic.<name> }}` `{table}` fragment
+MUST stay UNALIASED.** The renderer substitutes `{table}` with the source's
+**full** bronze identifier (`catalog.schema.table`); a correlation name (alias)
+would hide that identifier and the rendered predicate's full-path qualifier
+would fail to resolve at execution. Keep the source unaliased and qualify its
+reads by the table name (`ap_invoices.<col>`) — the extractor attributes those
+exactly like an alias, so the gate still passes. Only the semantic-consuming
+source is affected; alias every other source normally.
+
+This keeps `requiredColumns` an honest record of what the SQL actually consumes,
+so the live preflight/drift gates (AIDPF-2042/2071/2072/4071) cover every read.
 
 Wire overlays with:
 

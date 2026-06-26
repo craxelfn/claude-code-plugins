@@ -35,6 +35,11 @@ enforces it).
   type-overlay** via `medallion-author` (AIDPF-4070), **not** a new mart. The PVO
   source schema you inspect here surfaces the right type; retype in place via the
   overlay rather than authoring a new node.
+- Changing a **bronze** node's `requiredColumns` (assert/pull an extra source
+  column, or relax a normally-required one a tenant's PVO lacks) → that's a
+  **bronze requiredColumns overlay** via `medallion-author` (add via
+  `requiredColumns`, acknowledged removal via `relaxRequiredColumns`;
+  AIDPF-2062/2063), **not** a new mart.
 - Building the OAC dataset/workbook → `oac-dataset-advisor` + `workbook-authoring`.
 
 ## Non-negotiable safety rules
@@ -52,6 +57,13 @@ enforces it).
 6. **Classify every new bronze PVO before authoring.** A rung-4
    `bronze_extract` must be classified as transaction/change-feed,
    snapshot/config, or period-windowable snapshot before its YAML is accepted.
+7. **Declare your inputs (AIDPF-2084).** In any silver/gold SQL you author:
+   alias every upstream source, **never `SELECT *` from an upstream** (project
+   columns explicitly), qualify every upstream column with its alias, and list
+   every one in the node's `requiredColumns[<source>]` (literal, or
+   `$column.<key>` / `$coa.<role>` for a token). If a consumed column isn't in
+   the upstream's `outputSchema`, add it there too (keeps AIDPF-2045 green). The
+   declared-inputs gate fails closed on an undeclared read or a wildcard.
 
 ## Helpers
 

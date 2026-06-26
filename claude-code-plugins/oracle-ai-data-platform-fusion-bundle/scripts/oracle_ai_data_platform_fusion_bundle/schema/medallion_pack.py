@@ -262,14 +262,128 @@ class CalendarProfile(BaseModel):
         return _validate_iso_date("calendar date", v)
 
 
-class ChartOfAccountsProfile(BaseModel):
-    """Default COA segment role mapping. Overridden per tenant in profiles/<tenant>.yaml."""
+class CoaRoleMapping(BaseModel):
+    """One chart's COA role -> physical-column-name binding.
+
+    Values are physical column names (e.g. ``CodeCombinationSegment4``), not
+    integer positions -- so the binding survives non-conventional column
+    naming and can be existence-validated against the bronze contract.
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     balancing_segment: str = Field(alias="balancingSegment")
     cost_center_segment: str = Field(alias="costCenterSegment")
     natural_account_segment: str = Field(alias="naturalAccountSegment")
+
+    def columns(self) -> dict[str, str]:
+        """role-name -> physical column, keyed by the canonical role tokens."""
+        return {
+            "balancing": self.balancing_segment,
+            "cost_center": self.cost_center_segment,
+            "natural_account": self.natural_account_segment,
+        }
+
+
+class ChartOfAccountsProfile(BaseModel):
+    """COA segment role->column mapping for a tenant.
+
+    Two shapes are accepted:
+
+    * **Flat / legacy** -- ``balancingSegment`` / ``costCenterSegment`` /
+      ``naturalAccountSegment`` directly on this object (the pre-feature pack
+      default shape, kept back-compat-parseable).
+    * **Nested** -- ``default`` (a :class:`CoaRoleMapping`) plus optional
+      per-chart ``byChart`` arms keyed by ``CodeCombinationChartOfAccountsId``
+      (the multi-COA serving shape).
+
+    The flat and nested ``default`` shapes are mutually exclusive (declaring
+    both is an error). Use :meth:`resolved_default` to read the effective
+    default regardless of which shape was authored.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # Flat / legacy shape (optional now -- a profile may use the nested shape).
+    balancing_segment: str | None = Field(default=None, alias="balancingSegment")
+    cost_center_segment: str | None = Field(default=None, alias="costCenterSegment")
+    natural_account_segment: str | None = Field(
+        default=None, alias="naturalAccountSegment"
+    )
+
+    # Nested shape.
+    default: CoaRoleMapping | None = None
+    by_chart: dict[str, CoaRoleMapping] | None = Field(default=None, alias="byChart")
+
+    # Operator opt-in: all active charts share the default layout (set via
+    # `bootstrap --accept-singleton-coa`). Lets the multi-COA gate pass.
+    singleton_accepted: bool = Field(default=False, alias="singletonAccepted")
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> "ChartOfAccountsProfile":
+        flat_present = any(
+            v is not None
+            for v in (
+                self.balancing_segment,
+                self.cost_center_segment,
+                self.natural_account_segment,
+            )
+        )
+        if flat_present and self.default is not None:
+            raise ValueError(
+                "chartOfAccounts: declare EITHER the flat "
+                "balancing/costCenter/naturalAccount fields OR a nested "
+                "`default` mapping, not both."
+            )
+        if flat_present:
+            missing = [
+                name
+                for name, v in (
+                    ("balancingSegment", self.balancing_segment),
+                    ("costCenterSegment", self.cost_center_segment),
+                    ("naturalAccountSegment", self.natural_account_segment),
+                )
+                if v is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"chartOfAccounts flat shape is missing required fields: {missing}"
+                )
+        if self.by_chart is not None and not flat_present and self.default is None:
+            raise ValueError(
+                "chartOfAccounts: `byChart` requires a `default` mapping (or flat "
+                "fields) for charts not covered by an explicit arm."
+            )
+        return self
+
+    def resolved_default(self) -> CoaRoleMapping | None:
+        """The effective default mapping, from either the nested or flat shape."""
+        if self.default is not None:
+            return self.default
+        if self.balancing_segment is not None:
+            return CoaRoleMapping(
+                balancingSegment=self.balancing_segment,
+                costCenterSegment=self.cost_center_segment,  # type: ignore[arg-type]
+                naturalAccountSegment=self.natural_account_segment,  # type: ignore[arg-type]
+            )
+        return None
+
+    def arms(self) -> dict[str, CoaRoleMapping]:
+        """All effective mappings keyed by arm id (``default`` + each chart id)."""
+        out: dict[str, CoaRoleMapping] = {}
+        default = self.resolved_default()
+        if default is not None:
+            out["default"] = default
+        for chart_id, mapping in (self.by_chart or {}).items():
+            out[chart_id] = mapping
+        return out
+
+    def referenced_columns(self) -> set[str]:
+        """Union of every physical column referenced by any arm (existence scope)."""
+        cols: set[str] = set()
+        for mapping in self.arms().values():
+            cols.update(mapping.columns().values())
+        return cols
 
 
 class PackProfileDefaults(BaseModel):
@@ -300,7 +414,7 @@ class ColumnAlias(BaseModel):
     exists on the tenant.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     appliesTo: str
     """Fully-qualified bronze table this variation point applies to (e.g. `bronze.ap_invoices`)."""
@@ -310,7 +424,34 @@ class ColumnAlias(BaseModel):
 
     candidates: list[str] = Field(min_length=1)
     """Priority-ordered list of physical column names. May include the literal `inherit`
-    in overlay packs to extend the base pack's candidates (resolved at overlay merge)."""
+    in overlay packs to extend the base pack's candidates (resolved at overlay merge).
+
+    For ``resolution: semanticRole`` entries this is the *allowed domain* (the set of
+    physical columns a role may bind), not a priority walk."""
+
+    resolution: Literal["columnExistence", "semanticRole"] = "columnExistence"
+    """Resolution strategy. ``columnExistence`` (default) keeps the existing
+    physical-alias auto-match. ``semanticRole`` marks a tenant-specific business role
+    (e.g. COA balancing segment) resolved from explicit ``profile.chartOfAccounts``
+    config, not column existence -- existence cannot prove *meaning*."""
+
+    role: str | None = None
+    """For ``semanticRole`` entries: the semantic role this alias binds, e.g.
+    ``coa.balancing``. Maps the alias to its ``profile.chartOfAccounts`` mapping."""
+
+    @model_validator(mode="after")
+    def _check_resolution(self) -> "ColumnAlias":
+        if self.resolution == "semanticRole" and not self.role:
+            raise ValueError(
+                f"columnAlias on {self.appliesTo!r}: `resolution: semanticRole` "
+                "requires a `role:` binding (e.g. `role: coa.balancing`)."
+            )
+        if self.resolution == "columnExistence" and self.role is not None:
+            raise ValueError(
+                f"columnAlias on {self.appliesTo!r}: `role:` is only valid with "
+                "`resolution: semanticRole`."
+            )
+        return self
 
 
 class SemanticVariantDetect(BaseModel):
@@ -384,6 +525,39 @@ class PackOverlayRef(BaseModel):
         return f"{self.name}@{self.version}"
 
 
+class RelaxRequiredColumn(BaseModel):
+    """One acknowledged removal of a bronze node's ``requiredColumns`` entry.
+
+    Removing a required column *weakens* a live safety gate (the per-node
+    preflight assertion + PVO-drift watch stop covering it), so it is allowed
+    only behind an explicit, audited acknowledgement: the ``reason`` is
+    mandatory and must be non-blank — it is the *only* control on the
+    gate-weakening op. A missing key, ``""``, or whitespace-only string all fail
+    closed (a bare ``min_length`` would accept ``"   "``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: str = Field(min_length=1)
+    """The base ``requiredColumns`` entry to remove (literal or ``$column.*`` /
+    ``$coa.*`` reference, matched verbatim)."""
+
+    reason: str = Field(min_length=1)
+    """Operator-facing justification for relaxing the assertion. Mandatory,
+    non-blank — the acknowledgement of a deliberate gate relaxation."""
+
+    @field_validator("column", "reason")
+    @classmethod
+    def _reject_blank(cls, v: str, info) -> str:
+        if not v.strip():
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: relaxRequiredColumns `{info.field_name}` "
+                f"must be a non-blank string; whitespace-only is not a valid "
+                f"acknowledgement."
+            )
+        return v
+
+
 class OverrideEntry(BaseModel):
     """Per-node override declared by an overlay pack.
 
@@ -395,9 +569,14 @@ class OverrideEntry(BaseModel):
     * ``outputSchema:`` -- name-keyed partial merge of a bronze node's
       output columns (retype matched columns; append with ``extendColumns``).
       Bronze targets only; enforced at merge.
+    * ``requiredColumns:`` -- additive per-source union into a bronze node's
+      required columns (adds only; never removes). Bronze targets only.
+    * ``relaxRequiredColumns:`` -- acknowledged per-source REMOVAL of a bronze
+      node's required columns (each entry carries a mandatory ``reason``).
+      Bronze targets only; this is the *only* sanctioned removal path.
 
     Unknown keys fail closed (``extra="forbid"``) with an actionable
-    AIDPF-2001 message — in particular ``requiredColumns`` is out of scope.
+    AIDPF-2001 message.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -408,6 +587,16 @@ class OverrideEntry(BaseModel):
     output_schema: "OutputSchemaOverride | None" = Field(
         default=None, alias="outputSchema"
     )
+    required_columns: dict[str, list[str]] | None = Field(
+        default=None, alias="requiredColumns"
+    )
+    """Additive: per-source-id lists unioned into the base node's
+    ``requiredColumns``. Cannot express a removal (use ``relaxRequiredColumns``)."""
+    relax_required_columns: dict[str, list[RelaxRequiredColumn]] | None = Field(
+        default=None, alias="relaxRequiredColumns"
+    )
+    """Acknowledged removal: per-source-id lists of columns to drop from the base
+    node's ``requiredColumns``, each with a mandatory ``reason``."""
 
     @model_validator(mode="before")
     @classmethod
@@ -416,19 +605,17 @@ class OverrideEntry(BaseModel):
         keys *before* the generic ``extra="forbid"`` Pydantic error fires."""
         if not isinstance(data, dict):
             return data
-        known = {"profile", "sql", "quality", "output_schema", "outputSchema"}
+        known = {
+            "profile", "sql", "quality", "output_schema", "outputSchema",
+            "required_columns", "requiredColumns",
+            "relax_required_columns", "relaxRequiredColumns",
+        }
         unknown = [k for k in data if k not in known]
         if unknown:
-            hint = ""
-            if "requiredColumns" in unknown:
-                hint = (
-                    " `requiredColumns` is out of scope for override; see the "
-                    "`bronze-required-columns-overlay` feature."
-                )
             raise ValueError(
                 f"{AIDPF_2001_ORPHAN_OVERRIDE}: unsupported override key(s) "
                 f"{sorted(unknown)!r}. Allowed: profile, sql, quality, "
-                f"outputSchema.{hint}"
+                f"outputSchema, requiredColumns, relaxRequiredColumns."
             )
         return data
 
@@ -495,7 +682,20 @@ class PackProvenance(BaseModel):
     diagnostic_run_id: str | None = Field(default=None, alias="diagnosticRunId")
     """The bootstrap run_id whose diagnostic artifacts triggered the
     skill invocation. Threads the audit trail from failure → draft →
-    commit."""
+    commit. Mutually exclusive with ``operator_input_id`` — exactly one
+    identifies how the overlay was triggered."""
+
+    operator_input_id: str | None = Field(default=None, alias="operatorInputId")
+    """Set for overlays drafted from explicit operator input (no runtime
+    diagnostic) — e.g. the COA-depth mode triggered by an ``AIDPF-2015``
+    content-pack-validate failure, which writes no diagnostic artifact. A
+    path-safe synthetic id like ``operator-input-<id>`` (never a fake bootstrap
+    run id). Mutually exclusive with ``diagnostic_run_id``."""
+
+    trigger: str | None = None
+    """How the overlay was triggered: ``"diagnostic"`` (a runtime
+    ``.aidp/diagnostics`` artifact) or ``"operator_input"`` (explicit operator
+    command, no diagnostic)."""
 
     proposals: dict[str, SkillProposalRecord] | None = Field(
         default=None, alias="proposals"
