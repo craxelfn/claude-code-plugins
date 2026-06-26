@@ -32,6 +32,7 @@ from .required_column_resolver import coa_role_union
 _log = logging.getLogger(__name__)
 
 _COA_REF_PREFIX = "$coa."
+_SEMANTIC_REF_PREFIX = "$semantic."
 
 AIDPF_5001_IDENTIFIER_ALLOWLIST = "AIDPF-5001"
 """A COA role column from the tenant profile fails the SQL identifier allowlist.
@@ -283,6 +284,48 @@ def _check_required_columns(
                                 ),
                             )
                         )
+                continue
+            # $semantic.<key> resolves to the physical column the ACTIVE
+            # semanticVariants candidate detects (detect.columnExists), via
+            # profile.resolved.semantic — same semantics as the run-level
+            # resolve_required_column_entries, so the per-node gate doesn't treat
+            # it as a literal and false-fail AIDPF-2042.
+            if entry.startswith(_SEMANTIC_REF_PREFIX):
+                key = entry[len(_SEMANTIC_REF_PREFIX) :]
+                variant = pack.pack.semantic_variants.get(key)
+                cand_id = (getattr(profile.resolved, "semantic", None) or {}).get(key)
+                sem_col = None
+                if variant is not None and cand_id:
+                    for cand in variant.candidates:
+                        if cand.id == cand_id and cand.detect and cand.detect.column_exists:
+                            sem_col = cand.detect.column_exists
+                            break
+                if sem_col is None:
+                    errors.append(
+                        PreflightError(
+                            code=AIDPF_2046_REQUIRED_COLUMN_UNRESOLVED_REF,
+                            source=source_id,
+                            message=(
+                                f"requiredColumns entry {entry!r} could not resolve: "
+                                f"semanticVariants key {key!r} has no active candidate "
+                                f"in the tenant profile's `resolved.semantic`. Run "
+                                f"`aidp-fusion-bundle bootstrap`."
+                            ),
+                        )
+                    )
+                    continue
+                if sem_col.lower() not in present_ci:
+                    errors.append(
+                        PreflightError(
+                            code=AIDPF_2042_REQUIRED_COLUMN_MISSING,
+                            source=source_id,
+                            message=(
+                                f"semantic column {sem_col!r} (resolved from {entry!r}) "
+                                f"missing from live bronze for source {source_id!r} "
+                                f"(table {table!r}). Live columns: {sorted(present)!r}."
+                            ),
+                        )
+                    )
                 continue
             resolved, ref_error = _resolve_required_column_entry(
                 entry, profile, source_id, pack_alias_keys

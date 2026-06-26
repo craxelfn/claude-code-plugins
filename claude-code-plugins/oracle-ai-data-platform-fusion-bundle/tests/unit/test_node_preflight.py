@@ -146,6 +146,76 @@ class TestRequiredColumnMissing:
         report = preflight_node(spark, _load_node(), pack=_pack(), profile=_profile(), ctx=_ctx())
         assert report.ok, [e.message for e in report.errors]
 
+
+_NODE_YAML_SEMANTIC = """
+id: dim_thing
+layer: silver
+implementation: { type: sql, sql: silver/dim_thing.sql }
+target: dim_thing
+outputSchema:
+  columns:
+    - { name: thing_id, type: string, nullable: false, pii: none }
+dependsOn:
+  bronze:
+    - id: erp_thing
+      role: primary
+      watermark: { column: _extract_ts }
+requiredColumns:
+  erp_thing:
+    - SEGMENT1
+    - $semantic.cancelled_status
+refresh:
+  seed: { strategy: replace }
+  incremental:
+    strategy: merge
+    naturalKey: [thing_id]
+    watermark: { source: erp_thing, column: _extract_ts }
+"""
+
+
+def _semantic_pack() -> MagicMock:
+    """Pack mock with a `cancelled_status` semanticVariant whose active candidate
+    `cancelled_date` detects `ApInvoicesCancelledDate`."""
+    from types import SimpleNamespace
+    m = MagicMock()
+    m.pack.column_aliases = {}
+    cand = SimpleNamespace(id="cancelled_date",
+                           detect=SimpleNamespace(column_exists="ApInvoicesCancelledDate"))
+    m.pack.semantic_variants = {"cancelled_status": SimpleNamespace(candidates=[cand])}
+    return m
+
+
+def _semantic_profile() -> MagicMock:
+    m = MagicMock()
+    m.resolved.column = {}
+    m.resolved.semantic = {"cancelled_status": "cancelled_date"}
+    return m
+
+
+class TestSemanticRequiredColumn:
+    def test_semantic_ref_resolves_and_passes(self) -> None:
+        # $semantic.cancelled_status → ApInvoicesCancelledDate; present in live
+        # schema → preflight passes (regression: it used to false-fail AIDPF-2042
+        # treating the $semantic.* entry as a literal column name).
+        spark = _fake_describe_spark(["SEGMENT1", "ApInvoicesCancelledDate", "_extract_ts"])
+        report = preflight_node(
+            spark, _load_node(_NODE_YAML_SEMANTIC),
+            pack=_semantic_pack(), profile=_semantic_profile(), ctx=_ctx(),
+        )
+        assert report.ok, [e.message for e in report.errors]
+
+    def test_semantic_resolved_column_missing_raises_2042(self) -> None:
+        spark = _fake_describe_spark(["SEGMENT1", "_extract_ts"])  # cancelled date absent
+        report = preflight_node(
+            spark, _load_node(_NODE_YAML_SEMANTIC),
+            pack=_semantic_pack(), profile=_semantic_profile(), ctx=_ctx(),
+        )
+        assert not report.ok
+        assert any(
+            e.code == AIDPF_2042_REQUIRED_COLUMN_MISSING and "ApInvoicesCancelledDate" in e.message
+            for e in report.errors
+        )
+
     def test_unknown_source_id_yields_2042(self) -> None:
         spark = _fake_describe_spark(["SEGMENT1", "VENDORID", "_extract_ts"])
         ctx = RunContext(
