@@ -88,8 +88,14 @@ class TestValidate:
         CliRunner().invoke(cli.main, ["init", "--template", "minimal"])
         bundle = tmp_path / "bundle.yaml"
         text = bundle.read_text(encoding="utf-8")
-        # swap one dataset id to an unknown one
-        bundle.write_text(text.replace("gl_journal_lines", "definitely_not_in_catalog"))
+        # swap one dataset id to an unknown one. encoding="utf-8" is load-
+        # bearing: the template carries an em-dash; without it write_text uses
+        # the platform default (cp1252 on Windows), and the subsequent UTF-8
+        # read in validate raises UnicodeDecodeError.
+        bundle.write_text(
+            text.replace("gl_journal_lines", "definitely_not_in_catalog"),
+            encoding="utf-8",
+        )
         result = CliRunner().invoke(cli.main, ["validate"])
         assert result.exit_code == 1
         assert "definitely_not_in_catalog" in result.output
