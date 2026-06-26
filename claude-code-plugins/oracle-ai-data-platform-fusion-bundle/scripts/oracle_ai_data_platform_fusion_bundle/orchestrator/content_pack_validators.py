@@ -642,15 +642,16 @@ def validate_declared_inputs(
                         )
 
             # COA-role reads (standalone `{{ coa.<role> }}`) must be declared on
-            # the COA SOURCE — i.e. an upstream that is BOTH a declared dependency
-            # AND actually referenced as an upstream table in this node's SQL
-            # (its segment columns are read there). Checking only `req[<that
-            # source>]` — not the union of every requiredColumns key — prevents a
-            # `$coa.<role>` declared under a non-dependency or an unrelated
-            # upstream from spuriously satisfying the read.
-            coa_sources = (set(reads.demands) | reads.wildcard_sources) & deps
-            for role_sym in sorted(reads.coa_roles):
-                if not any(role_sym in (req.get(src) or []) for src in coa_sources):
+            # the COA SOURCE the token is read from — the extractor attributes each
+            # role to the direct upstream(s) of its block (or, for a derived-block
+            # token, all referenced upstreams). We check `req[<that source>]` only
+            # — not the union of every requiredColumns key — so a `$coa.<role>`
+            # declared under a non-dependency or an unrelated upstream cannot
+            # spuriously satisfy the read. Candidates are intersected with the
+            # declared dependencies.
+            for role_sym in sorted(reads.coa_role_sources):
+                cands = reads.coa_role_sources[role_sym] & deps
+                if not any(role_sym in (req.get(src) or []) for src in cands):
                     errors.append(
                         ValidationError(
                             code=AIDPF_2084_UNDECLARED_INPUT,
@@ -659,7 +660,7 @@ def validate_declared_inputs(
                                 f"reads COA role `{role_sym}` (via a `{{{{ coa.* }}}}` "
                                 f"token) but it is not declared in the requiredColumns "
                                 f"of the COA source it reads from "
-                                f"(referenced upstreams: {sorted(coa_sources)!r}). "
+                                f"(candidate sources: {sorted(cands)!r}). "
                                 f"Add `{role_sym}` to that source's requiredColumns."
                             ),
                             location=qualified,

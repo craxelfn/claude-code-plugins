@@ -91,10 +91,23 @@ def test_column_token_emits_symbol():
     assert r.demands == {"src": {"$column.invoice_currency_code"}}
 
 
-def test_coa_token_collected_as_role():
+def test_coa_token_attributed_to_block_upstream():
+    # Standalone {{ coa.balancing }} read directly from gl_coa → attributed to it.
     sql = "SELECT {{ coa.balancing }} AS company FROM {{ catalog }}.{{ bronze_schema }}.gl_coa coa"
     r = extract_upstream_reads(sql, depends_on_ids={"gl_coa"})
-    assert "$coa.balancing" in r.coa_roles
+    assert r.coa_role_sources.get("$coa.balancing") == {"gl_coa"}
+
+
+def test_coa_token_in_derived_block_falls_back_to_referenced():
+    # COA token in the OUTER block over a `(SELECT … FROM gl_coa)` subquery
+    # (the dim_account shape) → attributed via the referenced-upstreams fallback.
+    sql = (
+        "SELECT {{ coa.balancing }} AS company FROM ("
+        "  SELECT c.CodeCombinationSegment1 FROM {{ catalog }}.{{ bronze_schema }}.gl_coa c"
+        ") t"
+    )
+    r = extract_upstream_reads(sql, depends_on_ids={"gl_coa"})
+    assert r.coa_role_sources.get("$coa.balancing") == {"gl_coa"}
 
 
 def test_function_wrapped_column_still_seen():
@@ -235,6 +248,18 @@ def test_coa_role_must_be_declared_on_the_coa_source(tmp_path):
         tmp_path / "ok", silver_sql=sql, required={"src": ["A", "$coa.balancing"]},
     ))
     assert validate_declared_inputs(pack_ok) == []
+
+
+def test_coa_role_read_only_via_token_passes_when_declared(tmp_path):
+    # The node reads its COA source ONLY through the standalone token (no other
+    # qualified read / wildcard). With $coa.balancing declared on that source it
+    # must pass — this is the case the demands-only inference got wrong.
+    sql = "SELECT {{ coa.balancing }} AS company FROM {{ catalog }}.{{ bronze_schema }}.src s"
+    pack = load_pack(_make_pack(tmp_path, silver_sql=sql, required={"src": ["$coa.balancing"]}))
+    assert validate_declared_inputs(pack) == []
+    # ... and fails if NOT declared on that source.
+    pack_bad = load_pack(_make_pack(tmp_path / "bad", silver_sql=sql, required={"src": ["A"]}))
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT for e in validate_declared_inputs(pack_bad))
 
 
 def test_bare_upstream_column_warns_not_errors(tmp_path):
