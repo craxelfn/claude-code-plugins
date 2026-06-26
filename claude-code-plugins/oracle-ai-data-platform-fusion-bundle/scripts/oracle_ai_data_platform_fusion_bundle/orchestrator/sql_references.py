@@ -220,7 +220,30 @@ def _block_upstream_aliases(block: str, depends_on_ids: set[str]) -> dict[str, s
 
 
 _QUALIFIED_REF_RE = re.compile(r"\b(?P<alias>" + _IDENT + r")\.(?P<col>" + _IDENT + r"|\*)")
-_STAR_RE = re.compile(r"SELECT\s+(?:DISTINCT\s+)?\*", re.IGNORECASE)
+# A bare `*` projection ITEM (delimited by SELECT / `,` / end) anywhere in the
+# SELECT list — e.g. `SELECT *`, `SELECT a, *`, `SELECT *, b`. Bounded so it does
+# not match multiplication (`a * b`) or a qualified `t.*` (handled separately).
+_BARE_STAR_ITEM_RE = re.compile(r"(?:^|,)\s*\*\s*(?:,|$)")
+_PAREN_GROUP_RE = re.compile(r"\([^()]*\)")
+
+
+def _has_bare_star_projection(block: str) -> bool:
+    """True if the block's SELECT list contains a bare ``*`` item.
+
+    Isolates the projection (between this block's ``SELECT`` and its ``FROM``),
+    blanks parenthesised groups so ``COUNT(*)`` / function args don't count, and
+    looks for a ``*`` that stands as its own select-list item. A qualified
+    ``<alias>.*`` is NOT matched here (the qualified-ref scan handles it).
+    """
+    m = re.search(r"\bSELECT\b(?P<proj>.*?)\bFROM\b", block, re.IGNORECASE | re.DOTALL)
+    proj = m.group("proj") if m else ""
+    if not proj:
+        return False
+    prev = None
+    while prev != proj:  # strip nested parens (function args, COUNT(*))
+        prev = proj
+        proj = _PAREN_GROUP_RE.sub(" ", proj)
+    return _BARE_STAR_ITEM_RE.search(proj) is not None
 
 
 def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamReads:
@@ -256,9 +279,11 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
             sym = col_symbol.get(col.lower(), col)  # sentinel → $column.x, else literal
             result._add(sid, sym)
 
-        # Bare ``SELECT *`` in a block that has an upstream source → wildcard read
-        # of every upstream in the block (can't prove which columns).
-        if _STAR_RE.search(block):
+        # A bare ``*`` projection item (anywhere in the SELECT list, not just
+        # first) in a block with an upstream source → wildcard read of every
+        # upstream in the block (can't prove which columns). Catches
+        # `SELECT *`, `SELECT a, *`, `SELECT *, b` alike.
+        if _has_bare_star_projection(block):
             result.wildcard_sources.update(aliases.values())
 
         # Bare identifiers (no qualifier) for the warn-only check. Collect simple

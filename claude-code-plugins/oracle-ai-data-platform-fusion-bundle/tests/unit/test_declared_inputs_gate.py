@@ -44,6 +44,23 @@ def test_select_star_from_upstream_is_wildcard():
     assert r.wildcard_sources == {"src"}
 
 
+def test_mid_projection_star_is_wildcard():
+    # A bare `*` anywhere in the SELECT list (not just first) is a wildcard read,
+    # even when other columns are explicitly projected.
+    sql = "SELECT s.A, * FROM {{ catalog }}.{{ bronze_schema }}.src s"
+    r = extract_upstream_reads(sql, depends_on_ids={"src"})
+    assert r.wildcard_sources == {"src"}
+
+
+def test_count_star_and_multiplication_not_wildcard():
+    # COUNT(*) / function args and `a * b` multiplication must NOT trip wildcard.
+    for sql in (
+        "SELECT s.A, COUNT(*) FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        "SELECT s.A * s.B AS p FROM {{ catalog }}.{{ bronze_schema }}.src s",
+    ):
+        assert extract_upstream_reads(sql, depends_on_ids={"src"}).wildcard_sources == set()
+
+
 def test_select_star_over_cte_is_not_wildcard():
     # `*` over a derived/CTE block (no direct upstream) must NOT flag.
     sql = (
@@ -185,6 +202,18 @@ def test_wildcard_from_upstream_hard_error(tmp_path):
         tmp_path,
         silver_sql="SELECT * FROM {{ catalog }}.{{ bronze_schema }}.src s",
         required={"src": ["A", "B", "C"]},  # even fully declared, * is unverifiable
+    ))
+    errs = validate_declared_inputs(pack)
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
+
+
+def test_mid_projection_wildcard_fails_even_if_explicit_declared(tmp_path):
+    # `SELECT s.A, *` — A is declared, but the trailing `*` reads everything →
+    # still a hard AIDPF-2084 (the mid-projection wildcard regression).
+    pack = load_pack(_make_pack(
+        tmp_path,
+        silver_sql="SELECT s.A AS x, * FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        required={"src": ["A", "B", "C"]},
     ))
     errs = validate_declared_inputs(pack)
     assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
