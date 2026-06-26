@@ -641,26 +641,25 @@ def validate_declared_inputs(
                             )
                         )
 
-            # COA-role reads (standalone `{{ coa.<role> }}`) must be declared on
-            # the COA SOURCE the token is read from — the extractor attributes each
-            # role to the direct upstream(s) of its block (or, for a derived-block
-            # token, all referenced upstreams). We check `req[<that source>]` only
-            # — not the union of every requiredColumns key — so a `$coa.<role>`
-            # declared under a non-dependency or an unrelated upstream cannot
-            # spuriously satisfy the read. Candidates are intersected with the
-            # declared dependencies.
-            for role_sym in sorted(reads.coa_role_sources):
-                cands = reads.coa_role_sources[role_sym] & deps
+            # Role-like reads (standalone `{{ coa.<role> }}` / `{{ semantic.<key> }}`)
+            # must be declared on the SOURCE the token is read from — the extractor
+            # attributes each to the direct upstream(s) of its block (or, for a
+            # derived-block token, all referenced upstreams). We check
+            # `req[<that source>]` only — not the union of every requiredColumns key
+            # — so a `$coa.<role>` / `$semantic.<key>` declared under a
+            # non-dependency or an unrelated upstream cannot spuriously satisfy the
+            # read. Candidates are intersected with the declared dependencies.
+            for role_sym in sorted(reads.role_sources):
+                cands = reads.role_sources[role_sym] & deps
                 if not any(role_sym in (req.get(src) or []) for src in cands):
                     errors.append(
                         ValidationError(
                             code=AIDPF_2084_UNDECLARED_INPUT,
                             message=(
                                 f"{AIDPF_2084_UNDECLARED_INPUT}: node `{qualified}` "
-                                f"reads COA role `{role_sym}` (via a `{{{{ coa.* }}}}` "
-                                f"token) but it is not declared in the requiredColumns "
-                                f"of the COA source it reads from "
-                                f"(candidate sources: {sorted(cands)!r}). "
+                                f"reads `{role_sym}` (via a `{{{{ … }}}}` token) but it "
+                                f"is not declared in the requiredColumns of the source "
+                                f"it reads from (candidate sources: {sorted(cands)!r}). "
                                 f"Add `{role_sym}` to that source's requiredColumns."
                             ),
                             location=qualified,

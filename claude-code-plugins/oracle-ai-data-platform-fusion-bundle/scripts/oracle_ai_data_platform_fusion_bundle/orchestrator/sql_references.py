@@ -45,6 +45,7 @@ _SCHEMA_SENTINELS = set(_SCHEMA_TOKEN_SENTINEL.values())
 
 _COLUMN_TOKEN_RE = re.compile(r"\{\{\s*column\.([A-Za-z0-9_]+)\s*\}\}")
 _COA_TOKEN_RE = re.compile(r"\{\{\s*coa\.([A-Za-z0-9_]+)\s*\}\}")
+_SEMANTIC_TOKEN_RE = re.compile(r"\{\{\s*semantic\.([A-Za-z0-9_]+)\s*\}\}")
 _SCHEMA_TOKEN_RE = re.compile(r"\{\{\s*(catalog|bronze_schema|silver_schema|gold_schema)\s*\}\}")
 _ANY_TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 
@@ -52,11 +53,16 @@ _ANY_TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 # survives as a normal ``<alias>.<ident>`` / bare ``<ident>`` reference; the
 # extractor maps the sentinel back to the ``$column.<key>`` symbol.
 _COL_SENTINEL_PREFIX = "coltok_x_"
-# A ``{{ coa.<role> }}`` token is rewritten to this sentinel so it survives into
-# the per-block text, letting the extractor attribute the COA role to the
-# upstream source(s) of the block it is read from.
+# ``{{ coa.<role> }}`` and ``{{ semantic.<key> }}`` are "role-like" tokens that
+# render to column reads but carry no alias. Each is rewritten to a sentinel that
+# survives block splitting, so the extractor can attribute the role/variant to
+# the upstream source(s) of the block it is read from (like a column read), and
+# the gate requires it declared (`$coa.<role>` / `$semantic.<key>`).
 _COA_SENTINEL_PREFIX = "coarole_x_"
-_COA_SENTINEL_RE = re.compile(r"\b" + _COA_SENTINEL_PREFIX + r"[A-Za-z0-9_]+\b")
+_SEM_SENTINEL_PREFIX = "semvar_x_"
+_ROLE_SENTINEL_RE = re.compile(
+    r"\b(?:" + _COA_SENTINEL_PREFIX + r"|" + _SEM_SENTINEL_PREFIX + r")[A-Za-z0-9_]+\b"
+)
 
 _SQL_KEYWORDS = {
     "on", "where", "group", "order", "by", "left", "right", "inner", "outer",
@@ -76,11 +82,12 @@ class UpstreamReads:
     * ``demands`` — confidently-attributed reads, keyed by upstream source id,
       each a set of *symbols* (literal column name, ``$column.<key>``, or
       ``$coa.<role>``). These are gated as hard AIDPF-2084 demands.
-    * ``coa_role_sources`` — ``$coa.<role>`` symbols read via a standalone
-      ``{{ coa.<role> }}`` token, mapped to the **candidate upstream source ids**
-      it is read from: the direct upstream(s) of the block the token appears in,
-      or (for a token in a derived/CTE block with no direct upstream) the set of
-      all upstreams referenced in the SQL. The gate requires the role declared in
+    * ``role_sources`` — role-like reads via a standalone ``{{ coa.<role> }}``
+      (``$coa.<role>``) or ``{{ semantic.<key> }}`` (``$semantic.<key>``) token,
+      mapped to the **candidate upstream source ids** it is read from: the direct
+      upstream(s) of the block the token appears in, or (for a token in a
+      derived/CTE block with no direct upstream) the set of all upstreams
+      referenced in the SQL. The gate requires the symbol declared in
       ``requiredColumns`` of one of those sources.
     * ``wildcard_sources`` — upstream ids read via ``*`` / ``<alias>.*`` (hard
       AIDPF-2084: unverifiable).
@@ -90,12 +97,57 @@ class UpstreamReads:
     """
 
     demands: dict[str, set[str]] = field(default_factory=dict)
-    coa_role_sources: dict[str, set[str]] = field(default_factory=dict)
+    role_sources: dict[str, set[str]] = field(default_factory=dict)
     wildcard_sources: set[str] = field(default_factory=set)
     bare_identifiers: set[str] = field(default_factory=set)
 
     def _add(self, source_id: str, symbol: str) -> None:
         self.demands.setdefault(source_id, set()).add(symbol)
+
+
+# ---------------------------------------------------------------------------
+# Comment / string-literal stripping (run before any scanning)
+# ---------------------------------------------------------------------------
+
+
+def _strip_comments_and_strings(sql: str) -> str:
+    """Blank SQL line comments (``-- …``), block comments (``/* … */``), and
+    single-quoted string literals to spaces, preserving length/newlines.
+
+    The reference scanner must never read a column-looking token out of a comment
+    or a quoted literal (e.g. ``-- s.B`` or ``'s.B'``) — that would be a
+    false-positive demand and break the zero-false-positive guarantee.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        two = sql[i : i + 2]
+        if two == "--":
+            j = sql.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif two == "/*":
+            j = sql.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(" " * (j - i))
+            i = j
+        elif sql[i] == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'" and sql[j + 1 : j + 2] == "'":
+                    j += 2  # escaped '' inside the string
+                    continue
+                if sql[j] == "'":
+                    j += 1
+                    break
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -106,14 +158,14 @@ class UpstreamReads:
 def _neutralize_tokens(sql: str) -> tuple[str, dict[str, str], dict[str, str]]:
     """Replace ``{{ … }}`` tokens with parseable sentinels, preserving demand.
 
-    Returns ``(neutralized_sql, col_symbol_by_sentinel, coa_symbol_by_sentinel)``:
-    column-token and COA-token sentinels each map back to their author symbol
-    (``$column.<key>`` / ``$coa.<role>``). Both survive into the per-block text so
-    the extractor can attribute them to the block they're read from. Inert tokens
-    (watermark/run_id/snapshot/semantic) become harmless literals.
+    Returns ``(neutralized_sql, col_symbol_by_sentinel, role_symbol_by_sentinel)``:
+    column-token sentinels map to ``$column.<key>``; COA and semantic sentinels
+    map to ``$coa.<role>`` / ``$semantic.<key>``. All survive into the per-block
+    text so the extractor can attribute them to the block they're read from.
+    Inert tokens (watermark/run_id/snapshot) become harmless literals.
     """
     col_symbol: dict[str, str] = {}
-    coa_symbol: dict[str, str] = {}
+    role_symbol: dict[str, str] = {}
 
     def _col(m: "re.Match[str]") -> str:
         key = m.group(1)
@@ -124,17 +176,24 @@ def _neutralize_tokens(sql: str) -> tuple[str, dict[str, str], dict[str, str]]:
     def _coa(m: "re.Match[str]") -> str:
         role = m.group(1)
         sentinel = f"{_COA_SENTINEL_PREFIX}{role}"
-        coa_symbol[sentinel.lower()] = f"$coa.{role}"
+        role_symbol[sentinel.lower()] = f"$coa.{role}"
+        return sentinel
+
+    def _sem(m: "re.Match[str]") -> str:
+        key = m.group(1)
+        sentinel = f"{_SEM_SENTINEL_PREFIX}{key}"
+        role_symbol[sentinel.lower()] = f"$semantic.{key}"
         return sentinel
 
     sql = _COLUMN_TOKEN_RE.sub(_col, sql)
     sql = _COA_TOKEN_RE.sub(_coa, sql)
+    sql = _SEMANTIC_TOKEN_RE.sub(_sem, sql)
     # Schema tokens → sentinel idents so FROM targets are dotted, parseable.
     sql = _SCHEMA_TOKEN_RE.sub(lambda m: _SCHEMA_TOKEN_SENTINEL[m.group(1)], sql)
     # Everything else ({{ watermark_predicate }}, {{ run_id_literal }},
-    # {{ snapshot_date }}, {{ semantic.* }}) → an inert literal.
+    # {{ snapshot_date }}) → an inert literal.
     sql = _ANY_TOKEN_RE.sub("NULL", sql)
-    return sql, col_symbol, coa_symbol
+    return sql, col_symbol, role_symbol
 
 
 # ---------------------------------------------------------------------------
@@ -269,33 +328,35 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
     considered upstream.
     """
     result = UpstreamReads()
-    neutral, col_symbol, coa_symbol = _neutralize_tokens(sql)
+    sql = _strip_comments_and_strings(sql)  # never scan comments / string literals
+    neutral, col_symbol, role_symbol = _neutralize_tokens(sql)
     blocks = _split_blocks(neutral)
 
-    # COA attribution pass: a standalone `{{ coa.<role> }}` is attributed to the
-    # direct upstream(s) of the block it appears in. Tokens in a derived/CTE block
-    # (no direct upstream) are deferred and resolved to the union of all upstreams
-    # referenced anywhere in the SQL (covers dim_account, whose COA tokens live in
-    # the outer block over a `(SELECT … FROM gl_coa)` subquery).
+    # Role-token attribution pass: a standalone `{{ coa.<role> }}` /
+    # `{{ semantic.<key> }}` is attributed to the direct upstream(s) of the block
+    # it appears in. Tokens in a derived/CTE block (no direct upstream) are
+    # deferred and resolved to the union of all upstreams referenced anywhere in
+    # the SQL (covers dim_account, whose COA tokens live in the outer block over a
+    # `(SELECT … FROM gl_coa)` subquery).
     referenced_upstreams: set[str] = set()
-    coa_block_attr: dict[str, set[str]] = {}
-    coa_deferred: set[str] = set()
+    role_block_attr: dict[str, set[str]] = {}
+    role_deferred: set[str] = set()
     for block in blocks:
         aliases = _block_upstream_aliases(block, depends_on_ids)
         referenced_upstreams |= set(aliases.values())
-        for sentinel in _COA_SENTINEL_RE.findall(block):
-            role_sym = coa_symbol.get(sentinel.lower())
-            if role_sym is None:
+        for sentinel in _ROLE_SENTINEL_RE.findall(block):
+            sym = role_symbol.get(sentinel.lower())
+            if sym is None:
                 continue
             if aliases:
-                coa_block_attr.setdefault(role_sym, set()).update(aliases.values())
+                role_block_attr.setdefault(sym, set()).update(aliases.values())
             else:
-                coa_deferred.add(role_sym)
-    for role_sym in set(coa_block_attr) | coa_deferred:
-        cands = set(coa_block_attr.get(role_sym, set()))
+                role_deferred.add(sym)
+    for sym in set(role_block_attr) | role_deferred:
+        cands = set(role_block_attr.get(sym, set()))
         if not cands:  # only seen in derived blocks → fall back to all referenced
             cands = set(referenced_upstreams)
-        result.coa_role_sources[role_sym] = cands
+        result.role_sources[sym] = cands
 
     for block in blocks:
         aliases = _block_upstream_aliases(block, depends_on_ids)
@@ -346,6 +407,7 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
                     or tok == only_sid
                     or low.startswith(_COL_SENTINEL_PREFIX)
                     or low.startswith(_COA_SENTINEL_PREFIX)
+                    or low.startswith(_SEM_SENTINEL_PREFIX)
                 ):
                     continue
                 result.bare_identifiers.add(tok)

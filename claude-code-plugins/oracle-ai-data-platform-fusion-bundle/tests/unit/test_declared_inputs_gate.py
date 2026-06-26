@@ -95,7 +95,7 @@ def test_coa_token_attributed_to_block_upstream():
     # Standalone {{ coa.balancing }} read directly from gl_coa → attributed to it.
     sql = "SELECT {{ coa.balancing }} AS company FROM {{ catalog }}.{{ bronze_schema }}.gl_coa coa"
     r = extract_upstream_reads(sql, depends_on_ids={"gl_coa"})
-    assert r.coa_role_sources.get("$coa.balancing") == {"gl_coa"}
+    assert r.role_sources.get("$coa.balancing") == {"gl_coa"}
 
 
 def test_coa_token_in_derived_block_falls_back_to_referenced():
@@ -107,7 +107,28 @@ def test_coa_token_in_derived_block_falls_back_to_referenced():
         ") t"
     )
     r = extract_upstream_reads(sql, depends_on_ids={"gl_coa"})
-    assert r.coa_role_sources.get("$coa.balancing") == {"gl_coa"}
+    assert r.role_sources.get("$coa.balancing") == {"gl_coa"}
+
+
+def test_semantic_token_attributed_to_block_upstream():
+    # `{{ semantic.cancelled_status }}` read in a block over ap_invoices →
+    # emitted as a `$semantic.<key>` role attributed to that source.
+    sql = "SELECT ai.A FROM {{ catalog }}.{{ bronze_schema }}.ap_invoices ai WHERE {{ semantic.cancelled_status }}"
+    r = extract_upstream_reads(sql, depends_on_ids={"ap_invoices"})
+    assert r.role_sources.get("$semantic.cancelled_status") == {"ap_invoices"}
+
+
+def test_comments_and_string_literals_not_scanned():
+    # A `<alias>.<col>` inside a line/block comment or a quoted literal must NOT
+    # become a demand (zero-false-positive guarantee).
+    base = "SELECT s.A FROM {{ catalog }}.{{ bronze_schema }}.src s"
+    for variant in (
+        base + "  -- s.B in a line comment",
+        base + "  /* s.C in a block comment */",
+        "SELECT s.A, 's.D literal' AS lit FROM {{ catalog }}.{{ bronze_schema }}.src s",
+    ):
+        r = extract_upstream_reads(variant, depends_on_ids={"src"})
+        assert r.demands == {"src": {"A"}}, variant
 
 
 def test_function_wrapped_column_still_seen():
@@ -277,6 +298,28 @@ def test_bare_upstream_column_warns_not_errors(tmp_path):
 # ---------------------------------------------------------------------------
 # Completeness proof — the shipped starter pack is fully aligned
 # ---------------------------------------------------------------------------
+
+
+def test_semantic_symbol_resolves_into_live_required_column_union():
+    # `$semantic.cancelled_status` must resolve (with a profile) to the active
+    # candidate's column, so it flows into the live required-column union that
+    # bronze_readiness/fusion_pvo_drift assert — i.e. the read is no longer
+    # invisible to the live gates.
+    from oracle_ai_data_platform_fusion_bundle.commands.content_pack import (
+        _load_full_chain, resolve_pack_path,
+    )
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.required_column_resolver import (
+        resolve_required_column_entries,
+    )
+    pack = _load_full_chain(resolve_pack_path("fusion-finance-starter"))
+    prof = MagicMock()
+    prof.resolved.semantic = {"cancelled_status": "cancelled_date"}
+    prof.resolved.column = {}
+    prof.profile = {}
+    resolved = resolve_required_column_entries(
+        ["$semantic.cancelled_status"], resolved_pack=pack, tenant_profile=prof
+    )
+    assert resolved == {"ApInvoicesCancelledDate"}
 
 
 def test_starter_pack_declared_inputs_clean():

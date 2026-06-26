@@ -35,6 +35,10 @@ requiredColumns:
     - ApInvoicesInvoiceAmount
     - ApInvoicesAmountPaid
     - ApInvoicesInvoiceDate
+    # $semantic.cancelled_status → the active candidate's column
+    # (cancelled_date → ApInvoicesCancelledDate on this tenant); read via the
+    # `{{ semantic.cancelled_status }}` predicate in ap_aging.sql.
+    - $semantic.cancelled_status
     - _extract_ts
   dim_supplier:
     - vendor_id
