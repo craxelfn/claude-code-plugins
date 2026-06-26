@@ -316,8 +316,10 @@ def _has_bare_star_projection(block: str) -> bool:
     Isolates the projection (between this block's ``SELECT`` and its ``FROM``),
     strips a leading set quantifier (``DISTINCT`` / ``ALL``) so ``SELECT DISTINCT
     *`` is caught, blanks parenthesised groups so ``COUNT(*)`` / function args
-    don't count, and looks for a ``*`` that stands as its own select-list item. A
-    qualified ``<alias>.*`` is NOT matched here (the qualified-ref scan handles it).
+    don't count, collapses a Spark/Databricks ``* EXCEPT (...)`` star clause to a
+    bare ``*`` (it still reads an unbounded upstream column set), and looks for a
+    ``*`` that stands as its own select-list item. A qualified ``<alias>.*`` is
+    NOT matched here (the qualified-ref scan handles it).
     """
     m = re.search(r"\bSELECT\b(?P<proj>.*?)\bFROM\b", block, re.IGNORECASE | re.DOTALL)
     proj = m.group("proj") if m else ""
@@ -327,9 +329,14 @@ def _has_bare_star_projection(block: str) -> bool:
     # and the first projection item, so strip it before the bare-`*` scan.
     proj = re.sub(r"^\s*(?:DISTINCT|ALL)\s+", " ", proj, flags=re.IGNORECASE)
     prev = None
-    while prev != proj:  # strip nested parens (function args, COUNT(*))
+    while prev != proj:  # strip nested parens (function args, COUNT(*), EXCEPT list)
         prev = proj
         proj = _PAREN_GROUP_RE.sub(" ", proj)
+    # `* EXCEPT (col, …)` (Spark 3.4+/Databricks 11.3+ star clause) — the EXCEPT
+    # list parens are already blanked above; drop the trailing EXCEPT keyword so
+    # the leading `*` reads as a bare wildcard item (it reads every column except
+    # an explicit few — still an unbounded, unverifiable upstream read).
+    proj = re.sub(r"\*\s*EXCEPT\b", "*", proj, flags=re.IGNORECASE)
     return _BARE_STAR_ITEM_RE.search(proj) is not None
 
 

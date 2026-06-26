@@ -64,6 +64,19 @@ def test_select_distinct_star_is_wildcard():
         }, sql
 
 
+def test_star_except_clause_is_wildcard():
+    # `SELECT * EXCEPT (col, …)` (Spark 3.4+/Databricks 11.3+) reads every column
+    # except an explicit few — still an unbounded upstream read → wildcard.
+    for sql in (
+        "SELECT * EXCEPT (B) FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        "SELECT * EXCEPT(B, C) FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        "SELECT DISTINCT * EXCEPT (B) FROM {{ catalog }}.{{ bronze_schema }}.src s",
+    ):
+        assert extract_upstream_reads(sql, depends_on_ids={"src"}).wildcard_sources == {
+            "src"
+        }, sql
+
+
 def test_count_star_and_multiplication_not_wildcard():
     # COUNT(*) / function args and `a * b` multiplication must NOT trip wildcard.
     for sql in (
@@ -294,6 +307,18 @@ def test_distinct_wildcard_fails(tmp_path):
     pack = load_pack(_make_pack(
         tmp_path,
         silver_sql="SELECT DISTINCT * FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        required={"src": ["A", "B", "C"]},
+    ))
+    errs = validate_declared_inputs(pack)
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
+
+
+def test_star_except_wildcard_fails(tmp_path):
+    # `SELECT * EXCEPT (B)` is an unverifiable wildcard read → hard AIDPF-2084
+    # even though every declared column is present.
+    pack = load_pack(_make_pack(
+        tmp_path,
+        silver_sql="SELECT * EXCEPT (B) FROM {{ catalog }}.{{ bronze_schema }}.src s",
         required={"src": ["A", "B", "C"]},
     ))
     errs = validate_declared_inputs(pack)
