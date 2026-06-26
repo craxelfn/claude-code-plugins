@@ -52,13 +52,48 @@ def test_mid_projection_star_is_wildcard():
     assert r.wildcard_sources == {"src"}
 
 
+def test_select_distinct_star_is_wildcard():
+    # `SELECT DISTINCT *` / `SELECT ALL *` — the set quantifier sits between
+    # SELECT and the `*`, but it is still a bare wildcard read of the upstream.
+    for sql in (
+        "SELECT DISTINCT * FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        "SELECT ALL * FROM {{ catalog }}.{{ bronze_schema }}.src s",
+    ):
+        assert extract_upstream_reads(sql, depends_on_ids={"src"}).wildcard_sources == {
+            "src"
+        }, sql
+
+
 def test_count_star_and_multiplication_not_wildcard():
     # COUNT(*) / function args and `a * b` multiplication must NOT trip wildcard.
     for sql in (
         "SELECT s.A, COUNT(*) FROM {{ catalog }}.{{ bronze_schema }}.src s",
         "SELECT s.A * s.B AS p FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        # DISTINCT + multiplication: the quantifier strip must not turn `a * b`
+        # into a bare-`*` false positive.
+        "SELECT DISTINCT s.A * s.B AS p FROM {{ catalog }}.{{ bronze_schema }}.src s",
     ):
         assert extract_upstream_reads(sql, depends_on_ids={"src"}).wildcard_sources == set()
+
+
+def test_alias_case_insensitive_attribution():
+    # Spark unquoted identifiers are case-insensitive. A mismatch between the
+    # FROM alias and the column qualifier must still attribute the demand.
+    for sql in (
+        "SELECT s.SecretCol FROM {{ catalog }}.{{ bronze_schema }}.src S",
+        "SELECT S.SecretCol FROM {{ catalog }}.{{ bronze_schema }}.src s",
+    ):
+        r = extract_upstream_reads(sql, depends_on_ids={"src"})
+        assert r.demands == {"src": {"SecretCol"}}, sql
+        assert not r.wildcard_sources
+
+
+def test_source_id_case_insensitive_uses_canonical():
+    # `FROM …SRC` against declared upstream id `src` matches case-insensitively,
+    # and the demand keys against the CANONICAL declared id ("src"), not "SRC".
+    sql = "SELECT x.Col FROM {{ catalog }}.{{ bronze_schema }}.SRC x"
+    r = extract_upstream_reads(sql, depends_on_ids={"src"})
+    assert r.demands == {"src": {"Col"}}
 
 
 def test_select_star_over_cte_is_not_wildcard():
@@ -251,6 +286,30 @@ def test_mid_projection_wildcard_fails_even_if_explicit_declared(tmp_path):
     ))
     errs = validate_declared_inputs(pack)
     assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
+
+
+def test_distinct_wildcard_fails(tmp_path):
+    # `SELECT DISTINCT *` is an unverifiable wildcard read → hard AIDPF-2084
+    # even though every declared column is present.
+    pack = load_pack(_make_pack(
+        tmp_path,
+        silver_sql="SELECT DISTINCT * FROM {{ catalog }}.{{ bronze_schema }}.src s",
+        required={"src": ["A", "B", "C"]},
+    ))
+    errs = validate_declared_inputs(pack)
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "*" in e.message for e in errs)
+
+
+def test_case_mismatch_undeclared_read_still_fails(tmp_path):
+    # `FROM …src S` + `s.B` (case-mismatched alias) reads B; with B undeclared the
+    # gate must still raise AIDPF-2084 (it previously slipped through).
+    pack = load_pack(_make_pack(
+        tmp_path,
+        silver_sql="SELECT s.B AS x FROM {{ catalog }}.{{ bronze_schema }}.src S",
+        required={"src": ["A"]},  # B not declared
+    ))
+    errs = validate_declared_inputs(pack)
+    assert any(e.code == AIDPF_2084_UNDECLARED_INPUT and "B" in e.message for e in errs)
 
 
 def test_coa_role_must_be_declared_on_the_coa_source(tmp_path):

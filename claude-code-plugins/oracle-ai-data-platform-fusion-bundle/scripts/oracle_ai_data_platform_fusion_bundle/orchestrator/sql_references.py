@@ -270,26 +270,35 @@ _SOURCE_RE = re.compile(
 
 
 def _block_upstream_aliases(block: str, depends_on_ids: set[str]) -> dict[str, str]:
-    """``{alias_or_id: source_id}`` for upstream tables in THIS block's FROM/JOIN.
+    """``{alias_or_id_lower: canonical_source_id}`` for upstream tables in THIS
+    block's FROM/JOIN.
 
-    A source counts as upstream only if its trailing id is in ``depends_on_ids``
-    AND it is schema-qualified (preceded by a schema sentinel) — so a bare
-    ``FROM some_cte`` (CTE/derived) is never treated as an upstream. The key is
-    the SQL alias when present, else the id itself (covers an unaliased upstream).
+    A source counts as upstream only if its trailing id matches one of
+    ``depends_on_ids`` AND it is schema-qualified (preceded by a schema sentinel)
+    — so a bare ``FROM some_cte`` (CTE/derived) is never treated as an upstream.
+
+    Spark unquoted identifiers are case-insensitive, so both the source-id match
+    and the returned keys are normalised to lowercase (``FROM …src S`` →
+    ``s.SecretCol`` must still resolve). The *value* preserves the canonical
+    source id exactly as declared in ``depends_on_ids`` so downstream demand
+    attribution keys against the contract correctly. The key is the SQL alias
+    when present, else the id itself (covers an unaliased upstream).
     """
+    dep_canonical = {d.lower(): d for d in depends_on_ids}
     out: dict[str, str] = {}
     for m in _SOURCE_RE.finditer(block):
         sid = m.group("id")
         schema_qualified = (m.group("s1") in _SCHEMA_SENTINELS) or (
             m.group("s2") in _SCHEMA_SENTINELS
         )
-        if not schema_qualified or sid not in depends_on_ids:
+        canonical = dep_canonical.get(sid.lower())
+        if not schema_qualified or canonical is None:
             continue
         alias = m.group("alias")
         if alias and alias.lower() not in _SQL_KEYWORDS:
-            out[alias] = sid
+            out[alias.lower()] = canonical
         else:
-            out[sid] = sid  # unaliased upstream — reference by bare id/column
+            out[canonical.lower()] = canonical  # unaliased — reference by bare id/column
     return out
 
 
@@ -305,14 +314,18 @@ def _has_bare_star_projection(block: str) -> bool:
     """True if the block's SELECT list contains a bare ``*`` item.
 
     Isolates the projection (between this block's ``SELECT`` and its ``FROM``),
-    blanks parenthesised groups so ``COUNT(*)`` / function args don't count, and
-    looks for a ``*`` that stands as its own select-list item. A qualified
-    ``<alias>.*`` is NOT matched here (the qualified-ref scan handles it).
+    strips a leading set quantifier (``DISTINCT`` / ``ALL``) so ``SELECT DISTINCT
+    *`` is caught, blanks parenthesised groups so ``COUNT(*)`` / function args
+    don't count, and looks for a ``*`` that stands as its own select-list item. A
+    qualified ``<alias>.*`` is NOT matched here (the qualified-ref scan handles it).
     """
     m = re.search(r"\bSELECT\b(?P<proj>.*?)\bFROM\b", block, re.IGNORECASE | re.DOTALL)
     proj = m.group("proj") if m else ""
     if not proj:
         return False
+    # `SELECT DISTINCT *` / `SELECT ALL *` — the quantifier sits between SELECT
+    # and the first projection item, so strip it before the bare-`*` scan.
+    proj = re.sub(r"^\s*(?:DISTINCT|ALL)\s+", " ", proj, flags=re.IGNORECASE)
     prev = None
     while prev != proj:  # strip nested parens (function args, COUNT(*))
         prev = proj
@@ -369,7 +382,7 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
         # Qualified references <alias>.<col> / <alias>.*
         for m in _QUALIFIED_REF_RE.finditer(block):
             alias, col = m.group("alias"), m.group("col")
-            sid = aliases.get(alias)
+            sid = aliases.get(alias.lower())  # Spark identifiers are case-insensitive
             if sid is None:
                 continue  # alias not an upstream in this block → ignore
             if col == "*":
@@ -392,6 +405,7 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
         # Only meaningful when the block has exactly one upstream (else ambiguous).
         if len(set(aliases.values())) == 1:
             (only_sid,) = set(aliases.values())
+            only_sid_low = only_sid.lower()
             # Residual = block with qualified refs (<alias>.<col>) and AS-targets
             # removed, so only *truly unqualified* column-position identifiers
             # remain (a qualified ref's column part and an output alias are NOT
@@ -403,8 +417,8 @@ def extract_upstream_reads(sql: str, *, depends_on_ids: set[str]) -> UpstreamRea
                 if (
                     low in _SQL_KEYWORDS
                     or tok in _SCHEMA_SENTINELS
-                    or tok in upstream_alias_set
-                    or tok == only_sid
+                    or low in upstream_alias_set
+                    or low == only_sid_low
                     or low.startswith(_COL_SENTINEL_PREFIX)
                     or low.startswith(_COA_SENTINEL_PREFIX)
                     or low.startswith(_SEM_SENTINEL_PREFIX)
