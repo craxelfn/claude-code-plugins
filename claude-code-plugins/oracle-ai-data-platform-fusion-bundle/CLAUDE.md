@@ -142,6 +142,15 @@ Any silver/gold node SQL you author or edit MUST:
    `$column.<key>` / `$coa.<role>` matching the token used). A read not declared
    fails `AIDPF-2084`; a bare (unqualified) upstream column warns (`AIDPF-2085`).
 
+**Exception — a source consumed by a `{{ semantic.<name> }}` `{table}` fragment
+MUST stay UNALIASED.** The renderer substitutes `{table}` with the source's
+**full** bronze identifier (`catalog.schema.table`); a correlation name (alias)
+would hide that identifier and the rendered predicate's full-path qualifier
+would fail to resolve at execution. Keep the source unaliased and qualify its
+reads by the table name (`ap_invoices.<col>`) — the extractor attributes those
+exactly like an alias, so the gate still passes. Only the semantic-consuming
+source is affected; alias every other source normally.
+
 This keeps `requiredColumns` an honest record of what the SQL actually consumes,
 so the live preflight/drift gates (AIDPF-2042/2071/2072/4071) cover every read.
 
