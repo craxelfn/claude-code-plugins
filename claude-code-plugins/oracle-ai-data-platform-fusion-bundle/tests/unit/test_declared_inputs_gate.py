@@ -322,6 +322,39 @@ def test_semantic_symbol_resolves_into_live_required_column_union():
     assert resolved == {"ApInvoicesCancelledDate"}
 
 
+def test_semantic_variant_contract_holds_per_resolved_arm():
+    # Semantic candidates are mutually exclusive per tenant; the bronze contract
+    # can only back the RESOLVED arm. Prove the requiredColumns ⊆ outputSchema
+    # chain (AIDPF-2045) holds for the resolved `cancelled_date` arm, and that a
+    # `cancelled_flag`-resolving profile correctly surfaces AIDPF-2045 for the
+    # unbacked `ApInvoicesCancelledFlag` (the honest "extend the contract via a
+    # bronze overlay" signal — not a silent gap).
+    from oracle_ai_data_platform_fusion_bundle.commands.content_pack import (
+        _load_full_chain, resolve_pack_path,
+    )
+    from oracle_ai_data_platform_fusion_bundle.orchestrator.content_pack_validators import (
+        AIDPF_2045_COLUMN_CONTRACT_MISMATCH, validate_column_contracts,
+    )
+    pack = _load_full_chain(resolve_pack_path("fusion-finance-starter"))
+
+    def _prof(cand: str):
+        m = MagicMock()
+        m.resolved.column = {}
+        m.resolved.semantic = {"cancelled_status": cand}
+        m.profile = {}
+        return m
+
+    date_errs = [e for e in validate_column_contracts(pack, profile=_prof("cancelled_date"))
+                 if e.location == "gold/ap_aging"]
+    assert date_errs == []  # resolved arm's column (ApInvoicesCancelledDate) is in contract
+
+    flag_errs = validate_column_contracts(pack, profile=_prof("cancelled_flag"))
+    assert any(e.code == AIDPF_2045_COLUMN_CONTRACT_MISMATCH
+               and e.location == "gold/ap_aging"
+               and "ApInvoicesCancelledFlag" in e.message
+               for e in flag_errs)
+
+
 def test_starter_pack_declared_inputs_clean():
     from oracle_ai_data_platform_fusion_bundle.commands.content_pack import (
         _load_full_chain, resolve_pack_path,
