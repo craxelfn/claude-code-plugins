@@ -7,6 +7,7 @@ commented-out ``refresh.incremental`` TODOs the plan calls for.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,11 @@ from click.testing import CliRunner
 from oracle_ai_data_platform_fusion_bundle import cli
 from oracle_ai_data_platform_fusion_bundle.commands.catalog import _spark_type_to_yaml
 from oracle_ai_data_platform_fusion_bundle.schema.medallion_pack import NodeYaml
+
+# Tests that mock ``pyspark.sql.SparkSession`` need pyspark importable. The
+# ``spark=no`` CI matrix leg does not install it, so skip those (the type-mapper
+# and CLI-wireup tests below do not need Spark and still run).
+_HAS_PYSPARK = importlib.util.find_spec("pyspark") is not None
 
 
 class TestSparkTypeMapper:
@@ -93,6 +99,7 @@ datasets: []
     return bundle_path
 
 
+@pytest.mark.skipif(not _HAS_PYSPARK, reason="requires pyspark (spark=no CI leg)")
 class TestProbePvoEmitsLoadCleanYaml:
     """End-to-end: invoke the emitter, parse the YAML, validate via NodeYaml."""
 
