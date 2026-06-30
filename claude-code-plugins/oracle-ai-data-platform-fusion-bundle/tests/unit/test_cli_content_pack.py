@@ -384,6 +384,48 @@ def test_cli_refresh_fork_refuses_wrong_base_version(tmp_path: Path) -> None:
     assert (overlay / "pack.yaml").read_text() == before
 
 
+def test_cli_refresh_fork_multilevel_chain(tmp_path: Path) -> None:
+    """leaf overlay -> parent OVERLAY -> starter: the version guard must validate
+    the leaf's DIRECT parent (raw id/version), not the merged root identity."""
+    # Root base.
+    starter = tmp_path / "fusion-finance-starter"
+    _w(starter / "pack.yaml", {
+        "id": "fusion-finance-starter", "version": "0.1.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+    })
+    _w(starter / "bronze" / "erp_suppliers.yaml", copy.deepcopy(_RF_BRONZE))
+    _w(starter / "silver" / "dim_supplier.yaml", copy.deepcopy(_RF_SILVER))
+    (starter / "silver" / "dim_supplier.sql").write_text("SELECT 1 AS supplier_key\n")
+    # Mid overlay (no overrides) — the leaf's direct parent.
+    tenant = tmp_path / "tenant-base"
+    _w(tenant / "pack.yaml", {
+        "id": "tenant-base", "version": "0.1.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        "extends": "fusion-finance-starter@0.1.0",
+    })
+    # Leaf overlay extends the mid overlay, with a stale replaceNode stamp.
+    leaf = tmp_path / "acme-customer"
+    placeholder = {"sqlSha256": "stale", "contractSha256": "stale", "packVersion": "0.0.0"}
+    _w(leaf / "pack.yaml", {
+        "id": "acme-customer", "version": "0.1.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        "extends": "tenant-base@0.1.0",
+        "overrides": {
+            "silver/dim_supplier": {"replaceNode": {"reason": "x", "forkedFrom": placeholder}}
+        },
+    })
+    _w(leaf / "silver" / "dim_supplier.yaml", copy.deepcopy(_RF_SILVER))
+    (leaf / "silver" / "dim_supplier.sql").write_text("SELECT 2 AS supplier_key\n")
+
+    result = _run_cli("content-pack", "refresh-fork", str(leaf), "--json")
+    assert result.returncode == 0, result.stdout + result.stderr
+    # forkedFrom must be re-stamped with real fingerprints from the parent chain.
+    rew = _yaml.safe_load((leaf / "pack.yaml").read_text())
+    ff = rew["overrides"]["silver/dim_supplier"]["replaceNode"]["forkedFrom"]
+    assert len(ff["sqlSha256"]) == 64 and len(ff["contractSha256"]) == 64
+    assert ff["packVersion"] == "0.1.0"
+
+
 def test_cli_replace_node_validates_clean(tmp_path: Path) -> None:
     _, overlay = _build_replace_fixture(tmp_path)
     result = _run_cli("content-pack", "validate", str(overlay), "--json")

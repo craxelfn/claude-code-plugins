@@ -469,6 +469,14 @@ def refresh_fork_cli(
         return _emit_error(
             "AIDPF-2000", f"pack {name!r} is not an overlay (no `extends:`).", 1
         )
+    try:
+        ref = PackOverlayRef.parse(extends) if isinstance(extends, str) else None
+    except Exception:
+        ref = None
+    if ref is None:
+        return _emit_error(
+            "AIDPF-2000", f"pack {name!r} has a malformed `extends:` value {extends!r}.", 1
+        )
     base_path = _resolve_base_path(overlay_path, extends)
     if base_path is None:
         return _emit_error(
@@ -478,34 +486,32 @@ def refresh_fork_cli(
             1,
         )
 
-    try:
-        base = load_full_chain(base_path, base_resolver=_make_cli_base_resolver(base_path))
-    except (PackLoaderError, ValidationError, FileNotFoundError) as exc:
-        return _emit_error("AIDPF-2000", f"could not load base pack: {exc}", 1)
-
-    # Guard the `extends` version (AIDPF-2004). resolve_overlay_chain enforces this
-    # while walking the leaf's chain, but refresh-fork resolves the parent base by
-    # NAME, so the version is otherwise unchecked. Without this, an overlay that
-    # says `extends: pack@0.1.0` against a sibling/installed pack@0.2.0 would
-    # re-stamp forkedFrom from a base it does not actually extend — corrupting the
-    # fork provenance. Verify id + version BEFORE computing or writing anything.
-    try:
-        ref = PackOverlayRef.parse(extends) if isinstance(extends, str) else None
-    except Exception:
-        ref = None
-    if ref is None:
-        return _emit_error(
-            "AIDPF-2000", f"pack {name!r} has a malformed `extends:` value {extends!r}.", 1
-        )
-    if base.pack.id != ref.name or base.pack.version != ref.version:
+    # Guard the `extends` version (AIDPF-2004) against the leaf's DIRECT parent.
+    # resolve_overlay_chain enforces this while walking the chain, but refresh-fork
+    # resolves the parent by NAME, so the version is otherwise unchecked — an
+    # overlay declaring `extends: pack@0.1.0` against an installed pack@0.2.0 would
+    # re-stamp forkedFrom from a base it does not extend, corrupting provenance.
+    # Validate against the RAW candidate pack.yaml (its own declared id/version),
+    # NOT a merged ResolvedPack: when the direct parent is itself an overlay,
+    # merge_overlay keeps the ROOT base's identity, so the merged id/version would
+    # not match the (overlay) parent's ref. Check the raw candidate before merging.
+    raw_base = yaml.safe_load((base_path / "pack.yaml").read_text()) or {}
+    base_id, base_version = raw_base.get("id"), raw_base.get("version")
+    if base_id != ref.name or base_version != ref.version:
         return _emit_error(
             AIDPF_2004_EXTENDS_VERSION_MISMATCH,
             f"overlay {name!r} declares `extends: {ref.to_string()}` but the resolved "
-            f"base at {base_path} is {base.pack.id}@{base.pack.version}. Refusing to "
+            f"parent pack at {base_path} is {base_id}@{base_version}. Refusing to "
             f"re-stamp forkedFrom from a base the overlay does not extend — align the "
             f"versions first.",
             2,
         )
+
+    # Now merge the parent chain (excluding the leaf) for fingerprint computation.
+    try:
+        base = load_full_chain(base_path, base_resolver=_make_cli_base_resolver(base_path))
+    except (PackLoaderError, ValidationError, FileNotFoundError) as exc:
+        return _emit_error("AIDPF-2000", f"could not load base pack: {exc}", 1)
 
     changes: list[dict[str, Any]] = []
     for key, entry in targets.items():
