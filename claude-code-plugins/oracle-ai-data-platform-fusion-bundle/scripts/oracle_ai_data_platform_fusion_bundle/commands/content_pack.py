@@ -420,7 +420,11 @@ def refresh_fork_cli(
     """
     import yaml
 
-    from ..orchestrator.content_pack import _split_override_key, load_full_chain
+    from ..orchestrator.content_pack import (
+        AIDPF_2004_EXTENDS_VERSION_MISMATCH,
+        _split_override_key,
+        load_full_chain,
+    )
     from ..orchestrator.sql_renderer import (
         compute_contract_fingerprint,
         compute_fork_fingerprint,
@@ -478,6 +482,30 @@ def refresh_fork_cli(
         base = load_full_chain(base_path, base_resolver=_make_cli_base_resolver(base_path))
     except (PackLoaderError, ValidationError, FileNotFoundError) as exc:
         return _emit_error("AIDPF-2000", f"could not load base pack: {exc}", 1)
+
+    # Guard the `extends` version (AIDPF-2004). resolve_overlay_chain enforces this
+    # while walking the leaf's chain, but refresh-fork resolves the parent base by
+    # NAME, so the version is otherwise unchecked. Without this, an overlay that
+    # says `extends: pack@0.1.0` against a sibling/installed pack@0.2.0 would
+    # re-stamp forkedFrom from a base it does not actually extend — corrupting the
+    # fork provenance. Verify id + version BEFORE computing or writing anything.
+    try:
+        ref = PackOverlayRef.parse(extends) if isinstance(extends, str) else None
+    except Exception:
+        ref = None
+    if ref is None:
+        return _emit_error(
+            "AIDPF-2000", f"pack {name!r} has a malformed `extends:` value {extends!r}.", 1
+        )
+    if base.pack.id != ref.name or base.pack.version != ref.version:
+        return _emit_error(
+            AIDPF_2004_EXTENDS_VERSION_MISMATCH,
+            f"overlay {name!r} declares `extends: {ref.to_string()}` but the resolved "
+            f"base at {base_path} is {base.pack.id}@{base.pack.version}. Refusing to "
+            f"re-stamp forkedFrom from a base the overlay does not extend — align the "
+            f"versions first.",
+            2,
+        )
 
     changes: list[dict[str, Any]] = []
     for key, entry in targets.items():

@@ -565,13 +565,13 @@ class ForkedFrom(BaseModel):
     the base node YAML contract; silver/gold have no drift gate against the base,
     so a later starter-pack fix to the base mart would be silently missed. These
     fingerprints, recomputed at ``content-pack validate``, convert that *silent*
-    staleness into a *loud* one (``AIDPF-2047``):
+    staleness into a *loud* one (``AIDPF-2064``):
 
     * ``sql_sha256`` — the base SQL template text + the referenced
       ``{{ semantic.* }}`` candidate lists (pack-owned render inputs).
     * ``contract_sha256`` — the base node YAML contract (``outputSchema`` incl.
       ``pii``, ``requiredColumns``, ``quality.tests``). A base change that touches
-      only the YAML (e.g. a PII reclassification) trips ``AIDPF-2047`` too.
+      only the YAML (e.g. a PII reclassification) trips ``AIDPF-2064`` too.
     * ``pack_version`` — the base pack version at fork time (recorded provenance).
 
     Both fingerprints are profile-independent and validate-time computable. Keys

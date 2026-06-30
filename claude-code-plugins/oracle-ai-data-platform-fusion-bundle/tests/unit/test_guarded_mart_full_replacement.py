@@ -384,6 +384,64 @@ def test_fork_fingerprint_stable_and_sql_sensitive(tmp_path: Path) -> None:
     assert compute_fork_fingerprint(p4.silver["dim_supplier"], p4) != h1
 
 
+def _make_semantic_base(root: Path, *, fragment: str = "ACTIVE_FLAG = 'Y'") -> Path:
+    """A base whose dim_supplier.sql references `{{ semantic.active }}`, declared in
+    pack.yaml's semanticVariants — the pack-owned render input the raw-SQL hash
+    alone would miss."""
+    pack_root = root / "fusion-finance-starter"
+    _write_yaml(
+        pack_root / "pack.yaml",
+        {
+            "id": "fusion-finance-starter",
+            "version": "0.1.0",
+            "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+            "semanticVariants": {
+                "active": {
+                    "appliesTo": "bronze.erp_suppliers",
+                    "required": False,
+                    "candidates": [
+                        {
+                            "id": "by_flag",
+                            "detect": {"columnExists": "ACTIVE_FLAG"},
+                            "fragment": fragment,
+                        }
+                    ],
+                }
+            },
+        },
+    )
+    _write_yaml(pack_root / "bronze" / "erp_suppliers.yaml", copy.deepcopy(_BRONZE_NODE))
+    _write_yaml(pack_root / "silver" / "dim_supplier.yaml", copy.deepcopy(_SILVER_NODE))
+    (pack_root / "silver" / "dim_supplier.sql").write_text(
+        "SELECT 1 AS supplier_key WHERE {{ semantic.active }}\n"
+    )
+    return pack_root
+
+
+def test_semantic_fragment_drift_changes_fork_fingerprint(tmp_path: Path) -> None:
+    """Editing only a referenced semantic candidate fragment (SQL file untouched)
+    must move compute_fork_fingerprint — the pack-owned-render-input guard."""
+    base = _make_semantic_base(tmp_path, fragment="ACTIVE_FLAG = 'Y'")
+    p1 = load_pack(base)
+    h1 = compute_fork_fingerprint(p1.silver["dim_supplier"], p1)
+    # Rewrite ONLY the candidate fragment in pack.yaml; leave dim_supplier.sql alone.
+    _make_semantic_base(tmp_path, fragment="ACTIVE_FLAG = 'A'")
+    p2 = load_pack(base)
+    assert compute_fork_fingerprint(p2.silver["dim_supplier"], p2) != h1
+
+
+def test_semantic_fragment_drift_trips_2064_via_merge(tmp_path: Path) -> None:
+    base = _make_semantic_base(tmp_path, fragment="ACTIVE_FLAG = 'Y'")
+    ov = _make_replace_overlay(tmp_path, stamps=_stamps(base))
+    # Stamped against the current base → merges clean.
+    assert "dim_supplier" in _merge(base, ov).silver
+    # Edit ONLY the base semantic fragment → fork is now stale on the logic side.
+    _make_semantic_base(tmp_path, fragment="ACTIVE_FLAG = 'A'")
+    with pytest.raises(ForkBaseDriftError) as exc:
+        _merge(base, ov)
+    assert AIDPF_2064_FORK_BASE_DRIFT in str(exc.value)
+
+
 def test_contract_fingerprint_pii_sensitive(tmp_path: Path) -> None:
     base = _make_base(tmp_path)
     node = load_pack(base).silver["dim_supplier"]

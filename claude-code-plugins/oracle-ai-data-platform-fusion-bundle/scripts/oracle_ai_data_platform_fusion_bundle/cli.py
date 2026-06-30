@@ -603,7 +603,7 @@ def content_pack_validate(name: str, json_output: bool, profile: str | None) -> 
 def content_pack_refresh_fork(name: str, node: str | None, json_output: bool) -> None:
     """Re-stamp `replaceNode.forkedFrom` fingerprints from the current base.
 
-    The operator's exit from an `AIDPF-2047` (fork-base drift) failure: after
+    The operator's exit from an `AIDPF-2064` (fork-base drift) failure: after
     re-reconciling a replaceNode overlay against an updated base mart, this
     recomputes and rewrites all three `forkedFrom` stamps (sqlSha256,
     contractSha256, packVersion).

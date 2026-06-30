@@ -345,6 +345,43 @@ def test_cli_refresh_fork_help() -> None:
     result = _run_cli("content-pack", "refresh-fork", "--help")
     assert result.returncode == 0, result.stderr
     assert "forkedFrom" in result.stdout
+    # Help must name the current fork-base-drift code, not the stale/cluster one.
+    assert "AIDPF-2064" in result.stdout
+    assert "AIDPF-2047" not in result.stdout
+
+
+def test_cli_refresh_fork_refuses_wrong_base_version(tmp_path: Path) -> None:
+    """refresh-fork must NOT re-stamp from a base whose version != the overlay's
+    `extends` ref (AIDPF-2004) — it would corrupt fork provenance."""
+    # Base shipped at 0.2.0 ...
+    base = tmp_path / "fusion-finance-starter"
+    _w(base / "pack.yaml", {
+        "id": "fusion-finance-starter", "version": "0.2.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+    })
+    _w(base / "bronze" / "erp_suppliers.yaml", copy.deepcopy(_RF_BRONZE))
+    _w(base / "silver" / "dim_supplier.yaml", copy.deepcopy(_RF_SILVER))
+    (base / "silver" / "dim_supplier.sql").write_text("SELECT 1 AS supplier_key\n")
+    # ... but the overlay says it forked from 0.1.0 (stale placeholder stamps).
+    overlay = tmp_path / "acme-finance"
+    placeholder = {"sqlSha256": "x", "contractSha256": "y", "packVersion": "0.1.0"}
+    _w(overlay / "pack.yaml", {
+        "id": "acme-finance", "version": "0.1.0",
+        "compatibility": {"pluginMinVersion": "0.3.0", "fusionFamilies": ["ERP"]},
+        "extends": "fusion-finance-starter@0.1.0",
+        "overrides": {
+            "silver/dim_supplier": {"replaceNode": {"reason": "x", "forkedFrom": placeholder}}
+        },
+    })
+    _w(overlay / "silver" / "dim_supplier.yaml", copy.deepcopy(_RF_SILVER))
+    (overlay / "silver" / "dim_supplier.sql").write_text("SELECT 2 AS supplier_key\n")
+    before = (overlay / "pack.yaml").read_text()
+
+    result = _run_cli("content-pack", "refresh-fork", str(overlay), "--json")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AIDPF-2004" in [e["code"] for e in json.loads(result.stdout)["errors"]]
+    # The leaf pack.yaml must be left untouched (no re-stamp from the wrong base).
+    assert (overlay / "pack.yaml").read_text() == before
 
 
 def test_cli_replace_node_validates_clean(tmp_path: Path) -> None:
