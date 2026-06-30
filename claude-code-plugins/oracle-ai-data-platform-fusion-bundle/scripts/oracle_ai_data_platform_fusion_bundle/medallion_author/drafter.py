@@ -404,27 +404,60 @@ def validate_overlay(draft: OverlayDraft) -> None:
 
     * Overlay MUST NOT introduce any silver/gold node definitions
       (skill never authors SQL templates).
-    * Overlay ``overrides`` may carry ONLY a sanctioned bronze
-      ``outputSchema`` type-overlay (target ``bronze/<id>``, no other override
-      key). Any ``sql`` / ``profile`` / ``quality`` / non-bronze override —
-      i.e. SQL-template authoring — remains forbidden.
+    * Overlay ``overrides`` may carry ONLY one of two sanctioned shapes:
+
+      (a) a **bronze** override (target ``bronze/<id>``) carrying **at least one**
+          of the three sanctioned bronze keys — ``outputSchema`` (type-overlay),
+          ``requiredColumns`` (add a source-column assertion), and/or
+          ``relaxRequiredColumns`` (acknowledged removal of a required column, each
+          entry with a mandatory ``reason``). Any combination of the three is
+          allowed; a bronze entry carrying none of them is a no-op and is rejected.
+          These three are exactly the bronze mechanisms the medallion-author skill
+          is documented to author (see ``skills/medallion-author/SKILL.md`` "Bronze
+          requiredColumns overlay", and the ``/medallion-author`` routing in
+          mart-author / fusion-drift-doctor / aidpf-error-triage). The
+          ``relaxRequiredColumns`` safety is enforced by the schema (mandatory
+          ``reason``) and the engine (AIDPF-2063), not here.
+
+      (b) a **silver/gold** guarded full replacement (target ``silver/<id>`` /
+          ``gold/<id>`` carrying ONLY a ``replaceNode`` block).
+
+      Forbidden in every case: ``sql`` / ``profile`` / ``quality`` (free-form
+      SQL-template authoring) and a bronze ``replaceNode`` (silver/gold-only).
     * Overlay MUST carry a non-empty ``provenance.skill_id``,
       ``skill_version``, ``model_id``, ``diagnostic_run_id``.
     """
     pack = draft.pack_yaml
     for key, entry in (pack.overrides or {}).items():
-        sanctioned = (
+        # (a) Bronze override: at least one of the three sanctioned bronze keys,
+        # and none of the forbidden ones (sql/profile/quality/replaceNode).
+        sanctioned_bronze = (
             key.startswith("bronze/")
-            and entry.output_schema is not None
+            and (
+                entry.output_schema is not None
+                or entry.required_columns is not None
+                or entry.relax_required_columns is not None
+            )
             and entry.sql is None
             and entry.profile is None
             and entry.quality is None
+            and entry.replace_node is None
         )
-        if not sanctioned:
+        # (b) Silver/gold guarded full replacement: a `replaceNode` block (and
+        # nothing else — the schema already enforces replaceNode mutual-exclusion).
+        sanctioned_replace = (
+            (key.startswith("silver/") or key.startswith("gold/"))
+            and entry.replace_node is not None
+        )
+        if not (sanctioned_bronze or sanctioned_replace):
             raise OverlayValidationError(
-                f"Skill-authored overlay override {key!r} is not a sanctioned "
-                f"bronze `outputSchema` type-overlay; SQL-template authoring "
-                f"(sql/profile/quality, or a non-bronze target) is forbidden."
+                f"Skill-authored overlay override {key!r} is not a sanctioned shape. "
+                f"Allowed: a bronze override (`bronze/<id>`) carrying at least one of "
+                f"`outputSchema` / `requiredColumns` / `relaxRequiredColumns`, or a "
+                f"silver/gold `replaceNode` full replacement (`silver|gold/<id>`). "
+                f"Forbidden: `sql` / `profile` / `quality` (free-form SQL authoring), "
+                f"a bronze `replaceNode` (silver/gold-only), and an empty bronze "
+                f"override carrying none of the three bronze keys."
             )
     if pack.provenance is None:
         raise OverlayValidationError("Overlay missing `provenance` block.")

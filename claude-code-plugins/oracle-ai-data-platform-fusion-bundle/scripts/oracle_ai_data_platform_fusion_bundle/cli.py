@@ -591,6 +591,30 @@ def content_pack_validate(name: str, json_output: bool, profile: str | None) -> 
     )
 
 
+@content_pack.command("refresh-fork")
+@click.argument("name")
+@click.option(
+    "--node",
+    default=None,
+    help="Restrict to a single `<layer>/<id>` replaceNode override (e.g. "
+    "`silver/dim_account`). Omit to re-stamp every replaceNode in the overlay.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON for tooling.")
+def content_pack_refresh_fork(name: str, node: str | None, json_output: bool) -> None:
+    """Re-stamp `replaceNode.forkedFrom` fingerprints from the current base.
+
+    The operator's exit from an `AIDPF-2064` (fork-base drift) failure: after
+    re-reconciling a replaceNode overlay against an updated base mart, this
+    recomputes and rewrites all three `forkedFrom` stamps (sqlSha256,
+    contractSha256, packVersion).
+    """
+    from .commands.content_pack import refresh_fork_cli
+
+    sys.exit(
+        refresh_fork_cli(name, node=node, json_output=json_output, console=console)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dashboard commands (OAC integration)
 # ---------------------------------------------------------------------------
