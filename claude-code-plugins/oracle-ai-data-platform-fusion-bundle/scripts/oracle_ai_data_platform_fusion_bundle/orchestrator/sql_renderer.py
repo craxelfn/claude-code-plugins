@@ -50,6 +50,7 @@ seed/incremental execution.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -322,6 +323,104 @@ def compute_rendered_sql_hash(rendered: RenderedSql) -> str:
     template whitespace doesn't shift the hash; profile-value flips do.
     """
     return hashlib.sha256(rendered.hash_input.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Fork fingerprints (guarded same-id replacement, AIDPF-2064)
+#
+# Two PROFILE-INDEPENDENT, validate-time-computable fingerprints over a base
+# node, used by the ``replaceNode`` staleness gate and ``content-pack
+# refresh-fork``. These are deliberately NOT ``compute_rendered_sql_hash``:
+# that folds profile-resolved param values into ``hash_input`` and needs an
+# execution context (TenantProfile/RunContext), so it is neither stable across
+# tenant profiles nor computable at validate time.
+# ---------------------------------------------------------------------------
+
+
+def compute_fork_fingerprint(node: NodeYaml, pack: "ResolvedPack") -> str:  # noqa: F821
+    """SHA-256 over a base SQL mart's *logic* — raw ``.sql`` template text plus
+    the referenced ``{{ semantic.* }}`` candidate lists from the base pack.
+
+    Profile-independent by construction: tokens are left **unresolved** (no
+    ``{{ column.* }}`` / ``{{ coa.* }}`` / profile lookups), and for each
+    referenced semantic variant the **full** candidate list (every id+fragment,
+    order-stable) is folded in — not the profile-selected one. So a base fix to a
+    candidate ``fragment`` in ``pack.yaml`` shifts the hash even though the
+    ``.sql`` file is untouched (closing the pack-owned-render-input hole).
+
+    Caller contract: ``node.implementation.type == "sql"`` (the merge-time guard
+    fails closed on builtin/non-SQL before calling this).
+    """
+    impl = node.implementation
+    sql_rel = getattr(impl, "sql", None)
+    if sql_rel is None:
+        raise ValueError(
+            f"compute_fork_fingerprint requires a SQL node; node {node.id!r} has "
+            f"implementation.type={getattr(impl, 'type', '?')!r}."
+        )
+    qualified_id = _qualified_id_for_node(pack, node)
+    sql_path = pack.root_for(qualified_id) / sql_rel
+    template_text = Path(sql_path).read_text(encoding="utf-8")
+    canonical_sql = re.sub(r"\s+", " ", template_text).strip()
+
+    # Collect referenced semantic-variant names from the raw template.
+    referenced: list[str] = []
+    for m in _TOKEN_RE.finditer(template_text):
+        token = m.group(1).strip()
+        if token.startswith("semantic."):
+            name = token[len("semantic.") :].strip()
+            if name and name not in referenced:
+                referenced.append(name)
+
+    variants = _build_semantic_variants_index(pack)
+    semantic_material: list[str] = []
+    for name in sorted(referenced):
+        variant = variants.get(name)
+        candidates = getattr(variant, "candidates", None) or []
+        # Order-stable serialization of every candidate (id + fragment).
+        cand_repr = [
+            {"id": getattr(c, "id", None), "fragment": getattr(c, "fragment", None)}
+            for c in candidates
+        ]
+        semantic_material.append(
+            f"{name}:" + json.dumps(cand_repr, sort_keys=True, ensure_ascii=False)
+        )
+
+    material = "SQL:" + canonical_sql + "\nSEMANTIC:" + "|".join(semantic_material)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def compute_contract_fingerprint(node: NodeYaml) -> str:
+    """SHA-256 over a base node's *YAML contract* — ``outputSchema`` (incl.
+    ``pii``), ``requiredColumns``, and ``quality.tests``.
+
+    Profile-independent and computable from the base node object alone. A base
+    change that touches only the YAML (e.g. reclassifying a column to
+    ``pii: high``, tightening a type, or adding a quality test) shifts this hash
+    so the ``replaceNode`` staleness gate (AIDPF-2064) fires — even though the
+    ``.sql`` and its fork fingerprint are unchanged. The PII case is
+    security-relevant: dashboard enforcement reads the merged ``outputSchema``.
+    """
+    # outputSchema: declared order matters (it is the materialized column order).
+    output_cols = [
+        {"name": c.name, "type": c.type, "nullable": c.nullable, "pii": str(c.pii)}
+        for c in node.output_schema.columns
+    ]
+    # requiredColumns: order-independent — sort sources and each column list.
+    required = {
+        src: sorted(cols) for src, cols in (node.required_columns or {}).items()
+    }
+    # quality.tests: order-independent — canonicalize each test, sort the set.
+    tests = sorted(
+        json.dumps(t.model_dump(by_alias=True), sort_keys=True, ensure_ascii=False)
+        for t in node.quality.tests
+    )
+    material = json.dumps(
+        {"outputSchema": output_cols, "requiredColumns": required, "qualityTests": tests},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _format_profile_value_for_params(value: Any) -> Any:

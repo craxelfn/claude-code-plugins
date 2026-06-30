@@ -404,27 +404,37 @@ def validate_overlay(draft: OverlayDraft) -> None:
 
     * Overlay MUST NOT introduce any silver/gold node definitions
       (skill never authors SQL templates).
-    * Overlay ``overrides`` may carry ONLY a sanctioned bronze
-      ``outputSchema`` type-overlay (target ``bronze/<id>``, no other override
-      key). Any ``sql`` / ``profile`` / ``quality`` / non-bronze override —
-      i.e. SQL-template authoring — remains forbidden.
+    * Overlay ``overrides`` may carry ONLY one of two sanctioned shapes:
+      (a) a bronze ``outputSchema`` type-overlay (target ``bronze/<id>``, no
+      other override key); or (b) a silver/gold guarded full replacement
+      (target ``silver/<id>`` / ``gold/<id>`` carrying ONLY a ``replaceNode``
+      block). Any other ``sql`` / ``profile`` / ``quality`` override — i.e.
+      free-form SQL-template authoring outside ``replaceNode`` — remains forbidden.
     * Overlay MUST carry a non-empty ``provenance.skill_id``,
       ``skill_version``, ``model_id``, ``diagnostic_run_id``.
     """
     pack = draft.pack_yaml
     for key, entry in (pack.overrides or {}).items():
-        sanctioned = (
+        sanctioned_bronze = (
             key.startswith("bronze/")
             and entry.output_schema is not None
             and entry.sql is None
             and entry.profile is None
             and entry.quality is None
         )
-        if not sanctioned:
+        # Silver/gold guarded full replacement: a `replaceNode` block (and nothing
+        # else — the schema already enforces replaceNode mutual-exclusion).
+        sanctioned_replace = (
+            (key.startswith("silver/") or key.startswith("gold/"))
+            and entry.replace_node is not None
+        )
+        if not (sanctioned_bronze or sanctioned_replace):
             raise OverlayValidationError(
-                f"Skill-authored overlay override {key!r} is not a sanctioned "
-                f"bronze `outputSchema` type-overlay; SQL-template authoring "
-                f"(sql/profile/quality, or a non-bronze target) is forbidden."
+                f"Skill-authored overlay override {key!r} is not a sanctioned shape: "
+                f"a bronze `outputSchema` type-overlay (`bronze/<id>`) or a silver/gold "
+                f"`replaceNode` full replacement (`silver|gold/<id>`). Free-form "
+                f"SQL-template authoring (sql/profile/quality outside replaceNode) is "
+                f"forbidden."
             )
     if pack.provenance is None:
         raise OverlayValidationError("Overlay missing `provenance` block.")

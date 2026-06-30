@@ -77,13 +77,39 @@ enforces it).
 
 | Rung | Build | When |
 |---|---|---|
-| **3 — add column** | additive `outputSchema` + `SELECT` on an existing node | new field derives from columns already in that node's sources, **same grain** |
+| **3 — change a mart in place** | guarded same-id full replacement (`replaceNode`) of an existing silver/gold mart | add / remove / rewrite a column or logic from columns already in that node's sources, **identity unchanged** |
 | **1 — new gold** | new aggregate/business mart over EXISTING bronze/silver | a new metric/grain from already-materialized data |
 | **2 — new silver** | new conformed/typed node over EXISTING bronze | a conformed shape not yet in silver |
 | **4 — new bronze + node** | additive `bronze_extract` + downstream node | a raw field isn't extracted yet (only at the PVO source) |
 
-`change_planner.py` chooses the rung and refuses to mark any existing node for
-alteration.
+`change_planner.py` chooses the rung. Rung 3 keeps the mart's id (no downstream
+`dependsOn` repointing) but ships a complete replacement under an acknowledged
+`replaceNode` block — there is no separate additive mechanism, and add / remove /
+rewrite all use this one shape.
+
+**Rung-3 mechanism (guarded same-id full replacement).** Ship a complete new
+`overlays/<name>/<layer>/<id>.yaml` + `<id>.sql`, plus:
+
+```yaml
+overrides:
+  <layer>/<id>:
+    replaceNode:
+      reason: "Why this fork exists; e.g. TICKET-123."
+      forkedFrom:
+        sqlSha256: "<base SQL + referenced semantic fragments fingerprint>"
+        contractSha256: "<base outputSchema/pii + requiredColumns + quality fingerprint>"
+        packVersion: "<base pack version>"
+```
+
+- Compute/refresh `forkedFrom` with `aidp-fusion-bundle content-pack refresh-fork
+  overlays/<name> --node <layer>/<id>` (don't hand-author the hashes).
+- **Identity must equal base** — `layer`, `target`, the `dependsOn` edge set, and
+  the `refresh` contract. Changing any → `AIDPF-2065`; author a new mart id instead.
+- A bare same-id file with no `replaceNode` → `AIDPF-2001`. SQL marts only (a
+  builtin like `dim_calendar` → `AIDPF-2001`).
+- If the base mart later changes, validate fails closed (`AIDPF-2064`) until you
+  re-reconcile and re-run `refresh-fork`. This is the accepted cost of forking the
+  SQL (the base fix does not flow through automatically).
 
 ---
 

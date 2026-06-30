@@ -558,6 +558,76 @@ class RelaxRequiredColumn(BaseModel):
         return v
 
 
+class ForkedFrom(BaseModel):
+    """Provenance fingerprints a ``replaceNode`` overlay was forked from.
+
+    A same-id silver/gold full replacement *shadows* the base ``<id>.sql`` and
+    the base node YAML contract; silver/gold have no drift gate against the base,
+    so a later starter-pack fix to the base mart would be silently missed. These
+    fingerprints, recomputed at ``content-pack validate``, convert that *silent*
+    staleness into a *loud* one (``AIDPF-2047``):
+
+    * ``sql_sha256`` — the base SQL template text + the referenced
+      ``{{ semantic.* }}`` candidate lists (pack-owned render inputs).
+    * ``contract_sha256`` — the base node YAML contract (``outputSchema`` incl.
+      ``pii``, ``requiredColumns``, ``quality.tests``). A base change that touches
+      only the YAML (e.g. a PII reclassification) trips ``AIDPF-2047`` too.
+    * ``pack_version`` — the base pack version at fork time (recorded provenance).
+
+    Both fingerprints are profile-independent and validate-time computable. Keys
+    are camelCase in YAML (``sqlSha256`` / ``contractSha256`` / ``packVersion``),
+    matching ``outputSchema`` / ``requiredColumns``.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    sql_sha256: str = Field(min_length=1, alias="sqlSha256")
+    contract_sha256: str = Field(min_length=1, alias="contractSha256")
+    pack_version: str = Field(min_length=1, alias="packVersion")
+
+    @field_validator("sql_sha256", "contract_sha256", "pack_version")
+    @classmethod
+    def _reject_blank(cls, v: str, info) -> str:
+        if not v.strip():
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: forkedFrom `{info.field_name}` "
+                f"must be a non-blank string; whitespace-only is not a valid "
+                f"fingerprint."
+            )
+        return v
+
+
+class ReplaceNode(BaseModel):
+    """Acknowledged same-id silver/gold full replacement (`.yaml` + `.sql`).
+
+    Same-id silver/gold replacement is rejected by default (``AIDPF-2001``); a
+    ``replaceNode`` block makes it legal — opt-in and audited, mirroring the
+    ``relaxRequiredColumns`` precedent. The overlay ships a complete new
+    ``<layer>/<id>.yaml`` + ``<id>.sql`` for a shipped SQL mart, keeping its id so
+    downstream ``dependsOn`` consumers are not re-pointed. Add, remove, and
+    rewrite of columns/logic all go through this one shape; only identity changes
+    (``layer`` / ``target`` / ``dependsOn`` edges / ``refresh``) remain new-mart-id.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    reason: str = Field(min_length=1)
+    """Mandatory, non-blank operator justification — the acknowledgement of a
+    deliberate, staleness-incurring fork."""
+
+    forked_from: ForkedFrom = Field(alias="forkedFrom")
+
+    @field_validator("reason")
+    @classmethod
+    def _reject_blank_reason(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: replaceNode `reason` must be a "
+                f"non-blank string; whitespace-only is not a valid acknowledgement."
+            )
+        return v
+
+
 class OverrideEntry(BaseModel):
     """Per-node override declared by an overlay pack.
 
@@ -574,6 +644,10 @@ class OverrideEntry(BaseModel):
     * ``relaxRequiredColumns:`` -- acknowledged per-source REMOVAL of a bronze
       node's required columns (each entry carries a mandatory ``reason``).
       Bronze targets only; this is the *only* sanctioned removal path.
+    * ``replaceNode:`` -- acknowledged same-id silver/gold full replacement
+      (`.yaml` + `.sql`). Silver/gold targets only; mutually exclusive with every
+      other key (the replacement files carry the new schema/SQL). See
+      :class:`ReplaceNode`.
 
     Unknown keys fail closed (``extra="forbid"``) with an actionable
     AIDPF-2001 message.
@@ -597,6 +671,9 @@ class OverrideEntry(BaseModel):
     )
     """Acknowledged removal: per-source-id lists of columns to drop from the base
     node's ``requiredColumns``, each with a mandatory ``reason``."""
+    replace_node: "ReplaceNode | None" = Field(default=None, alias="replaceNode")
+    """Acknowledged same-id silver/gold full replacement. Silver/gold only;
+    mutually exclusive with all other override keys."""
 
     @model_validator(mode="before")
     @classmethod
@@ -609,15 +686,43 @@ class OverrideEntry(BaseModel):
             "profile", "sql", "quality", "output_schema", "outputSchema",
             "required_columns", "requiredColumns",
             "relax_required_columns", "relaxRequiredColumns",
+            "replace_node", "replaceNode",
         }
         unknown = [k for k in data if k not in known]
         if unknown:
             raise ValueError(
                 f"{AIDPF_2001_ORPHAN_OVERRIDE}: unsupported override key(s) "
                 f"{sorted(unknown)!r}. Allowed: profile, sql, quality, "
-                f"outputSchema, requiredColumns, relaxRequiredColumns."
+                f"outputSchema, requiredColumns, relaxRequiredColumns, replaceNode."
             )
         return data
+
+    @model_validator(mode="after")
+    def _replace_node_is_exclusive(self) -> "OverrideEntry":
+        """``replaceNode`` carries its delta in the replacement files, so it must
+        be the ONLY key on the entry — it cannot be combined with
+        ``sql``/``outputSchema``/``requiredColumns``/``relaxRequiredColumns``/
+        ``quality``/``profile``."""
+        if self.replace_node is None:
+            return self
+        siblings = {
+            "profile": self.profile,
+            "sql": self.sql,
+            "quality": self.quality,
+            "outputSchema": self.output_schema,
+            "requiredColumns": self.required_columns,
+            "relaxRequiredColumns": self.relax_required_columns,
+        }
+        present = [k for k, v in siblings.items() if v is not None]
+        if present:
+            raise ValueError(
+                f"{AIDPF_2001_ORPHAN_OVERRIDE}: `replaceNode` is mutually "
+                f"exclusive with other override keys, but found {sorted(present)!r} "
+                f"on the same entry. A full replacement carries its new schema/SQL "
+                f"in the replacement `<layer>/<id>.yaml` + `<id>.sql` files; declare "
+                f"only `replaceNode`."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

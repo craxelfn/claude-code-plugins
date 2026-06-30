@@ -120,13 +120,28 @@ Allowed overlay changes:
   { <src>: [{ column: COL, reason: "…" }] }}}` — the `reason` is mandatory.
   A same-id file that drops a base required column fails closed (AIDPF-2062); a
   relax of a column the base never required fails closed (AIDPF-2063). Bronze-only.
+- Change a shipped **silver/gold** SQL mart in place — **add, remove, or rewrite
+  columns/logic** — via a guarded same-id full replacement. Ship a complete new
+  `overlays/<name>/<layer>/<id>.yaml` + `<id>.sql`, keeping the id (so downstream
+  `dependsOn` consumers are not re-pointed), under an **acknowledged** block:
+  `overrides: { <layer>/<id>: { replaceNode: { reason: "…", forkedFrom: {
+  sqlSha256, contractSha256, packVersion } } } }`. The `reason` is mandatory; the
+  `forkedFrom` fingerprints pin the base you forked from. A bare same-id silver/gold
+  file (no `replaceNode`) is still rejected (AIDPF-2001). If the base mart later
+  changes, validation fails closed (AIDPF-2064, logic or contract variant) until
+  you re-reconcile and re-stamp with `aidp-fusion-bundle content-pack refresh-fork
+  overlays/<name> --node <layer>/<id>`. SQL marts only — a builtin (e.g.
+  `dim_calendar`) is rejected (AIDPF-2001). There is **no** separate additive
+  mechanism; adding a column is just a replacement whose new `outputSchema`/SQL
+  carries the extra column.
 
-Do not change grain, natural key, target table, PVO/datastore, or refresh of a
-shipped node via overlay — those are off-limits to both the block and the same-id
-file (the file is diff-guarded). Create a new node / mart id instead. The bronze
-`outputSchema` type-overlay and `requiredColumns` overlay are **bronze-only**; a
-silver/gold schema or required-column change stays `overrides: { sql }` or a new
-mart id, and a same-id silver/gold file is rejected.
+Do not change identity via overlay — `layer`, `target`, the `dependsOn` edge set,
+or the `refresh` contract of a shipped node are off-limits to every mechanism
+(block, same-id file, and `replaceNode`, all diff-/identity-guarded). A
+`replaceNode` that changes any of these fails closed (AIDPF-2065); create a new
+node / mart id instead. The bronze `outputSchema` type-overlay and
+`requiredColumns` overlay are **bronze-only**; a silver/gold column/logic change
+goes through `replaceNode` (above) or a new mart id.
 
 ### SQL authoring convention (declared-inputs gate, AIDPF-2084)
 

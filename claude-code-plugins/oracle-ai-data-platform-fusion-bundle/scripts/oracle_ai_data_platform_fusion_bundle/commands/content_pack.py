@@ -380,3 +380,156 @@ def validate_pack_cli(
                 console.print(f"  [red]{e.code}[/red]{loc_part}: {e.message}")
 
     return 0 if report.ok else 2
+
+
+# ---------------------------------------------------------------------------
+# Verb: content-pack refresh-fork
+# ---------------------------------------------------------------------------
+
+
+def _resolve_base_path(overlay_path: Path, extends: str) -> Path | None:
+    """Resolve the parent base pack a `replaceNode` overlay forked from.
+
+    Mirrors :func:`_make_cli_base_resolver`: sibling directory first, then the
+    installed content-packs dir. Returns ``None`` if not found.
+    """
+    base_name = str(extends).split("@")[0]
+    sibling = overlay_path.parent / base_name
+    if sibling.exists() and (sibling / "pack.yaml").exists():
+        return sibling.resolve()
+    installed = INSTALLED_CONTENT_PACKS_DIR / base_name
+    if installed.exists() and (installed / "pack.yaml").exists():
+        return installed.resolve()
+    return None
+
+
+def refresh_fork_cli(
+    name: str, *, node: str | None, json_output: bool, console
+) -> int:
+    """Re-stamp ``replaceNode.forkedFrom`` fingerprints from the current base.
+
+    Recomputes **all three** stamps (``sqlSha256`` / ``contractSha256`` /
+    ``packVersion``) — using the SAME helpers the validate-time gate uses — and
+    rewrites them in the leaf overlay's ``pack.yaml``. Re-stamping only the SQL
+    fingerprint would leave an operator stuck after a contract-only ``AIDPF-2064``.
+
+    Load sequencing (must fingerprint the PARENT base, not the merged/replaced
+    node): read the leaf overlay raw ``pack.yaml`` for the ``replaceNode`` block,
+    resolve the ancestor chain **excluding** the leaf to get the base node + root,
+    compute the stamps from that parent base, then rewrite only the leaf file.
+    """
+    import yaml
+
+    from ..orchestrator.content_pack import _split_override_key, load_full_chain
+    from ..orchestrator.sql_renderer import (
+        compute_contract_fingerprint,
+        compute_fork_fingerprint,
+    )
+
+    def _emit_error(code: str, message: str, exit_code: int) -> int:
+        if json_output:
+            print(json.dumps({"errors": [{"code": code, "message": message}]}, indent=2))
+        else:
+            console.print(f"[red]{code}:[/red] {message}")
+        return exit_code
+
+    try:
+        overlay_path = resolve_pack_path(name)
+    except FileNotFoundError as exc:
+        return _emit_error("AIDPF-2000", str(exc), 1)
+
+    raw = yaml.safe_load((overlay_path / "pack.yaml").read_text()) or {}
+    overrides = raw.get("overrides") or {}
+    targets = {
+        k: v
+        for k, v in overrides.items()
+        if isinstance(v, dict) and isinstance(v.get("replaceNode"), dict)
+    }
+    if node is not None:
+        targets = {k: v for k, v in targets.items() if k == node}
+        if not targets:
+            return _emit_error(
+                "AIDPF-2000",
+                f"no replaceNode override for --node {node!r} in {name!r}.",
+                1,
+            )
+    if not targets:
+        return _emit_error(
+            "AIDPF-2000",
+            f"pack {name!r} has no replaceNode overrides to refresh.",
+            1,
+        )
+
+    extends = raw.get("extends")
+    if not extends:
+        return _emit_error(
+            "AIDPF-2000", f"pack {name!r} is not an overlay (no `extends:`).", 1
+        )
+    base_path = _resolve_base_path(overlay_path, extends)
+    if base_path is None:
+        return _emit_error(
+            "AIDPF-2000",
+            f"base pack for `extends: {extends}` not found beside {overlay_path} "
+            f"or in {INSTALLED_CONTENT_PACKS_DIR}.",
+            1,
+        )
+
+    try:
+        base = load_full_chain(base_path, base_resolver=_make_cli_base_resolver(base_path))
+    except (PackLoaderError, ValidationError, FileNotFoundError) as exc:
+        return _emit_error("AIDPF-2000", f"could not load base pack: {exc}", 1)
+
+    changes: list[dict[str, Any]] = []
+    for key, entry in targets.items():
+        layer, nid = _split_override_key(key)
+        base_nodes = base.silver if layer == "silver" else base.gold
+        base_node = base_nodes.get(nid) if layer in ("silver", "gold") else None
+        if base_node is None:
+            return _emit_error(
+                "AIDPF-2000",
+                f"replaceNode key {key!r} does not resolve to a shipped "
+                f"silver/gold base node.",
+                1,
+            )
+        old = dict(entry["replaceNode"].get("forkedFrom") or {})
+        new = {
+            "sqlSha256": compute_fork_fingerprint(base_node, base),
+            "contractSha256": compute_contract_fingerprint(base_node),
+            "packVersion": base.pack.version,
+        }
+        entry["replaceNode"]["forkedFrom"] = new
+        changes.append(
+            {
+                "node": key,
+                "changed": old != new,
+                "sqlSha256": {"old": old.get("sqlSha256"), "new": new["sqlSha256"]},
+                "contractSha256": {
+                    "old": old.get("contractSha256"),
+                    "new": new["contractSha256"],
+                },
+                "packVersion": {"old": old.get("packVersion"), "new": new["packVersion"]},
+            }
+        )
+
+    (overlay_path / "pack.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    if json_output:
+        print(json.dumps({"pack": raw.get("id", name), "refreshed": changes}, indent=2))
+    else:
+        any_changed = any(c["changed"] for c in changes)
+        if not any_changed:
+            console.print("[green]✓[/green] all forkedFrom stamps already current.")
+        for c in changes:
+            if not c["changed"]:
+                console.print(f"  {c['node']}: unchanged")
+                continue
+            sql_moved = c["sqlSha256"]["old"] != c["sqlSha256"]["new"]
+            contract_moved = c["contractSha256"]["old"] != c["contractSha256"]["new"]
+            what = ", ".join(
+                w for w, moved in (("logic", sql_moved), ("contract", contract_moved)) if moved
+            ) or "version"
+            console.print(
+                f"  [yellow]re-stamped[/yellow] {c['node']} (base {what} changed) — "
+                f"review your overlay against the new base before seeding."
+            )
+    return 0
