@@ -116,7 +116,7 @@ def _build_creds_cell(
 
 def _build_run_cell(
     *,
-    mode: Literal["seed", "incremental"],
+    mode: Literal["seed", "incremental"] | None,
     datasets: list[str] | None,
     layers: list[str] | None,
     execution_backend: str = "legacy-python",
@@ -360,7 +360,7 @@ def build_notebook(
     *,
     wheel_path: Path,
     bundle_yaml: str,
-    mode: Literal["seed", "incremental"],
+    mode: Literal["seed", "incremental"] | None,
     datasets: list[str] | None,
     layers: list[str] | None,
     bicc_secret_name: str = "fusion_bicc_password",

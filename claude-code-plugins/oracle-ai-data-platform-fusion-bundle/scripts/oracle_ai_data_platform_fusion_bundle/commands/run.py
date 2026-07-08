@@ -35,7 +35,7 @@ def run(
     config_path: Path,
     env_name: str,
     *,
-    mode: str = "seed",
+    mode: str | None = None,
     datasets: str | None = None,
     layers: str | None = None,
     inline: bool = False,
@@ -133,7 +133,7 @@ def run(
 
 def _run_inline(
     bundle_path: Path,
-    mode: str,
+    mode: str | None,
     datasets: list[str] | None,
     layers: list[str] | None,
     resume_run_id: str | None,
@@ -286,7 +286,7 @@ def _run_via_aidp_dispatch(
     env_name: str,
     datasets: list[str] | None,
     layers: list[str] | None,
-    mode: str,
+    mode: str | None,
     dry_run: bool,
     poll_timeout_s: int,
     console: Console,
@@ -592,6 +592,12 @@ def status(
 
     # Latest-per-dataset query via row_number window. Selects skip_reason
     # so the renderer can show cascade vs aborted on `status='skipped'` rows.
+    #
+    # Reserved ``__*__`` synthetic ids (the run manifest + gate markers) are
+    # audit-only rows retained for resume/drift — they are NOT operator-facing
+    # datasets, so they are excluded from the status view and any completion-
+    # health rollup (else a fully-successful run would forever show
+    # ``__run_manifest__`` as deferred/aborted and trip health checks).
     latest_query = f"""
         WITH ranked AS (
           SELECT
@@ -602,6 +608,7 @@ def status(
               ORDER BY last_run_at DESC
             ) AS rn
           FROM {state_table}
+          WHERE dataset_id NOT LIKE '\\_\\_%\\_\\_'
         )
         SELECT
           dataset_id, layer, mode, last_watermark, last_run_at, status,

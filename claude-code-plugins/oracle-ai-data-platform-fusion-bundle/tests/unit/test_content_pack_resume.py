@@ -259,14 +259,14 @@ def _state_rows(
     base_time = datetime(2026, 5, 21, 12, 0, 0)
     for ds_id, layer in succeeded:
         rows.append(_FakeRow(
-            dataset_id=ds_id, layer=layer, status="success",
+            dataset_id=ds_id, layer=layer, status="success", mode="seed",
             row_count=succeeded_row_count, last_watermark=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
         ))
     for ds_id, layer in failed:
         rows.append(_FakeRow(
-            dataset_id=ds_id, layer=layer, status="failed",
+            dataset_id=ds_id, layer=layer, status="failed", mode="seed",
             row_count=None, last_watermark=None,
             plan_hash=plan_hash, plan_snapshot=snapshot,
             last_run_at=base_time,
@@ -295,14 +295,14 @@ def _cp_shape_state_rows(
     base_time = datetime(2026, 5, 21, 12, 0, 0)
     for ds_id, layer in succeeded:
         rows.append(_FakeRow(
-            dataset_id=ds_id, layer=layer, status="success",
+            dataset_id=ds_id, layer=layer, status="success", mode="seed",
             row_count=succeeded_row_count, last_watermark=None,
             plan_hash=f"cp-node-hash-{ds_id}", plan_snapshot=None,
             last_run_at=base_time,
         ))
     for ds_id, layer in failed:
         rows.append(_FakeRow(
-            dataset_id=ds_id, layer=layer, status="failed",
+            dataset_id=ds_id, layer=layer, status="failed", mode="seed",
             row_count=None, last_watermark=None,
             plan_hash=f"cp-node-hash-{ds_id}", plan_snapshot=None,
             last_run_at=base_time,
@@ -601,3 +601,85 @@ class TestContentPackResume:
             "bare resume — reconstructed scope should have driven all "
             "in-scope nodes through the resume short-circuit"
         )
+
+
+# ---------------------------------------------------------------------------
+# Reader: __*__ exclusion + execution-row predicate + manifest read
+# (feature: fail-fast-seed-validation)
+# ---------------------------------------------------------------------------
+
+
+class _ManifestAwareSpark:
+    """Fake spark answering both the ranked resume query and the manifest read."""
+
+    def __init__(self, rows: list[_FakeRow], manifest_raw: str | None) -> None:
+        self._rows = rows
+        self._manifest_raw = manifest_raw
+
+    def sql(self, query: str):
+        if "SELECT run_manifest FROM" in query and "__run_manifest__" in query:
+            if self._manifest_raw is None:
+                return _FakeDataFrame([])
+            return _FakeDataFrame([_FakeRow(run_manifest=self._manifest_raw)])
+        if "ranked AS" in query and "row_count IS NOT NULL" in query:
+            return _FakeDataFrame(
+                [r for r in self._rows
+                 if getattr(r, "_data", {}).get("row_count") is not None]
+            )
+        if "ranked AS" in query:
+            return _FakeDataFrame(self._rows)
+        return _FakeDataFrame([])
+
+
+def _row(dataset_id, layer, status, mode, **extra):
+    from datetime import datetime
+    base = dict(
+        dataset_id=dataset_id, layer=layer, status=status, mode=mode,
+        row_count=None, last_watermark=None, plan_hash="h", plan_snapshot=None,
+        last_run_at=datetime(2026, 5, 21, 12, 0, 0),
+    )
+    base.update(extra)
+    return _FakeRow(**base)
+
+
+def test_reader_excludes_reserved_ids_and_reads_manifest() -> None:
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    rows = [
+        _row("gl_coa", "bronze", "success", "seed"),
+        _row("dim_account", "silver", "failed", "seed"),
+        # Reserved manifest row (status deferred) — must NOT count as a node.
+        _row("__run_manifest__", "silver", "deferred", "seed"),
+        # Audit row on a real node — success but audit mode → not an exec row.
+        _row("dim_account", "silver", "success", "plan_hash_repin",
+             last_run_at=__import__("datetime").datetime(2026, 5, 21, 11, 0, 0)),
+    ]
+    spark = _ManifestAwareSpark(rows, manifest_raw='{"schemaVersion":1}')
+    paths = MagicMock()
+    paths.bronze.return_value = "cat.bronze.fusion_bundle_state"
+    ctx = _state.read_content_pack_resumable_state(spark, paths, "run-1")
+
+    # Reserved id excluded from succeeded + scope.
+    assert "__run_manifest__" not in ctx.succeeded
+    assert "__run_manifest__" not in ctx.scope_datasets
+    # gl_coa succeeded (exec row); dim_account did not (latest exec row failed).
+    assert "gl_coa" in ctx.succeeded
+    # Manifest raw surfaced.
+    assert ctx.run_manifest_raw == '{"schemaVersion":1}'
+    # Only 'seed' is an execution mode here (audit mode excluded).
+    assert ctx.historical_exec_modes == ("seed",)
+
+
+def test_reader_surfaces_mixed_execution_modes() -> None:
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    rows = [
+        _row("gl_coa", "bronze", "success", "seed"),
+        _row("ap_invoices", "bronze", "success", "incremental"),
+    ]
+    spark = _ManifestAwareSpark(rows, manifest_raw=None)
+    paths = MagicMock()
+    paths.bronze.return_value = "cat.bronze.fusion_bundle_state"
+    ctx = _state.read_content_pack_resumable_state(spark, paths, "run-2")
+    assert set(ctx.historical_exec_modes) == {"seed", "incremental"}
+    assert ctx.run_manifest_raw is None

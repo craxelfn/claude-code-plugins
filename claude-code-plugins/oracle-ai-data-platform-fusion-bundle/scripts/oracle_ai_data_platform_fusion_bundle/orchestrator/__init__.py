@@ -15,6 +15,7 @@ ADR-0022 cleanup.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,8 @@ from .errors import (  # noqa: E402  (re-export at module level)
     PrerequisiteError,
     WatermarkMonotonicityError,
 )
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +298,7 @@ def run(
     bundle_path: Path,
     *,
     spark: "SparkSession | None" = None,
-    mode: str = "seed",
+    mode: str | None = None,
     datasets: list[str] | None = None,
     layers: list[str] | None = None,
     dry_run: bool = False,
@@ -366,8 +369,16 @@ def run(
             partially-migrated write path).
         ResumeBundleMismatchError: stored vs current plan hash diverge.
     """
-    # Mode validation runs BEFORE any I/O.
-    if mode not in _VALID_MODES:
+    # Mode resolution + validation (feature: fail-fast-seed-validation). A
+    # FRESH run resolves the tri-state ``--mode`` here (omitted → "seed",
+    # unchanged default). A RESUME keeps ``mode`` as passed (possibly None) and
+    # resolves it in the dispatcher against the run manifest / legacy execution
+    # history (needs state I/O) — a bare resume must NOT silently default to
+    # "seed" over an interrupted incremental.
+    if resume_run_id is None:
+        from .run_manifest import resolve_run_mode
+        mode = resolve_run_mode(mode, is_resume=False)
+    if mode is not None and mode not in _VALID_MODES:
         raise UnsupportedModeError(
             f"mode={mode!r} is not supported. Valid modes: "
             f"{sorted(_VALID_MODES)}. "
@@ -474,8 +485,13 @@ def _dispatch_content_pack_run(
     # Dry-run skips state I/O.
     resume_context = None
     if resume_run_id is not None and not dry_run:
+        from . import run_manifest as _rmf
         from . import state_phase2 as _state_phase2
         from .resume import check_identity_drift, reconstruct_resume_scope
+
+        # Capture the operator's EXPLICIT scope before any reconstruction
+        # overwrites it (for the manifest scope-conflict check, AIDPF-1047).
+        _explicit_datasets, _explicit_layers = datasets, layers
 
         spark = spark or _bootstrap_spark()
         state.ensure_state_table(spark, paths)
@@ -484,22 +500,95 @@ def _dispatch_content_pack_run(
             spark, paths, resume_run_id,
         )
 
-        if resume_context.bronze_plan_snapshot is not None:
-            from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
-            check_identity_drift(
-                resume_context.bronze_plan_snapshot,
-                bundle=bundle, paths=paths, plugin_version=_pv,
-                run_id=resume_context.run_id,
-            )
+        # Parse the durable manifest, if this run wrote one. A present-but-
+        # malformed manifest fails closed (AIDPF-4022) — never legacy-fallback.
+        manifest = (
+            _rmf.parse_manifest(resume_context.run_manifest_raw)
+            if resume_context.run_manifest_raw
+            else None
+        )
 
-        if datasets is None and layers is None:
+        # Mode resolution (feature: fail-fast-seed-validation). Adopt the
+        # manifest mode / legacy-infer a single mode; a MIXED legacy history or
+        # an explicit conflict is rejected (AIDPF-1046) — a bare resume never
+        # silently flips seed↔incremental.
+        mode = _rmf.resolve_run_mode(
+            mode,
+            is_resume=True,
+            manifest_mode=(manifest.get("mode") if manifest else None),
+            historical_exec_modes=list(resume_context.historical_exec_modes),
+        )
+
+        if manifest is not None:
+            # A manifest-backed resume is scoped BY THE MANIFEST. An explicit
+            # scope filter must exactly equal it, else AIDPF-1047 (never
+            # silently narrow). strict_scope is adopted from the manifest.
+            _rmf.check_scope_conflict(
+                _explicit_datasets, _explicit_layers, None,
+                manifest_inputs=manifest["resolver_inputs"],
+            )
+            # Identity / profile / exec-policy drift → fresh seed (AIDPF-1048).
+            from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+            from ..schema.tenant_profile import compute_profile_hash as _cph
+            from .plan_hash import _identity_dict
+
+            _rmf.check_identity_profile_drift(
+                current_identity=_identity_dict(bundle, paths, _pv),
+                current_profile_hash=_cph(tenant_profile),
+                current_allow_unprovable_coa=bool(
+                    getattr(
+                        getattr(bundle, "content_pack", None),
+                        "allow_unprovable_coa",
+                        False,
+                    )
+                ),
+                manifest=manifest,
+            )
+            # Replay the ORIGINAL resolver inputs (preserves --layers; no
+            # AIDPF-1043), then guard topology + node-definition drift.
+            _ri = manifest["resolver_inputs"]
+            datasets = _ri.get("datasets")
+            layers = _ri.get("layers")
+            strict_scope = bool(_ri.get("strict_scope"))
+            _replay_plan = _resolve_plan_for_manifest(
+                resolved_pack, datasets, layers, strict_scope, bundle
+            )
+            _replay_topo = _manifest_topology_for_plan(
+                _replay_plan, resolved_pack, bundle
+            )
+            _rmf.check_topology_drift(
+                _replay_topo, manifest_topology=manifest["topology"]
+            )
+            _rmf.check_node_definition_drift(
+                _replay_topo,
+                _rmf.compute_pack_fingerprint(resolved_pack),
+                manifest_topology=manifest["topology"],
+                manifest_pack_fingerprint=manifest["pack_fingerprint"],
+            )
+        else:
+            # Legacy no-manifest resume — existing behaviour (identity drift via
+            # the bronze snapshot + row-reconstructed scope for a bare resume).
             if resume_context.bronze_plan_snapshot is not None:
-                datasets, layers = reconstruct_resume_scope(
+                from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+                check_identity_drift(
                     resume_context.bronze_plan_snapshot,
+                    bundle=bundle, paths=paths, plugin_version=_pv,
+                    run_id=resume_context.run_id,
                 )
-            else:
-                datasets = list(resume_context.scope_datasets)
-                layers = list(resume_context.scope_layers)
+            if datasets is None and layers is None:
+                if resume_context.bronze_plan_snapshot is not None:
+                    datasets, layers = reconstruct_resume_scope(
+                        resume_context.bronze_plan_snapshot,
+                    )
+                else:
+                    datasets = list(resume_context.scope_datasets)
+                    layers = list(resume_context.scope_layers)
+
+    # Safety net: a resume dry-run skips the state read above (guarded by
+    # ``not dry_run``), so ``mode`` can still be None here. Resolve to the
+    # display default rather than surfacing ``mode=None`` in the preview.
+    if mode is None:
+        mode = "seed"
 
     # Dry-run — emit the would-run plan and return.
     if dry_run:
@@ -864,12 +953,16 @@ def _build_content_pack_dry_run_plan(
     to what would actually run — minus the side effects.
     """
     from .content_pack_plan_resolver import resolve_content_pack_plan
+    from .node_preflight import coa_applicable_sources, order_coa_source_first
 
     plan = resolve_content_pack_plan(
         resolved_pack, datasets=datasets, layers=layers,
         strict_scope=strict_scope,
         bundle_scope=bundle_scope,
     )
+    # Dry-run parity: preview the SAME gl_coa-first order the exec loop uses, so
+    # the previewed order does not diverge from execution.
+    plan = order_coa_source_first(plan, coa_applicable_sources(resolved_pack, plan))
     plan_nodes = tuple(
         PlanNode(
             dataset_id=node.id,
@@ -1238,6 +1331,56 @@ def _run_content_pack_backend(
     # regress their per-node cascade (independent marts proceeding past one
     # bronze failure).
     _mart_only = _is_mart_only_run(layers)
+
+    # COA fail-fast (feature: fail-fast-seed-validation). Order gl_coa (COA-source
+    # bronze) FIRST so no expensive PVO is extracted until COA is proven, and
+    # compute applicability + the escape-hatch flag once for reuse by the
+    # pre-extraction structural gate, the in-loop checkpoint, and the mart-only
+    # checkpoint below.
+    from .node_preflight import (
+        coa_applicable_sources,
+        evaluate_coa_checkpoint,
+        order_coa_source_first,
+    )
+
+    _coa_sources = coa_applicable_sources(resolved_pack, plan)
+    _allow_unprovable = bool(
+        getattr(getattr(bundle, "content_pack", None), "allow_unprovable_coa", False)
+    )
+    plan = order_coa_source_first(plan, _coa_sources)
+
+    def _coa_gate_abort(
+        result: "CoaCheckpointResult", prior_steps: "list[RunStep]"
+    ) -> RunSummary:
+        """Build a fail-fast RunSummary for a hard COA outcome.
+
+        Includes any already-emitted steps (e.g. a successfully-landed gl_coa on
+        an in-loop abort) plus one synthetic ``__coa_gate__`` gate-failure step
+        carrying the offending code(s). No later (expensive) bronze dispatches;
+        no silver/gold state rows written.
+        """
+        codes = sorted({e.code for e in result.blocking})
+        detail = "; ".join(
+            f"{e.code} ({e.source}): {e.message}" for e in result.blocking
+        )
+        gate_step = RunStep.gate_failed(
+            run_id=run_id,
+            mode=mode,
+            layer="silver",
+            gate_dataset_id="__coa_gate__",
+            aidpf_code=codes[0],
+            error_message=detail,
+        )
+        gate_now = _dt.now(_tz.utc)
+        return RunSummary(
+            run_id=run_id,
+            started_at=gate_now,
+            finished_at=gate_now,
+            bundle_project=bundle_project,
+            mode=mode,  # type: ignore[arg-type]
+            steps=(*prior_steps, gate_step),
+        )
+
     if (enable_bronze_readiness_gate or _mart_only) and not dry_run:
         from .bronze_readiness import (
             BronzeReadinessGateError,
@@ -1289,6 +1432,30 @@ def _run_content_pack_backend(
                     mode=mode,  # type: ignore[arg-type]
                     steps=(gate_step,),
                 )
+
+    # COA checkpoint (feature: fail-fast-seed-validation).
+    #   * MART-ONLY runs never enter the in-loop checkpoint (bronze is skipped),
+    #     so validate the LANDED gl_coa here — structural gate + data probes —
+    #     before any COA-dependent mart dispatches (gate-ordering row 3m).
+    #   * FULL runs run only the STRUCTURAL gate here (pre-extraction, before any
+    #     bronze dispatch — no landed data yet); their data probes run in-loop
+    #     right after gl_coa lands (rows 4a/4b).
+    # A hard COA outcome aborts before the expensive PVOs; a downgraded (hatched)
+    # probe failure is logged and proceeds.
+    if _coa_sources and not dry_run:
+        _coa_ckpt = evaluate_coa_checkpoint(
+            spark,
+            pack=resolved_pack,
+            profile=tenant_profile,
+            bronze_table_for_source=bronze_table_for_source,
+            coa_sources=_coa_sources,
+            allow_unprovable=_allow_unprovable,
+            structural_only=not _mart_only,
+        )
+        for _w in _coa_ckpt.warnings:
+            _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
+        if not _coa_ckpt.ok:
+            return _coa_gate_abort(_coa_ckpt, [])
 
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we
@@ -1368,6 +1535,53 @@ def _run_content_pack_backend(
                 bundle_project=bundle_project, mode=mode,
                 steps=tuple(_gsteps),
                 diagnostics=tuple(f["diagnostic"] for f in _src_failures),
+            )
+
+    # Durable pre-execution run manifest (gate-ordering row 0). Written ONCE on
+    # a FRESH run (never on resume — the manifest is immutable), AFTER the
+    # read-only pre-write gates and BEFORE the first node dispatch, so a
+    # manifest-commit failure aborts cleanly with nothing extracted (AIDPF-4022).
+    if resume_run_id is None and not dry_run:
+        from .run_manifest import AIDPF_4022_MANIFEST_COMMIT_FAILED
+        try:
+            _manifest_json = _build_run_manifest_json(
+                plan=plan,
+                resolved_pack=resolved_pack,
+                bundle=bundle,
+                paths=paths,
+                profile_hash=profile_hash,
+                mode=mode,
+                datasets=datasets,
+                layers=layers,
+                strict_scope=strict_scope,
+                allow_unprovable_coa=_allow_unprovable,
+            )
+            _write_run_manifest_row(
+                spark, paths, run_id=run_id, mode=mode,
+                manifest_json=_manifest_json,
+            )
+        except Exception as _manifest_exc:
+            _mnow = _dt.now(_tz.utc)
+            return RunSummary(
+                run_id=run_id,
+                started_at=_mnow,
+                finished_at=_mnow,
+                bundle_project=bundle_project,
+                mode=mode,  # type: ignore[arg-type]
+                steps=(
+                    RunStep.gate_failed(
+                        run_id=run_id,
+                        mode=mode,
+                        layer="silver",
+                        gate_dataset_id="__run_manifest__",
+                        aidpf_code=AIDPF_4022_MANIFEST_COMMIT_FAILED,
+                        error_message=(
+                            f"run manifest commit failed before extraction: "
+                            f"{_manifest_exc}. Nothing was extracted; re-run "
+                            f"`--mode seed`."
+                        ),
+                    ),
+                ),
             )
 
     started_at = _dt.now(_tz.utc)
@@ -1509,6 +1723,46 @@ def _run_content_pack_backend(
             )
         )
 
+        # COA fail-fast (rows 4a/4b). A COA-source bronze node runs FIRST; act on
+        # its outcome BEFORE any later (expensive) bronze dispatches — the
+        # resilient per-node cascade would NOT stop them (gl_coa feeds a silver
+        # mart, not the other bronze PVOs).
+        if node.id in _coa_sources:
+            # 4a — a COA-source NODE failure (extract/encode/write/state) aborts
+            # the run now, carrying the node's own failure code (already in
+            # `steps`). No later bronze dispatches; a bare --resume reruns the
+            # full unfinished closure incl. this failed node.
+            if status != "success":
+                _log.warning(
+                    "COA-source node %r failed; aborting before later bronze "
+                    "extracts (COA unproven).",
+                    node.id,
+                )
+                return RunSummary(
+                    run_id=run_id,
+                    started_at=started_at,
+                    finished_at=_dt.now(_tz.utc),
+                    bundle_project=bundle_project,
+                    mode=mode,
+                    steps=tuple(steps),
+                    diagnostics=tuple(diagnostics),
+                )
+            # 4b — gl_coa landed: run the data-probe checkpoint against it before
+            # the next bronze node dispatches.
+            _ckpt = evaluate_coa_checkpoint(
+                spark,
+                pack=resolved_pack,
+                profile=tenant_profile,
+                bronze_table_for_source=ctx.bronze_table_for_source,
+                coa_sources={node.id},
+                allow_unprovable=_allow_unprovable,
+                structural_only=False,
+            )
+            for _w in _ckpt.warnings:
+                _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
+            if not _ckpt.ok:
+                return _coa_gate_abort(_ckpt, steps)
+
     finished_at = _dt.now(_tz.utc)
     return RunSummary(
         run_id=run_id,
@@ -1518,6 +1772,135 @@ def _run_content_pack_backend(
         mode=mode,
         steps=tuple(steps),
         diagnostics=tuple(diagnostics),
+    )
+
+
+def _compute_sem_by_id(
+    plan: "list[Any]", resolved_pack: "Any", bundle: "Any"
+) -> dict[str, str]:
+    """Per-node ``sem`` fingerprints for ``plan`` (shared by the manifest WRITE
+    and the resume REPLAY so they can never diverge). Reads each SQL node's
+    template bytes best-effort — an unreadable template degrades to a NULL-sql
+    sem rather than aborting."""
+    from . import run_manifest as _rmf
+
+    overrides = getattr(getattr(bundle, "fusion", None), "schema_overrides", {}) or {}
+    sem_by_id: dict[str, str] = {}
+    for node in plan:
+        sql_bytes: bytes | None = None
+        if getattr(node.implementation, "type", None) == "sql":
+            try:
+                sql_path = resolved_pack.root_for(
+                    f"{node.layer}/{node.id}"
+                ) / node.implementation.sql
+                sql_bytes = sql_path.read_bytes()
+            except Exception:  # pragma: no cover — best-effort sem input
+                sql_bytes = None
+        sem_by_id[node.id] = _rmf.compute_node_sem(
+            node, sql_bytes=sql_bytes, schema_override=overrides.get(node.id)
+        )
+    return sem_by_id
+
+
+def _resolve_plan_for_manifest(
+    resolved_pack: "Any",
+    datasets: "list[str] | None",
+    layers: "list[str] | None",
+    strict_scope: bool,
+    bundle: "Any",
+) -> "list[Any]":
+    """Replay the manifest's resolver inputs against the CURRENT pack graph."""
+    from .content_pack_plan_resolver import resolve_content_pack_plan
+
+    return resolve_content_pack_plan(
+        resolved_pack,
+        datasets=datasets,
+        layers=layers,
+        strict_scope=strict_scope,
+        bundle_scope=_effective_bundle_scope(bundle),
+    )
+
+
+def _manifest_topology_for_plan(
+    plan: "list[Any]", resolved_pack: "Any", bundle: "Any"
+) -> "list[dict]":
+    """Canonical topology (with sem) for a plan — used to compare against the
+    stored manifest topology on resume."""
+    from . import run_manifest as _rmf
+
+    return _rmf.canonical_topology(
+        plan, sem_by_id=_compute_sem_by_id(plan, resolved_pack, bundle)
+    )
+
+
+def _build_run_manifest_json(
+    *,
+    plan: "list[Any]",
+    resolved_pack: "Any",
+    bundle: "Any",
+    paths: "Any",
+    profile_hash: str,
+    mode: str,
+    datasets: "list[str] | None",
+    layers: "list[str] | None",
+    strict_scope: bool,
+    allow_unprovable_coa: bool,
+) -> str:
+    """Assemble + serialize the durable run manifest (feature:
+    fail-fast-seed-validation)."""
+    from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
+
+    from . import run_manifest as _rmf
+    from .plan_hash import _identity_dict
+
+    topology = _rmf.canonical_topology(
+        plan, sem_by_id=_compute_sem_by_id(plan, resolved_pack, bundle)
+    )
+    manifest = _rmf.build_manifest(
+        datasets=datasets,
+        layers=layers,
+        strict_scope=strict_scope,
+        topology=topology,
+        mode=mode,
+        identity=_identity_dict(bundle, paths, _pv),
+        pack_fingerprint=_rmf.compute_pack_fingerprint(resolved_pack),
+        profile_hash=profile_hash,
+        allow_unprovable_coa=allow_unprovable_coa,
+    )
+    return _rmf.serialize_manifest(manifest)
+
+
+def _write_run_manifest_row(
+    spark: "Any", paths: "Any", *, run_id: str, mode: str, manifest_json: str
+) -> None:
+    """HARD-write the single reserved ``__run_manifest__`` state row.
+
+    Stored ``status='deferred'`` / ``skip_reason='aborted'`` (a resumable-
+    terminal, non-``succeeded`` status) with the manifest JSON in the dedicated
+    ``run_manifest`` column. Raises (via ``write_state_rows_hard``) on a Delta
+    failure so the caller can abort with AIDPF-4022 before any node dispatches.
+    """
+    from datetime import datetime as _dt2, timezone as _tz2
+
+    from .run_manifest import RUN_MANIFEST_DATASET_ID
+    from .state_phase2 import write_state_rows_hard
+
+    write_state_rows_hard(
+        spark,
+        paths,
+        [
+            {
+                "run_id": run_id,
+                "dataset_id": RUN_MANIFEST_DATASET_ID,
+                "layer": "silver",
+                "mode": mode,
+                "status": "deferred",
+                "skip_reason": "aborted",
+                "last_run_at": _dt2.now(_tz2.utc),
+                "duration_seconds": 0.0,
+                "run_manifest": manifest_json,
+            }
+        ],
     )
 
 

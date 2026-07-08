@@ -1496,6 +1496,15 @@ class CPResumeContext:
     succeeded_row_counts: "dict[tuple[str, str], int]"
     succeeded_last_watermarks: "dict[tuple[str, str], datetime | None]"
     original_started_at: "datetime"
+    # Durable run manifest (feature: fail-fast-seed-validation). Raw JSON from
+    # the reserved ``__run_manifest__`` row, or None for a legacy/pre-feature
+    # run (or an unmigrated table). Default None keeps every existing
+    # constructor call valid.
+    run_manifest_raw: "str | None" = None
+    # Distinct EXECUTION modes (``mode IN ('seed','incremental')``) observed
+    # across this run's real node rows — used for legacy (no-manifest) mode
+    # inference / mixed-mode rejection.
+    historical_exec_modes: tuple[str, ...] = ()
 
 
 def read_content_pack_resumable_state(
@@ -1546,7 +1555,7 @@ def read_content_pack_resumable_state(
             AND status IN ({status_list})
         )
         SELECT dataset_id, status, plan_hash, plan_snapshot,
-               last_run_at, layer
+               last_run_at, layer, mode
         FROM ranked
         WHERE rn = 1
     """
@@ -1559,13 +1568,51 @@ def read_content_pack_resumable_state(
             f"status` to list recent run_ids."
         )
 
+    # Reserved ``__*__`` synthetic ids (gate markers, run manifest) are NEVER
+    # real nodes — exclude them from every derived node set so a resume can't
+    # mistake a synthetic row for succeeded/scope work.
+    def _is_real_node(dataset_id: str) -> bool:
+        return not (dataset_id.startswith("__") and dataset_id.endswith("__"))
+
+    # EXECUTION rows only: audit modes (plan_hash_repin / fingerprint_skip) can
+    # carry status='success' on a REAL node id but never represent executed
+    # work — a resume that counted them would SKIP work that never ran. The
+    # execution predicate is the shared guard for every derived set.
+    _EXEC_MODES = ("seed", "incremental")
+
+    def _is_exec_row(r) -> bool:
+        return _is_real_node(r["dataset_id"]) and r["mode"] in _EXEC_MODES
+
     # Succeeded set — includes BOTH 'success' AND 'resumed_skipped' so a
-    # re-resume of an already-resumed run treats carry-forwards as done.
+    # re-resume of an already-resumed run treats carry-forwards as done. Counts
+    # only EXECUTION rows on real nodes.
     succeeded: set[str] = {
         r["dataset_id"]
         for r in rows
-        if r["status"] in ("success", "resumed_skipped")
+        if r["status"] in ("success", "resumed_skipped") and _is_exec_row(r)
     }
+
+    # Distinct execution modes across real node rows (legacy mode inference).
+    historical_exec_modes = tuple(
+        sorted({r["mode"] for r in rows if _is_exec_row(r)})
+    )
+
+    # Durable run manifest — read defensively: the ``run_manifest`` column may
+    # be absent on a table created by pre-feature code and not yet migrated,
+    # and a legacy run has no manifest row. Any failure → None (legacy path).
+    run_manifest_raw: str | None = None
+    try:
+        _mrows = spark.sql(
+            f"SELECT run_manifest FROM {table_path} "
+            f"WHERE run_id = '{escaped_run_id}' "
+            f"AND dataset_id = '__run_manifest__' "
+            f"AND run_manifest IS NOT NULL "
+            f"ORDER BY last_run_at DESC LIMIT 1"
+        ).collect()
+        if _mrows:
+            run_manifest_raw = _mrows[0]["run_manifest"]
+    except Exception:  # pragma: no cover — unmigrated table / column absent
+        run_manifest_raw = None
 
     # Lift a plan_snapshot from any row that carries one (bronze rows
     # from the legacy backend write one; CP rows do not). Take the
@@ -1580,9 +1627,14 @@ def read_content_pack_resumable_state(
     if snap_candidates:
         bronze_plan_snapshot = snap_candidates[0]["plan_snapshot"]
 
-    # Scope reconstruction from the rows themselves.
-    scope_datasets = tuple(sorted({r["dataset_id"] for r in rows}))
-    scope_layers = tuple(sorted({r["layer"] for r in rows}))
+    # Scope reconstruction from the rows themselves. Reserved ``__*__`` ids are
+    # excluded (a synthetic marker is not part of the run's dataset scope).
+    scope_datasets = tuple(
+        sorted({r["dataset_id"] for r in rows if _is_real_node(r["dataset_id"])})
+    )
+    scope_layers = tuple(
+        sorted({r["layer"] for r in rows if _is_real_node(r["dataset_id"])})
+    )
     original_started_at = min(r["last_run_at"] for r in rows)
 
     # row_counts + last_watermarks queries — same SQL shape as
@@ -1641,6 +1693,8 @@ def read_content_pack_resumable_state(
         succeeded_row_counts=succeeded_row_counts,
         succeeded_last_watermarks=succeeded_last_watermarks,
         original_started_at=original_started_at,
+        run_manifest_raw=run_manifest_raw,
+        historical_exec_modes=historical_exec_modes,
     )
 
 
