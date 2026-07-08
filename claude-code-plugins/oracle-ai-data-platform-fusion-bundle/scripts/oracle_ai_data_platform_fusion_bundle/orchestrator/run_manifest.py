@@ -117,19 +117,34 @@ def compute_node_sem(
     return h.hexdigest()
 
 
-def compute_pack_fingerprint(pack: ResolvedPack) -> str:
+def compute_pack_fingerprint(
+    pack: ResolvedPack, active_profile_name: str | None
+) -> str:
     """Manifest-level PACK execution fingerprint.
 
-    Covers pack-level inputs that no per-node ``sem`` covers: pack ``id`` +
-    ``version``; the ``columnAliases`` block (each alias's ``resolution`` /
-    ``role`` / ``appliesTo`` / ``domain``/``candidates`` — a COA alias role or
-    ``appliesTo`` edit must invalidate); and the active pack-profile ``calendar``
-    defaults consumed by ``dim_calendar_adapter``. A change → AIDPF-1049.
+    Covers pack-level inputs that no per-node ``sem`` covers:
+
+    * pack ``id`` + ``version``;
+    * the ``columnAliases`` block (each alias's ``resolution`` / ``role`` /
+      ``appliesTo`` / ``candidates`` — a COA alias role or ``appliesTo`` edit
+      must invalidate);
+    * **every ``semanticVariants`` candidate** (full ``model_dump``) — a
+      ``{{ semantic.* }}`` fragment edit that leaves a node's SQL token
+      unchanged still changes the RENDERED SQL, so it must invalidate here
+      (per-node ``sem`` hashes only the raw template bytes and would miss it);
+    * the **active** pack-profile ``calendar`` defaults consumed by
+      ``dim_calendar_adapter`` — keyed by ``active_profile_name`` (the real
+      active key is ``bundle.contentPack.profile``; the ``Pack`` model has NO
+      ``active_profile`` attribute, so it MUST be passed in — a wrong/None key
+      would hash the calendar as null and miss a calendar mutation).
+
+    Any change → AIDPF-1049 on resume.
     """
     payload: dict[str, Any] = {
         "id": pack.pack.id,
         "version": pack.pack.version,
         "columnAliases": {},
+        "semanticVariants": {},
     }
     for name, spec in sorted(pack.pack.column_aliases.items()):
         payload["columnAliases"][name] = {
@@ -138,11 +153,24 @@ def compute_pack_fingerprint(pack: ResolvedPack) -> str:
             "appliesTo": getattr(spec, "appliesTo", None),
             "candidates": list(getattr(spec, "candidates", []) or []),
         }
-    # Active pack-profile calendar defaults (dim_calendar_adapter input).
+    # Full semanticVariants block — any referenced fragment edit invalidates.
+    for name, variant in sorted(
+        (getattr(pack.pack, "semantic_variants", None) or {}).items()
+    ):
+        payload["semanticVariants"][name] = (
+            variant.model_dump(by_alias=True, mode="json")
+            if hasattr(variant, "model_dump")
+            else variant
+        )
+    # Active pack-profile calendar defaults (dim_calendar_adapter input),
+    # resolved by the REAL active profile key.
     profiles = getattr(pack.pack, "profiles", None) or {}
-    active = getattr(pack.pack, "active_profile", None)
     cal: Any = None
-    prof = profiles.get(active) if isinstance(profiles, dict) and active else None
+    prof = (
+        profiles.get(active_profile_name)
+        if isinstance(profiles, dict) and active_profile_name
+        else None
+    )
     if prof is not None:
         cal = getattr(prof, "calendar", None)
         if cal is not None and hasattr(cal, "model_dump"):
@@ -268,7 +296,64 @@ def parse_manifest(raw: str | None) -> dict[str, Any]:
             f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: manifest schemaVersion "
             f"{data['schemaVersion']!r} != supported {MANIFEST_SCHEMA_VERSION}."
         )
+
+    # Validate NESTED shape + types — top-level presence alone is not enough. A
+    # payload like ``resolver_inputs: []`` would pass presence then crash on a
+    # later ``.get`` in the guards. Fail closed HERE instead (AIDPF-4022).
+    def _require(cond: bool, detail: str) -> None:
+        if not cond:
+            raise ManifestInvalidError(
+                f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: {detail}"
+            )
+
+    ri = data["resolver_inputs"]
+    _require(isinstance(ri, dict), "resolver_inputs is not an object.")
+    _require(
+        ri.get("datasets") is None or _is_str_list(ri.get("datasets")),
+        "resolver_inputs.datasets is not null or a list of strings.",
+    )
+    _require(
+        ri.get("layers") is None or _is_str_list(ri.get("layers")),
+        "resolver_inputs.layers is not null or a list of strings.",
+    )
+    _require(
+        isinstance(ri.get("strict_scope"), bool),
+        "resolver_inputs.strict_scope is not a bool.",
+    )
+    _require(isinstance(data["mode"], str), "mode is not a string.")
+    _require(isinstance(data["identity"], dict), "identity is not an object.")
+    _require(
+        isinstance(data["pack_fingerprint"], str),
+        "pack_fingerprint is not a string.",
+    )
+    _require(isinstance(data["profile_hash"], str), "profile_hash is not a string.")
+    _require(isinstance(data["exec_policy"], dict), "exec_policy is not an object.")
+
+    topo = data["topology"]
+    _require(isinstance(topo, list), "topology is not a list.")
+    for i, entry in enumerate(topo):
+        _require(isinstance(entry, dict), f"topology[{i}] is not an object.")
+        _require(
+            isinstance(entry.get("id"), str),
+            f"topology[{i}].id is not a string.",
+        )
+        _require(
+            isinstance(entry.get("layer"), str),
+            f"topology[{i}].layer is not a string.",
+        )
+        _require(
+            _is_str_list(entry.get("deps")),
+            f"topology[{i}].deps is not a list of strings.",
+        )
+        _require(
+            isinstance(entry.get("sem"), str),
+            f"topology[{i}].sem is not a string.",
+        )
     return data
+
+
+def _is_str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
 # ---------------------------------------------------------------------------

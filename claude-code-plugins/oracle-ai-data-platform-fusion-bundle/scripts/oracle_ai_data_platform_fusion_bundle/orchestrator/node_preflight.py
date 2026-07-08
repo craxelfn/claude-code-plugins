@@ -976,6 +976,25 @@ def order_coa_source_first(
     return coa_first + rest
 
 
+def split_landed_coa_sources(
+    coa_sources: set[str], *, mart_only: bool, succeeded: "frozenset[str] | set[str]"
+) -> "tuple[set[str], set[str]]":
+    """Split COA sources into (already-LANDED, still-PENDING) for the
+    pre-extraction checkpoint.
+
+    A COA source is already MATERIALIZED at pre-extraction time — so the in-loop
+    data checkpoint (row 4b) will NOT fire for it — when either the run is
+    mart-only (all bronze skipped) or this is a resume and the source already
+    succeeded (it will be resumed-skipped). Those sources MUST get the FULL
+    landed-data checkpoint pre-extraction; a source that will still land in-loop
+    only needs the structural gate now (its data probes run at 4b). Without this
+    split, a run originally aborted at the in-loop checkpoint (AIDPF-2018/2074)
+    could resume straight into the expensive bronze with COA unproven.
+    """
+    landed = {s for s in coa_sources if mart_only or s in succeeded}
+    return landed, coa_sources - landed
+
+
 def evaluate_coa_checkpoint(
     spark: "SparkSession",
     *,

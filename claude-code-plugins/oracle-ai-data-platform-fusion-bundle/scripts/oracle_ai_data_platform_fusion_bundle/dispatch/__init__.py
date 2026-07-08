@@ -147,7 +147,7 @@ def dispatch_via_rest(
     # ``--strict-scope`` opt-out of implicit transitive include. Threaded into
     # both the dispatch dry-run resolver and the cluster-side orchestrator.run
     # call. Default False matches the CLI default.
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> RunSummary:
     """Dispatch the orchestrator notebook to AIDP and return the parsed RunSummary.
 

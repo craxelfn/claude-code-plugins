@@ -44,7 +44,7 @@ def run(
     poll_timeout_s: int = 3600,
     force_fingerprint_skip: bool = False,
     repin_plan_hash: bool = False,
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
     console: Console | None = None,
 ) -> int:
     """Submit the bundle's pipeline to AIDP, or run inline if --inline.
@@ -142,7 +142,7 @@ def _run_inline(
     *,
     force_fingerprint_skip: bool = False,
     repin_plan_hash: bool = False,
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> int:
     """Run the orchestrator in-process.
 
@@ -294,7 +294,7 @@ def _run_via_aidp_dispatch(
     force_fingerprint_skip: bool = False,
     repin_plan_hash: bool = False,
     resume_run_id: str | None = None,
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> int:
     """Submit the bundle to AIDP via the REST job API.
 

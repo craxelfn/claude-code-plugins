@@ -497,3 +497,57 @@ def test_checkpoint_probe_failure_downgraded_with_hatch() -> None:
     )
     assert res.ok
     assert res.warnings
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 — resume must run the FULL data checkpoint for already-landed COA
+# ---------------------------------------------------------------------------
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.node_preflight import (  # noqa: E402
+    split_landed_coa_sources,
+)
+
+
+def test_split_landed_coa_mart_only_all_landed() -> None:
+    landed, pending = split_landed_coa_sources(
+        {"gl_coa"}, mart_only=True, succeeded=frozenset()
+    )
+    assert landed == {"gl_coa"} and pending == set()
+
+
+def test_split_landed_coa_resume_succeeded_is_landed() -> None:
+    """Resume where gl_coa already succeeded → it is LANDED, so the FULL data
+    checkpoint runs pre-extraction (the in-loop 4b checkpoint won't fire for a
+    resumed-skipped node). This is the Finding-1 hole: an original abort at
+    AIDPF-2018/2074 must be re-caught before any unfinished bronze."""
+    landed, pending = split_landed_coa_sources(
+        {"gl_coa"}, mart_only=False, succeeded=frozenset({"gl_coa"})
+    )
+    assert landed == {"gl_coa"} and pending == set()
+
+
+def test_split_landed_coa_fresh_run_is_pending() -> None:
+    """Fresh full run: gl_coa not yet landed → structural-only now; data probes
+    run in-loop at 4b."""
+    landed, pending = split_landed_coa_sources(
+        {"gl_coa"}, mart_only=False, succeeded=frozenset()
+    )
+    assert landed == set() and pending == {"gl_coa"}
+
+
+def test_landed_coa_full_checkpoint_catches_2018_on_resume() -> None:
+    """End-to-end at the checkpoint layer: for a LANDED COA source, the FULL
+    data checkpoint (structural_only=False) blocks on the multi-COA violation —
+    i.e. the resume is re-aborted rather than proceeding into expensive bronze."""
+    pack = load_pack(PACK_ROOT)
+    landed, _ = split_landed_coa_sources(
+        {"gl_coa"}, mart_only=False, succeeded=frozenset({"gl_coa"})
+    )
+    spark = _fake_spark({"101": 15000, "5023": 8000})  # 2 charts, singleton COA
+    res = evaluate_coa_checkpoint(
+        spark, pack=pack, profile=_profile(SINGLETON_COA),
+        bronze_table_for_source={"gl_coa": "cat.bronze.gl_coa"},
+        coa_sources=landed, allow_unprovable=False, structural_only=False,
+    )
+    assert not res.ok
+    assert AIDPF_2018_MULTI_COA_UNCONFIGURED in {e.code for e in res.blocking}

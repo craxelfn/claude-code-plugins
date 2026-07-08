@@ -835,8 +835,9 @@ def write_fingerprint_skip_row(
 
     Row carries:
 
-    * ``dataset_id = "_fingerprint_skip"`` — sentinel; the prior
-      bootstrap/run queries never look it up by this id.
+    * ``dataset_id = "__fingerprint_skip__"`` — reserved ``__*__`` sentinel so
+      the resume reader excludes it from every derived node set (succeeded /
+      scope / legacy-detection); it never collides with a real node id.
     * ``layer = "bronze"`` (the fingerprint is whole-bronze-schema).
     * ``mode = "fingerprint_skip"`` — distinguishes from
       ``seed``/``incremental`` rows in audit queries.
@@ -887,7 +888,7 @@ def write_fingerprint_skip_row(
            plan_hash, plan_snapshot)
         VALUES
           ({_q(run_id)},
-           '_fingerprint_skip',
+           '__fingerprint_skip__',
            'bronze',
            'fingerprint_skip',
            CAST(NULL AS TIMESTAMP),
@@ -1592,10 +1593,19 @@ def read_content_pack_resumable_state(
         if r["status"] in ("success", "resumed_skipped") and _is_exec_row(r)
     }
 
-    # Distinct execution modes across real node rows (legacy mode inference).
-    historical_exec_modes = tuple(
-        sorted({r["mode"] for r in rows if _is_exec_row(r)})
-    )
+    # Distinct execution modes across ALL historical rows (UNRANKED) — used for
+    # legacy mixed-mode rejection. Must query every execution row, NOT the
+    # latest-per-node survivors: an older `incremental` row hidden by a newer
+    # `seed` row for the SAME node would vanish under ranking, so the mixed
+    # physical baseline (which no forward --mode can repair) would go
+    # undetected. Reserved `__*__` ids and audit modes are excluded.
+    _mode_rows = spark.sql(
+        f"SELECT DISTINCT mode FROM {table_path} "
+        f"WHERE run_id = '{escaped_run_id}' "
+        f"AND mode IN ('seed', 'incremental') "
+        f"AND dataset_id NOT LIKE '\\_\\_%\\_\\_'"
+    ).collect()
+    historical_exec_modes = tuple(sorted({r["mode"] for r in _mode_rows}))
 
     # Durable run manifest — read defensively: the ``run_manifest`` column may
     # be absent on a table created by pre-feature code and not yet migrated,
@@ -1627,13 +1637,17 @@ def read_content_pack_resumable_state(
     if snap_candidates:
         bronze_plan_snapshot = snap_candidates[0]["plan_snapshot"]
 
-    # Scope reconstruction from the rows themselves. Reserved ``__*__`` ids are
-    # excluded (a synthetic marker is not part of the run's dataset scope).
+    # Scope reconstruction from the rows themselves — EXECUTION rows only.
+    # Excludes reserved ``__*__`` markers (e.g. ``__fingerprint_skip__``,
+    # ``__run_manifest__``) AND audit-mode rows on real ids (``plan_hash_repin``
+    # is written on a real node id BEFORE the node executes). An audit-only row
+    # must neither activate legacy reconstruction nor pollute the reconstructed
+    # ``--datasets`` scope with a node that never ran.
     scope_datasets = tuple(
-        sorted({r["dataset_id"] for r in rows if _is_real_node(r["dataset_id"])})
+        sorted({r["dataset_id"] for r in rows if _is_exec_row(r)})
     )
     scope_layers = tuple(
-        sorted({r["layer"] for r in rows if _is_real_node(r["dataset_id"])})
+        sorted({r["layer"] for r in rows if _is_exec_row(r)})
     )
     original_started_at = min(r["last_run_at"] for r in rows)
 

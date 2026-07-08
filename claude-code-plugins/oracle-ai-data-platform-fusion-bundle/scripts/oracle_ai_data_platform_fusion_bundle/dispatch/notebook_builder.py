@@ -125,7 +125,7 @@ def _build_run_cell(
     resume_run_id: str | None = None,
     # ``--strict-scope`` opts out of implicit transitive include. Emit it
     # as ``strict_scope=...`` so the cluster honors the operator's choice.
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> str:
     # For content-pack execution, the previous bootstrap cell set up
     # _resolved_pack and _tenant_profile; thread them into orchestrator.run.
@@ -389,7 +389,7 @@ def build_notebook(
     env_vars: Mapping[str, str] | None = None,
     # ``--strict-scope`` opts out of implicit transitive include. Threaded
     # into the generated orchestrator.run() call as a literal kwarg.
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> dict:
     """Build the 4-cell ipynb dict that runs the orchestrator on the cluster.
 

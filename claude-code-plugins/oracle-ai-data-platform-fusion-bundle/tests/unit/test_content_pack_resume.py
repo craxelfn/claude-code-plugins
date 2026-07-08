@@ -621,6 +621,18 @@ class _ManifestAwareSpark:
             if self._manifest_raw is None:
                 return _FakeDataFrame([])
             return _FakeDataFrame([_FakeRow(run_manifest=self._manifest_raw)])
+        if "SELECT DISTINCT mode FROM" in query:
+            # Unranked distinct execution modes over real-node exec rows.
+            modes = {
+                r._data.get("mode")
+                for r in self._rows
+                if r._data.get("mode") in ("seed", "incremental")
+                and not (
+                    r._data["dataset_id"].startswith("__")
+                    and r._data["dataset_id"].endswith("__")
+                )
+            }
+            return _FakeDataFrame([_FakeRow(mode=m) for m in sorted(modes)])
         if "ranked AS" in query and "row_count IS NOT NULL" in query:
             return _FakeDataFrame(
                 [r for r in self._rows

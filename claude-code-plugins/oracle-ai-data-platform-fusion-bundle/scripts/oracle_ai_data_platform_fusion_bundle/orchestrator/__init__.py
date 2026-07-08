@@ -319,8 +319,10 @@ def run(
     repin_plan_hash: bool = False,
     # Opt-out of implicit-transitive-include in the plan
     # resolver. When True, declared roots must include every transitive
-    # dep explicitly; missing deps raise AIDPF-1042.
-    strict_scope: bool = False,
+    # dep explicitly; missing deps raise AIDPF-1042. Tri-state: None = omitted
+    # (fresh → False; resume → adopt the manifest value); an explicit value
+    # that conflicts with a manifest-backed resume raises AIDPF-1047.
+    strict_scope: bool | None = None,
     # Shared run_id contract retained for resume
     # semantics. Private contract; the CLI never passes this directly.
     _forced_run_id: str | None = None,
@@ -435,7 +437,7 @@ def _dispatch_content_pack_run(
     force_fingerprint_skip: bool,
     repin_plan_hash: bool = False,
     dry_run: bool = False,
-    strict_scope: bool = False,
+    strict_scope: bool | None = None,
 ) -> RunSummary:
     """Single-path content-pack dispatcher.
 
@@ -492,6 +494,7 @@ def _dispatch_content_pack_run(
         # Capture the operator's EXPLICIT scope before any reconstruction
         # overwrites it (for the manifest scope-conflict check, AIDPF-1047).
         _explicit_datasets, _explicit_layers = datasets, layers
+        _explicit_strict_scope = strict_scope  # tri-state: None = omitted
 
         spark = spark or _bootstrap_spark()
         state.ensure_state_table(spark, paths)
@@ -521,10 +524,13 @@ def _dispatch_content_pack_run(
 
         if manifest is not None:
             # A manifest-backed resume is scoped BY THE MANIFEST. An explicit
-            # scope filter must exactly equal it, else AIDPF-1047 (never
-            # silently narrow). strict_scope is adopted from the manifest.
+            # scope filter (datasets / layers / strict-scope) must exactly equal
+            # it, else AIDPF-1047 (never silently narrow). The CAPTURED explicit
+            # strict-scope (tri-state None = omitted) is passed so an explicit
+            # value conflicting with the manifest is caught, not silently
+            # ignored; an omitted value adopts the manifest.
             _rmf.check_scope_conflict(
-                _explicit_datasets, _explicit_layers, None,
+                _explicit_datasets, _explicit_layers, _explicit_strict_scope,
                 manifest_inputs=manifest["resolver_inputs"],
             )
             # Identity / profile / exec-policy drift → fresh seed (AIDPF-1048).
@@ -561,7 +567,12 @@ def _dispatch_content_pack_run(
             )
             _rmf.check_node_definition_drift(
                 _replay_topo,
-                _rmf.compute_pack_fingerprint(resolved_pack),
+                _rmf.compute_pack_fingerprint(
+                    resolved_pack,
+                    getattr(
+                        getattr(bundle, "content_pack", None), "profile", None
+                    ),
+                ),
                 manifest_topology=manifest["topology"],
                 manifest_pack_fingerprint=manifest["pack_fingerprint"],
             )
@@ -589,6 +600,12 @@ def _dispatch_content_pack_run(
     # display default rather than surfacing ``mode=None`` in the preview.
     if mode is None:
         mode = "seed"
+
+    # Resolve the tri-state ``strict_scope`` to a concrete bool for the resolver
+    # / backend. The manifest-backed branch above already set it from the
+    # manifest's resolver_inputs; a fresh run (resume skipped) or a legacy
+    # resume leaves it None → False (the historical default).
+    strict_scope = bool(strict_scope)
 
     # Dry-run — emit the would-run plan and return.
     if dry_run:
@@ -1253,15 +1270,12 @@ def _run_content_pack_backend(
     state.ensure_state_table(spark, paths)
     ensure_state_columns_v2(spark, paths)
 
-    # Force-skip audit row (after state-table exists; uses
-    # the SAME run_id as the rest of the run).
-    if preflight.kind == "skip_force_flag":
-        state.write_fingerprint_skip_row(
-            spark, paths,
-            run_id=run_id,
-            prior_fingerprint=preflight.prior_fingerprint,  # type: ignore[arg-type]
-            current_fingerprint=preflight.current_fingerprint,  # type: ignore[arg-type]
-        )
+    # NOTE: the ``--force-fingerprint-skip`` audit row is DEFERRED to AFTER the
+    # run-manifest write (below), so the manifest stays the FIRST hard write.
+    # Otherwise a crash between this point and the manifest would leave a
+    # terminal audit row but NO manifest — a state a resume could misread. The
+    # row uses the reserved ``__fingerprint_skip__`` id + ``fingerprint_skip``
+    # mode, so the reader excludes it either way.
 
     # Build the run context the renderer needs. ``active_profile_name``
     # is the bundle's contentPack.profile — keyed by the renderer + builtin
@@ -1433,29 +1447,43 @@ def _run_content_pack_backend(
                     steps=(gate_step,),
                 )
 
-    # COA checkpoint (feature: fail-fast-seed-validation).
-    #   * MART-ONLY runs never enter the in-loop checkpoint (bronze is skipped),
-    #     so validate the LANDED gl_coa here — structural gate + data probes —
-    #     before any COA-dependent mart dispatches (gate-ordering row 3m).
-    #   * FULL runs run only the STRUCTURAL gate here (pre-extraction, before any
-    #     bronze dispatch — no landed data yet); their data probes run in-loop
-    #     right after gl_coa lands (rows 4a/4b).
-    # A hard COA outcome aborts before the expensive PVOs; a downgraded (hatched)
-    # probe failure is logged and proceeds.
+    # COA checkpoint (feature: fail-fast-seed-validation). A COA source is
+    # already MATERIALIZED at this point — so the in-loop data checkpoint (row
+    # 4b) will NOT fire for it — when either (a) this is a mart-only run (bronze
+    # skipped), or (b) this is a RESUME and the COA source already succeeded (it
+    # will be resumed-skipped in the loop). For those sources the FULL landed-
+    # data checkpoint MUST run HERE, before any unfinished non-COA bronze
+    # dispatches — otherwise a run originally aborted at the in-loop checkpoint
+    # (AIDPF-2018 / AIDPF-2074) could resume straight into the expensive bronze
+    # with COA still unproven. A COA source that will still LAND in-loop only
+    # needs the structural gate here (its data probes run at 4b after it lands).
     if _coa_sources and not dry_run:
-        _coa_ckpt = evaluate_coa_checkpoint(
-            spark,
-            pack=resolved_pack,
-            profile=tenant_profile,
-            bronze_table_for_source=bronze_table_for_source,
-            coa_sources=_coa_sources,
-            allow_unprovable=_allow_unprovable,
-            structural_only=not _mart_only,
+        from .node_preflight import split_landed_coa_sources
+
+        _succeeded_now: frozenset[str] = (
+            shared_resume_context.succeeded
+            if shared_resume_context is not None
+            else frozenset()
         )
-        for _w in _coa_ckpt.warnings:
-            _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
-        if not _coa_ckpt.ok:
-            return _coa_gate_abort(_coa_ckpt, [])
+        _landed_coa, _pending_coa = split_landed_coa_sources(
+            _coa_sources, mart_only=_mart_only, succeeded=_succeeded_now
+        )
+        for _srcs, _structural_only in ((_landed_coa, False), (_pending_coa, True)):
+            if not _srcs:
+                continue
+            _coa_ckpt = evaluate_coa_checkpoint(
+                spark,
+                pack=resolved_pack,
+                profile=tenant_profile,
+                bronze_table_for_source=bronze_table_for_source,
+                coa_sources=_srcs,
+                allow_unprovable=_allow_unprovable,
+                structural_only=_structural_only,
+            )
+            for _w in _coa_ckpt.warnings:
+                _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
+            if not _coa_ckpt.ok:
+                return _coa_gate_abort(_coa_ckpt, [])
 
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we
@@ -1583,6 +1611,18 @@ def _run_content_pack_backend(
                     ),
                 ),
             )
+
+    # Deferred ``--force-fingerprint-skip`` audit row — written AFTER the
+    # manifest (Finding 3) so the manifest is the first hard write. Uses the
+    # reserved ``__fingerprint_skip__`` id + ``fingerprint_skip`` mode, so the
+    # resume reader excludes it from succeeded / scope / mode inference.
+    if preflight.kind == "skip_force_flag":
+        state.write_fingerprint_skip_row(
+            spark, paths,
+            run_id=run_id,
+            prior_fingerprint=preflight.prior_fingerprint,  # type: ignore[arg-type]
+            current_fingerprint=preflight.current_fingerprint,  # type: ignore[arg-type]
+        )
 
     started_at = _dt.now(_tz.utc)
     steps: list[RunStep] = []
@@ -1863,7 +1903,10 @@ def _build_run_manifest_json(
         topology=topology,
         mode=mode,
         identity=_identity_dict(bundle, paths, _pv),
-        pack_fingerprint=_rmf.compute_pack_fingerprint(resolved_pack),
+        pack_fingerprint=_rmf.compute_pack_fingerprint(
+            resolved_pack,
+            getattr(getattr(bundle, "content_pack", None), "profile", None),
+        ),
         profile_hash=profile_hash,
         allow_unprovable_coa=allow_unprovable_coa,
     )

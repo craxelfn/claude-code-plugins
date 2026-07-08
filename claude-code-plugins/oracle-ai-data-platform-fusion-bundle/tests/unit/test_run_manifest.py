@@ -146,18 +146,77 @@ class TestManifestRoundTrip:
         with pytest.raises(rm.ManifestInvalidError):
             rm.parse_manifest(json.dumps(m))
 
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda m: m.update(resolver_inputs=[]),  # wrong type (list)
+            lambda m: m["resolver_inputs"].update(strict_scope="false"),  # str bool
+            lambda m: m["resolver_inputs"].update(datasets="gl_coa"),  # str not list
+            lambda m: m.update(topology={}),  # not a list
+            lambda m: m.update(topology=[{"id": "a"}]),  # entry missing fields
+            lambda m: m.update(topology=[{"id": 1, "layer": "b", "deps": [], "sem": "s"}]),
+            lambda m: m.update(mode=123),  # not a str
+            lambda m: m.update(identity=[]),  # not an object
+            lambda m: m.update(exec_policy="x"),  # not an object
+            lambda m: m.update(pack_fingerprint=None),  # not a str
+        ],
+    )
+    def test_malformed_nested_fields_fail_closed_4022(self, mutate) -> None:
+        """Should-fix: nested type/shape violations fail closed with AIDPF-4022
+        instead of passing parse then crashing on a later .get."""
+        import json
+
+        m = _manifest()
+        mutate(m)
+        with pytest.raises(rm.ManifestInvalidError):
+            rm.parse_manifest(json.dumps(m))
+
 
 # ---------------------------------------------------------------------------
 # Fingerprints + topology (against the shipped pack)
 # ---------------------------------------------------------------------------
 
 
+_ACTIVE = "finance-default"  # the starter pack's active profile name
+
+
 class TestFingerprints:
-    def test_pack_fingerprint_stable_and_sensitive(self) -> None:
+    def test_pack_fingerprint_stable(self) -> None:
         pack = load_pack(PACK_ROOT)
-        fp1 = rm.compute_pack_fingerprint(pack)
-        fp2 = rm.compute_pack_fingerprint(pack)
+        fp1 = rm.compute_pack_fingerprint(pack, _ACTIVE)
+        fp2 = rm.compute_pack_fingerprint(pack, _ACTIVE)
         assert fp1 == fp2 and len(fp1) == 64
+
+    def test_pack_fingerprint_keys_calendar_by_active_profile(self) -> None:
+        """Finding 4: the active pack-profile calendar MUST participate — keyed
+        by the passed active-profile name (there is no pack.active_profile). A
+        wrong/None key would hash the calendar as null and miss a mutation."""
+        pack = load_pack(PACK_ROOT)
+        # With the real active profile, the calendar is hashed; with None it is
+        # null — so the two must differ (proves the calendar is included).
+        assert rm.compute_pack_fingerprint(
+            pack, _ACTIVE
+        ) != rm.compute_pack_fingerprint(pack, None)
+
+    def test_pack_fingerprint_changes_on_calendar_mutation(self) -> None:
+        """Finding 4: mutating the active profile's calendar changes the pack
+        fingerprint (→ AIDPF-1049 on resume)."""
+        pack = load_pack(PACK_ROOT)
+        before = rm.compute_pack_fingerprint(pack, _ACTIVE)
+        prof = pack.pack.profiles[_ACTIVE]
+        pack.pack.profiles[_ACTIVE] = prof.model_copy(update={"calendar": None})
+        after = rm.compute_pack_fingerprint(pack, _ACTIVE)
+        assert before != after
+
+    def test_pack_fingerprint_changes_on_semantic_variant_edit(self) -> None:
+        """Finding 5: a {{ semantic.* }} fragment edit (which a node's raw-SQL
+        `sem` would miss) changes the pack fingerprint (→ AIDPF-1049)."""
+        pack = load_pack(PACK_ROOT)
+        before = rm.compute_pack_fingerprint(pack, _ACTIVE)
+        # Drop the variant to simulate an edit to the referenced fragment set.
+        pack.pack.semantic_variants = {}
+        after = rm.compute_pack_fingerprint(pack, _ACTIVE)
+        assert before != after
 
     def test_node_sem_changes_with_sql_bytes(self) -> None:
         pack = load_pack(PACK_ROOT)
