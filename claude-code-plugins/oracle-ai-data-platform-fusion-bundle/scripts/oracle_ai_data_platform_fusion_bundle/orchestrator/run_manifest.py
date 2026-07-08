@@ -320,7 +320,10 @@ def parse_manifest(raw: str | None) -> dict[str, Any]:
         isinstance(ri.get("strict_scope"), bool),
         "resolver_inputs.strict_scope is not a bool.",
     )
-    _require(isinstance(data["mode"], str), "mode is not a string.")
+    _require(
+        data["mode"] in EXECUTION_MODES,
+        f"mode {data['mode']!r} is not one of {EXECUTION_MODES!r}.",
+    )
     _require(isinstance(data["identity"], dict), "identity is not an object.")
     _require(
         isinstance(data["pack_fingerprint"], str),

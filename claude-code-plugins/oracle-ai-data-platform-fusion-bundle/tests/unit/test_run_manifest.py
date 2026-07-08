@@ -130,6 +130,18 @@ class TestManifestRoundTrip:
         with pytest.raises(rm.ManifestInvalidError):
             rm.parse_manifest(raw)
 
+    @pytest.mark.parametrize("bad_mode", ["garbage", "full", "SEED", "", "plan_hash_repin"])
+    def test_invalid_mode_fails_closed_4022(self, bad_mode) -> None:
+        """Finding 2: the parser must reject a mode outside EXECUTION_MODES, so a
+        malformed value can never be adopted on resume and reach the destructive
+        seed-overwrite vs incremental-merge branch."""
+        import json
+
+        m = _manifest()
+        m["mode"] = bad_mode
+        with pytest.raises(rm.ManifestInvalidError):
+            rm.parse_manifest(json.dumps(m))
+
     def test_unknown_version_fails_closed_4022(self) -> None:
         import json
 

@@ -504,6 +504,7 @@ def test_checkpoint_probe_failure_downgraded_with_hatch() -> None:
 # ---------------------------------------------------------------------------
 
 from oracle_ai_data_platform_fusion_bundle.orchestrator.node_preflight import (  # noqa: E402
+    _node_consumes_source,
     split_landed_coa_sources,
 )
 
@@ -551,3 +552,74 @@ def test_landed_coa_full_checkpoint_catches_2018_on_resume() -> None:
     )
     assert not res.ok
     assert AIDPF_2018_MULTI_COA_UNCONFIGURED in {e.code for e in res.blocking}
+
+
+# ---------------------------------------------------------------------------
+# Should-fix — only re-probe a landed COA source with an UNFINISHED consumer
+# ---------------------------------------------------------------------------
+
+
+def _landed_to_recheck(pack, plan, *, mart_only, succeeded):
+    """Mirror the orchestrator composition: landed COA sources filtered to
+    those with an unfinished in-scope consumer."""
+    coa_sources = coa_applicable_sources(pack, plan)
+    landed, _pending = split_landed_coa_sources(
+        coa_sources, mart_only=mart_only, succeeded=frozenset(succeeded)
+    )
+    needed = coa_applicable_sources(
+        pack, [n for n in plan if n.id not in succeeded]
+    )
+    return landed & needed
+
+
+def _coa_consumer_ids(pack, plan):
+    return [
+        n.id for n in plan
+        if n.layer in ("silver", "gold")
+        and any(_node_consumes_source(n, s) for s in {"gl_coa"})
+    ]
+
+
+def test_complete_resume_does_not_recheck_landed_coa() -> None:
+    """A documented idempotent COMPLETE resume: every node (incl. all COA
+    consumers) already succeeded → NO landed source is re-probed, so a transient
+    probe failure cannot block it."""
+    pack = load_pack(PACK_ROOT)
+    plan = (
+        list(pack.bronze.values())
+        + list(pack.silver.values())
+        + list(pack.gold.values())
+    )
+    all_ids = {n.id for n in plan}
+    assert _landed_to_recheck(pack, plan, mart_only=False, succeeded=all_ids) == set()
+
+
+def test_unrelated_failure_after_dim_account_does_not_recheck_coa() -> None:
+    """dim_account (the COA consumer) succeeded; only an unrelated non-COA mart
+    is unfinished → gl_coa is NOT re-probed (recovery not blocked)."""
+    pack = load_pack(PACK_ROOT)
+    plan = (
+        list(pack.bronze.values())
+        + list(pack.silver.values())
+        + list(pack.gold.values())
+    )
+    consumers = set(_coa_consumer_ids(pack, plan))
+    # Everything succeeded EXCEPT one non-COA-consuming gold mart.
+    non_consumer_gold = next(
+        (n.id for n in pack.gold.values() if n.id not in consumers), None
+    )
+    if non_consumer_gold is None:
+        import pytest as _pt
+        _pt.skip("starter pack has no non-COA gold mart")
+    succeeded = {n.id for n in plan} - {non_consumer_gold}
+    assert _landed_to_recheck(pack, plan, mart_only=False, succeeded=succeeded) == set()
+
+
+def test_coa_consumer_unfinished_does_recheck_coa() -> None:
+    """The F1 case still fires: if a COA consumer (dim_account) is unfinished,
+    its landed source IS re-probed."""
+    pack = load_pack(PACK_ROOT)
+    plan = list(pack.bronze.values()) + list(pack.silver.values())
+    # gl_coa succeeded, dim_account (consumer) unfinished.
+    succeeded = {"gl_coa"}
+    assert _landed_to_recheck(pack, plan, mart_only=False, succeeded=succeeded) == {"gl_coa"}

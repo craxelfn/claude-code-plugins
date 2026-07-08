@@ -521,6 +521,17 @@ def _dispatch_content_pack_run(
             manifest_mode=(manifest.get("mode") if manifest else None),
             historical_exec_modes=list(resume_context.historical_exec_modes),
         )
+        # Re-validate the RESOLVED resume mode before any dispatch. run()'s
+        # pre-dispatch _VALID_MODES check ran with mode=None on a resume, so the
+        # value adopted here (from the manifest / legacy history) has not yet
+        # been checked — a malformed value must never reach the destructive
+        # seed-overwrite vs incremental-merge branch.
+        if mode not in _VALID_MODES:
+            raise UnsupportedModeError(
+                f"resume resolved an unsupported mode={mode!r}. Valid modes: "
+                f"{sorted(_VALID_MODES)}. The recorded run state is corrupt; "
+                f"start a fresh `--mode seed`."
+            )
 
         if manifest is not None:
             # A manifest-backed resume is scoped BY THE MANIFEST. An explicit
@@ -1468,6 +1479,18 @@ def _run_content_pack_backend(
         _landed_coa, _pending_coa = split_landed_coa_sources(
             _coa_sources, mart_only=_mart_only, succeeded=_succeeded_now
         )
+        # Should-fix: only RE-probe a landed COA source that still has an
+        # UNFINISHED in-scope COA consumer. If every COA-consuming node already
+        # succeeded, COA was already proven in the original run — re-running the
+        # data probes would let a transient probe failure block a documented
+        # idempotent complete resume, or block recovery of an unrelated failed
+        # mart after dim_account completed. (The F1 abort case still fires: an
+        # original COA abort means dim_account never ran, so it is unfinished
+        # and its source stays in _needed_coa.)
+        _needed_coa = coa_applicable_sources(
+            resolved_pack, [n for n in plan if n.id not in _succeeded_now]
+        )
+        _landed_coa &= _needed_coa
         for _srcs, _structural_only in ((_landed_coa, False), (_pending_coa, True)):
             if not _srcs:
                 continue

@@ -610,17 +610,47 @@ class TestContentPackResume:
 
 
 class _ManifestAwareSpark:
-    """Fake spark answering both the ranked resume query and the manifest read."""
+    """Fake spark answering the ranked resume query, DESCRIBE (column probe),
+    the unranked distinct-mode query, and the manifest read.
 
-    def __init__(self, rows: list[_FakeRow], manifest_raw: str | None) -> None:
+    ``manifest_rows`` (list of payload values, each str or None) drives the
+    ``__run_manifest__`` read; ``manifest_raises`` makes that read raise;
+    ``has_manifest_col`` toggles whether DESCRIBE reports the run_manifest
+    column (False → column-absent legacy table)."""
+
+    def __init__(
+        self,
+        rows: list[_FakeRow],
+        manifest_raw: str | None = None,
+        *,
+        manifest_rows: "list[str | None] | None" = None,
+        manifest_raises: bool = False,
+        has_manifest_col: bool = True,
+    ) -> None:
         self._rows = rows
-        self._manifest_raw = manifest_raw
+        if manifest_rows is not None:
+            self._manifest_rows = manifest_rows
+        elif manifest_raw is not None:
+            self._manifest_rows = [manifest_raw]
+        else:
+            self._manifest_rows = []
+        self._manifest_raises = manifest_raises
+        self._has_manifest_col = has_manifest_col
 
     def sql(self, query: str):
+        if query.strip().startswith("DESCRIBE TABLE"):
+            cols = [
+                "run_id", "dataset_id", "layer", "mode", "status", "last_run_at",
+            ]
+            if self._has_manifest_col:
+                cols.append("run_manifest")
+            return _FakeDataFrame([_FakeRow(col_name=c) for c in cols])
         if "SELECT run_manifest FROM" in query and "__run_manifest__" in query:
-            if self._manifest_raw is None:
-                return _FakeDataFrame([])
-            return _FakeDataFrame([_FakeRow(run_manifest=self._manifest_raw)])
+            if self._manifest_raises:
+                raise RuntimeError("spark read failure on manifest column")
+            return _FakeDataFrame(
+                [_FakeRow(run_manifest=p) for p in self._manifest_rows]
+            )
         if "SELECT DISTINCT mode FROM" in query:
             # Unranked distinct execution modes over real-node exec rows.
             modes = {
@@ -695,3 +725,78 @@ def test_reader_surfaces_mixed_execution_modes() -> None:
     ctx = _state.read_content_pack_resumable_state(spark, paths, "run-2")
     assert set(ctx.historical_exec_modes) == {"seed", "incremental"}
     assert ctx.run_manifest_raw is None
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 (round 2): manifest ingestion FAILS CLOSED, never fails open
+# ---------------------------------------------------------------------------
+
+from oracle_ai_data_platform_fusion_bundle.orchestrator.run_manifest import (  # noqa: E402
+    ManifestInvalidError,
+)
+
+
+def _paths_mock():
+    paths = MagicMock()
+    paths.bronze.return_value = "cat.bronze.fusion_bundle_state"
+    return paths
+
+
+def _one_exec_row():
+    return [_row("gl_coa", "bronze", "success", "seed")]
+
+
+def test_manifest_null_payload_row_raises_4022() -> None:
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(_one_exec_row(), manifest_rows=[None])
+    with pytest.raises(ManifestInvalidError):
+        _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+
+
+def test_manifest_conflicting_duplicate_rows_raise_4022() -> None:
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(
+        _one_exec_row(),
+        manifest_rows=['{"schemaVersion":1,"a":1}', '{"schemaVersion":1,"a":2}'],
+    )
+    with pytest.raises(ManifestInvalidError):
+        _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+
+
+def test_manifest_read_failure_raises_4022_not_legacy() -> None:
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(_one_exec_row(), manifest_raises=True)
+    with pytest.raises(ManifestInvalidError):
+        _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+
+
+def test_manifest_absent_column_is_legacy_not_error() -> None:
+    """A pre-feature table WITHOUT the run_manifest column → legitimate legacy
+    path (raw=None), NOT an error."""
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(_one_exec_row(), has_manifest_col=False)
+    ctx = _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+    assert ctx.run_manifest_raw is None
+
+
+def test_manifest_no_rows_is_legacy() -> None:
+    """Column present but zero __run_manifest__ rows → legacy (raw=None)."""
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(_one_exec_row(), manifest_rows=[])
+    ctx = _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+    assert ctx.run_manifest_raw is None
+
+
+def test_manifest_single_duplicate_identical_payload_ok() -> None:
+    """Two rows with the SAME payload are benign (idempotent) — not a conflict."""
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    raw = '{"schemaVersion":1}'
+    spark = _ManifestAwareSpark(_one_exec_row(), manifest_rows=[raw, raw])
+    ctx = _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+    assert ctx.run_manifest_raw == raw

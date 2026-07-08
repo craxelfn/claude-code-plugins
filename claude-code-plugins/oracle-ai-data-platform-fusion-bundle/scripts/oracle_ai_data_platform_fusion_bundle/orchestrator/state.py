@@ -1607,22 +1607,53 @@ def read_content_pack_resumable_state(
     ).collect()
     historical_exec_modes = tuple(sorted({r["mode"] for r in _mode_rows}))
 
-    # Durable run manifest — read defensively: the ``run_manifest`` column may
-    # be absent on a table created by pre-feature code and not yet migrated,
-    # and a legacy run has no manifest row. Any failure → None (legacy path).
+    # Durable run manifest ingestion — FAIL CLOSED, never fail open (Finding 1).
+    #   * The ``run_manifest`` COLUMN being absent means a pre-feature table that
+    #     could never have a manifest → legitimate legacy path (raw=None).
+    #   * If the column exists, read EVERY reserved ``__run_manifest__`` row (no
+    #     ``LIMIT 1``, no ``IS NOT NULL`` filter). Zero rows → legacy (raw=None).
+    #   * A manifest row present but with a NULL payload, or MULTIPLE rows with
+    #     conflicting payloads (immutability violated), or a Spark READ error —
+    #     each surfaces as AIDPF-4022 (ManifestInvalidError), NOT the legacy
+    #     path. Misclassifying any of these as legacy would reconstruct scope
+    #     from only surviving rows, omit never-dispatched nodes, and bypass the
+    #     identity / profile / topology guards.
+    from .run_manifest import (
+        AIDPF_4022_MANIFEST_COMMIT_FAILED,
+        ManifestInvalidError,
+    )
+
     run_manifest_raw: str | None = None
-    try:
-        _mrows = spark.sql(
-            f"SELECT run_manifest FROM {table_path} "
-            f"WHERE run_id = '{escaped_run_id}' "
-            f"AND dataset_id = '__run_manifest__' "
-            f"AND run_manifest IS NOT NULL "
-            f"ORDER BY last_run_at DESC LIMIT 1"
-        ).collect()
+    if "run_manifest" in _existing_state_columns(spark, table_path):
+        try:
+            _mrows = spark.sql(
+                f"SELECT run_manifest FROM {table_path} "
+                f"WHERE run_id = '{escaped_run_id}' "
+                f"AND dataset_id = '__run_manifest__'"
+            ).collect()
+        except Exception as exc:  # a real read failure is NOT "no manifest"
+            raise ManifestInvalidError(
+                f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: could not read the run "
+                f"manifest for run_id={run_id!r} ({exc}). Resume aborted (fail "
+                f"closed); start a fresh `--mode seed`."
+            ) from exc
         if _mrows:
-            run_manifest_raw = _mrows[0]["run_manifest"]
-    except Exception:  # pragma: no cover — unmigrated table / column absent
-        run_manifest_raw = None
+            _payloads = {r["run_manifest"] for r in _mrows}
+            if len(_payloads) != 1:
+                raise ManifestInvalidError(
+                    f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: run_id={run_id!r} has "
+                    f"{len(_mrows)} __run_manifest__ rows with conflicting "
+                    f"payloads — the manifest must be a single immutable row. "
+                    f"Non-resumable; start a fresh `--mode seed`."
+                )
+            _only = next(iter(_payloads))
+            if _only is None:
+                raise ManifestInvalidError(
+                    f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: the __run_manifest__ "
+                    f"row for run_id={run_id!r} has a NULL payload (corrupt "
+                    f"manifest). Non-resumable; start a fresh `--mode seed`."
+                )
+            run_manifest_raw = _only
 
     # Lift a plan_snapshot from any row that carries one (bronze rows
     # from the legacy backend write one; CP rows do not). Take the
