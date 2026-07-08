@@ -212,12 +212,16 @@ pass):
    nothing extracted). Reserved `__*__` ids are hidden from `status`.
 5. Per-node execution loop (bronze → silver → gold).
 
-`--resume` replays the manifest, not the surviving rows. A malformed/absent
-manifest fails closed (`AIDPF-4022`). Guards that route to a fresh `--mode seed`
-rather than resuming: topology drift `AIDPF-1044`, node-definition/pack drift
-`AIDPF-1049`, execution-identity / profile / COA-policy drift `AIDPF-1048`,
-scope conflict `AIDPF-1047`, mode conflict or a MIXED legacy history
-`AIDPF-1046`. A bare `--resume` never silently flips seed↔incremental.
+`--resume` replays the manifest, not the surviving rows. A manifest that is
+PRESENT but malformed / empty / unreadable fails closed (`AIDPF-4022`). A
+MISSING manifest row or column (a pre-feature run — backward compatibility is
+intentionally preserved) is NOT an error: it uses the legacy path (scope
+reconstructed from state rows, mode inferred from the run's execution rows with
+`AIDPF-1046` mixed-history / conflict protection). When a manifest IS present,
+these guards route to a fresh `--mode seed` rather than resuming: topology drift
+`AIDPF-1044`, node-definition/pack drift `AIDPF-1049`, execution-identity /
+profile / COA-policy drift `AIDPF-1048`, scope conflict `AIDPF-1047`, mode
+conflict `AIDPF-1046`. A bare `--resume` never silently flips seed↔incremental.
 
 ## Safety Rules
 
