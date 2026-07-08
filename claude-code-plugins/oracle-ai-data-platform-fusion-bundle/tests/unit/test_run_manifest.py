@@ -130,6 +130,36 @@ class TestManifestRoundTrip:
         with pytest.raises(rm.ManifestInvalidError):
             rm.parse_manifest(raw)
 
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            {},  # allowUnprovableCOA missing
+            {"allowUnprovableCOA": "false"},  # coercible string
+            {"allowUnprovableCOA": 0},  # coercible int
+            {"allowUnprovableCOA": 1},
+            {"allowUnprovableCOA": None},
+        ],
+    )
+    def test_exec_policy_non_native_bool_fails_closed_4022(self, policy) -> None:
+        """Finding: allowUnprovableCOA must be present AND a native bool — a
+        persisted 'false' must not be read as truthy and resume with the hatch
+        enabled."""
+        import json
+
+        m = _manifest()
+        m["exec_policy"] = policy
+        with pytest.raises(rm.ManifestInvalidError):
+            rm.parse_manifest(json.dumps(m))
+
+    def test_exec_policy_native_bool_accepted(self) -> None:
+        import json
+
+        m = _manifest()
+        m["exec_policy"] = {"allowUnprovableCOA": True}
+        assert rm.parse_manifest(json.dumps(m))["exec_policy"] == {
+            "allowUnprovableCOA": True
+        }
+
     @pytest.mark.parametrize("bad_mode", ["garbage", "full", "SEED", "", "plan_hash_repin"])
     def test_invalid_mode_fails_closed_4022(self, bad_mode) -> None:
         """Finding 2: the parser must reject a mode outside EXECUTION_MODES, so a

@@ -503,11 +503,15 @@ def _dispatch_content_pack_run(
             spark, paths, resume_run_id,
         )
 
-        # Parse the durable manifest, if this run wrote one. A present-but-
-        # malformed manifest fails closed (AIDPF-4022) — never legacy-fallback.
+        # Parse the durable manifest, if this run wrote one. Branch on
+        # ``is not None`` (NOT truthiness): the state reader already rejects an
+        # empty/blank payload as AIDPF-4022, but branching on truthiness here
+        # would ALSO route an empty string to the legacy path — so a
+        # present-but-malformed manifest fails closed (AIDPF-4022 via
+        # parse_manifest), never legacy-fallback.
         manifest = (
             _rmf.parse_manifest(resume_context.run_manifest_raw)
-            if resume_context.run_manifest_raw
+            if resume_context.run_manifest_raw is not None
             else None
         )
 

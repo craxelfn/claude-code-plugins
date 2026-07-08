@@ -189,6 +189,36 @@ Then seed only the needed node when possible:
 aidp-fusion-bundle run --mode seed --datasets <mart_id> --layers gold
 ```
 
+## Seed Gate Ordering And Run Manifest
+
+A `run --mode seed|incremental` fails fast: every provable gate runs BEFORE the
+expensive Fusion PVO extracts, in this order (nothing is extracted until they
+pass):
+
+1. PVO source-drift (`AIDPF-2072`) and bronze-schema fingerprint drift.
+2. Bronze readiness (`AIDPF-2071`, mart-only runs) + the source-schema batch
+   (`AIDPF-4071`).
+3. **COA gate.** The `gl_coa` extract is ordered FIRST among bronze. A
+   MISSING / EMPTY / structurally invalid `profile.chartOfAccounts` hard-blocks
+   pre-extraction with **`AIDPF-2013`** (both the flat/legacy and nested
+   `default` shapes are accepted). Once `gl_coa` lands, COA plausibility is
+   checked (`AIDPF-5001/2016/2042/2018/2017`); a probe that cannot execute is
+   **`AIDPF-2074`** — blocked by default, downgraded to a WARN only when
+   `contentPack.allowUnprovableCOA: true` AND no real violation was found.
+4. **Run manifest** — one immutable `__run_manifest__` row is written (records
+   resolver inputs + canonical topology + per-node fingerprints + mode +
+   execution identity + pack fingerprint + profile hash + exec policy) BEFORE
+   the first node dispatches. A commit failure is **`AIDPF-4022`** (clean abort,
+   nothing extracted). Reserved `__*__` ids are hidden from `status`.
+5. Per-node execution loop (bronze → silver → gold).
+
+`--resume` replays the manifest, not the surviving rows. A malformed/absent
+manifest fails closed (`AIDPF-4022`). Guards that route to a fresh `--mode seed`
+rather than resuming: topology drift `AIDPF-1044`, node-definition/pack drift
+`AIDPF-1049`, execution-identity / profile / COA-policy drift `AIDPF-1048`,
+scope conflict `AIDPF-1047`, mode conflict or a MIXED legacy history
+`AIDPF-1046`. A bare `--resume` never silently flips seed↔incremental.
+
 ## Safety Rules
 
 - Never store Fusion or OAC passwords in committed files.

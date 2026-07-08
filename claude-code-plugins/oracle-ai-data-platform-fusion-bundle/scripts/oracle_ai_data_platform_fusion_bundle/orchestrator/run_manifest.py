@@ -19,6 +19,8 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..schema.errors import OrchestratorConfigError
+
 if TYPE_CHECKING:
     from ..schema.medallion_pack import NodeYaml
     from .content_pack import ResolvedPack
@@ -44,8 +46,12 @@ AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT = "AIDPF-1048"
 AIDPF_1049_RESUME_NODE_DEFINITION_DRIFT = "AIDPF-1049"
 
 
-class ManifestError(Exception):
-    """Base for manifest / resume-guard failures (each carries an AIDPF code)."""
+class ManifestError(OrchestratorConfigError):
+    """Base for manifest / resume-guard failures (each carries an AIDPF code).
+
+    Inherits ``OrchestratorConfigError`` so the CLI boundary
+    (``commands/run.py``) maps every AIDPF-4022 / AIDPF-104x manifest failure to
+    the established clean exit-code-2 path instead of leaking a traceback."""
 
 
 class ManifestInvalidError(ManifestError):
@@ -331,6 +337,13 @@ def parse_manifest(raw: str | None) -> dict[str, Any]:
     )
     _require(isinstance(data["profile_hash"], str), "profile_hash is not a string.")
     _require(isinstance(data["exec_policy"], dict), "exec_policy is not an object.")
+    # allowUnprovableCOA must be present AND a NATIVE bool — a persisted
+    # coercible value like "false" would otherwise be read as truthy by a later
+    # bool(...) and silently resume with the correctness hatch ENABLED.
+    _require(
+        isinstance(data["exec_policy"].get("allowUnprovableCOA"), bool),
+        "exec_policy.allowUnprovableCOA is missing or not a native bool.",
+    )
 
     topo = data["topology"]
     _require(isinstance(topo, list), "topology is not a list.")
@@ -531,8 +544,12 @@ def check_identity_profile_drift(
             f"changed since the manifest was written. Apply via a fresh "
             f"`--mode seed`, not a resume."
         )
-    m_policy = bool((manifest.get("exec_policy") or {}).get("allowUnprovableCOA"))
-    if bool(current_allow_unprovable_coa) != m_policy:
+    # Compare the stored native bool DIRECTLY — no bool() coercion. parse_manifest
+    # already guaranteed exec_policy.allowUnprovableCOA is a native bool, so a
+    # corrupt "false" string never reaches here; comparing directly means we
+    # never silently coerce a malformed value into a hatch-enabled resume.
+    m_policy = manifest["exec_policy"]["allowUnprovableCOA"]
+    if current_allow_unprovable_coa is not m_policy:
         raise ResumeIdentityProfileDriftError(
             f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: the COA exec policy "
             f"(allowUnprovableCOA) changed since the manifest was written; a "

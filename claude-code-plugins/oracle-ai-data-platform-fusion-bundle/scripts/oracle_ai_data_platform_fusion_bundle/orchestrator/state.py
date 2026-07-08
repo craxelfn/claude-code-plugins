@@ -1647,11 +1647,16 @@ def read_content_pack_resumable_state(
                     f"Non-resumable; start a fresh `--mode seed`."
                 )
             _only = next(iter(_payloads))
-            if _only is None:
+            # Reject NULL, non-string, AND empty/blank payloads (an empty string
+            # is corruption, not "no manifest" — accepting it would let the
+            # dispatcher fall back to legacy reconstruction and bypass the
+            # fail-closed guards).
+            if not isinstance(_only, str) or not _only.strip():
                 raise ManifestInvalidError(
                     f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: the __run_manifest__ "
-                    f"row for run_id={run_id!r} has a NULL payload (corrupt "
-                    f"manifest). Non-resumable; start a fresh `--mode seed`."
+                    f"row for run_id={run_id!r} has a missing/empty payload "
+                    f"(corrupt manifest). Non-resumable; start a fresh "
+                    f"`--mode seed`."
                 )
             run_manifest_raw = _only
 

@@ -754,6 +754,17 @@ def test_manifest_null_payload_row_raises_4022() -> None:
         _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
 
 
+@pytest.mark.parametrize("payload", ["", "   ", "\n"])
+def test_manifest_empty_payload_row_raises_4022(payload) -> None:
+    """An empty/blank string payload is corruption, NOT 'no manifest' — it must
+    fail closed (AIDPF-4022), not fall back to the legacy path."""
+    from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
+
+    spark = _ManifestAwareSpark(_one_exec_row(), manifest_rows=[payload])
+    with pytest.raises(ManifestInvalidError):
+        _state.read_content_pack_resumable_state(spark, _paths_mock(), "r")
+
+
 def test_manifest_conflicting_duplicate_rows_raise_4022() -> None:
     from oracle_ai_data_platform_fusion_bundle.orchestrator import state as _state
 
