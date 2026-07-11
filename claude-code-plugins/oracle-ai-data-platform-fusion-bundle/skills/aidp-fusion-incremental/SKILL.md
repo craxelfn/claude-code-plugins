@@ -81,8 +81,13 @@ Fire `run --mode incremental <scope flags> --poll-timeout <N>` (default 3600).
   it). A full incremental re-extracts bronze deltas within the watermark safety
   window, then merges up.
 - On non-terminal failure → capture the `run_id`, offer
-  `run --mode incremental --resume <run_id>` (scope reconstructed from the stored
-  plan snapshot; the original run_id is preserved end-to-end).
+  `run --mode incremental --resume <run_id>` (the original run_id is preserved
+  end-to-end). When the failed run wrote a durable **run manifest**, `--resume`
+  replays the manifest (topology + per-node fingerprints + mode + identity) rather
+  than re-deriving scope, and a bare `--resume` never silently flips
+  seed↔incremental; manifest drift guards (`AIDPF-1044/1046/1047/1048/1049`) route
+  to a fresh run. A pre-manifest run uses the legacy path (scope reconstructed from
+  state rows). A malformed manifest fails closed with `AIDPF-4022`.
 
 ### 5 — Present + recommend
 Summarize the per-step table (dataset / layer / status / row_count / duration) +
