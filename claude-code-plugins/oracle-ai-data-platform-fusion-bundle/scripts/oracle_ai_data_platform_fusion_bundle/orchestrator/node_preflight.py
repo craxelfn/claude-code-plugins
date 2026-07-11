@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from ..schema.coa_roles import SUPPORTED_COA_ROLES, coa_role_aliases
 from ..schema.medallion_pack import ChartOfAccountsProfile, NodeYaml
 from . import coa_gate
 from .required_column_resolver import coa_role_union
@@ -517,35 +518,13 @@ _COA_ACCOUNT_TYPE = "CodeCombinationAccountType"
 _COA_ENABLED_FLAG = "CodeCombinationEnabledFlag"
 
 
-_SUPPORTED_COA_ROLES = frozenset(
-    ("coa.balancing", "coa.cost_center", "coa.natural_account")
-)
-"""The COA semantic roles this gate understands. ``_coa_role_aliases`` filters
-to these so a non-COA (or typo'd) ``semanticRole`` alias is NEVER treated as a
-COA source — otherwise COA probe SQL would be interpolated against a non-COA
-column. Keep in sync with ``coa_resolution.ROLE_FIELD`` and the render map in
-``sql_renderer._COA_ROLE_FIELD``."""
-
-
-def _coa_role_aliases(pack: "ResolvedPack") -> dict[str, tuple[str, str]]:
-    """Return {alias_name: (role_token, applies_to_source)} for COA semanticRole
-    aliases declared in the pack. Empty when the pack has none.
-
-    ONLY the supported ``coa.*`` roles (:data:`_SUPPORTED_COA_ROLES`) are
-    returned — a ``semanticRole`` alias with an unrecognised/non-COA ``role`` is
-    skipped, so the COA gate/probes never run against a non-COA source."""
-    out: dict[str, tuple[str, str]] = {}
-    for name, spec in pack.pack.column_aliases.items():
-        resolution = getattr(spec, "resolution", "columnExistence")
-        role = getattr(spec, "role", None)
-        if resolution != "semanticRole" or not isinstance(role, str):
-            continue
-        if role not in _SUPPORTED_COA_ROLES:
-            continue
-        applies_to = getattr(spec, "appliesTo", "")
-        source = applies_to.split(".", 1)[1] if "." in applies_to else applies_to
-        out[name] = (role, source)
-    return out
+# The COA role filter now lives in the neutral schema layer
+# (``schema.coa_roles``) so ``schema.plan_resolver``'s dry-run COA-first
+# ordering can share ONE definition without importing this engine-side module
+# (which would break the dispatch import boundary). Re-exported here under the
+# module-private names this file's COA gate already uses.
+_SUPPORTED_COA_ROLES = SUPPORTED_COA_ROLES
+_coa_role_aliases = coa_role_aliases
 
 
 def _node_consumes_source(node: NodeYaml, source_id: str) -> bool:

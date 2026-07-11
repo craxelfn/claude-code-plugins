@@ -421,9 +421,15 @@ def resolve_dry_run_plan(
     # runtime dispatches: hoist COA-source bronze (consumed by an in-scope
     # silver/gold) to the front. Applicability mirrors
     # `node_preflight.coa_applicable_sources`.
-    from ..orchestrator.node_preflight import _coa_role_aliases
+    #
+    # The COA role filter lives in the neutral schema layer
+    # (``schema.coa_roles``), NOT ``orchestrator.node_preflight`` — importing
+    # the engine-side module here would pull orchestrator/* into sys.modules
+    # and break the dispatch import boundary (see the module docstring +
+    # ``tests/unit/dispatch/test_imports.py``).
+    from .coa_roles import coa_role_aliases
 
-    _coa_srcs = {src for (_role, src) in _coa_role_aliases(pack).values()}
+    _coa_srcs = {src for (_role, src) in coa_role_aliases(pack).values()}
     if _coa_srcs:
         _applicable: set[str] = set()
         for name in plan_ids:
