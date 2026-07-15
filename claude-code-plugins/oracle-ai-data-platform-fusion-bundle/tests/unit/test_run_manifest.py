@@ -111,13 +111,16 @@ def _manifest() -> dict:
         pack_fingerprint="pf",
         profile_hash="ph",
         allow_unprovable_coa=False,
+        # v2 COA baseline (incremental-coa-chart-onboarding).
+        coa_projection={"default": {}, "byChart": {}, "singletonAccepted": False},
+        non_coa_semantic_hash="nch",
     )
 
 
 class TestManifestRoundTrip:
     def test_build_has_all_required_fields(self) -> None:
         m = _manifest()
-        for f in rm._REQUIRED_FIELDS:
+        for f in rm._REQUIRED_FIELDS_BY_VERSION[rm.MANIFEST_SCHEMA_VERSION]:
             assert f in m
         assert m["schemaVersion"] == rm.MANIFEST_SCHEMA_VERSION
 
@@ -365,6 +368,58 @@ class TestDriftGuards:
             current_allow_unprovable_coa=False,
             manifest=m,
         )
+
+    # --- COA-split (feature: incremental-coa-chart-onboarding) -------------
+
+    def test_additive_coa_only_change_allowed(self) -> None:
+        """Profile hash changed, non-COA hash UNCHANGED, verdict additive → allow."""
+        m = _manifest()  # non_coa_semantic_hash="nch"
+        rm.check_identity_profile_drift(
+            current_identity={"aidp.catalog": "c"},
+            current_profile_hash="CHANGED",
+            current_allow_unprovable_coa=False,
+            manifest=m,
+            current_non_coa_semantic_hash="nch",  # matches manifest
+            coa_verdict="additive",
+        )
+
+    def test_mutating_coa_only_change_1048(self) -> None:
+        m = _manifest()
+        with pytest.raises(rm.ResumeIdentityProfileDriftError):
+            rm.check_identity_profile_drift(
+                current_identity={"aidp.catalog": "c"},
+                current_profile_hash="CHANGED",
+                current_allow_unprovable_coa=False,
+                manifest=m,
+                current_non_coa_semantic_hash="nch",
+                coa_verdict="mutating",
+            )
+
+    def test_non_coa_change_1048_even_if_verdict_additive(self) -> None:
+        """Non-COA hash differs → 1048 regardless of the COA verdict."""
+        m = _manifest()
+        with pytest.raises(rm.ResumeIdentityProfileDriftError):
+            rm.check_identity_profile_drift(
+                current_identity={"aidp.catalog": "c"},
+                current_profile_hash="CHANGED",
+                current_allow_unprovable_coa=False,
+                manifest=m,
+                current_non_coa_semantic_hash="DIFFERENT",
+                coa_verdict="additive",
+            )
+
+    def test_verdict_none_falls_back_to_conservative_1048(self) -> None:
+        """Fail-closed: an unreadable protected set (verdict None) blocks."""
+        m = _manifest()
+        with pytest.raises(rm.ResumeIdentityProfileDriftError):
+            rm.check_identity_profile_drift(
+                current_identity={"aidp.catalog": "c"},
+                current_profile_hash="CHANGED",
+                current_allow_unprovable_coa=False,
+                manifest=m,
+                current_non_coa_semantic_hash="nch",
+                coa_verdict=None,
+            )
 
 
 class TestScopeConflict:

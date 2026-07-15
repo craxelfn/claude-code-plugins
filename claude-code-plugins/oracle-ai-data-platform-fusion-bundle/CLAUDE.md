@@ -223,6 +223,20 @@ these guards route to a fresh `--mode seed` rather than resuming: topology drift
 profile / COA-policy drift `AIDPF-1048`, scope conflict `AIDPF-1047`, mode
 conflict `AIDPF-1046`. A bare `--resume` never silently flips seed↔incremental.
 
+### Additive chart-of-accounts on incremental
+
+Onboarding a **new** chart of accounts (a new `profile.chartOfAccounts.byChart`
+arm added via `bootstrap --refresh`) is absorbed by an ordinary `run --mode
+incremental` — no full re-seed — **when the change is provably additive**: every
+already-materialised chart's role→column mapping is byte-identical and only new
+charts are added. The COA-source bronze node (`gl_coa`) accepts pre-checkpoint
+(it produces the data the checkpoint reads); downstream COA consumers accept only
+after the post-land COA data checkpoint passes. Each accepting node records
+`coa_additive_accept_reason` on its success row. A **mutating** COA change (an
+existing chart's mapping moved or removed) still routes to a fresh `--mode seed`
+(`AIDPF-1048` / `AIDPF-4040`), because an incremental MERGE cannot revisit the
+already-classified rows it would leave stale.
+
 ## Safety Rules
 
 - Never store Fusion or OAC passwords in committed files.

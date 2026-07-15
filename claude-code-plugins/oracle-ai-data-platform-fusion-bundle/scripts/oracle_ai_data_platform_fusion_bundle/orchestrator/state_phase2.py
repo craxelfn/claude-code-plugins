@@ -86,6 +86,13 @@ CONTENT_PACK_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
     # bronze_plan_snapshot lifter is untouched — zero risk to the live resume
     # path.
     ("run_manifest", "STRING"),
+    # Additive-COA fast-path acceptance trace (feature:
+    # incremental-coa-chart-onboarding). Set on a node's atomic SUCCESS row when
+    # its AIDPF-4040 plan-hash advance was accepted as a proven additive COA
+    # change; NULL on every other row. Dedicated column (not overloading
+    # skip_reason) so a success row is never misread as a skip. Observability
+    # only — the acceptance is re-derivable from the paired manifest + proof.
+    ("coa_additive_accept_reason", "STRING"),
 )
 """New nullable columns added to ``fusion_bundle_state`` for content-pack
 runs. v1 rows write NULL for these columns and continue to work; v2
@@ -176,6 +183,7 @@ def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
             tenant_fingerprint, fusion_version, bronze_schema_fingerprint,
             source_id, source_role, input_watermark_start, input_watermark_end,
             output_watermark, consumed_version, delta_row_count, run_manifest,
+            coa_additive_accept_reason,
             ROW_NUMBER() OVER (
               PARTITION BY run_id, dataset_id, layer, source_id
               ORDER BY last_run_at DESC
@@ -190,7 +198,8 @@ def _phase2_latest_view_ddl(table_path: str, view_path: str) -> str:
           rendered_sql_hash, output_schema_hash, profile_hash,
           tenant_fingerprint, fusion_version, bronze_schema_fingerprint,
           source_id, source_role, input_watermark_start, input_watermark_end,
-          output_watermark, consumed_version, delta_row_count, run_manifest
+          output_watermark, consumed_version, delta_row_count, run_manifest,
+          coa_additive_accept_reason
         FROM ranked
         WHERE rn = 1
     """

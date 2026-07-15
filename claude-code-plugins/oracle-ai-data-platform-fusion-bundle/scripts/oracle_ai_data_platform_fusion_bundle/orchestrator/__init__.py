@@ -553,9 +553,35 @@ def _dispatch_content_pack_run(
             from ..schema.tenant_profile import compute_profile_hash as _cph
             from .plan_hash import _identity_dict
 
+            # Additive-COA split (feature: incremental-coa-chart-onboarding). Only
+            # when the profile hash actually differs (the only case the split
+            # matters) do the Spark-side work: compute the non-COA semantic hash +
+            # classify the COA change against the RESUMED manifest's projection and
+            # the live `dim_account` protected charts. An unreadable dim or a v1
+            # baseline leaves the verdict None → the pure gate falls back to the
+            # conservative whole-profile_hash 1048 (fail-closed).
+            _cur_profile_hash = _cph(tenant_profile)
+            _cur_non_coa_hash = None
+            _coa_verdict = None
+            if _cur_profile_hash != manifest.get("profile_hash"):
+                from .coa_change import (
+                    classify_coa_change,
+                    coa_projection_of,
+                    non_coa_semantic_hash,
+                )
+                from .coa_incremental import read_protected_charts
+
+                _cur_non_coa_hash = non_coa_semantic_hash(tenant_profile, resolved_pack)
+                _prior_coa = manifest.get("coa_projection")
+                if isinstance(_prior_coa, dict):
+                    _protected = read_protected_charts(spark, resolved_pack, paths)
+                    if _protected is not None:
+                        _coa_verdict = classify_coa_change(
+                            _prior_coa, coa_projection_of(tenant_profile), _protected
+                        )
             _rmf.check_identity_profile_drift(
                 current_identity=_identity_dict(bundle, paths, _pv),
-                current_profile_hash=_cph(tenant_profile),
+                current_profile_hash=_cur_profile_hash,
                 current_allow_unprovable_coa=bool(
                     getattr(
                         getattr(bundle, "content_pack", None),
@@ -564,6 +590,8 @@ def _dispatch_content_pack_run(
                     )
                 ),
                 manifest=manifest,
+                current_non_coa_semantic_hash=_cur_non_coa_hash,
+                coa_verdict=_coa_verdict,
             )
             # Replay the ORIGINAL resolver inputs (preserves --layers; no
             # AIDPF-1043), then guard topology + node-definition drift.
@@ -1472,6 +1500,12 @@ def _run_content_pack_backend(
     # (AIDPF-2018 / AIDPF-2074) could resume straight into the expensive bronze
     # with COA still unproven. A COA source that will still LAND in-loop only
     # needs the structural gate here (its data probes run at 4b after it lands).
+    # True once the FULL (data) COA checkpoint has passed for already-landed COA
+    # sources BEFORE the loop (mart-only / resume where gl_coa pre-exists). Lets
+    # downstream COA consumers accept an additive-COA plan-hash advance from the
+    # first node (incremental-coa-chart-onboarding). A fresh incremental leaves
+    # this False; the in-loop post-land checkpoint flips it after gl_coa lands.
+    _coa_preloop_data_ckpt_ok = False
     if _coa_sources and not dry_run:
         from .node_preflight import split_landed_coa_sources
 
@@ -1511,6 +1545,9 @@ def _run_content_pack_backend(
                 _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
             if not _coa_ckpt.ok:
                 return _coa_gate_abort(_coa_ckpt, [])
+        # A non-empty landed set means the FULL data checkpoint (structural_only
+        # =False) ran and passed above (a failure would have aborted).
+        _coa_preloop_data_ckpt_ok = bool(_landed_coa)
 
     # Per-node execution loop. execute_node writes its own state rows
     # (success + failure paths) and returns a NodeExecutionResult; we
@@ -1605,6 +1642,7 @@ def _run_content_pack_backend(
                 bundle=bundle,
                 paths=paths,
                 profile_hash=profile_hash,
+                tenant_profile=tenant_profile,
                 mode=mode,
                 datasets=datasets,
                 layers=layers,
@@ -1655,6 +1693,32 @@ def _run_content_pack_backend(
     steps: list[RunStep] = []
     diagnostics: list[dict] = []
     failed_node_ids: set[str] = set()
+
+    # Additive-COA fast path (feature: incremental-coa-chart-onboarding). Built
+    # once per run; consulted by each node's AIDPF-4040 gate. Active only on
+    # incremental. `coa_checkpoint_passed` starts False and is flipped True after
+    # the post-land COA data checkpoint succeeds — so the COA-SOURCE node
+    # (gl_coa) accepts pre-checkpoint (it produces the data) while downstream
+    # consumers wait for it. `protected_charts=None` (unreadable dim) fails
+    # closed. Inactive → every gate keeps its pre-feature behaviour.
+    coa_inc = None
+    if mode == "incremental" and not dry_run:
+        from .coa_change import coa_projection_of
+        from .coa_incremental import (
+            CoaIncrementalContext,
+            manifest_for_run,
+            read_protected_charts,
+        )
+
+        coa_inc = CoaIncrementalContext(
+            active=True,
+            incoming_coa=coa_projection_of(tenant_profile),
+            protected_charts=read_protected_charts(spark, resolved_pack, paths),
+            coa_source_ids=frozenset(_coa_sources),
+            coa_checkpoint_passed=_coa_preloop_data_ckpt_ok,
+            manifest_by_run_id=lambda rid: manifest_for_run(spark, paths, rid),
+        )
+
     for node in plan:
         # Mart-only run: bronze is in the plan for lineage but must NOT be
         # re-seeded — the marts run against the pre-existing landed tables
@@ -1732,8 +1796,8 @@ def _run_content_pack_backend(
         # incremental reads: a state-read
         # failure in incremental mode must NOT silently degrade to
         # seed semantics.
-        prior_plan_hash, prior_watermark_for_node = _read_prior_state_for_node(
-            spark, paths, node, mode=mode,
+        prior_plan_hash, prior_watermark_for_node, prior_run_id_for_node = (
+            _read_prior_state_for_node(spark, paths, node, mode=mode)
         )
         # Build a per-node ctx that carries the prior watermark for the
         # primary source. We rebuild the ctx (instead of mutating
@@ -1763,6 +1827,8 @@ def _run_content_pack_backend(
             profile_hash=profile_hash,
             prior_plan_hash=prior_plan_hash,
             repin_plan_hash=repin_plan_hash,
+            coa_inc=coa_inc,
+            prior_run_id=prior_run_id_for_node,
         )
         node_duration = (_dt.now(_tz.utc) - node_started).total_seconds()
         status: str = "success" if result.status == "success" else "failed"
@@ -1829,6 +1895,11 @@ def _run_content_pack_backend(
                 _log.warning("COA checkpoint (allowUnprovableCOA): %s", _w)
             if not _ckpt.ok:
                 return _coa_gate_abort(_ckpt, steps)
+            # Post-land COA data checkpoint passed → downstream COA CONSUMERS may
+            # now accept an additive-COA plan-hash advance (incremental-coa-chart-
+            # onboarding). The COA SOURCE already ran without this signal.
+            if coa_inc is not None:
+                coa_inc.coa_checkpoint_passed = True
 
     finished_at = _dt.now(_tz.utc)
     return RunSummary(
@@ -1907,6 +1978,7 @@ def _build_run_manifest_json(
     bundle: "Any",
     paths: "Any",
     profile_hash: str,
+    tenant_profile: "Any",
     mode: str,
     datasets: "list[str] | None",
     layers: "list[str] | None",
@@ -1914,10 +1986,11 @@ def _build_run_manifest_json(
     allow_unprovable_coa: bool,
 ) -> str:
     """Assemble + serialize the durable run manifest (feature:
-    fail-fast-seed-validation)."""
+    fail-fast-seed-validation; v2 COA baseline for incremental-coa-chart-onboarding)."""
     from oracle_ai_data_platform_fusion_bundle import __version__ as _pv
 
     from . import run_manifest as _rmf
+    from .coa_change import coa_projection_of, non_coa_semantic_hash
     from .plan_hash import _identity_dict
 
     topology = _rmf.canonical_topology(
@@ -1936,6 +2009,11 @@ def _build_run_manifest_json(
         ),
         profile_hash=profile_hash,
         allow_unprovable_coa=allow_unprovable_coa,
+        # v2 COA baseline (incremental-coa-chart-onboarding): the durable
+        # prior-COA mapping + the allowlist non-COA semantic hash a later
+        # resume/incremental proves an additive change against.
+        coa_projection=coa_projection_of(tenant_profile),
+        non_coa_semantic_hash=non_coa_semantic_hash(tenant_profile, resolved_pack),
     )
     return _rmf.serialize_manifest(manifest)
 
@@ -2233,17 +2311,19 @@ def _read_prior_state_for_node(
     """
     primary_source = _resolve_primary_source_id_for_state_read(node)
     if primary_source is None:
-        return None, {}
+        return None, {}, None
 
     try:
         # Read the latest primary-role row for this node from the
         # Content-pack latest view. The view's grain is (run_id, dataset_id,
         # layer, source_id) so we additionally filter by source_role
-        # to disambiguate.
+        # to disambiguate. ``run_id`` is read so the caller can pair this
+        # node's prior plan-hash with the manifest of the run that WROTE it
+        # (incremental-coa-chart-onboarding per-run pairing).
         from . import state as v1_state
         view_path = v1_state._state_latest_view_path(paths)
         df = spark.sql(
-            f"SELECT plan_hash, output_watermark, source_id, status "
+            f"SELECT plan_hash, output_watermark, source_id, status, run_id "
             f"FROM {view_path} "
             f"WHERE dataset_id = '{node.id}' AND layer = '{node.layer}' "
             f"AND source_role = 'primary' AND status = 'success' "
@@ -2264,10 +2344,10 @@ def _read_prior_state_for_node(
                 cause=exc,
             ) from exc
         # Seed mode — table-missing on first run is benign; fall through.
-        return None, {}
+        return None, {}, None
 
     if not rows:
-        return None, {}
+        return None, {}, None
 
     row = rows[0]
     # Spark Row supports both attribute and index access; use index
@@ -2279,10 +2359,19 @@ def _read_prior_state_for_node(
         try:
             plan_hash, output_watermark = row[0], row[1]
         except (IndexError, TypeError):
-            return None, {}
+            return None, {}, None
+    # prior_run_id is best-effort (only used by the additive-COA fast path);
+    # a fake-Spark tuple without it degrades to None (feature inactive).
+    try:
+        prior_run_id = row["run_id"]
+    except (KeyError, TypeError, IndexError):
+        try:
+            prior_run_id = row[4]
+        except (KeyError, IndexError, TypeError):
+            prior_run_id = None
 
     prior_watermark = {primary_source: output_watermark} if output_watermark is not None else {}
-    return plan_hash, prior_watermark
+    return plan_hash, prior_watermark, prior_run_id
 
 
 def _resolve_primary_source_id_for_state_read(node: "Any") -> "str | None":
