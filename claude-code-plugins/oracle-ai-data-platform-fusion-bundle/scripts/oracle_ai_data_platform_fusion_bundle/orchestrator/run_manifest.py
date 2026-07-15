@@ -28,9 +28,19 @@ if TYPE_CHECKING:
 RUN_MANIFEST_DATASET_ID = "__run_manifest__"
 """Reserved ``dataset_id`` of the single durable manifest row."""
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 """Bumped only on a breaking manifest-shape change. The reader fails closed on
-an unknown version (never legacy-reconstructs when a manifest row exists)."""
+an unknown version (never legacy-reconstructs when a manifest row exists).
+
+v2 (feature: incremental-coa-chart-onboarding) adds ``coa_projection`` and
+``non_coa_semantic_hash`` so an additive chart-of-accounts change can be proven
+on resume/incremental. A v1 manifest (written before this feature) is still
+accepted — it simply lacks the COA baseline, so the additive fast path is
+unavailable and the conservative seed-only behaviour applies."""
+
+SUPPORTED_MANIFEST_SCHEMA_VERSIONS = (1, 2)
+"""Manifest versions this reader accepts. A version outside this set fails
+closed (AIDPF-4022) — never legacy-reconstructed."""
 
 EXECUTION_MODES = ("seed", "incremental")
 """The only ``mode`` values that count as an EXECUTION row. Audit modes
@@ -238,8 +248,19 @@ def build_manifest(
     pack_fingerprint: str,
     profile_hash: str,
     allow_unprovable_coa: bool,
+    coa_projection: dict[str, Any],
+    non_coa_semantic_hash: str,
 ) -> dict[str, Any]:
-    """Assemble the immutable manifest dict (stored verbatim as JSON)."""
+    """Assemble the immutable manifest dict (stored verbatim as JSON).
+
+    ``coa_projection`` is the raw ``{default, byChart, singletonAccepted}`` COA
+    mapping (normalised via :func:`coa_change.coa_projection_of`), and
+    ``non_coa_semantic_hash`` is the allowlist semantic hash of the non-COA
+    profile identity (:func:`coa_change.non_coa_semantic_hash`). Both are
+    computed by the caller (orchestrator) so this function stays pure. They are
+    the durable baseline the additive-COA fast path proves against on a later
+    resume/incremental.
+    """
     return {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
         "resolver_inputs": {
@@ -253,6 +274,9 @@ def build_manifest(
         "pack_fingerprint": pack_fingerprint,
         "profile_hash": profile_hash,
         "exec_policy": {"allowUnprovableCOA": bool(allow_unprovable_coa)},
+        # v2 (incremental-coa-chart-onboarding) COA baseline.
+        "coa_projection": coa_projection,
+        "non_coa_semantic_hash": non_coa_semantic_hash,
     }
 
 
@@ -260,7 +284,8 @@ def serialize_manifest(manifest: dict[str, Any]) -> str:
     return json.dumps(manifest, sort_keys=True, default=str)
 
 
-_REQUIRED_FIELDS = (
+# Base fields present in every manifest version.
+_REQUIRED_FIELDS_BASE = (
     "schemaVersion",
     "resolver_inputs",
     "topology",
@@ -270,6 +295,14 @@ _REQUIRED_FIELDS = (
     "profile_hash",
     "exec_policy",
 )
+# Per-version required-field sets. v2 adds the COA baseline. A v1 manifest MUST
+# NOT be required to carry the v2 fields (it predates the feature), so the
+# reader selects the required set by the manifest's own schemaVersion — read
+# BEFORE the field-presence check.
+_REQUIRED_FIELDS_BY_VERSION: dict[int, tuple[str, ...]] = {
+    1: _REQUIRED_FIELDS_BASE,
+    2: _REQUIRED_FIELDS_BASE + ("coa_projection", "non_coa_semantic_hash"),
+}
 
 
 def parse_manifest(raw: str | None) -> dict[str, Any]:
@@ -291,16 +324,24 @@ def parse_manifest(raw: str | None) -> dict[str, Any]:
         raise ManifestInvalidError(
             f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: manifest is not an object."
         )
-    missing = [f for f in _REQUIRED_FIELDS if f not in data]
-    if missing:
+    # Read the version FIRST — the required-field set is version-specific, so a
+    # v1 manifest must not be rejected for lacking the v2 COA fields.
+    if "schemaVersion" not in data:
         raise ManifestInvalidError(
             f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: manifest missing required "
-            f"field(s) {missing!r}."
+            f"field 'schemaVersion'."
         )
-    if data["schemaVersion"] != MANIFEST_SCHEMA_VERSION:
+    version = data["schemaVersion"]
+    if version not in SUPPORTED_MANIFEST_SCHEMA_VERSIONS:
         raise ManifestInvalidError(
             f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: manifest schemaVersion "
-            f"{data['schemaVersion']!r} != supported {MANIFEST_SCHEMA_VERSION}."
+            f"{version!r} not in supported {SUPPORTED_MANIFEST_SCHEMA_VERSIONS!r}."
+        )
+    missing = [f for f in _REQUIRED_FIELDS_BY_VERSION[version] if f not in data]
+    if missing:
+        raise ManifestInvalidError(
+            f"{AIDPF_4022_MANIFEST_COMMIT_FAILED}: v{version} manifest missing "
+            f"required field(s) {missing!r}."
         )
 
     # Validate NESTED shape + types — top-level presence alone is not enough. A
@@ -364,6 +405,18 @@ def parse_manifest(raw: str | None) -> dict[str, Any]:
         _require(
             isinstance(entry.get("sem"), str),
             f"topology[{i}].sem is not a string.",
+        )
+
+    # v2 COA baseline shape (only present/required for v2+; a v1 manifest has
+    # no COA baseline and takes the conservative no-additive-path branch).
+    if version >= 2:
+        _require(
+            isinstance(data["coa_projection"], dict),
+            "coa_projection is not an object.",
+        )
+        _require(
+            isinstance(data["non_coa_semantic_hash"], str),
+            "non_coa_semantic_hash is not a string.",
         )
     return data
 
@@ -528,10 +581,28 @@ def check_identity_profile_drift(
     current_profile_hash: str,
     current_allow_unprovable_coa: bool,
     manifest: dict[str, Any],
+    current_non_coa_semantic_hash: str | None = None,
+    coa_verdict: str | None = None,
 ) -> None:
-    """AIDPF-1048 — execution identity, profile hash, or exec policy changed on
-    resume. Any change routes to a fresh ``--mode seed`` (not a resume), so a
-    mixed-tenant / mixed-profile / weakened-COA-policy resume is impossible."""
+    """AIDPF-1048 — execution identity, profile, or exec policy changed on resume.
+
+    Identity and exec-policy changes always route to a fresh ``--mode seed``.
+    A **profile** change is split (feature: incremental-coa-chart-onboarding):
+
+    * ``current_non_coa_semantic_hash`` differs from the manifest's → a real
+      (non-COA) profile change → **AIDPF-1048** (unchanged behaviour).
+    * non-COA identical, so the delta is confined to the COA mapping (or to
+      volatile refresh metadata excluded from the semantic hash) → honour the
+      precomputed ``coa_verdict``: ``additive`` / ``identical`` → allow the
+      resume; ``mutating`` → **AIDPF-1048**.
+
+    Both ``current_non_coa_semantic_hash`` and ``coa_verdict`` are computed
+    Spark-side by the orchestrator (the additive verdict needs a live
+    ``dim_account`` read for ``protected_charts``; a failed read must arrive here
+    as ``coa_verdict=None`` so this gate stays fail-closed). When either is
+    ``None`` — a v1 manifest with no COA baseline, or an unavailable read — the
+    gate falls back to the conservative whole-``profile_hash`` compare.
+    """
     if current_identity != manifest.get("identity"):
         raise ResumeIdentityProfileDriftError(
             f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: execution identity "
@@ -539,11 +610,35 @@ def check_identity_profile_drift(
             f"manifest was written. Apply via a fresh `--mode seed`."
         )
     if current_profile_hash != manifest.get("profile_hash"):
-        raise ResumeIdentityProfileDriftError(
-            f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: the tenant profile "
-            f"changed since the manifest was written. Apply via a fresh "
-            f"`--mode seed`, not a resume."
-        )
+        manifest_non_coa = manifest.get("non_coa_semantic_hash")
+        # Conservative fallback: no v2 COA baseline, or the verdict / non-COA
+        # hash could not be computed (fail-closed) → treat any profile change as
+        # a fresh-seed change, exactly as before this feature.
+        if (
+            manifest_non_coa is None
+            or coa_verdict is None
+            or current_non_coa_semantic_hash is None
+        ):
+            raise ResumeIdentityProfileDriftError(
+                f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: the tenant profile "
+                f"changed since the manifest was written. Apply via a fresh "
+                f"`--mode seed`, not a resume."
+            )
+        if current_non_coa_semantic_hash != manifest_non_coa:
+            raise ResumeIdentityProfileDriftError(
+                f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: a non-COA part of "
+                f"the tenant profile changed since the manifest was written. "
+                f"Apply via a fresh `--mode seed`, not a resume."
+            )
+        # Non-COA identical → the delta is COA-only (or volatile-metadata-only).
+        if coa_verdict == "mutating":
+            raise ResumeIdentityProfileDriftError(
+                f"{AIDPF_1048_RESUME_IDENTITY_PROFILE_DRIFT}: an existing chart "
+                f"of accounts' mapping changed (mutating COA change). An "
+                f"incremental would leave already-classified rows stale — apply "
+                f"via a fresh `--mode seed`."
+            )
+        # coa_verdict in ("additive", "identical") → safe to resume.
     # Compare the stored native bool DIRECTLY — no bool() coercion. parse_manifest
     # already guaranteed exec_policy.allowUnprovableCOA is a native bool, so a
     # corrupt "false" string never reaches here; comparing directly means we

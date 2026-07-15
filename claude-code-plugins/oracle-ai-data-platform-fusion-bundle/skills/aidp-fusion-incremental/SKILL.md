@@ -66,6 +66,15 @@ gets a clear next step instead of a deep cluster error:
   and don't want a full re-seed, pass the hidden `--repin-plan-hash` flag to
   repin the new hash (writes a `mode='plan_hash_repin'` audit row); otherwise
   re-seed or revert.
+- **New chart of accounts added?** A profile change that ONLY adds a new
+  `chartOfAccounts.byChart` arm (existing charts byte-identical) is a *proven
+  additive* change: incremental **absorbs it automatically** — no re-seed and no
+  `--repin-plan-hash` needed. The per-node gate accepts the plan-hash advance
+  (recording `coa_additive_accept_reason`) once the post-land COA checkpoint
+  passes. A **mutating** COA change (an existing chart's segment moved/removed)
+  is NOT additive and still routes to `--mode seed` (AIDPF-1048/4040) — an
+  incremental would leave that chart's already-classified rows stale. So: adding
+  a chart → incremental; correcting an existing chart → seed.
 - **Fusion-PVO / bronze drift?** Incremental fires the drift gates — `AIDPF-2072`
   (live PVO column renamed/removed vs the pinned snapshot), `AIDPF-4070/4071`
   (source-schema), `AIDPF-2012` (bronze-table fingerprint). On any of these →
