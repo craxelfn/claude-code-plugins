@@ -195,7 +195,11 @@ A `run --mode seed|incremental` fails fast: every provable gate runs BEFORE the
 expensive Fusion PVO extracts, in this order (nothing is extracted until they
 pass):
 
-1. PVO source-drift (`AIDPF-2072`) and bronze-schema fingerprint drift.
+1. PVO source-drift (`AIDPF-2072`) and bronze-schema fingerprint drift. An
+   ABSENT bronze table (extract never succeeded) is tolerated with a WARN and
+   baseline-filled from the pinned schema snapshot — one unmaterialised dataset
+   does not block the incremental; every present table stays drift-checked.
+   Missing/desynced snapshot → fail closed (`bootstrap --refresh` back-fills).
 2. Bronze readiness (`AIDPF-2071`, mart-only runs) + the source-schema batch
    (`AIDPF-4071`).
 3. **COA gate.** The `gl_coa` extract is ordered FIRST among bronze. A

@@ -73,6 +73,12 @@ gets a clear next step instead of a deep cluster error:
   `bootstrap --refresh` (a declared candidate still matches) or `/medallion-author`
   (a new column the pack never anticipated). Do NOT paper over it with
   `--force-fingerprint-skip` outside dev.
+  An **absent** bronze table (a dataset whose extract never succeeded — e.g. the
+  `LIMITS.md` L2-blocked PVO) no longer aborts the fingerprint gate: it is
+  tolerated with a WARN and baseline-filled from the pinned schema snapshot, so
+  every *present* table stays drift-checked and `--force-fingerprint-skip` is
+  NOT needed for that case. If the snapshot is missing/desynced the gate still
+  fails closed — run `bootstrap --refresh` to back-fill it (no repin needed).
 
 ### 4 — Dispatch
 Fire `run --mode incremental <scope flags> --poll-timeout <N>` (default 3600).
