@@ -18,6 +18,7 @@ import requests
 
 from oracle_ai_data_platform_fusion_bundle.commands.coa_advisory import (
     CoaAdvisoryResult,
+    _enabled_flag,
     compare_charts,
     run_coa_advisory,
 )
@@ -180,6 +181,34 @@ class TestCompareCharts:
         assert not any("no enabled combinations" in l for l in unprobed.lines)
 
 
+# ── EnabledFlag parsing (post-ship review, Blocking) ─────────────────────
+
+
+class TestEnabledFlagParsing:
+    """``bool("N")`` is ``True`` — the chart LOV's flag must be parsed
+    explicitly. Policy is gate-consistent with ``_coa_chart_active``'s
+    ``COALESCE(flag, 'Y') <> 'N'``: disabled iff explicitly False/"N";
+    absent/null → enabled. Both live wire shapes (JSON boolean, "Y"/"N"
+    string) are accepted."""
+
+    @pytest.mark.parametrize(
+        ("wire", "expected"),
+        [
+            ("Y", True),
+            ("N", False),
+            ("y", True),
+            ("n", False),
+            (" N ", False),   # whitespace-tolerant
+            (True, True),
+            (False, False),
+            (None, True),     # null policy: COALESCE(flag, 'Y')
+            ("", True),       # SQL '' <> 'N' → enabled
+        ],
+    )
+    def test_wire_shapes(self, wire, expected):
+        assert _enabled_flag(wire) is expected
+
+
 # ── fetchers: single-request + deadline (rounds 1 & 4) ───────────────────
 
 
@@ -273,6 +302,39 @@ class TestRunCoaAdvisory:
         assert all("EnabledFlag=Y;_CHART_OF_ACCOUNTS_ID=" in q for q in probe_qs)
         # Candidate (9) probed BEFORE the mapped sweep (1).
         assert "9" in probe_qs[0]
+
+    def test_disabled_n_chart_never_probed_never_displaces_candidates(self):
+        """Post-ship review (Blocking): with ``bool()``, a string-"N"
+        (disabled) unmapped chart entered the candidate probe list and could
+        exhaust the shared budget before a genuinely active unmapped chart
+        was reached. Pin: an "N" chart is never probed at all — the probe
+        count equals the enabled charts exactly — and the active unmapped
+        chart still yields its finding."""
+        s = _Session()
+        s.chart_pages = [{
+            "items": [
+                {"StructureInstanceNumber": 5, "EnabledFlag": "N"},  # disabled, unmapped
+                {"StructureInstanceNumber": 9, "EnabledFlag": "Y"},  # active, unmapped
+                {"StructureInstanceNumber": 1, "EnabledFlag": "Y"},  # mapped
+            ],
+            "hasMore": False,
+        }]
+        s.combo_router = {"9": 1, "1": 1}
+        r = run_coa_advisory(
+            service_url="https://x",
+            chart_of_accounts=_coa(by_chart={"1": {}}),
+            session=s,
+        )
+        assert r.kind == "findings" and r.findings == ("9",)
+        assert r.coverage == "complete"  # nothing left unprobed by budget
+        probe_qs = [c["params"].get("q", "")
+                    for c in s.calls if "accountCombinationsLOV" in c["url"]]
+        # The disabled chart is never probed…
+        assert not any(q.endswith("_CHART_OF_ACCOUNTS_ID=5") for q in probe_qs)
+        # …and cannot displace anyone: probes = candidate 9 + mapped 1 only,
+        # with the candidate still first in budget order.
+        assert len(probe_qs) == 2
+        assert probe_qs[0].endswith("_CHART_OF_ACCOUNTS_ID=9")
 
     def test_dev_tenant_shape_silent_ok(self):
         """43 visible / 41 mapped / 2 enabled-but-inactive → silent OK."""

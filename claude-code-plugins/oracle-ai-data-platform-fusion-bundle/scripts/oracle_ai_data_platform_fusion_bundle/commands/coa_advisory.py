@@ -214,6 +214,25 @@ def _is_aidp_secret_ref(value: str) -> bool:
     return value.startswith("${aidp:secret:")
 
 
+def _enabled_flag(value: Any) -> bool:
+    """Parse the chart LOV's ``EnabledFlag`` — never ``bool()``.
+
+    Fusion serialises flag attributes as JSON booleans on some resources and
+    as ``"Y"`` / ``"N"`` strings on others; ``bool("N")`` is ``True``, which
+    would admit disabled charts into the candidate probe list and let them
+    burn the shared budget ahead of a genuinely active unmapped chart.
+    Policy is gate-consistent with ``_coa_chart_active``'s
+    ``COALESCE(flag, 'Y') <> 'N'``: disabled iff explicitly ``False`` or
+    ``"N"``; absent/null → enabled (an extra probe is safe; silently
+    dropping a chart is not).
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().upper() != "N"
+
+
 @dataclass
 class _Skip(Exception):
     reason: str
@@ -280,7 +299,9 @@ def run_coa_advisory(
             ):
                 cid = item.get(IDENTITY_ATTR)
                 if cid is not None:
-                    visible_enabled[str(cid)] = bool(item.get("EnabledFlag"))
+                    visible_enabled[str(cid)] = _enabled_flag(
+                        item.get("EnabledFlag")
+                    )
         except DeadlineExceeded:
             raise _Skip("time budget expired while listing charts") from None
 
