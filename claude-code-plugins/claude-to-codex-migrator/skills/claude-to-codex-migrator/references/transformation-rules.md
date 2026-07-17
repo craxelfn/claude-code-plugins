@@ -55,8 +55,9 @@ For agents:
 For documentation:
 
 1. Remove source-only installation steps when they do not apply.
-2. Keep behavioral knowledge as references.
-3. Do not duplicate the same rule in `SKILL.md` and a reference.
+2. In a plugin target, keep documentation at its original repository path (`docs/`, root `README.md`); do not funnel it into one skill's references folder.
+3. In a skill target, keep behavioral knowledge as references.
+4. Do not duplicate the same rule in `SKILL.md` and a reference.
 
 ## Resource placement
 

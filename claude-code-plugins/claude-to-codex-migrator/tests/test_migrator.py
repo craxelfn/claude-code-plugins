@@ -134,6 +134,21 @@ class MigratorTests(unittest.TestCase):
             )
             self.assertIn("PLUGIN_ROOT", hook_text)
             self.assertNotIn("CLAUDE_PLUGIN_ROOT", hook_text)
+            # Documentation keeps its repository layout instead of being
+            # funneled into the primary skill's references folder.
+            self.assertTrue((result.package_root / "README.md").is_file())
+            self.assertTrue(
+                (result.package_root / "docs" / "architecture.md").is_file()
+            )
+            self.assertFalse(
+                (
+                    result.package_root
+                    / "skills"
+                    / "sync"
+                    / "references"
+                    / "architecture.md"
+                ).exists()
+            )
             self.assertTrue(result.validation.ok)
             self.assertEqual(scan_leftovers(result.package_root), [])
             validated = validate_package(result.package_root, "plugin")

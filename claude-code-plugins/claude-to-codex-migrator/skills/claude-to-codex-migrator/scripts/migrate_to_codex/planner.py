@@ -373,16 +373,24 @@ def build_plan(
                 reason = "Runtime implementation requires review before inclusion in a standalone Skill."
         elif kind == "documentation":
             if source.text is not None:
-                operation = "split-into-reference"
                 if decision.target == "plugin":
-                    target_path = f"skills/{primary_skill_name}/references/{normalize_name(path.stem)}.md"
+                    # A plugin ships as a repository: documentation keeps its
+                    # original layout instead of being funneled into one
+                    # skill's references folder.
+                    operation = "rewrite"
+                    target_path = _clean_relative(source.path)
+                    reason = (
+                        "Preserve documentation at its original repository path."
+                    )
+                    rewrites = ["Rewrite source-platform references"]
                 else:
+                    operation = "split-into-reference"
                     target_path = f"references/{normalize_name(path.stem)}.md"
-                reason = "Preserve relevant documentation as progressively disclosed Skill reference material."
-                rewrites = [
-                    "Remove source-only setup",
-                    "Rewrite source-platform references",
-                ]
+                    reason = "Preserve relevant documentation as progressively disclosed Skill reference material."
+                    rewrites = [
+                        "Remove source-only setup",
+                        "Rewrite source-platform references",
+                    ]
             else:
                 operation, target_path = "manual", None
                 reason = "Binary documentation requires manual review."
