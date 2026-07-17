@@ -241,6 +241,19 @@ existing chart's mapping moved or removed) still routes to a fresh `--mode seed`
 (`AIDPF-1048` / `AIDPF-4040`), because an incremental MERGE cannot revisit the
 already-classified rows it would leave stale.
 
+### Bootstrap COA advisory (yellow, never blocking)
+
+Bootstrap (initial AND `--refresh`, including the no-drift early return) ends
+with a pre-extraction advisory comparing the charts of accounts **visible to
+the configured Fusion user** (transactional REST LOVs, laptop-side
+`FUSION_BICC_USER`/`FUSION_BICC_PASSWORD` env creds) against
+`profile.chartOfAccounts`. An active-but-unmapped chart is a finding with the
+additive remediation spelled out (`bootstrap --refresh` + ordinary
+incremental). It has NO exit code and NO AIDPF code — never treat advisory or
+`COA advisory skipped:` lines as a failure; a skip is normal without laptop
+env creds, and the post-extraction AIDPF-2018 gate remains the authoritative
+tenant-complete check.
+
 ## Safety Rules
 
 - Never store Fusion or OAC passwords in committed files.
