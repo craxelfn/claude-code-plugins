@@ -26,7 +26,17 @@ from .models import Inventory, MigrationPlan, PlanItem, SourceFile
 # Only documentation gets prose rewriting; executable and runtime content
 # (by classified kind, e.g. requirements.txt is runtime-config despite its
 # suffix) receives mechanical rewrites exclusively.
-MECHANICAL_KINDS = {"script", "hook", "mcp", "app", "runtime-config", "runtime-source"}
+MECHANICAL_KINDS = {
+    "script",
+    "hook",
+    "mcp",
+    "app",
+    "runtime-config",
+    "runtime-source",
+    "test",
+    "repository-metadata",
+    "ci-workflow",
+}
 PROSE_SUFFIXES = {".md", ".markdown", ".txt"}
 
 

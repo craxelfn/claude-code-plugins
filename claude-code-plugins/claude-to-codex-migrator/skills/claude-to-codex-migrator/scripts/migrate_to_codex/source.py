@@ -53,6 +53,11 @@ def _copy_source_tree(source: Path, destination: Path) -> None:
             candidate = current_path / filename
             if candidate.is_symlink():
                 raise ValueError(f"Symlinked files are not accepted: {candidate}")
+            if not stat.S_ISREG(candidate.lstat().st_mode):
+                # FIFOs, sockets, and device nodes block or misbehave on open.
+                raise ValueError(
+                    f"Only regular files are accepted: {candidate}"
+                )
             relative = candidate.relative_to(source)
             target = _safe_destination(destination, PurePosixPath(relative.as_posix()))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +186,10 @@ def stage_source(
     if source_path.is_dir():
         _copy_source_tree(source_path, destination)
         return _resolve_wrapped_root(destination), "folder", source_path.name or None
+    if not stat.S_ISREG(source_path.stat().st_mode):
+        # Must precede is_zipfile(), which opens and reads the path — a FIFO
+        # would block there before any copy.
+        raise ValueError(f"Only regular files are accepted: {source_path}")
     if zipfile.is_zipfile(source_path):
         _extract_zip(source_path, destination)
         return _resolve_wrapped_root(destination), "zip", source_path.stem or None
@@ -240,7 +249,20 @@ def classify_source_path(relative_path: str) -> str:
         return "runtime-config"
     if parts and parts[0].lower() in {"src", "lib", "bin"}:
         return "runtime-source"
-    if name == ".gitignore":
+    if parts and parts[0].lower() == ".github":
+        # Workflows and composite actions execute automatically on push/PR;
+        # they are runtime, not inert metadata.
+        if len(parts) >= 2 and parts[1].lower() in {"workflows", "actions"}:
+            return "ci-workflow"
+        return "repository-metadata"
+    if name in {
+        ".gitignore",
+        ".gitattributes",
+        ".gitmodules",
+        ".editorconfig",
+        ".mailmap",
+        "codeowners",
+    }:
         return "repository-metadata"
     return "unknown"
 

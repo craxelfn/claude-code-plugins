@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import socket
 import sys
 import tempfile
 import unittest
@@ -137,6 +139,53 @@ class MigratorTests(unittest.TestCase):
             validated = validate_package(result.package_root, "plugin")
             self.assertTrue(validated.ok, validated.errors)
 
+    def test_tests_and_repository_metadata_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "result"
+            result = migrate(
+                FIXTURES / "integration-source",
+                output,
+                MigrationOptions(strict=True, trust_runtime=True),
+            )
+
+            migrated_test = result.package_root / "tests" / "test_server.py"
+            self.assertTrue(migrated_test.is_file())
+            test_text = migrated_test.read_text(encoding="utf-8")
+            self.assertIn("PLUGIN_ROOT", test_text)
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", test_text)
+            self.assertTrue((result.package_root / ".gitignore").is_file())
+            self.assertTrue((result.package_root / ".editorconfig").is_file())
+            self.assertTrue(
+                (
+                    result.package_root / ".github" / "ISSUE_TEMPLATE" / "bug.md"
+                ).is_file()
+            )
+            # trust_runtime=True lets reviewed CI workflows and actions ship.
+            self.assertTrue(
+                (result.package_root / ".github" / "workflows" / "ci.yml").is_file()
+            )
+            self.assertTrue(
+                (
+                    result.package_root
+                    / ".github"
+                    / "actions"
+                    / "setup"
+                    / "action.yml"
+                ).is_file()
+            )
+            plan = json.loads(
+                (result.reports_root / "migration-plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            dropped = [
+                item
+                for item in plan["items"]
+                if item["kind"] in {"test", "repository-metadata"}
+                and item["operation"] == "delete"
+            ]
+            self.assertEqual(dropped, [])
+
     def test_zip_input_is_safely_staged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
@@ -160,6 +209,70 @@ class MigratorTests(unittest.TestCase):
                 archive.writestr("../escape.md", "unsafe")
             with self.assertRaises(ValueError):
                 migrate(archive_path, Path(temporary) / "result")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX special files")
+    def test_fifo_and_socket_sources_are_rejected(self) -> None:
+        skill_text = (
+            "---\n"
+            "name: special-files\n"
+            "description: Guide work. Use when guiding.\n"
+            "---\n\nBody.\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            # A FIFO nested in a source directory must fail fast, not hang.
+            source = Path(temporary) / "fifo-source"
+            source.mkdir()
+            (source / "SKILL.md").write_text(skill_text, encoding="utf-8")
+            os.mkfifo(source / "pipe")
+            with self.assertRaises(ValueError):
+                migrate(source, Path(temporary) / "result-fifo")
+
+            # A FIFO passed as the top-level source must fail before
+            # is_zipfile() opens it.
+            top_level = Path(temporary) / "pipe-input"
+            os.mkfifo(top_level)
+            with self.assertRaises(ValueError):
+                migrate(top_level, Path(temporary) / "result-top-fifo")
+
+            # A socket nested in a source directory is rejected the same way.
+            sock_source = Path(temporary) / "socket-source"
+            sock_source.mkdir()
+            (sock_source / "SKILL.md").write_text(skill_text, encoding="utf-8")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                try:
+                    server.bind(str(sock_source / "app.sock"))
+                except OSError:
+                    self.skipTest("cannot bind AF_UNIX socket in tempdir")
+                with self.assertRaises(ValueError):
+                    migrate(sock_source, Path(temporary) / "result-socket")
+            finally:
+                server.close()
+
+    def test_binary_markdown_resource_does_not_crash_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "binary-md"
+            (source / "skills" / "demo").mkdir(parents=True)
+            (source / "skills" / "demo" / "SKILL.md").write_text(
+                "---\n"
+                "name: demo\n"
+                "description: Demo workflow. Use when demoing.\n"
+                "---\n\nBody.\n",
+                encoding="utf-8",
+            )
+            (source / "skills" / "demo" / "blob.md").write_bytes(b"\xff\xfe\x00\x01")
+
+            result = migrate(source, Path(temporary) / "result")
+
+            self.assertTrue(
+                (result.reports_root / "migration-plan.json").is_file()
+            )
+            preserved = sorted(result.package_root.rglob("blob.md"))
+            self.assertTrue(preserved, "binary Markdown resource was not preserved")
+            self.assertEqual(preserved[0].read_bytes(), b"\xff\xfe\x00\x01")
+            self.assertFalse(
+                any("UnicodeDecodeError" in error for error in result.validation.errors)
+            )
 
     def test_stdin_json_bundle_builds_skill(self) -> None:
         bundle = json.dumps(
@@ -781,12 +894,34 @@ class MigratorTests(unittest.TestCase):
             self.assertTrue(
                 (result.reports_root / "unresolved" / ".mcp.json").is_file()
             )
+            self.assertFalse(
+                (result.package_root / ".github" / "workflows").exists()
+            )
+            self.assertFalse((result.package_root / ".github" / "actions").exists())
+            self.assertTrue(
+                (
+                    result.reports_root
+                    / "unresolved"
+                    / ".github"
+                    / "workflows"
+                    / "ci.yml"
+                ).is_file()
+            )
             quarantined = {
                 item.source_path
                 for item in result.plan.manual_items
             }
             self.assertIn("hooks/hooks.json", quarantined)
             self.assertIn(".mcp.json", quarantined)
+            self.assertIn(".github/workflows/ci.yml", quarantined)
+            self.assertIn(".github/actions/setup/action.yml", quarantined)
+            # Inert repository metadata still ships without the trust flag.
+            self.assertTrue(
+                (
+                    result.package_root / ".github" / "ISSUE_TEMPLATE" / "bug.md"
+                ).is_file()
+            )
+            self.assertTrue((result.package_root / ".editorconfig").is_file())
 
     def test_output_overlapping_a_file_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -983,18 +1118,33 @@ class MigratorTests(unittest.TestCase):
                 any("CLAUDE_PROJECT_DIR" in warning for warning in result.plan.warnings)
             )
 
-            # Never-shipped content and substring matches must not warn.
+            # Test files ship with the package, so their unmapped env vars warn.
+            noisy = Path(temporary) / "noisy-helper"
+            (noisy / "tests").mkdir(parents=True)
+            (noisy / "SKILL.md").write_text(
+                "---\n"
+                "name: noisy-helper\n"
+                "description: Noisy workflows. Use when noisy.\n"
+                "---\n\nRun the workflow.\n",
+                encoding="utf-8",
+            )
+            (noisy / "tests" / "fixture.py").write_text(
+                'URL = "$CLAUDE_SANDBOX_URL"\n', encoding="utf-8"
+            )
+            result = migrate(noisy, Path(temporary) / "noisy-result")
+            self.assertTrue(
+                any("CLAUDE_SANDBOX_URL" in warning for warning in result.plan.warnings)
+            )
+
+            # Substring matches must not warn.
             quiet = Path(temporary) / "quiet-helper"
-            (quiet / "tests").mkdir(parents=True)
+            quiet.mkdir()
             (quiet / "SKILL.md").write_text(
                 "---\n"
                 "name: quiet-helper\n"
                 "description: Quiet workflows. Use when quiet.\n"
                 "---\n\nExport MY_CLAUDE_TOKEN before running.\n",
                 encoding="utf-8",
-            )
-            (quiet / "tests" / "fixture.py").write_text(
-                'URL = "$CLAUDE_SANDBOX_URL"\n', encoding="utf-8"
             )
             result = migrate(quiet, Path(temporary) / "quiet-result")
             self.assertFalse(

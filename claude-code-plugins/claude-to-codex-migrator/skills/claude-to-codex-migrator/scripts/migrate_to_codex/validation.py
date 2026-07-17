@@ -193,7 +193,11 @@ def _validate_markdown_links(
 ) -> None:
     root = boundary.resolve()
     for path in sorted(skill_root.rglob("*.md")):
-        text = path.read_text(encoding="utf-8")
+        binary, text = read_text_if_safe(path)
+        if binary or text is None:
+            # Binary or oversized Markdown-named resources carry no parseable
+            # links; the cleanup scanner still raw-scans their bytes.
+            continue
         for raw in MARKDOWN_LINK_RE.findall(text):
             target = raw.strip().strip("<>").split("#", 1)[0]
             if not target or target.startswith(("http://", "https://", "mailto:")):

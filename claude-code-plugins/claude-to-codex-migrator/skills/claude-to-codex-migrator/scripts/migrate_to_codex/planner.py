@@ -16,9 +16,6 @@ from .models import ArchitectureDecision, Inventory, MigrationPlan, PlanItem
 
 
 RUNTIME_KINDS = {"mcp", "app", "hook", "runtime-config", "runtime-source"}
-# Kinds that deterministically receive the delete operation — their content
-# never ships, so it must not trigger manual-work warnings.
-NEVER_SHIPPED_KINDS = {"test", "repository-metadata"}
 
 
 def _read_metadata(inventory: Inventory) -> dict[str, Any]:
@@ -54,7 +51,7 @@ def _read_metadata(inventory: Inventory) -> dict[str, Any]:
 def _unmapped_env_vars(inventory: Inventory) -> list[str]:
     found: set[str] = set()
     for item in inventory.files:
-        if item.text and item.kind not in NEVER_SHIPPED_KINDS:
+        if item.text:
             found.update(SOURCE_ENV_VAR_RE.findall(item.text))
     return sorted(found - set(ENV_VAR_MAP))
 
@@ -389,9 +386,35 @@ def build_plan(
             else:
                 operation, target_path = "manual", None
                 reason = "Binary documentation requires manual review."
-        elif kind in {"test", "repository-metadata"}:
-            operation, target_path = "delete", None
-            reason = "Do not copy source test or repository metadata into the distributable package."
+        elif kind == "test":
+            operation = "rewrite" if not source.binary else "rename"
+            target_path = _clean_relative(source.path)
+            reason = "Preserve the source test suite alongside the migrated runtime code."
+            rewrites = (
+                ["Rewrite source-platform references"] if not source.binary else []
+            )
+        elif kind == "ci-workflow":
+            if trust_runtime:
+                operation = "rewrite" if not source.binary else "rename"
+                target_path = _clean_relative(source.path)
+                reason = "Preserve the reviewed CI workflow in the migrated repository."
+                rewrites = (
+                    ["Rewrite source-platform references"] if not source.binary else []
+                )
+            else:
+                operation, target_path = "manual", None
+                reason = (
+                    "CI workflows and composite actions execute automatically once "
+                    "the repository is pushed; they are quarantined until reviewed. "
+                    "Re-run with --trust-runtime after verifying every step."
+                )
+        elif kind == "repository-metadata":
+            operation = "rewrite" if not source.binary else "rename"
+            target_path = _clean_relative(source.path)
+            reason = "Preserve repository metadata so the migrated package remains a complete repository."
+            rewrites = (
+                ["Rewrite source-platform references"] if not source.binary else []
+            )
         else:
             if (
                 decision.target == "skill"
